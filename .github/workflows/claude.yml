@@ -33,6 +33,14 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: >-
+          Model override, passed to Claude Code as --model (empty = Claude
+          Code's default). claude-code-action@v1 has no first-class model
+          input, so this is spliced into claude_args.
+        required: false
+        type: string
+        default: ""
       base_branch:
         description: >-
           Base branch for branches/PRs Claude creates (defaults to the repo's
@@ -66,7 +74,9 @@ jobs:
           trigger_phrase: ${{ inputs.trigger_phrase }}
           label_trigger: ${{ inputs.label_trigger }}
           base_branch: ${{ inputs.base_branch }}
-          claude_args: ${{ inputs.claude_args }}
+          claude_args: >-
+            ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+            ${{ inputs.claude_args }}
 
       - name: Upload execution log
         if: always()
