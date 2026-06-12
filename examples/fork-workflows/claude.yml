@@ -1,0 +1,37 @@
+# Claude stub for the meridianlabs-ai/inspect_ai fork.
+# Lives on the `meridian` default branch (event workflows only fire from the
+# default branch). Claude branches from and opens PRs against pristine `main`
+# (which mirrors UKGovernmentBEIS/inspect_ai) so review diffs never include
+# meridian infra commits. See the two-stage PR flow in the README.
+
+name: Claude
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  claude:
+    # Cheap gate to avoid spending runner minutes on unrelated events; the
+    # action does its own authoritative trigger check.
+    if: |
+      contains(github.event.comment.body, '@claude') ||
+      contains(github.event.review.body, '@claude') ||
+      contains(github.event.issue.body, '@claude') ||
+      contains(github.event.issue.title, '@claude') ||
+      github.event.label.name == 'claude'
+    uses: meridianlabs-ai/agents/.github/workflows/claude.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    with:
+      base_branch: main

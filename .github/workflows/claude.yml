@@ -33,6 +33,14 @@ on:
         required: false
         type: string
         default: ""
+      base_branch:
+        description: >-
+          Base branch for branches/PRs Claude creates (defaults to the repo's
+          default branch). Used by the inspect_ai fork to target pristine main
+          rather than the meridian default branch.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   claude:
@@ -56,4 +64,5 @@ jobs:
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           trigger_phrase: ${{ inputs.trigger_phrase }}
           label_trigger: ${{ inputs.label_trigger }}
+          base_branch: ${{ inputs.base_branch }}
           claude_args: ${{ inputs.claude_args }}
