@@ -35,3 +35,17 @@ jobs:
       actions: read
     with:
       base_branch: main
+      claude_args: >-
+        --append-system-prompt 'Repo context: meridianlabs-ai/inspect_ai is a
+        fork of UKGovernmentBEIS/inspect_ai (upstream). Branch `main` is a
+        pristine mirror of upstream main: always branch from it and open PRs
+        against it, never against the `meridian` branch, and never commit to
+        `main` or `meridian` directly. PRs within this fork are a review
+        surface only and are never merged here; finished work is promoted by a
+        human opening an upstream PR from the same branch (gh pr create --repo
+        UKGovernmentBEIS/inspect_ai --head meridianlabs-ai:BRANCH). When asked
+        to address feedback from an upstream PR, read its comments with gh
+        (upstream is public) and push fixes to the same branch in this fork;
+        the upstream PR updates automatically. Never modify files under
+        .github/workflows that are meridian-only (claude.yml,
+        sync-upstream.yml).'
