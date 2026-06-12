@@ -1,9 +1,10 @@
 # Copy this file to .github/workflows/claude.yml in any Meridian repo
 # (or run scripts/enable-claude.sh <org/repo> to open a PR that adds it).
 #
-# Requires:
-#   - Claude GitHub App installed on the repo (org-level install covers this)
-#   - ANTHROPIC_API_KEY org secret visible to the repo
+# Requires only that the Claude GitHub App is installed on the repo
+# (org-level install covers this). Auth uses Workload Identity Federation —
+# no secrets needed, but `id-token: write` below is required for the OIDC
+# exchange.
 
 name: Claude
 
@@ -28,4 +29,9 @@ jobs:
       contains(github.event.issue.title, '@claude') ||
       github.event.label.name == 'claude'
     uses: meridianlabs-ai/agents/.github/workflows/claude.yml@main
-    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read

@@ -3,6 +3,17 @@ name: Claude (reusable)
 # Reusable workflow wrapping anthropics/claude-code-action.
 # Caller repos add a thin stub (see examples/claude-stub.yml) and inherit
 # all configuration from here, so trigger/config changes happen in one place.
+#
+# Auth uses Anthropic Workload Identity Federation: each run exchanges the
+# GitHub OIDC token for a short-lived Anthropic credential scoped to the
+# meridian service account/workspace. No secrets required — but callers MUST
+# grant `id-token: write` at the calling job level (GitHub does not pass
+# id-token to reusable workflows implicitly).
+#
+# Note: GitHub does not issue OIDC tokens to workflows triggered by PRs from
+# forks, so fork PRs cannot authenticate. All triggers in the stub run in the
+# base-repo context, so this only matters if a caller adds pull_request
+# triggers of its own.
 
 on:
   workflow_call:
@@ -22,9 +33,6 @@ on:
         required: false
         type: string
         default: ""
-    secrets:
-      ANTHROPIC_API_KEY:
-        required: true
 
 jobs:
   claude:
@@ -42,7 +50,10 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
+          anthropic_organization_id: 25a4c004-1d4f-4385-9e02-d56096cc07c4
+          anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
+          anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           trigger_phrase: ${{ inputs.trigger_phrase }}
           label_trigger: ${{ inputs.label_trigger }}
           claude_args: ${{ inputs.claude_args }}
