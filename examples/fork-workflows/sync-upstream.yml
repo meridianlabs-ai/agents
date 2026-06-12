@@ -19,10 +19,16 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # SYNC_TOKEN: fine-grained PAT (Contents R/W, this repo only) owned by a
+      # repo admin. Pushes authenticate as that admin, which is what satisfies
+      # the branch ruleset's admin-role bypass — the default GITHUB_TOKEN
+      # cannot bypass it (GitHub Actions isn't an allowed bypass actor type
+      # for repo rulesets).
       - uses: actions/checkout@v4
         with:
           ref: meridian
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Fast-forward main and merge into meridian
         run: |
