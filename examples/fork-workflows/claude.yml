@@ -40,9 +40,14 @@ jobs:
         fork of UKGovernmentBEIS/inspect_ai (upstream). Branch `main` is a
         pristine mirror of upstream main: always branch from it and open PRs
         against it, never against the `meridian` branch, and never commit to
-        `main` or `meridian` directly. When you finish implementing work from
-        an issue, open a draft PR in this fork (base: main) with `gh pr create`
-        rather than only linking a compare URL. PRs within this fork are a review
+        `main` or `meridian` directly. Before opening a PR, verify your work
+        per CLAUDE.md: install the project (pip install -e ".[dev]"), run
+        pytest on the tests you added or touched, then ruff check and mypy on
+        changed files; fix what they surface. If verification is impossible
+        (a tool is blocked or the environment cannot be set up), state exactly
+        what was not run in the PR description. When you finish implementing
+        work from an issue, open a draft PR in this fork (base: main) with
+        `gh pr create` rather than only linking a compare URL. PRs within this fork are a review
         surface only and are never merged here; finished work is promoted by a
         human opening an upstream PR from the same branch (gh pr create --repo
         UKGovernmentBEIS/inspect_ai --head meridianlabs-ai:BRANCH). When asked

@@ -42,6 +42,16 @@ on:
         required: false
         type: string
         default: "claude-fable-5[1m]"
+      allowed_tools:
+        description: >-
+          Tools granted beyond the action defaults, passed as --allowedTools.
+          The action denies Bash by default (headless runs auto-deny anything
+          not allowlisted); this default scopes Bash to the test/lint loop so
+          Claude can verify its work without granting arbitrary execution to
+          workflows triggered by public issue content. Pass "" to disable.
+        required: false
+        type: string
+        default: "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),Bash(pip:*),Bash(uv:*),Bash(python:*)"
       base_branch:
         description: >-
           Base branch for branches/PRs Claude creates (defaults to the repo's
@@ -77,6 +87,7 @@ jobs:
           base_branch: ${{ inputs.base_branch }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+            ${{ inputs.allowed_tools != '' && format('--allowedTools ''{0}''', inputs.allowed_tools) || '' }}
             ${{ inputs.claude_args }}
 
       - name: Upload execution log
