@@ -1,0 +1,48 @@
+name: Claude (reusable)
+
+# Reusable workflow wrapping anthropics/claude-code-action.
+# Caller repos add a thin stub (see examples/claude-stub.yml) and inherit
+# all configuration from here, so trigger/config changes happen in one place.
+
+on:
+  workflow_call:
+    inputs:
+      trigger_phrase:
+        description: Comment phrase that triggers Claude
+        required: false
+        type: string
+        default: "@claude"
+      label_trigger:
+        description: Issue label that triggers Claude
+        required: false
+        type: string
+        default: "claude"
+      claude_args:
+        description: Additional CLI arguments passed through to Claude Code
+        required: false
+        type: string
+        default: ""
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          trigger_phrase: ${{ inputs.trigger_phrase }}
+          label_trigger: ${{ inputs.label_trigger }}
+          claude_args: ${{ inputs.claude_args }}
