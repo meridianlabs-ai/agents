@@ -10,6 +10,8 @@ scripts, and (eventually) shared skills and plugins.
   All Claude configuration lives here; caller repos carry only a thin stub.
 - `examples/claude-stub.yml` — the stub to copy into a repo's
   `.github/workflows/claude.yml`.
+- `examples/fork-workflows/` — reference copies of the workflows deployed on
+  the `meridian` branch of the inspect_ai fork (see below).
 - `scripts/enable-claude.sh` — opens a PR adding the stub to a repo.
 
 ## Enabling Claude in a repo
@@ -52,6 +54,38 @@ These are already done (or need doing once), not per-repo:
 3. **Actions access policy** on this repo set to "organization" so other repos
    can call the reusable workflow (done — via
    `gh api -X PUT repos/meridianlabs-ai/agents/actions/permissions/access -f access_level=organization`).
+
+## The inspect_ai fork
+
+[meridianlabs-ai/inspect_ai](https://github.com/meridianlabs-ai/inspect_ai)
+is a fork of
+[UKGovernmentBEIS/inspect_ai](https://github.com/UKGovernmentBEIS/inspect_ai)
+that lets Claude work on inspect issues even though we don't control the
+upstream org. Branch layout:
+
+- **`main`** — pristine mirror of upstream main. Never commit to it; the sync
+  workflow fast-forwards it daily (non-ff pushes are rejected, enforcing the
+  mirror invariant).
+- **`meridian`** (default branch) — `main` plus meridian-only workflows
+  (Claude stub, upstream sync; slow tests may move here later). Event and
+  scheduled workflows only fire from the default branch, which is why it must
+  be the default.
+
+The two-stage PR flow:
+
+1. File an issue on the fork (from the project board) and add the `claude`
+   label.
+2. Claude branches from pristine `main` and opens a PR **within the fork**
+   (`claude/xyz` → `main`). This PR is the review surface — it is never
+   merged. Because `main` mirrors upstream, its diff is exactly what upstream
+   will see.
+3. Iterate with `@claude` on the fork PR.
+4. When ready, open the upstream PR from the same branch:
+   `gh pr create --repo UKGovernmentBEIS/inspect_ai --head meridianlabs-ai:claude/xyz`
+   (or ask Claude to). Close the fork PR with a link.
+5. To address upstream review feedback, comment on the fork PR
+   (`@claude address the feedback on UKGovernmentBEIS/inspect_ai#NNNN`) —
+   pushes to the shared branch update the upstream PR automatically.
 
 ## Updating Claude behavior across all repos
 
