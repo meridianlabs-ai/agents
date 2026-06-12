@@ -70,7 +70,7 @@ jobs:
         id: claude
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
-          anthropic_organization_id: 25a4c004-1d4f-4385-9e02-d56096cc07c4
+          anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           trigger_phrase: ${{ inputs.trigger_phrase }}
