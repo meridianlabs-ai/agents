@@ -35,12 +35,13 @@ on:
         default: ""
       model:
         description: >-
-          Model override, passed to Claude Code as --model (empty = Claude
-          Code's default). claude-code-action@v1 has no first-class model
-          input, so this is spliced into claude_args.
+          Model passed to Claude Code as --model. Defaults to Fable 5 for all
+          meridian repos; pass "" to fall back to Claude Code's own default,
+          or another model id to override. claude-code-action@v1 has no
+          first-class model input, so this is spliced into claude_args.
         required: false
         type: string
-        default: ""
+        default: "claude-fable-5[1m]"
       base_branch:
         description: >-
           Base branch for branches/PRs Claude creates (defaults to the repo's
