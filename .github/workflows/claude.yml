@@ -57,6 +57,7 @@ jobs:
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@v1
+        id: claude
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
           anthropic_organization_id: 25a4c004-1d4f-4385-9e02-d56096cc07c4
@@ -66,3 +67,11 @@ jobs:
           label_trigger: ${{ inputs.label_trigger }}
           base_branch: ${{ inputs.base_branch }}
           claude_args: ${{ inputs.claude_args }}
+
+      - name: Upload execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-execution-output
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: ignore
