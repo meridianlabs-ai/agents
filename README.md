@@ -146,5 +146,8 @@ to set up per repo. For working on the infra:
   rationale/history behind the design.
 - [design/shared-instructions.md](design/shared-instructions.md) — proposed (not
   yet built) plan for sharing `CLAUDE.md`/`AGENTS.md` across Meridian repos.
+- [design/scheduled-tests-on-fork.md](design/scheduled-tests-on-fork.md) —
+  proposed (not yet built) plan to move the scheduled inspect tests + triage to
+  the fork and close the triage → fix loop.
 - [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) — instructions for agents
   making changes in this repo.

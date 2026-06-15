@@ -325,9 +325,9 @@ for the model that actually ran (the init line echoes the *requested* model).
   `gh pr create` a draft PR) has been smoke-tested but never run end-to-end
   under the current settings.json permissions. A throwaway "edit a doc + open a
   PR" issue would prove it.
-- **Slow tests on the fork** — move the scheduled slow-test suite to the fork's
-  `meridian` branch (workflow on default branch, `ref: main` checkout), with
-  failure → triage → fix-PR.
+- **Slow tests on the fork** — move the scheduled slow-test suite + triage to
+  the fork's `meridian` branch and close the triage → fix loop. Designed in
+  [scheduled-tests-on-fork.md](scheduled-tests-on-fork.md); not yet implemented.
 - **`meridian-claude` machine account** — would enable board assignment
   (`assignee_trigger`) and automated upstream PR promotion; deferred.
 - **Shared CLAUDE.md/AGENTS.md across repos** — designed in
