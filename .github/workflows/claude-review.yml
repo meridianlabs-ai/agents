@@ -37,17 +37,22 @@ on:
         required: false
         type: string
         default: "default"
-      allowed_tools:
+      settings:
         description: >-
-          Tools granted via --allowedTools. Covers the verify loop (tests +
-          type/lint, both `python` and `python3` invocation forms) and posting
-          the review (`gh` + inline-comment MCP). No write tools, and
-          contents:read below means the runner cannot push regardless — `gh`
-          is bounded by the token's pull-requests:write / contents:read scope,
-          so it can comment but not merge or push.
+          Claude Code settings JSON (inline). Allows the verify loop (tests +
+          type/lint, both python/python3 forms) and posting the review (gh +
+          inline-comment MCP), and DENIES file mutation and git writes. The
+          deny overlay makes read-only intent explicit; the real boundary is
+          the job's contents:read token, which can't push regardless. deny
+          beats allow, so it holds even against any claude_args override.
         required: false
         type: string
-        default: "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),Bash(pip:*),Bash(pip3:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(gh:*),mcp__github_inline_comment"
+        default: >-
+          {"permissions":{
+          "allow":["Read","Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)",
+          "Bash(pip:*)","Bash(pip3:*)","Bash(uv:*)","Bash(python:*)",
+          "Bash(python3:*)","Bash(gh:*)","mcp__github_inline_comment"],
+          "deny":["Edit","Write","Bash(git push:*)","Bash(git commit:*)"]}}
       claude_args:
         description: Additional CLI arguments passed through to Claude Code.
         required: false
@@ -80,10 +85,10 @@ jobs:
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           prompt: ${{ inputs.review_prompt }}
+          settings: ${{ inputs.settings }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
-            ${{ inputs.allowed_tools != '' && format('--allowedTools ''{0}''', inputs.allowed_tools) || '' }}
             ${{ inputs.claude_args }}
 
       - name: Upload execution log
