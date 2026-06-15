@@ -35,13 +35,23 @@ on:
         default: ""
       model:
         description: >-
-          Model passed to Claude Code as --model. Defaults to Fable 5 for all
-          meridian repos; pass "" to fall back to Claude Code's own default,
-          or another model id to override. claude-code-action@v1 has no
-          first-class model input, so this is spliced into claude_args.
+          Preferred model, passed to Claude Code as --model (empty = Claude
+          Code's own default). Defaults to the Fable alias for all meridian
+          repos. claude-code-action@v1 has no first-class model input, so this
+          is spliced into claude_args.
         required: false
         type: string
-        default: "claude-fable-5[1m]"
+        default: "fable"
+      fallback_model:
+        description: >-
+          Model used when the preferred model is overloaded or unavailable
+          (e.g. retired), passed as --fallback-model. "default" expands to the
+          account default, so the Fable-preferred default degrades gracefully
+          if Fable is gone. Pass "" to disable fallback. Ignored when model is
+          empty.
+        required: false
+        type: string
+        default: "default"
       allowed_tools:
         description: >-
           Tools granted beyond the action defaults, passed as --allowedTools.
@@ -89,6 +99,7 @@ jobs:
           base_branch: ${{ inputs.base_branch }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+            ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.allowed_tools != '' && format('--allowedTools ''{0}''', inputs.allowed_tools) || '' }}
             ${{ inputs.claude_args }}
 
