@@ -61,7 +61,7 @@ on:
           workflows triggered by public issue content. Pass "" to disable.
         required: false
         type: string
-        default: "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),Bash(pip:*),Bash(uv:*),Bash(python:*)"
+        default: "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),Bash(pip:*),Bash(pip3:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(gh:*)"
       base_branch:
         description: >-
           Base branch for branches/PRs Claude creates (defaults to the repo's
