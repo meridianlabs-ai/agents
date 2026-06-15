@@ -212,6 +212,37 @@ Checkout is `fetch-depth: 0` (full history + tags): setuptools-scm needs tags
 to compute a version (a shallow clone produced a version that conflicted with a
 pinned dependency), and the agent uses `git log`/`blame` to understand code.
 
+### Branch sync before work
+
+A `@claude merge my branch` run exposed two gaps. First, `git fetch`/`git
+merge` weren't allow-listed, so the agent couldn't merge `main` locally and
+fell back to the GitHub merges API — and reported the checkout as "shallow,"
+which is wrong (`fetch-depth: 0` is full history; a local merge resolves a
+common ancestor fine). Second, nothing told the agent to start from current
+code, so a stale PR branch produces changes (and test runs) against old code.
+
+Both are fixed in the dev workflow: a **scoped git allow-list**
+(`fetch`/`merge`/`rebase`/`push`/`checkout`/`switch`/`branch` plus read-only
+`status`/`log`/`diff`/`show`/`rev-parse`/`remote`) lets the agent sync its
+branch, and a **`branch_sync_prompt` input** (default: "merge the base branch
+in before starting; include that merge when you push") is spliced as
+`--append-system-prompt` so it adds to — not replaces — the comment-derived
+task. We scoped git rather than granting blanket `git:*`, consistent with the
+allow-list-not-denylist stance above; the `contents:write` token is the real
+privilege boundary and the fork's branch protection still blocks force-push to
+`main`/`meridian`, so the scoping is about injection blast-radius, not the git
+plumbing itself.
+
+The merge instruction is **gated to follow-up runs only** — runs that continue
+an existing branch, where the branch can have drifted from base. That's exactly
+the PR-context triggers: an `@claude` comment on a PR
+(`github.event.issue.pull_request` is set) or the review / review-comment events
+(`github.event.pull_request` is set). A fresh `@claude` from an issue (or a
+plain issue comment) has neither, and the action branches off the base —  which
+the hourly sync keeps current — so injecting "merge base in" there is pointless
+noise. The gate is a condition on the splice, so the flag simply isn't emitted
+on issue-triggered runs.
+
 ## The reviewer: auto-review tradeoffs
 
 The reviewer is a separate persona (`@review`, distinct from `@claude` to avoid
