@@ -30,19 +30,18 @@ reviewer physically cannot push regardless of what it's asked to do.
 - `examples/claude-review-stub.yml` — reviewer stub to copy into a repo.
 - `examples/fork-workflows/` — reference copies of everything deployed on the
   `meridian` branch of the inspect_ai fork (Claude, review, sync).
-- `scripts/enable-claude.sh` — opens a PR adding the dev stub to a repo.
+- `scripts/enable-claude.sh` — opens a PR adding both agent stubs to a repo.
 - `design/architecture.md` — design rationale and history.
 
 ## Enabling the agents in a repo
-
-Dev agent:
 
 ```sh
 scripts/enable-claude.sh meridianlabs-ai/<repo>
 ```
 
-Reviewer: copy `examples/claude-review-stub.yml` to the repo's
-`.github/workflows/claude-review.yml` (no script yet).
+This opens a PR adding both stubs (dev `claude.yml` and reviewer
+`claude-review.yml`); stubs already present are skipped, so it's safe to re-run.
+Merge the PR to activate.
 
 Prerequisite: the Claude GitHub App must have access to the repo (org-wide
 install covers this).
