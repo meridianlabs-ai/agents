@@ -67,6 +67,8 @@ Notes:
 The reviewer posts a top-level summary plus inline comments on a PR. It runs:
 
 - **Automatically** when a PR is opened, reopened, or marked ready for review.
+  (This relies on the workflow being present on the PR's base branch — see the
+  fork caveat below, where it isn't and auto-review is driven differently.)
 - **On demand** when someone comments `@review` on a PR.
 
 It is read-only: it can run tests to verify a finding but cannot modify code or
@@ -77,7 +79,8 @@ speculative ones).
 
 Acting on a review is **human-mediated by design** — there is no automatic
 handoff from reviewer to dev agent (the reviewer's comments don't contain
-`@claude`, and bot-authored comments are ignored as triggers anyway). The loop:
+`@claude`, and the dev agent ignores bot-authored comments anyway — its
+`allowed_bots` is empty). The loop:
 
 1. Reviewer posts findings.
 2. You decide which to act on.
@@ -100,10 +103,24 @@ Branch layout:
   by a ruleset (no updates/deletes/force-pushes) so PRs can't be merged into it
   accidentally.
 - **`meridian`** (default branch) — `main` plus meridian-only workflows (dev,
-  review, sync). Event and scheduled workflows only fire from the default
-  branch, which is why meridian must be default. These workflows are
-  maintained directly on that branch (the source of truth):
+  review, sync). The Claude workflows live *only* here, which is why meridian
+  must be default. These workflows are maintained directly on that branch (the
+  source of truth):
   [.github/workflows on `meridian`](https://github.com/meridianlabs-ai/inspect_ai/tree/meridian/.github/workflows).
+
+> **Trigger caveat (consequence of the branch layout).** GitHub resolves
+> `issue_comment` and `issues` workflows from the **default branch** (`meridian`,
+> which has the workflows) but `pull_request`-family events
+> (`pull_request`, `pull_request_review`, `pull_request_review_comment`) from
+> the **PR's own branches** (`main` / a `main`-cut feature branch), which carry
+> no Claude workflows. So on the fork, **only top-level `@claude`/`@review`
+> comments and the `claude` label trigger the agents.** Inline review-comment
+> replies, review submissions, and auto-review-on-PR-open do **not** fire. The
+> fork's dev stub therefore drops the two PR-review triggers, and auto-review is
+> restored another way: when the dev agent opens a PR it posts a top-level
+> `@review` comment, and the reviewer stub sets `allowed_bots: "claude[bot]"` so
+> that bot-authored comment is honored. Human-opened PRs still need a manual
+> `@review`.
 
 Both branches are kept current by `sync-upstream.yml` (hourly): it
 fast-forwards `main` from upstream and merges upstream into `meridian`. It
@@ -116,10 +133,12 @@ workflow token cannot bypass rulesets.
 1. File an issue on the fork (e.g. from the project board) and add the `claude`
    label, or `@claude` it.
 2. Claude branches from pristine `main` and opens a draft PR **within the fork**
-   (`claude/xyz` → `main`). This PR is the review surface — it is never merged
-   here. Because `main` mirrors upstream, its diff is exactly what upstream will
-   see.
-3. Iterate on the fork PR (`@claude` to fix, `@review` to re-review).
+   (`claude/xyz` → `main`), then posts a top-level `@review` comment to kick off
+   the reviewer (auto-review-on-open can't fire here — see the trigger caveat).
+   This PR is the review surface — it is never merged here. Because `main`
+   mirrors upstream, its diff is exactly what upstream will see.
+3. Iterate on the fork PR (`@claude` to fix, `@review` to re-review) — always as
+   **top-level** PR comments; inline review-comment replies don't trigger here.
 4. When ready, **a human** opens the upstream PR from the same branch:
    `gh pr create --repo UKGovernmentBEIS/inspect_ai --head meridianlabs-ai:claude/xyz`.
    Close the fork PR with a link. (Promotion is a deliberate human step — the

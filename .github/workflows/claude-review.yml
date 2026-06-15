@@ -7,6 +7,13 @@ name: Claude review (reusable)
 # examples/claude-review-stub.yml) that triggers on pull_request events
 # (auto-review) and/or @review comments.
 #
+# Auto-review-on-open only fires where this workflow file exists on the PR's
+# base branch (GitHub resolves pull_request-family workflows from the PR's
+# branches, not the default branch). On a pristine-base mirror like the
+# inspect_ai fork — whose PRs target an upstream-mirror `main` that has no
+# meridian workflows — pull_request never fires; only the @review comment path
+# (issue_comment, resolved from the default branch) works there. See README.
+#
 # Callers MUST grant id-token: write at the calling job level (GitHub does not
 # pass id-token to reusable workflows implicitly).
 
@@ -58,6 +65,30 @@ on:
         required: false
         type: string
         default: ""
+      append_system_prompt:
+        description: >-
+          Repo-specific guidance appended to the review prompt (via
+          --append-system-prompt, so it adds to — not replaces — review_prompt).
+          Empty by default; the inspect_ai fork uses it to tell reviewers that
+          inline review-comment replies don't reach the dev agent on that repo
+          (pristine-main; see README → The inspect_ai fork), so users must act on
+          findings with a top-level @claude comment.
+        required: false
+        type: string
+        default: ""
+      allowed_bots:
+        description: >-
+          Comma-separated bot logins whose events may trigger the reviewer, or
+          "*" for all. Empty by default, which means claude-code-action rejects
+          ALL bot-authored events (its checkHumanActor runs even in prompt/agent
+          mode). The fork sets "claude[bot]" so the dev agent can kick off a
+          review by posting a top-level @review comment when it opens a PR —
+          auto-review-on-open can't fire there (the workflow isn't on the PR's
+          base branch). Keep this empty on the dev workflow: allowing bots there
+          would let the reviewer's own comments retrigger the dev agent.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   review:
@@ -86,9 +117,11 @@ jobs:
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           prompt: ${{ inputs.review_prompt }}
           settings: ${{ inputs.settings }}
+          allowed_bots: ${{ inputs.allowed_bots }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
+            ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
             ${{ inputs.claude_args }}
 
       - name: Upload execution log
