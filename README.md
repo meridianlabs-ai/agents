@@ -89,46 +89,6 @@ handoff from reviewer to dev agent (the reviewer's comments don't contain
 This keeps your judgment in the loop on which findings matter. See the design
 doc for why we avoid a fully automatic reviewer→fixer loop.
 
-## Authentication
-
-Auth uses **Anthropic Workload Identity Federation** — no API keys or secrets.
-Each run exchanges its GitHub OIDC token (`id-token: write`) for a short-lived
-Anthropic credential scoped to the meridian service account and workspace,
-where usage is tracked, rate-limited, and capped in the Console. The federation
-rule / org / service-account / workspace IDs in the workflows are identifiers,
-not secrets — security rests on the federation rule's OIDC claim check (only
-workflows in `meridianlabs-ai` repos can mint tokens) plus claude-code-action's
-write-access check on whoever triggered the run.
-
-Caveats:
-
-- Callers must grant `id-token: write` at the calling job level (the stubs do);
-  GitHub does not pass OIDC tokens to reusable workflows implicitly.
-- GitHub does not issue OIDC tokens to fork-PR-triggered runs, so those cannot
-  authenticate. The stubs' triggers run in base-repo context, so this only
-  affects external-contributor fork PRs, not our internal PRs.
-
-## Model selection
-
-Workflows default to the `fable` alias with `--fallback-model default`, so runs
-prefer Fable and fall back to the account default if Fable is unavailable
-(verified: when Fable was retired, runs transparently served the default).
-Override per repo with the `model` input; `model: ""` uses Claude Code's own
-default with no fallback.
-
-To see what model a run *actually* used, read `modelUsage` in the uploaded
-execution-log artifact — **not** the init line, which echoes the requested
-model even when the fallback fired.
-
-## Permissions
-
-Permissions are expressed as inline Claude Code `settings.json` (the `settings`
-input), not `--allowedTools`. settings owns the allow-list; the reviewer adds a
-`deny` overlay for `Edit`/`Write`/git writes (deny beats allow). It's an
-allow-list, not allow-all-plus-deny, because these workflows are triggered by
-partially attacker-controllable issue/PR text — an allow-list caps the blast
-radius of prompt injection. See the design doc.
-
 ## The inspect_ai fork
 
 [meridianlabs-ai/inspect_ai](https://github.com/meridianlabs-ai/inspect_ai) is
@@ -176,17 +136,9 @@ the change on their next run (stubs reference `@main`). For the inspect_ai fork,
 also redeploy the changed stub to its `meridian` branch if the stub itself
 changed (the reusable workflow it calls updates automatically).
 
-## One-time org setup
+## Maintainers
 
-Already done, listed for reference:
-
-1. **Claude GitHub App** installed on `meridianlabs-ai` repos
-   (<https://github.com/apps/claude>).
-2. **Workload Identity Federation rule** in the Anthropic Console (CEL:
-   `repository_owner == "meridianlabs-ai"`), target service account
-   `claude-code-agent` in the "Claude Code Agent" workspace.
-3. **Actions access policy** on this repo set to organization-accessible, and
-   this repo is **public** so other (including public) repos can call its
-   reusable workflows.
-4. **`SYNC_TOKEN`** secret on the inspect_ai fork (admin-owned fine-grained PAT,
-   Contents read/write) for the upstream-sync workflow.
+Authentication (Workload Identity Federation), the permission model, model
+selection, branch protection, and the one-time org setup are documented in
+[design/architecture.md](design/architecture.md). You don't need any of it to
+use the agents — there are no secrets or config to set up per repo.

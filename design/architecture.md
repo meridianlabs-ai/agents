@@ -279,6 +279,44 @@ The intended Slack story, mostly off-the-shelf:
   teleports to local VS Code with history — the one thing the Actions path
   can't do).
 
+## Operations reference
+
+### One-time org setup (done; listed for reference / disaster recovery)
+
+1. **Claude GitHub App** installed on `meridianlabs-ai` repos
+   (<https://github.com/apps/claude>). Members can request the install; org
+   owners (`dragonstyle`, `jjallaire`) approve. Not all repos are covered yet —
+   extend access as repos are onboarded.
+2. **Workload Identity Federation rule** in the Anthropic Console → Workload
+   identity. Issuer: GitHub Actions OIDC. Match: CEL
+   `repository_owner == "meridianlabs-ai"`. Target service account
+   `claude-code-agent` (`svac_01RL4wYD7ikbypwYKf4wFojv`), which **must be a
+   member of** the "Claude Code Agent" workspace (`wrkspc_01RKCQ5DTPBatQ7kHLkaEueD`).
+   Org id `be5d0086-bc43-45d2-9184-20ecdd647aa7`, rule `fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y`.
+3. **This repo is public** and its Actions access policy is
+   organization-accessible (`gh api -X PUT
+   repos/meridianlabs-ai/agents/actions/permissions/access -f
+   access_level=organization`), so any caller (including public repos like the
+   inspect_ai fork) can call its reusable workflows.
+4. **`SYNC_TOKEN`** secret on the inspect_ai fork: an admin-owned fine-grained
+   PAT (Contents read/write, that repo only) for the upstream-sync workflow.
+   Renew before it expires — the sync fails loudly when it lapses.
+
+### Caller requirements (handled by the stubs)
+
+- Grant `id-token: write` at the calling job level — GitHub does not pass OIDC
+  tokens to reusable workflows implicitly.
+- WIF can't authenticate fork-PR-triggered runs (GitHub withholds OIDC tokens
+  from them). The stubs' triggers run in base-repo context, so this only
+  affects external-contributor fork PRs, never our internal PRs.
+
+### Spend / model visibility
+
+Usage is attributed to the "Claude Code Agent" workspace in the Anthropic
+Console (set rate limits and spend caps there). Per-run model and cost are in
+the `claude-execution-output.json` artifact each run uploads — read `modelUsage`
+for the model that actually ran (the init line echoes the *requested* model).
+
 ## Open items
 
 - **Slack rollout** — team-side `/github signin`; optional @mention-when-blocked
