@@ -1,0 +1,91 @@
+name: Claude review (reusable)
+
+# Read-only reviewer persona, separate from the dev agent in claude.yml.
+# Posts PR review comments but has no write access to contents — it cannot
+# push commits or open PRs (enforced by job permissions, not just the prompt).
+# Same WIF auth as the dev agent. Callers add a stub (see
+# examples/claude-review-stub.yml) that triggers on pull_request events
+# (auto-review) and/or @review comments.
+#
+# Callers MUST grant id-token: write at the calling job level (GitHub does not
+# pass id-token to reusable workflows implicitly).
+
+on:
+  workflow_call:
+    inputs:
+      review_prompt:
+        description: Instruction given to the reviewer.
+        required: false
+        type: string
+        default: >-
+          Review this pull request. Focus on correctness bugs, security
+          issues, and clear simplification or reuse opportunities — prefer a
+          few high-confidence findings over many speculative ones. You may run
+          the test suite, ruff, and mypy to verify a finding before reporting
+          it. This is a read-only review: do NOT modify code or push commits.
+          Post specific, actionable findings as inline review comments where
+          possible, plus a brief top-level summary. If you find no significant
+          issues, say so concisely.
+      model:
+        description: Preferred model (--model). Empty = Claude Code default.
+        required: false
+        type: string
+        default: "fable"
+      fallback_model:
+        description: Fallback when the preferred model is unavailable.
+        required: false
+        type: string
+        default: "default"
+      allowed_tools:
+        description: >-
+          Tools granted via --allowedTools. Defaults to the read/verify loop
+          (run tests and type/lint checks) — no write tools, and contents:read
+          below means the runner cannot push regardless.
+        required: false
+        type: string
+        default: "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),Bash(pip:*),Bash(uv:*),Bash(python:*)"
+      claude_args:
+        description: Additional CLI arguments passed through to Claude Code.
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read          # read code to review; cannot push
+      pull-requests: write    # post review + inline comments
+      issues: read
+      id-token: write         # WIF auth
+      actions: read
+    steps:
+      # On a pull_request event the default checkout is the PR merge ref. On an
+      # @review comment (issue_comment) the default would be the repo default
+      # branch, so resolve the PR head explicitly.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
+
+      - uses: anthropics/claude-code-action@v1
+        id: claude
+        with:
+          anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
+          anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
+          anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
+          anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
+          prompt: ${{ inputs.review_prompt }}
+          claude_args: >-
+            ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+            ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
+            ${{ inputs.allowed_tools != '' && format('--allowedTools ''{0}''', inputs.allowed_tools) || '' }}
+            ${{ inputs.claude_args }}
+
+      - name: Upload execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-review-execution-output
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: ignore
