@@ -101,6 +101,16 @@ on:
           changes and their tests run against current code — then include that
           merge when you push. The checkout has full history (fetch-depth 0),
           so a local merge works without extra fetching depth.
+      branch_sync_append:
+        description: >-
+          Caller-specific guidance appended to branch_sync_prompt (not
+          replacing it), so a repo can add to the shared base-sync instruction
+          without copying it. Same gating as branch_sync_prompt — only on PR
+          follow-up runs. Empty by default; e.g. the inspect_ai fork adds its
+          CHANGELOG-merge check here.
+        required: false
+        type: string
+        default: ""
       append_system_prompt:
         description: >-
           Repo-specific guidance appended to the system prompt (via
@@ -145,12 +155,13 @@ jobs:
         id: sysprompt
         env:
           BRANCH_SYNC: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_prompt || '' }}
+          BRANCH_SYNC_APPEND: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_append || '' }}
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
-          combined="$BRANCH_SYNC"
-          if [ -n "$EXTRA" ]; then
-            combined="${combined:+$combined }$EXTRA"
-          fi
+          combined=""
+          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$EXTRA"; do
+            [ -n "$part" ] && combined="${combined:+$combined }$part"
+          done
           echo "value=$combined" >> "$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
