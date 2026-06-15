@@ -23,9 +23,10 @@ on:
           few high-confidence findings over many speculative ones. You may run
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
-          Post specific, actionable findings as inline review comments where
-          possible, plus a brief top-level summary. If you find no significant
-          issues, say so concisely.
+          You MUST post your review to the PR — it is not surfaced anywhere
+          else. Post a concise top-level summary with `gh pr comment`, and add
+          inline comments for specific line-level findings. If you find no
+          significant issues, post a brief comment saying so.
       model:
         description: Preferred model (--model). Empty = Claude Code default.
         required: false
@@ -38,12 +39,15 @@ on:
         default: "default"
       allowed_tools:
         description: >-
-          Tools granted via --allowedTools. Defaults to the read/verify loop
-          (run tests and type/lint checks) — no write tools, and contents:read
-          below means the runner cannot push regardless.
+          Tools granted via --allowedTools. Covers the verify loop (tests +
+          type/lint, both `python` and `python3` invocation forms) and posting
+          the review (`gh` + inline-comment MCP). No write tools, and
+          contents:read below means the runner cannot push regardless — `gh`
+          is bounded by the token's pull-requests:write / contents:read scope,
+          so it can comment but not merge or push.
         required: false
         type: string
-        default: "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),Bash(pip:*),Bash(uv:*),Bash(python:*)"
+        default: "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),Bash(pip:*),Bash(pip3:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(gh:*),mcp__github_inline_comment"
       claude_args:
         description: Additional CLI arguments passed through to Claude Code.
         required: false
