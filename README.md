@@ -28,8 +28,6 @@ reviewer physically cannot push regardless of what it's asked to do.
 - `.github/workflows/claude-review.yml` — reusable reviewer workflow.
 - `examples/claude-stub.yml` — dev-agent stub to copy into a repo.
 - `examples/claude-review-stub.yml` — reviewer stub to copy into a repo.
-- `examples/fork-workflows/` — reference copies of everything deployed on the
-  `meridian` branch of the inspect_ai fork (Claude, review, sync).
 - `scripts/enable-claude.sh` — opens a PR adding both agent stubs to a repo.
 - `design/architecture.md` — design rationale and history.
 
@@ -103,7 +101,9 @@ Branch layout:
   accidentally.
 - **`meridian`** (default branch) — `main` plus meridian-only workflows (dev,
   review, sync). Event and scheduled workflows only fire from the default
-  branch, which is why meridian must be default.
+  branch, which is why meridian must be default. These workflows are
+  maintained directly on that branch (the source of truth):
+  [.github/workflows on `meridian`](https://github.com/meridianlabs-ai/inspect_ai/tree/meridian/.github/workflows).
 
 Both branches are kept current by `sync-upstream.yml` (hourly): it
 fast-forwards `main` from upstream and merges upstream into `meridian`. It
