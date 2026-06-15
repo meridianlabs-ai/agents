@@ -101,6 +101,20 @@ on:
           changes and their tests run against current code — then include that
           merge when you push. The checkout has full history (fetch-depth 0),
           so a local merge works without extra fetching depth.
+      append_system_prompt:
+        description: >-
+          Repo-specific guidance appended to the system prompt (via
+          --append-system-prompt, so it adds to — not replaces — the
+          comment-derived task) on EVERY dev run. Empty by default: this is the
+          channel for caller-specific conventions a shared default can't carry
+          — e.g. the inspect_ai fork's stub sets it with CHANGELOG.md rules.
+          (The fork can't ship a CLAUDE.md/AGENTS.md file: main must stay
+          pristine and a file on meridian isn't present on the main-cut branches
+          the agent works from — see design/shared-instructions.md.) Distinct
+          from branch_sync_prompt, which is gated to PR follow-up runs.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   claude:
@@ -118,6 +132,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Compose the two appended-system-prompt sources into ONE value, so we
+      # emit a single --append-system-prompt flag. Two flags would force a bet
+      # on undocumented CLI behavior (accumulate vs. last-one-wins), and they
+      # co-occur on PR follow-ups (branch_sync_prompt fires there, and
+      # append_system_prompt fires on every run). branch_sync_prompt is gated
+      # to PR context here (issue comment on a PR, or a review/review-comment
+      # event); fresh issue runs branch off the synced base and skip it. Joined
+      # on one line so the toJSON splice below stays a clean single-quoted arg
+      # (a newline would survive toJSON as a literal \n in the shell-parsed args).
+      - name: Compose appended system prompt
+        id: sysprompt
+        env:
+          BRANCH_SYNC: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_prompt || '' }}
+          EXTRA: ${{ inputs.append_system_prompt }}
+        run: |
+          combined="$BRANCH_SYNC"
+          if [ -n "$EXTRA" ]; then
+            combined="${combined:+$combined }$EXTRA"
+          fi
+          echo "value=$combined" >> "$GITHUB_OUTPUT"
+
       - uses: anthropics/claude-code-action@v1
         id: claude
         with:
@@ -132,7 +167,7 @@ jobs:
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
-            ${{ inputs.branch_sync_prompt != '' && (github.event.issue.pull_request != '' || github.event.pull_request != '') && format('--append-system-prompt {0}', toJSON(inputs.branch_sync_prompt)) || '' }}
+            ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
             ${{ inputs.claude_args }}
 
       - name: Upload execution log

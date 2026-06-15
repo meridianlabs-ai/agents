@@ -240,8 +240,26 @@ the PR-context triggers: an `@claude` comment on a PR
 (`github.event.pull_request` is set). A fresh `@claude` from an issue (or a
 plain issue comment) has neither, and the action branches off the base —  which
 the hourly sync keeps current — so injecting "merge base in" there is pointless
-noise. The gate is a condition on the splice, so the flag simply isn't emitted
-on issue-triggered runs.
+noise.
+
+### Two prompt-injection sources, one flag
+
+There are two appended-system-prompt sources: `branch_sync_prompt` (the gated
+merge instruction above) and `append_system_prompt` (always-on, empty by
+default — the channel for **caller-specific** guidance a shared default can't
+carry, e.g. the inspect_ai fork's stub setting CHANGELOG.md rules; see
+[shared-instructions.md](shared-instructions.md) for why the fork can't ship a
+`CLAUDE.md`). Both feed `--append-system-prompt`, and on a PR follow-up both are
+non-empty at once.
+
+A "Compose appended system prompt" step joins them into **one** value (space-
+separated, on one line) so we emit a *single* `--append-system-prompt` flag.
+Two flags would bet on undocumented CLI behavior (do repeated flags accumulate,
+or does the last win? — the docs don't say), and the gate for `branch_sync_prompt`
+lives in that step's env rather than in the claude_args splice. One line also
+keeps the `toJSON(...)` splice a clean single-quoted arg: a newline survives
+`toJSON` as a literal `\n`, which the action's shell-style arg parsing would
+pass through verbatim rather than as a line break.
 
 ## The reviewer: auto-review tradeoffs
 
