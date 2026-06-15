@@ -1,93 +1,193 @@
 # agents
 
-Shared agent infrastructure for Meridian repos: Claude Code workflows, rollout
-scripts, and (eventually) shared skills and plugins.
+Shared agent infrastructure for Meridian repos: Claude Code GitHub workflows,
+rollout scripts, and (eventually) shared skills and plugins. Configuration
+lives here once; caller repos carry thin stubs that reference it, so behavior
+changes in one place propagate everywhere.
+
+For the *why* behind the design — the cross-org constraint, the auth journey,
+the auto-review and permission tradeoffs — see [design/architecture.md](design/architecture.md).
+
+## The two agents
+
+| | Dev agent | Reviewer |
+|---|---|---|
+| Workflow | `.github/workflows/claude.yml` | `.github/workflows/claude-review.yml` |
+| Trigger | `@claude` mention, or the `claude` label | auto on PR open, or `@review` |
+| GitHub token | `contents: write` (edits, pushes, opens PRs) | `contents: read` (cannot push) |
+| Tools | file edits + verify loop (tests/lint) + `gh` | verify loop + `gh` + inline comments; **denies** edits/git writes |
+
+Both authenticate the same way (Workload Identity Federation) and default to
+the same model (Fable, falling back to the account default). The hard
+privilege boundary between them is the GitHub token scope, not the prompt — the
+reviewer physically cannot push regardless of what it's asked to do.
 
 ## Layout
 
-- `.github/workflows/claude.yml` — reusable workflow wrapping
-  [claude-code-action](https://github.com/anthropics/claude-code-action).
-  All Claude configuration lives here; caller repos carry only a thin stub.
-- `examples/claude-stub.yml` — the stub to copy into a repo's
-  `.github/workflows/claude.yml`.
-- `examples/fork-workflows/` — reference copies of the workflows deployed on
-  the `meridian` branch of the inspect_ai fork (see below).
-- `scripts/enable-claude.sh` — opens a PR adding the stub to a repo.
+- `.github/workflows/claude.yml` — reusable dev-agent workflow.
+- `.github/workflows/claude-review.yml` — reusable reviewer workflow.
+- `examples/claude-stub.yml` — dev-agent stub to copy into a repo.
+- `examples/claude-review-stub.yml` — reviewer stub to copy into a repo.
+- `examples/fork-workflows/` — reference copies of everything deployed on the
+  `meridian` branch of the inspect_ai fork (Claude, review, sync).
+- `scripts/enable-claude.sh` — opens a PR adding the dev stub to a repo.
+- `design/architecture.md` — design rationale and history.
 
-## Enabling Claude in a repo
+## Enabling the agents in a repo
+
+Dev agent:
 
 ```sh
 scripts/enable-claude.sh meridianlabs-ai/<repo>
 ```
 
-Then merge the PR. Trigger Claude by:
+Reviewer: copy `examples/claude-review-stub.yml` to the repo's
+`.github/workflows/claude-review.yml` (no script yet).
 
-- Mentioning `@claude` in an issue or PR comment
-- Adding the `claude` label to an issue (works from project board views)
+Prerequisite: the Claude GitHub App must have access to the repo (org-wide
+install covers this).
+
+## Using the dev agent
+
+Trigger it by:
+
+- Mentioning `@claude` in an issue or PR comment, with whatever instruction
+  follows (`@claude fix the failing test in auth.py`).
+- Adding the `claude` label to an issue — works directly from project-board
+  views, no need to open the issue.
+
+Notes:
+
+- On an **issue**, the agent starts from the default branch and creates a new
+  branch. On a **PR**, it pushes to the existing PR branch. Drive iterative
+  work (review fixes, follow-ups) from the PR, not the issue, or you'll spawn a
+  parallel branch.
+- The agent runs the project's tests/lint to verify its work before opening a
+  PR (per each repo's CLAUDE.md conventions).
+
+## Using the reviewer
+
+The reviewer posts a top-level summary plus inline comments on a PR. It runs:
+
+- **Automatically** when a PR is opened, reopened, or marked ready for review.
+- **On demand** when someone comments `@review` on a PR.
+
+It is read-only: it can run tests to verify a finding but cannot modify code or
+push. Its findings are confidence-filtered (few high-signal items over many
+speculative ones).
+
+### The review → fix loop
+
+Acting on a review is **human-mediated by design** — there is no automatic
+handoff from reviewer to dev agent (the reviewer's comments don't contain
+`@claude`, and bot-authored comments are ignored as triggers anyway). The loop:
+
+1. Reviewer posts findings.
+2. You decide which to act on.
+3. Comment `@claude address the review feedback` **on the PR**. The dev agent
+   pushes fixes to the same branch.
+
+This keeps your judgment in the loop on which findings matter. See the design
+doc for why we avoid a fully automatic reviewer→fixer loop.
 
 ## Authentication
 
-Auth uses **Anthropic Workload Identity Federation** — no API keys or secrets
-anywhere. Each workflow run exchanges its GitHub OIDC token (`id-token: write`)
-for a short-lived Anthropic credential scoped to the meridian service account
-and workspace, where usage can be tracked, rate-limited, and capped in the
-Anthropic Console. The federation rule / org / service account / workspace IDs
-in the reusable workflow are identifiers, not secrets.
+Auth uses **Anthropic Workload Identity Federation** — no API keys or secrets.
+Each run exchanges its GitHub OIDC token (`id-token: write`) for a short-lived
+Anthropic credential scoped to the meridian service account and workspace,
+where usage is tracked, rate-limited, and capped in the Console. The federation
+rule / org / service-account / workspace IDs in the workflows are identifiers,
+not secrets — security rests on the federation rule's OIDC claim check (only
+workflows in `meridianlabs-ai` repos can mint tokens) plus claude-code-action's
+write-access check on whoever triggered the run.
 
 Caveats:
 
-- Callers must grant `id-token: write` at the calling job level (the stub
-  does); GitHub does not pass OIDC tokens to reusable workflows implicitly.
-- GitHub does not issue OIDC tokens to workflows triggered by fork PRs, so
-  fork-PR-triggered runs cannot authenticate. The stub's triggers all run in
-  base-repo context, so this only matters for custom `pull_request` triggers.
+- Callers must grant `id-token: write` at the calling job level (the stubs do);
+  GitHub does not pass OIDC tokens to reusable workflows implicitly.
+- GitHub does not issue OIDC tokens to fork-PR-triggered runs, so those cannot
+  authenticate. The stubs' triggers run in base-repo context, so this only
+  affects external-contributor fork PRs, not our internal PRs.
 
-## One-time org setup
+## Model selection
 
-These are already done (or need doing once), not per-repo:
+Workflows default to the `fable` alias with `--fallback-model default`, so runs
+prefer Fable and fall back to the account default if Fable is unavailable
+(verified: when Fable was retired, runs transparently served the default).
+Override per repo with the `model` input; `model: ""` uses Claude Code's own
+default with no fallback.
 
-1. **Claude GitHub App** installed org-wide:
-   <https://github.com/apps/claude> → install on all `meridianlabs-ai` repos.
-2. **Workload Identity Federation rule** in the Anthropic Console trusting
-   GitHub Actions OIDC for this org (done — IDs are in
-   `.github/workflows/claude.yml`).
-3. **Actions access policy** on this repo set to "organization" so other repos
-   can call the reusable workflow (done — via
-   `gh api -X PUT repos/meridianlabs-ai/agents/actions/permissions/access -f access_level=organization`).
+To see what model a run *actually* used, read `modelUsage` in the uploaded
+execution-log artifact — **not** the init line, which echoes the requested
+model even when the fallback fired.
+
+## Permissions
+
+Permissions are expressed as inline Claude Code `settings.json` (the `settings`
+input), not `--allowedTools`. settings owns the allow-list; the reviewer adds a
+`deny` overlay for `Edit`/`Write`/git writes (deny beats allow). It's an
+allow-list, not allow-all-plus-deny, because these workflows are triggered by
+partially attacker-controllable issue/PR text — an allow-list caps the blast
+radius of prompt injection. See the design doc.
 
 ## The inspect_ai fork
 
-[meridianlabs-ai/inspect_ai](https://github.com/meridianlabs-ai/inspect_ai)
-is a fork of
-[UKGovernmentBEIS/inspect_ai](https://github.com/UKGovernmentBEIS/inspect_ai)
+[meridianlabs-ai/inspect_ai](https://github.com/meridianlabs-ai/inspect_ai) is
+a fork of [UKGovernmentBEIS/inspect_ai](https://github.com/UKGovernmentBEIS/inspect_ai)
 that lets Claude work on inspect issues even though we don't control the
-upstream org. Branch layout:
+upstream org (we can't install the app or add workflows there).
 
-- **`main`** — pristine mirror of upstream main. Never commit to it; the sync
-  workflow fast-forwards it daily (non-ff pushes are rejected, enforcing the
-  mirror invariant).
-- **`meridian`** (default branch) — `main` plus meridian-only workflows
-  (Claude stub, upstream sync; slow tests may move here later). Event and
-  scheduled workflows only fire from the default branch, which is why it must
-  be the default.
+Branch layout:
 
-The two-stage PR flow:
+- **`main`** — pristine mirror of upstream main. Never commit to it. Protected
+  by a ruleset (no updates/deletes/force-pushes) so PRs can't be merged into it
+  accidentally.
+- **`meridian`** (default branch) — `main` plus meridian-only workflows (dev,
+  review, sync). Event and scheduled workflows only fire from the default
+  branch, which is why meridian must be default.
 
-1. File an issue on the fork (from the project board) and add the `claude`
-   label.
-2. Claude branches from pristine `main` and opens a PR **within the fork**
-   (`claude/xyz` → `main`). This PR is the review surface — it is never
-   merged. Because `main` mirrors upstream, its diff is exactly what upstream
-   will see.
-3. Iterate with `@claude` on the fork PR.
-4. When ready, open the upstream PR from the same branch:
-   `gh pr create --repo UKGovernmentBEIS/inspect_ai --head meridianlabs-ai:claude/xyz`
-   (or ask Claude to). Close the fork PR with a link.
+Both branches are kept current by `sync-upstream.yml` (hourly): it
+fast-forwards `main` from upstream and merges upstream into `meridian`. It
+pushes via the `SYNC_TOKEN` secret (an admin-owned fine-grained PAT) because
+the ruleset's admin-role bypass lets that identity through; the default
+workflow token cannot bypass rulesets.
+
+### The two-stage PR flow
+
+1. File an issue on the fork (e.g. from the project board) and add the `claude`
+   label, or `@claude` it.
+2. Claude branches from pristine `main` and opens a draft PR **within the fork**
+   (`claude/xyz` → `main`). This PR is the review surface — it is never merged
+   here. Because `main` mirrors upstream, its diff is exactly what upstream will
+   see.
+3. Iterate on the fork PR (`@claude` to fix, `@review` to re-review).
+4. When ready, **a human** opens the upstream PR from the same branch:
+   `gh pr create --repo UKGovernmentBEIS/inspect_ai --head meridianlabs-ai:claude/xyz`.
+   Close the fork PR with a link. (Promotion is a deliberate human step — the
+   agent's fork token can't push cross-repo, and this is the gate before
+   publishing into an org we don't control.)
 5. To address upstream review feedback, comment on the fork PR
-   (`@claude address the feedback on UKGovernmentBEIS/inspect_ai#NNNN`) —
-   pushes to the shared branch update the upstream PR automatically.
+   (`@claude address the feedback on UKGovernmentBEIS/inspect_ai#NNNN`) — pushes
+   to the shared branch update the upstream PR automatically.
 
-## Updating Claude behavior across all repos
+## Updating behavior across all repos
 
-Edit `.github/workflows/claude.yml` here and merge to `main`. All caller repos
-pick up the change immediately (stubs reference `@main`).
+Edit the reusable workflow here and merge to `main`. All caller repos pick up
+the change on their next run (stubs reference `@main`). For the inspect_ai fork,
+also redeploy the changed stub to its `meridian` branch if the stub itself
+changed (the reusable workflow it calls updates automatically).
+
+## One-time org setup
+
+Already done, listed for reference:
+
+1. **Claude GitHub App** installed on `meridianlabs-ai` repos
+   (<https://github.com/apps/claude>).
+2. **Workload Identity Federation rule** in the Anthropic Console (CEL:
+   `repository_owner == "meridianlabs-ai"`), target service account
+   `claude-code-agent` in the "Claude Code Agent" workspace.
+3. **Actions access policy** on this repo set to organization-accessible, and
+   this repo is **public** so other (including public) repos can call its
+   reusable workflows.
+4. **`SYNC_TOKEN`** secret on the inspect_ai fork (admin-owned fine-grained PAT,
+   Contents read/write) for the upstream-sync workflow.
