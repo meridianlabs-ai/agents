@@ -138,7 +138,13 @@ changed (the reusable workflow it calls updates automatically).
 
 ## Maintainers
 
-Authentication (Workload Identity Federation), the permission model, model
-selection, branch protection, and the one-time org setup are documented in
-[design/architecture.md](design/architecture.md). You don't need any of it to
-use the agents — there are no secrets or config to set up per repo.
+You don't need any of this to *use* the agents — there are no secrets or config
+to set up per repo. For working on the infra:
+
+- [design/architecture.md](design/architecture.md) — auth (WIF), the permission
+  model, model selection, branch protection, one-time org setup, and the
+  rationale/history behind the design.
+- [design/shared-instructions.md](design/shared-instructions.md) — proposed (not
+  yet built) plan for sharing `CLAUDE.md`/`AGENTS.md` across Meridian repos.
+- [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) — instructions for agents
+  making changes in this repo.

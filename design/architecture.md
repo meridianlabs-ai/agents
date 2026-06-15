@@ -330,3 +330,5 @@ for the model that actually ran (the init line echoes the *requested* model).
   failure → triage → fix-PR.
 - **`meridian-claude` machine account** — would enable board assignment
   (`assignee_trigger`) and automated upstream PR promotion; deferred.
+- **Shared CLAUDE.md/AGENTS.md across repos** — designed in
+  [shared-instructions.md](shared-instructions.md); not yet implemented.
