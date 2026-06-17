@@ -188,16 +188,24 @@ jobs:
       # Gated to fresh issue runs (the inverse of the branch-sync gate): PR
       # follow-ups already have a PR. branch_name is the action's output for the
       # branch it pushed — empty when the run made no commits, so this no-ops.
-      # Idempotent: skips when a PR already exists for the branch. Uses the
-      # action's github_token (the Claude App token) so the new PR triggers CI;
-      # PRs opened with the default GITHUB_TOKEN would not.
+      # Idempotent: skips when a PR already exists for the branch.
+      #
+      # Token: use the job's default GITHUB_TOKEN, NOT the action's github_token
+      # output. The action revokes its Claude App token in a "Revoke app token"
+      # step that runs inside its own composite action (i.e. before this step),
+      # so steps.claude.outputs.github_token is already dead here and gh would
+      # fail with "401 Bad credentials". Tradeoff: a PR opened with GITHUB_TOKEN
+      # does not trigger downstream `pull_request` CI runs (GitHub's recursion
+      # guard) — the PR is created for review, but a maintainer must kick CI
+      # (e.g. push a commit or close/reopen). No secret-based app token is
+      # available to avoid this (this repo is secret-free by design).
       - name: Open PR for issue-triggered run
         if: >-
           github.event.issue.pull_request == '' &&
           github.event.pull_request == '' &&
           steps.claude.outputs.branch_name != ''
         env:
-          GH_TOKEN: ${{ steps.claude.outputs.github_token || github.token }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ steps.claude.outputs.branch_name }}
           # Empty on most repos (gh defaults --base to the repo default branch);
