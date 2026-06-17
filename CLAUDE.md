@@ -16,3 +16,7 @@ The shared, tool-agnostic instructions for this repo are in `AGENTS.md`
   change; the claude-api skill for any Anthropic-API / model-id questions.
 - Per-repo distribution of these instructions to other Meridian repos is
   planned but not built — see [design/shared-instructions.md](design/shared-instructions.md).
+- Commit directly to `main` in this repo — no feature branch or PR needed.
+  (This overrides the default "branch before committing on the default branch"
+  behavior.) Note the `@main` contract: a push here goes live on every caller
+  repo's next run, so still commit deliberately.

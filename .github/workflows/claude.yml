@@ -125,26 +125,6 @@ on:
         required: false
         type: string
         default: ""
-      open_pr_prompt:
-        description: >-
-          Guidance appended to the system prompt ONLY on fresh issue runs (not
-          PR follow-ups), telling the agent to open a pull request after pushing.
-          claude-code-action does not auto-open PRs on issue triggers — it
-          pushes a branch and surfaces a prefilled "Create PR" link — so without
-          this the fix sits on a branch with no PR. Idempotent: the agent checks
-          for an existing PR first, so it is a no-op on the rare issue run that
-          continues a branch. The base-branch splice (below) makes it target the
-          configured base_branch (e.g. the fork's pristine main) rather than gh's
-          default of the repo default branch. Pass "" to disable.
-        required: false
-        type: string
-        default: >-
-          After you have committed and pushed your changes, open a pull request
-          so the work is reviewable: first run
-          `gh pr list --head <your-branch>` and, only if none exists, run
-          `gh pr create` with a clear title and a body that references the issue
-          (e.g. "Fixes #<number>"). The action pushes your branch but does not
-          open the PR for you.
 
 jobs:
   claude:
@@ -176,20 +156,10 @@ jobs:
         env:
           BRANCH_SYNC: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_prompt || '' }}
           BRANCH_SYNC_APPEND: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_append || '' }}
-          # Fires only on fresh issue runs — the inverse of BRANCH_SYNC's gate.
-          OPEN_PR: ${{ (github.event.issue.pull_request == '' && github.event.pull_request == '') && inputs.open_pr_prompt || '' }}
-          OPEN_PR_BASE: ${{ inputs.base_branch }}
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
-          # gh pr create defaults --base to the repo default branch, which is
-          # wrong on the fork (default is meridian, base_branch is main), so
-          # splice in the configured base when set.
-          open_pr="$OPEN_PR"
-          if [ -n "$open_pr" ] && [ -n "$OPEN_PR_BASE" ]; then
-            open_pr="$open_pr Pass --base $OPEN_PR_BASE so the PR targets the correct branch."
-          fi
           combined=""
-          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$open_pr" "$EXTRA"; do
+          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$EXTRA"; do
             [ -n "$part" ] && combined="${combined:+$combined }$part"
           done
           echo "value=$combined" >> "$GITHUB_OUTPUT"
@@ -210,6 +180,48 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
             ${{ inputs.claude_args }}
+
+      # On issue triggers claude-code-action pushes a branch but never opens the
+      # PR — it only posts a prefilled "Create PR" link, and its built-in flow
+      # reliably wins over any --append-system-prompt nudge to run `gh pr create`
+      # (the agent posts the link and stops). So open the PR deterministically.
+      # Gated to fresh issue runs (the inverse of the branch-sync gate): PR
+      # follow-ups already have a PR. branch_name is the action's output for the
+      # branch it pushed — empty when the run made no commits, so this no-ops.
+      # Idempotent: skips when a PR already exists for the branch. Uses the
+      # action's github_token (the Claude App token) so the new PR triggers CI;
+      # PRs opened with the default GITHUB_TOKEN would not.
+      - name: Open PR for issue-triggered run
+        if: >-
+          github.event.issue.pull_request == '' &&
+          github.event.pull_request == '' &&
+          steps.claude.outputs.branch_name != ''
+        env:
+          GH_TOKEN: ${{ steps.claude.outputs.github_token || github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.claude.outputs.branch_name }}
+          # Empty on most repos (gh defaults --base to the repo default branch);
+          # set on the fork, where base is pristine main, not the meridian default.
+          BASE: ${{ inputs.base_branch }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # The branch lives on origin; the initial checkout predates the push.
+          if ! git fetch --quiet origin "$BRANCH"; then
+            echo "Branch $BRANCH not on origin; nothing to open."
+            exit 0
+          fi
+          if [ -n "$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            echo "PR already exists for $BRANCH; nothing to do."
+            exit 0
+          fi
+          # Title/body from the latest commit (the agent writes descriptive,
+          # conventional-commit messages); prefix the body with the issue link.
+          title="$(git log -1 --format=%s FETCH_HEAD)"
+          detail="$(git log -1 --format=%b FETCH_HEAD)"
+          body="$(printf 'Fixes #%s\n\n%s' "$ISSUE" "$detail")"
+          gh pr create --repo "$REPO" --head "$BRANCH" ${BASE:+--base "$BASE"} \
+            --title "$title" --body "$body"
 
       - name: Upload execution log
         if: always()
