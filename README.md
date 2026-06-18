@@ -44,6 +44,17 @@ Merge the PR to activate.
 Prerequisite: the Claude GitHub App must have access to the repo (org-wide
 install covers this).
 
+**Optional — let the agents run your tests.** By default the agents review and
+build against a bare runner (no deps installed), so they verify with static
+checks only. To give them a real environment, add a
+`.github/actions/claude-setup` composite action to your repo that installs your
+project — ideally by delegating to your existing CI setup
+(`uses: ./.github/actions/<your-setup>`), so nothing is duplicated and the build
+cache is shared. Both agents run it automatically when present (a failed setup
+fails the run, so keep it green). See
+[design/architecture.md](design/architecture.md) for the mechanics and the
+inspect_ai-fork caveat.
+
 ## Using the dev agent
 
 Trigger it by:

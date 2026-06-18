@@ -142,6 +142,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Provision the project environment so the agent's allow-listed
+      # pytest/ruff/mypy can actually run (a bare runner has neither the deps
+      # nor the package installed). Convention-based opt-in: a caller repo adds
+      # a `.github/actions/claude-setup` composite action that delegates to its
+      # existing, cache-backed CI setup — no install command is duplicated here,
+      # and the GitHub cache is the caller's (scoped to the run's repo), so it
+      # hits the same entries normal CI populates. `./` resolves against the
+      # checked-out workspace (the caller repo), not this workflow's repo. The
+      # hashFiles guard makes this a no-op for repos that don't define it.
+      # Fatal on failure: a broken setup surfaces loudly rather than silently
+      # degrading to static-only checks. See design/architecture.md.
+      - name: Provision project environment
+        if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        uses: ./.github/actions/claude-setup
+
       # Compose the two appended-system-prompt sources into ONE value, so we
       # emit a single --append-system-prompt flag. Two flags would force a bet
       # on undocumented CLI behavior (accumulate vs. last-one-wins), and they

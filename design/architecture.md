@@ -212,6 +212,57 @@ Checkout is `fetch-depth: 0` (full history + tags): setuptools-scm needs tags
 to compute a version (a shallow clone produced a version that conflicted with a
 pinned dependency), and the agent uses `git log`/`blame` to understand code.
 
+### Provisioning the environment for the verify loop
+
+The allow-list grants permission to run `pytest`/`ruff`/`mypy`, but a bare
+`ubuntu-latest` runner has neither the dev tools nor the package installed — so
+without a setup step the agent can only fall back to `py_compile` and reasoning
+(observed: a reviewer reported "env not provisioned: no pytest/inspect_flow" and
+LGTM'd on static checks alone). Both workflows therefore run a setup step
+between checkout and the agent.
+
+The mechanism is a **convention, not a duplicated command**. A caller repo opts
+in by adding a `.github/actions/claude-setup` composite action; the workflows
+run it via `uses: ./.github/actions/claude-setup`, guarded by
+`hashFiles(...) != ''` so repos that don't define it are unaffected. Three
+GitHub-Actions facts make this work and are worth recording (they were verified
+against the docs, not assumed):
+
+- **`./` resolves against the checked-out workspace** (the *caller* repo), not
+  the repo that owns the reusable workflow. So the caller's own action runs. The
+  shim should delegate to the repo's existing CI setup
+  (`uses: ./.github/actions/<their-setup>`) rather than re-spelling the install,
+  so the install logic lives in one place.
+- **`uses:` must be a literal** — no `${{ … }}` interpolation — which is why the
+  path is a fixed convention rather than a configurable input.
+- **The Actions cache is scoped to the run's repo** (the caller), even though
+  the step lives in our reusable workflow. So the caller's normal CI and these
+  runs share cache entries when keys match, and the default-branch (`main`)
+  cache is readable from feature branches, PR heads, and `issue_comment` runs —
+  i.e. all of our trigger types. Reuse of the cache is automatic; we don't
+  manage keys here.
+
+The step is **fatal on failure** (no `continue-on-error`): a broken setup config
+should surface loudly rather than silently degrade every run to static-only
+review.
+
+**Fork asymmetry.** What's in the workspace — not which branch the workflow was
+*resolved* from — decides whether the shim is found, and the two agents check
+out different things on the inspect_ai fork:
+
+- The **dev agent** checks out no explicit ref, so on the fork's live triggers
+  (`issue_comment`/`issues`, resolved from the default branch) the workspace is
+  `meridian`. A `claude-setup` action placed on `meridian` *is* present, so the
+  shim fires. Because `meridian`'s source ≈ pristine `main` ≈ upstream, the
+  installed env matches the `main`-cut branch the agent then edits.
+- The **reviewer** deliberately checks out `refs/pull/{N}/head` (so it reviews
+  exactly the upstream-bound diff). That branch is cut from pristine `main` and
+  carries no meridian files, so the shim is absent and setup is skipped — the
+  reviewer stays on static checks there. Giving it a real env would require an
+  extra checkout of `meridian`'s `.github/actions` into a fixed subdir; not done,
+  since the fork's diffs are validated by upstream's own CI. For normal
+  (non-fork) repos both agents provision identically.
+
 ### Branch sync before work
 
 A `@claude merge my branch` run exposed two gaps. First, `git fetch`/`git

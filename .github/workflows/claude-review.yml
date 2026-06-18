@@ -108,6 +108,21 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
 
+      # Provision the project environment so the agent's allow-listed
+      # pytest/ruff/mypy can actually run, instead of falling back to py_compile
+      # and reasoning. Convention-based opt-in: a caller repo adds a
+      # `.github/actions/claude-setup` composite action that delegates to its
+      # existing, cache-backed CI setup; the GitHub cache is the caller's, so it
+      # hits the entries normal CI populates. `./` resolves against the
+      # checked-out workspace. The hashFiles guard makes this a no-op for repos
+      # that don't define it. Fatal on failure. NOTE: the reviewer checks out
+      # the PR head (above), so on the inspect_ai fork — whose PR branches are
+      # cut from pristine main and carry no meridian files — the action is
+      # absent and this is skipped; see design/architecture.md.
+      - name: Provision project environment
+        if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        uses: ./.github/actions/claude-setup
+
       - uses: anthropics/claude-code-action@v1
         id: claude
         with:
