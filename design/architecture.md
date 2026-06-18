@@ -294,6 +294,10 @@ The loop is: reviewer posts → human triages → `@claude address the feedback`
 **on the PR** (so the dev agent pushes to the existing branch rather than
 spawning a new one from the issue).
 
+The `@auto` agent ([auto-agent.md](auto-agent.md)) deliberately revisits this
+decision — automating the review→fix loop, with the human gate replaced by a
+hard 3-round cap, an `auto`-label kill-switch, and opt-in-only triggering.
+
 ## Branch protection on the fork
 
 `main` (and `meridian`) carry a ruleset blocking deletion, force-push, and
@@ -378,6 +382,8 @@ for the model that actually ran (the init line echoes the *requested* model).
   the fork's `meridian` branch and close the triage → fix loop. Designed in
   [scheduled-tests-on-fork.md](scheduled-tests-on-fork.md); not yet implemented.
 - **`meridian-claude` machine account** — would enable board assignment
-  (`assignee_trigger`) and automated upstream PR promotion; deferred.
+  (`assignee_trigger`) and automated upstream PR promotion; deferred. Also the
+  identity that powers `@auto` ([auto-agent.md](auto-agent.md)): a non-`GITHUB_TOKEN`
+  PAT is the only way an agent-opened PR triggers CI and `@review`.
 - **Shared CLAUDE.md/AGENTS.md across repos** — designed in
   [shared-instructions.md](shared-instructions.md); not yet implemented.
