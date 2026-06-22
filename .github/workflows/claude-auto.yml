@@ -84,6 +84,14 @@ on:
 jobs:
   auto-ci-fix:
     runs-on: ubuntu-latest
+    # Serialize per PR branch so the attempt counter's read-modify-write can't
+    # race: overlapping runs (a human push mid-fix, multiple named CI workflows,
+    # a re-run) would otherwise both read the same count and slip past the cap,
+    # defeating the kill-switch. cancel-in-progress: false lets an in-flight fix
+    # finish (cancelling mid-push would corrupt the branch) and queues the next.
+    concurrency:
+      group: claude-auto-${{ github.repository }}-${{ inputs.head_branch }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
