@@ -261,6 +261,24 @@ The simple case ships first and is independently useful:
   review still consumes a round-counter increment (benign — escalation also
   routes to a human). _Fork:_ the handoff wording becomes "ready to promote
   upstream" via the fork's append-prompt (fork PRs are never merged in-fork).
+- **Fork rollout — _done; verified end to end on meridianlabs-ai/inspect_ai._**
+  Auto-stub on the `meridian` branch (Phase 1 keyed to the fork's `Build`; Phase
+  2/3 on the `issue_comment` marker — both resolve from the default branch, so
+  they fire despite PRs targeting pristine `main`). Validated: planted ruff F401
+  → `ci-fix` (workflow_run from `meridian`) fixed it as marvin → `Build` green;
+  then `@review` → marker comment → `review-fix` → "ready to promote upstream"
+  handoff, no merge, PR left open. Note the fork's `Build` is ~10 min, so each
+  loop turn is slower than on a light repo.
+
+## Open follow-ups
+
+- **Stub-gate hardening (non-blocking).** The deployed `review-fix` stub gates
+  are routers (`issue_comment` + marker); authoritative gating (reviewer
+  identity, same-repo, `auto` label, cap) is in `claude-auto-review.yml` and is
+  verified. The example stub adds `github.event.issue.pull_request != ''` as a
+  cheap pre-filter (consistency with `claude-review.yml`, reduces forged-marker
+  surface); the deployed inspect_flow and fork stubs can be synced to match when
+  convenient — purely surface-reduction, not a security gap.
 
 ## History: how we got here
 
