@@ -213,42 +213,47 @@ The simple case ships first and is independently useful:
   turned CI green, confirming the prompt-mode push goes out as marvin (so CI
   re-triggers). _Not yet exercised:_ the cap/escalation path (no failure has
   survived 3 attempts) and the fork (only inspect_flow so far).
-- **Phase 2 — review→fix loop. _Verified on inspect_flow._** Reusable
-  `claude-auto-review.yml`: on `pull_request_review` submitted by the automated
-  reviewer (`reviewer_login`, default `claude[bot]`) on an `auto`-labeled PR,
-  wake the fixer agent (as marvin) to address the feedback, push, and re-post
-  `@review` — closing the loop. Bounded by a 3-round cap (deterministic
-  sticky-comment counter, sharing claude-auto.yml's per-branch `concurrency`
-  group); at the cap it comments and removes the `auto` label. **Decisions:**
-  only the automated reviewer drives the loop (human reviews are the escalation
-  endpoint, not a turn); whether a review needs another round is the fixer
-  agent's judgment (fix + re-request, or "no changes needed" + stop), so
-  `@review` is left unchanged. **`allowed_bots` gotcha:** the trigger actor is
-  the reviewer bot, so claude-code-action's default non-human-actor guard aborts
-  the run — the workflow sets `allowed_bots: "claude"` (never `*`) to lift it for
-  that one bot; the gate does the real authorization first. Smoke test (planted
-  CI-passing clamp upper-bound bug): `@review` flagged it, marvin fixed it
-  correctly + added the suggested test + re-requested review, then `@review`
-  came back satisfied and the loop idled at round 1 — clean convergence, no
-  runaway, no escalation. **Fork caveat:** `pull_request_review` resolves
-  from the PR base branch, so it never fires on the pristine-base fork — that
-  surface needs a different re-review trigger, handled with the fork rollout.
-- **Phase 3 — convergence → human handoff. _Verified on inspect_flow._** **Decision:
-  @auto hands off, it does NOT auto-merge** (the merge is the one irreversible
-  step; a human keeps it). Two prompt changes, no new workflow:
-  (1) `@review` records a clean verdict as a *formal* review (`gh pr review
-  --comment`) instead of a plain comment, so the clean case fires
-  `pull_request_review` instead of going silent — that was the missing
-  convergence event (Phase 2 finding). (2) In `claude-auto-review.yml`, when the
-  fixer agent has nothing to fix (the deterministic clean signal = it pushes no
-  commit), it hands off: reports live CI + mergeable status and @-mentions the
-  originating human, and does not merge or re-request. Grounding: inspect_flow's
-  `main` requires no approvals and native auto-merge is off, so no `APPROVE`
-  state or merge machinery is needed. _Known v1 limitations:_ the handoff is
-  agent-posted, so its CI status reflects the moment (may read "running" if the
-  review lands before CI); and a clean review still consumes a round-counter
-  increment (benign — escalation also routes to a human). _Fork:_ same
-  `pull_request_review` caveat as Phase 2.
+- **Phase 2 — review→fix loop. _Built; verified on inspect_flow via
+  `pull_request_review`, then reworked to the unified `issue_comment` trigger
+  (re-test pending)._** Reusable `claude-auto-review.yml`: on the reviewer's
+  **marked summary comment** (`issue_comment`, body contains
+  `<!-- claude-review-summary -->`, author = `reviewer_login`, default
+  `claude[bot]`) on an `auto`-labeled, same-repo PR, wake the fixer agent (as
+  marvin) to address the feedback, push, and re-post `@review` — closing the
+  loop. Bounded by a 3-round cap (deterministic sticky-comment counter, sharing
+  claude-auto.yml's per-PR `concurrency` group); at the cap it comments and
+  removes the `auto` label. **Decisions:** only the automated reviewer drives the
+  loop (human reviews are the escalation endpoint, not a turn); whether a review
+  needs another round is the fixer agent's judgment (fix + re-request, or "no
+  changes needed" → handoff). **Why `issue_comment`, not `pull_request_review`:**
+  the latter resolves workflows from the PR base branch, so it never fires on the
+  pristine-base fork; `issue_comment` resolves from the default branch and fires
+  everywhere — one mechanism for all repos. The reviewer marks its summary
+  comment so @auto keys on it, then reads the real review/inline findings via the
+  API; cross-repo (fork-of-our-repo) PRs are skipped in the gate (the agent runs
+  PR head code under MARVIN_TOKEN). **`allowed_bots` gotcha:** the trigger actor
+  is the reviewer bot, so the workflow sets `allowed_bots: "claude"` (never `*`)
+  to lift claude-code-action's non-human-actor guard; the gate authorizes first.
+  (The earlier `pull_request_review` build verified the fix/cap/convergence
+  behavior end to end — planted clamp bug, fixed + re-requested, converged at
+  round 1; the rework changes only the trigger.)
+- **Phase 3 — convergence → human handoff. _Built (re-test pending with the
+  Phase 2 rework)._** **Decision: @auto hands off, it does NOT auto-merge** (the
+  merge is the one irreversible step; a human keeps it). Two changes, no new
+  workflow: (1) `@review` **always posts a marked summary comment**
+  (`<!-- claude-review-summary -->`), findings and clean alike — this both fires
+  the unified `issue_comment` trigger and carries the verdict (replaces the
+  silent-when-clean behavior that was the Phase 2 finding). (2) In
+  `claude-auto-review.yml`, when the fixer agent has nothing to fix (the
+  deterministic clean signal = it pushes no commit), it hands off: reports live
+  CI + mergeable status and @-mentions the originating human, and does not merge
+  or re-request. Grounding: inspect_flow's `main` requires no approvals and
+  native auto-merge is off, so no `APPROVE` state or merge machinery is needed.
+  _Known v1 limitations:_ the handoff is agent-posted, so its CI status reflects
+  the moment (may read "running" if the review lands before CI); and a clean
+  review still consumes a round-counter increment (benign — escalation also
+  routes to a human). _Fork:_ the handoff wording becomes "ready to promote
+  upstream" via the fork's append-prompt (fork PRs are never merged in-fork).
 
 ## History: how we got here
 

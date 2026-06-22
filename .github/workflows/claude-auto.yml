@@ -24,6 +24,15 @@ on:
         description: PR head branch whose CI failed (from workflow_run.head_branch).
         required: true
         type: string
+      pr_number:
+        description: >-
+          PR number (from workflow_run.pull_requests[0].number) — used only to
+          key the concurrency group so this shares it with claude-auto-review.yml
+          (both serialize per PR). Empty when CI ran on a non-PR branch, which
+          this job skips anyway.
+        required: false
+        type: string
+        default: ""
       ci_run_id:
         description: The failed CI run id, so the agent can read its failing logs.
         required: true
@@ -90,7 +99,7 @@ jobs:
     # defeating the kill-switch. cancel-in-progress: false lets an in-flight fix
     # finish (cancelling mid-push would corrupt the branch) and queues the next.
     concurrency:
-      group: claude-auto-${{ github.repository }}-${{ inputs.head_branch }}
+      group: claude-auto-${{ github.repository }}-pr-${{ inputs.pr_number }}
       cancel-in-progress: false
     permissions:
       contents: write
