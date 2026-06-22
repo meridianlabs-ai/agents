@@ -113,6 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          echo "review-fix gate: pr=#$PR comment_author='$AUTHOR' reviewer_login='$REVIEWER'"
           if [ "$HAS_TOKEN" != "true" ]; then
             echo "No MARVIN_TOKEN; the review loop can't push/re-request as a real identity. Skipping."
             act skip; exit 0
@@ -121,7 +122,8 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER'; ignoring."
             act skip; exit 0
           fi
-          pr_json=$(gh pr view "$PR" --repo "$REPO" --json headRefName,isCrossRepository,labels)
+          pr_json=$(gh pr view "$PR" --repo "$REPO" --json headRefName,isCrossRepository,labels 2>/dev/null) || {
+            echo "#$PR is not a pull request; skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
             act skip; exit 0
