@@ -201,13 +201,18 @@ The simple case ships first and is independently useful:
   the caller's other secrets); each caller repo's deployed stub needs that and
   the org secret scoped to it. (The roadmap called this token `AUTO_TOKEN`; the
   provisioned secret is `MARVIN_TOKEN`.)
-- **Phase 1 — CI-failure → fix trigger. _Built, in testing._** Reusable
+- **Phase 1 — CI-failure → fix trigger. _Verified on inspect_flow._** Reusable
   `claude-auto.yml` + `examples/claude-auto-stub.yml`: on `workflow_run` failure
   for an `auto`-labeled same-repo PR, the dev agent (as marvin) reads the failing
   logs, fixes on the branch, and pushes — re-triggering CI. Bounded by a 3-attempt
-  cap (deterministic sticky-comment counter); at the cap it comments and removes
-  the `auto` label. The auto-stub needs a per-repo CI-workflow-name edit, so it's
-  installed manually (not via `enable-claude.sh`) until @auto matures.
+  cap (deterministic sticky-comment counter, serialized by a per-branch
+  `concurrency` group); at the cap it comments and removes the `auto` label. The
+  auto-stub needs a per-repo CI-workflow-name edit, so it's installed manually
+  (not via `enable-claude.sh`) until @auto matures. Smoke test (planted ruff
+  F401, PR authored by a human, `auto`-labeled): marvin fixed it on attempt 1 and
+  turned CI green, confirming the prompt-mode push goes out as marvin (so CI
+  re-triggers). _Not yet exercised:_ the cap/escalation path (no failure has
+  survived 3 attempts) and the fork (only inspect_flow so far).
 - **Phase 2** — review→fix loop with the 3-round cap and label kill-switch.
 - **Phase 3** — convergence → auto-merge / escalation.
 
