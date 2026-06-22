@@ -33,7 +33,11 @@ on:
           You MUST post your review to the PR — it is not surfaced anywhere
           else. Post a concise top-level summary with `gh pr comment`, and add
           inline comments for specific line-level findings. If you find no
-          significant issues, post a brief comment saying so.
+          significant issues, record that verdict as a FORMAL review — run
+          `gh pr review --comment --body "<brief summary>"` (not `gh pr comment`)
+          — so that a clean review is still a review event, not just a comment.
+          (This lets the @auto loop detect convergence; for a normal PR it is
+          simply a recorded "no issues" review.)
       model:
         description: Preferred model (--model). Empty = Claude Code default.
         required: false

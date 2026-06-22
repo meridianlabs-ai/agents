@@ -233,7 +233,22 @@ The simple case ships first and is independently useful:
   runaway, no escalation. **Fork caveat:** `pull_request_review` resolves
   from the PR base branch, so it never fires on the pristine-base fork — that
   surface needs a different re-review trigger, handled with the fork rollout.
-- **Phase 3** — convergence → auto-merge / escalation.
+- **Phase 3 — convergence → human handoff. _Built, in testing._** **Decision:
+  @auto hands off, it does NOT auto-merge** (the merge is the one irreversible
+  step; a human keeps it). Two prompt changes, no new workflow:
+  (1) `@review` records a clean verdict as a *formal* review (`gh pr review
+  --comment`) instead of a plain comment, so the clean case fires
+  `pull_request_review` instead of going silent — that was the missing
+  convergence event (Phase 2 finding). (2) In `claude-auto-review.yml`, when the
+  fixer agent has nothing to fix (the deterministic clean signal = it pushes no
+  commit), it hands off: reports live CI + mergeable status and @-mentions the
+  originating human, and does not merge or re-request. Grounding: inspect_flow's
+  `main` requires no approvals and native auto-merge is off, so no `APPROVE`
+  state or merge machinery is needed. _Known v1 limitations:_ the handoff is
+  agent-posted, so its CI status reflects the moment (may read "running" if the
+  review lands before CI); and a clean review still consumes a round-counter
+  increment (benign — escalation also routes to a human). _Fork:_ same
+  `pull_request_review` caveat as Phase 2.
 
 ## History: how we got here
 
