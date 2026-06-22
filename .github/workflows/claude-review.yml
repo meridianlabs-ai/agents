@@ -35,12 +35,14 @@ on:
           or not you found issues), and add inline comments for specific
           line-level findings. THEN, as your final action, post a SEPARATE
           standalone comment with a single `gh pr comment --body` call whose body
-          is exactly `🔎 @auto: review complete. <!-- claude-review-summary -->`
-          — post it in one call and do NOT edit it afterward. The @auto loop is
-          triggered by that marker comment; it must be created atomically with
-          the marker present (a comment built up via edits would not carry the
-          marker in the `created` event that fires the loop). For a normal PR
-          this is just a short "review complete" note.
+          is exactly `🔎 Review complete. <!-- claude-review-summary -->` — post
+          it in one call and do NOT edit it afterward. (The trailing HTML comment
+          is a marker the @auto loop keys on; it must be created atomically with
+          the marker present, since a comment built up via edits would not carry
+          the marker in the `created` event. Keep the visible text neutral — do
+          NOT mention @auto, so it doesn't read as if @auto is acting on PRs that
+          aren't `auto`-labeled.) For a normal PR this is just a short
+          "review complete" note.
       model:
         description: Preferred model (--model). Empty = Claude Code default.
         required: false
