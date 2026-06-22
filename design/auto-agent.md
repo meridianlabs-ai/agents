@@ -213,7 +213,7 @@ The simple case ships first and is independently useful:
   turned CI green, confirming the prompt-mode push goes out as marvin (so CI
   re-triggers). _Not yet exercised:_ the cap/escalation path (no failure has
   survived 3 attempts) and the fork (only inspect_flow so far).
-- **Phase 2 — review→fix loop. _Built, in testing._** Reusable
+- **Phase 2 — review→fix loop. _Verified on inspect_flow._** Reusable
   `claude-auto-review.yml`: on `pull_request_review` submitted by the automated
   reviewer (`reviewer_login`, default `claude[bot]`) on an `auto`-labeled PR,
   wake the fixer agent (as marvin) to address the feedback, push, and re-post
@@ -223,7 +223,14 @@ The simple case ships first and is independently useful:
   only the automated reviewer drives the loop (human reviews are the escalation
   endpoint, not a turn); whether a review needs another round is the fixer
   agent's judgment (fix + re-request, or "no changes needed" + stop), so
-  `@review` is left unchanged. **Fork caveat:** `pull_request_review` resolves
+  `@review` is left unchanged. **`allowed_bots` gotcha:** the trigger actor is
+  the reviewer bot, so claude-code-action's default non-human-actor guard aborts
+  the run — the workflow sets `allowed_bots: "claude"` (never `*`) to lift it for
+  that one bot; the gate does the real authorization first. Smoke test (planted
+  CI-passing clamp upper-bound bug): `@review` flagged it, marvin fixed it
+  correctly + added the suggested test + re-requested review, then `@review`
+  came back satisfied and the loop idled at round 1 — clean convergence, no
+  runaway, no escalation. **Fork caveat:** `pull_request_review` resolves
   from the PR base branch, so it never fires on the pristine-base fork — that
   surface needs a different re-review trigger, handled with the fork rollout.
 - **Phase 3** — convergence → auto-merge / escalation.
