@@ -206,6 +206,14 @@ jobs:
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           github_token: ${{ secrets.MARVIN_TOKEN }}
           prompt: ${{ steps.prompt.outputs.value }}
+          # This job is triggered by the reviewer bot's review, so the action's
+          # default "refuse non-human actors" guard would abort. Allow only that
+          # one bot (never '*' — that lets any App invoke). Note the actor name
+          # here ("claude") differs from the review-author login ("claude[bot]")
+          # used by reviewer_login; both name the same reviewer. Real
+          # authorization already happened in the gate (reviewer + auto label +
+          # same-repo), so this just lifts the actor block.
+          allowed_bots: "claude"
           settings: ${{ inputs.settings }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
