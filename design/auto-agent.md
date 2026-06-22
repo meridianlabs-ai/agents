@@ -233,7 +233,7 @@ The simple case ships first and is independently useful:
   runaway, no escalation. **Fork caveat:** `pull_request_review` resolves
   from the PR base branch, so it never fires on the pristine-base fork — that
   surface needs a different re-review trigger, handled with the fork rollout.
-- **Phase 3 — convergence → human handoff. _Built, in testing._** **Decision:
+- **Phase 3 — convergence → human handoff. _Verified on inspect_flow._** **Decision:
   @auto hands off, it does NOT auto-merge** (the merge is the one irreversible
   step; a human keeps it). Two prompt changes, no new workflow:
   (1) `@review` records a clean verdict as a *formal* review (`gh pr review
