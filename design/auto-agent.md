@@ -280,6 +280,19 @@ The simple case ships first and is independently useful:
   surface); the deployed inspect_flow and fork stubs can be synced to match when
   convenient — purely surface-reduction, not a security gap.
 
+## Kickoff: `@auto` as a distinct trigger
+
+Initially only the *loop* was gated by the `auto` label (on PRs); kickoff stayed
+`@claude`/`claude`, so labeling an *issue* `auto` did nothing (the dev agent's
+gate didn't match it, and claude-code-action's `label_trigger`/`trigger_phrase`
+are single-valued). Now `@auto`/`auto` is a **distinct kickoff that coexists
+with `@claude`**: a second dev-agent job (in the caller stub) invokes the same
+reusable `claude.yml` with `trigger_phrase: '@auto'`, `label_trigger: 'auto'`,
+and the dev agent's PR-open post-step **propagates the `auto` label from the
+issue onto the new PR** so the loop engages. `claude`/`@claude` remains the
+one-shot assisted mode (PR opened, human drives); `auto`/`@auto` is the
+autonomous mode (PR opened, labeled `auto`, loop runs to handoff).
+
 ## History: how we got here
 
 The path to "the machine account is required" was a sequence of distinct

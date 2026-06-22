@@ -250,6 +250,8 @@ jobs:
           # set on the fork, where base is pristine main, not the meridian default.
           BASE: ${{ inputs.base_branch }}
           ISSUE: ${{ github.event.issue.number }}
+          # Label that opts a PR into the @auto loop; propagated from the issue.
+          AUTO_LABEL: "auto"
         run: |
           set -euo pipefail
           # The branch lives on origin; the initial checkout predates the push.
@@ -266,8 +268,16 @@ jobs:
           title="$(git log -1 --format=%s FETCH_HEAD)"
           detail="$(git log -1 --format=%b FETCH_HEAD)"
           body="$(printf 'Fixes #%s\n\n%s' "$ISSUE" "$detail")"
-          gh pr create --repo "$REPO" --head "$BRANCH" ${BASE:+--base "$BASE"} \
-            --title "$title" --body "$body"
+          pr_url="$(gh pr create --repo "$REPO" --head "$BRANCH" ${BASE:+--base "$BASE"} \
+            --title "$title" --body "$body")"
+          # If the originating issue carries the `auto` label, propagate it onto
+          # the new PR so the @auto loop engages (an `auto`-labeled issue means
+          # "drive this autonomously"). Harmless when absent.
+          if gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name' \
+               | grep -qx "$AUTO_LABEL"; then
+            echo "Issue #$ISSUE is $AUTO_LABEL-labeled; propagating to $pr_url."
+            gh pr edit "$pr_url" --add-label "$AUTO_LABEL" || true
+          fi
 
       - name: Upload execution log
         if: always()
