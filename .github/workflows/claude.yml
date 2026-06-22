@@ -125,6 +125,22 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      MARVIN_TOKEN:
+        description: >-
+          Machine-account (marvin@meridianlabs.ai) fine-grained PAT. Optional;
+          stubs pass it via `secrets: inherit`. When present it's handed to
+          claude-code-action as github_token, so the agent acts as the machine
+          account: its branch pushes and the PR the post-step opens then trigger
+          CI and @review, which a GITHUB_TOKEN-authored PR cannot (GitHub's
+          recursion guard). The action also does NOT revoke a caller-provided
+          token, so the post-step can reuse it to open the PR deterministically.
+          When absent, the dev agent still works via the Claude App token but
+          issue-triggered PR creation degrades (no CI; blocked entirely where
+          Actions-PR-creation is disallowed). This is the identity layer for
+          @auto; model auth stays Workload Identity Federation regardless. See
+          design/auto-agent.md.
+        required: false
 
 jobs:
   claude:
@@ -189,6 +205,10 @@ jobs:
           trigger_phrase: ${{ inputs.trigger_phrase }}
           label_trigger: ${{ inputs.label_trigger }}
           base_branch: ${{ inputs.base_branch }}
+          # Machine-account identity (empty falls back to the Claude App token).
+          # Passing it also stops the action revoking it, so the post-step below
+          # can reuse the same live token to open the PR. See secrets.MARVIN_TOKEN.
+          github_token: ${{ secrets.MARVIN_TOKEN }}
           settings: ${{ inputs.settings }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
@@ -205,22 +225,23 @@ jobs:
       # branch it pushed — empty when the run made no commits, so this no-ops.
       # Idempotent: skips when a PR already exists for the branch.
       #
-      # Token: use the job's default GITHUB_TOKEN, NOT the action's github_token
-      # output. The action revokes its Claude App token in a "Revoke app token"
-      # step that runs inside its own composite action (i.e. before this step),
-      # so steps.claude.outputs.github_token is already dead here and gh would
-      # fail with "401 Bad credentials". Tradeoff: a PR opened with GITHUB_TOKEN
-      # does not trigger downstream `pull_request` CI runs (GitHub's recursion
-      # guard) — the PR is created for review, but a maintainer must kick CI
-      # (e.g. push a commit or close/reopen). No secret-based app token is
-      # available to avoid this (this repo is secret-free by design).
+      # Token: prefer the machine-account PAT (MARVIN_TOKEN). It's a real GitHub
+      # identity, so the PR it opens triggers CI and @review (the whole point);
+      # and because it was passed to the action as github_token, the action did
+      # NOT revoke it, so it's still live here. Two dead ends ruled this in:
+      # steps.claude.outputs.github_token is the Claude App token, which the
+      # action revokes inside its own composite step (gh → 401 here); and the
+      # default GITHUB_TOKEN is barred from creating PRs where the org disables
+      # Actions PR-creation, and even when allowed its PRs trigger no CI
+      # (recursion guard). The `|| github.token` fallback only applies on repos
+      # without the secret, where it degrades exactly as documented above.
       - name: Open PR for issue-triggered run
         if: >-
           github.event.issue.pull_request == '' &&
           github.event.pull_request == '' &&
           steps.claude.outputs.branch_name != ''
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ steps.claude.outputs.branch_name }}
           # Empty on most repos (gh defaults --base to the repo default branch);

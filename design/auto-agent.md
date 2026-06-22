@@ -188,11 +188,13 @@ Per CLAUDE.md, confirm the action's surface rather than assuming:
 
 The simple case ships first and is independently useful:
 
-- **Phase 0 — reliable PR + CI (the original problem).** Once `AUTO_TOKEN`
-  exists, pass it as `github_token` in `claude.yml` and point the deterministic
-  post-step at it. This alone gives reliable issue→PR creation *with* CI and
-  auto-`@review` — fixing the failures that started this thread — with no loop
-  yet. Stubs gain a one-line `secrets: inherit` (or explicit pass-through).
+- **Phase 0 — reliable PR + CI (the original problem). _Done._** The
+  machine-account PAT (`MARVIN_TOKEN`, owned by `marvin@meridianlabs.ai`) is
+  passed as `github_token` in `claude.yml`, and the deterministic post-step
+  reuses it. This gives reliable issue→PR creation *with* CI and auto-`@review`,
+  no loop yet. Stubs pass it via `secrets: inherit`; each caller repo's deployed
+  stub needs that line and the org secret scoped to it. (The roadmap called this
+  token `AUTO_TOKEN`; the provisioned secret is `MARVIN_TOKEN`.)
 - **Phase 1** — CI-failure → fix trigger.
 - **Phase 2** — review→fix loop with the 3-round cap and label kill-switch.
 - **Phase 3** — convergence → auto-merge / escalation.

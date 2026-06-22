@@ -38,6 +38,12 @@ jobs:
       contains(github.event.issue.title, '@claude') ||
       github.event.label.name == 'claude'
     uses: meridianlabs-ai/agents/.github/workflows/claude.yml@main
+    # Pass MARVIN_TOKEN (the machine-account PAT, an org secret) through to the
+    # reusable workflow so agent-opened PRs trigger CI and @review. `inherit` is
+    # harmless where the secret isn't available — the agent still runs, but
+    # issue-triggered PR creation degrades (see the reusable workflow's
+    # secrets.MARVIN_TOKEN and design/auto-agent.md).
+    secrets: inherit
     permissions:
       contents: write
       pull-requests: write
