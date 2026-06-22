@@ -1,0 +1,221 @@
+name: Claude Auto Review (reusable)
+
+# @auto Phase 2: the review -> fix loop. A caller stub triggers this on
+# `pull_request_review` (submitted). When the automated reviewer posts a review
+# on an `auto`-labeled PR, this wakes the dev agent (as the machine account) to
+# address the feedback, push a fix, and re-request review — closing the loop.
+# Bounded by review_round_cap: at the cap it drops the `auto` label (the
+# kill-switch) and pings a human. See design/auto-agent.md.
+#
+# Only the automated reviewer's reviews drive the loop (reviewer_login). A human
+# review is the escalation endpoint, not a loop turn, so it is ignored here.
+# Whether a review needs another round is the fixer agent's judgment (it fixes +
+# re-requests, or says "no changes needed" and stops) — the deterministic bound
+# is the round cap, not a review-state gate, so @review is left unchanged.
+#
+# Shares the per-branch `concurrency` group with claude-auto.yml so the CI-fixer
+# and review-fixer never push to the same branch at once.
+#
+# Note: pull_request_review resolves workflows from the PR's BASE branch, so on
+# a pristine-base fork (PRs target a base lacking this workflow) it never fires;
+# that surface needs a different re-review trigger (see design/auto-agent.md).
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      head_branch:
+        required: true
+        type: string
+      review_id:
+        description: The submitted review's id, so the agent can read it + its comments.
+        required: true
+        type: string
+      review_author:
+        description: Login that submitted the review (github.event.review.user.login).
+        required: true
+        type: string
+      reviewer_login:
+        description: >-
+          Login of the automated reviewer whose reviews drive the loop. Reviews
+          from anyone else (humans, the machine account) are ignored.
+        required: false
+        type: string
+        default: "claude[bot]"
+      auto_label:
+        required: false
+        type: string
+        default: "auto"
+      review_round_cap:
+        description: Max review -> fix rounds before escalating to a human.
+        required: false
+        type: number
+        default: 3
+      model:
+        required: false
+        type: string
+        default: "fable"
+      fallback_model:
+        required: false
+        type: string
+        default: "default"
+      append_system_prompt:
+        required: false
+        type: string
+        default: ""
+      settings:
+        description: Keep in sync with claude.yml / claude-auto.yml.
+        required: false
+        type: string
+        default: >-
+          {"permissions":{"allow":["Read","Edit","Write",
+          "Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)","Bash(pip:*)",
+          "Bash(pip3:*)","Bash(uv:*)","Bash(python:*)","Bash(python3:*)",
+          "Bash(gh:*)",
+          "Bash(git fetch:*)","Bash(git merge:*)","Bash(git rebase:*)",
+          "Bash(git push:*)","Bash(git checkout:*)","Bash(git switch:*)",
+          "Bash(git branch:*)","Bash(git status:*)","Bash(git log:*)",
+          "Bash(git diff:*)","Bash(git show:*)","Bash(git rev-parse:*)",
+          "Bash(git remote:*)"]}}
+    secrets:
+      MARVIN_TOKEN:
+        required: false
+
+jobs:
+  auto-review-fix:
+    runs-on: ubuntu-latest
+    # Same group as claude-auto.yml's CI-fixer: all @auto pushes to a branch
+    # serialize, and the round counter's read-modify-write can't race.
+    concurrency:
+      group: claude-auto-${{ github.repository }}-${{ inputs.head_branch }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      # Check out the PR branch; authenticate as the machine account so the
+      # agent's fix push re-triggers CI and its `@review` comment re-triggers
+      # the reviewer (a GITHUB_TOKEN push/comment would be dropped/inert).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.head_branch }}
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+
+      # Gate (only the automated reviewer, only auto-labeled PRs, token present)
+      # and compute the round count deterministically. Counter increments before
+      # the agent runs, so a crashed agent still consumes a round.
+      - name: Gate and count
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          AUTHOR: ${{ inputs.review_author }}
+          REVIEWER: ${{ inputs.reviewer_login }}
+          AUTO_LABEL: ${{ inputs.auto_label }}
+          CAP: ${{ inputs.review_round_cap }}
+          HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
+          MARKER: "<!-- auto-review-rounds -->"
+        run: |
+          set -euo pipefail
+          act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "No MARVIN_TOKEN; the review loop can't push/re-request as a real identity. Skipping."
+            act skip; exit 0
+          fi
+          if [ "$AUTHOR" != "$REVIEWER" ]; then
+            echo "Review by '$AUTHOR', not the automated reviewer '$REVIEWER'; ignoring (humans are the escalation endpoint)."
+            act skip; exit 0
+          fi
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '[.labels[].name]')
+          if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.[]; .==$l)' <<<"$labels")" != "true" ]; then
+            echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
+          fi
+          cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
+          prev=0
+          if [ -n "$cid" ]; then
+            prev=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' \
+                     | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
+            prev=${prev:-0}
+          fi
+          next=$((prev + 1))
+          echo "cid=$cid" >>"$GITHUB_OUTPUT"
+          echo "round=$next" >>"$GITHUB_OUTPUT"
+          if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
+
+      - name: Escalate to human
+        if: steps.gate.outputs.act == 'escalate'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          AUTO_LABEL: ${{ inputs.auto_label }}
+          CAP: ${{ inputs.review_round_cap }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "🤖 @auto: the reviewer still has feedback after $CAP review rounds and I haven't converged. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating."
+          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+
+      - name: Record round
+        if: steps.gate.outputs.act == 'fix'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          CID: ${{ steps.gate.outputs.cid }}
+          ROUND: ${{ steps.gate.outputs.round }}
+          CAP: ${{ inputs.review_round_cap }}
+          MARKER: "<!-- auto-review-rounds -->"
+        run: |
+          set -euo pipefail
+          body="$MARKER
+          🤖 @auto review rounds: $ROUND (cap $CAP)."
+          if [ -n "$CID" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
+          fi
+
+      - name: Compose review-fix prompt
+        if: steps.gate.outputs.act == 'fix'
+        id: prompt
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          REVIEW_ID: ${{ inputs.review_id }}
+          ROUND: ${{ steps.gate.outputs.round }}
+          CAP: ${{ inputs.review_round_cap }}
+        run: |
+          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the review and its inline comments with gh: \`gh api repos/$REPO/pulls/$PR/reviews/$REVIEW_ID\` for the summary, and \`gh api repos/$REPO/pulls/$PR/comments\` for inline threads. Address the actionable feedback on the current branch and verify your changes (run the relevant pytest/ruff/mypy). If you make changes, commit and push to the current branch as the machine account (this re-runs CI), then post a single top-level comment of exactly \`@review\` to request re-review. If after reading there is nothing actionable — the review is approval or non-blocking nits only — do NOT change code and do NOT re-request review; instead post one short comment explaining no changes are needed. Where you disagree with a specific comment, reply to it with your reasoning instead of changing code." >>"$GITHUB_OUTPUT"
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.act == 'fix'
+        id: claude
+        with:
+          anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
+          anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
+          anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
+          anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
+          github_token: ${{ secrets.MARVIN_TOKEN }}
+          prompt: ${{ steps.prompt.outputs.value }}
+          settings: ${{ inputs.settings }}
+          claude_args: >-
+            ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+            ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
+            ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
+
+      - name: Upload execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-auto-review-execution-output
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: ignore

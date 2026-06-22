@@ -213,7 +213,19 @@ The simple case ships first and is independently useful:
   turned CI green, confirming the prompt-mode push goes out as marvin (so CI
   re-triggers). _Not yet exercised:_ the cap/escalation path (no failure has
   survived 3 attempts) and the fork (only inspect_flow so far).
-- **Phase 2** — review→fix loop with the 3-round cap and label kill-switch.
+- **Phase 2 — review→fix loop. _Built, in testing._** Reusable
+  `claude-auto-review.yml`: on `pull_request_review` submitted by the automated
+  reviewer (`reviewer_login`, default `claude[bot]`) on an `auto`-labeled PR,
+  wake the fixer agent (as marvin) to address the feedback, push, and re-post
+  `@review` — closing the loop. Bounded by a 3-round cap (deterministic
+  sticky-comment counter, sharing claude-auto.yml's per-branch `concurrency`
+  group); at the cap it comments and removes the `auto` label. **Decisions:**
+  only the automated reviewer drives the loop (human reviews are the escalation
+  endpoint, not a turn); whether a review needs another round is the fixer
+  agent's judgment (fix + re-request, or "no changes needed" + stop), so
+  `@review` is left unchanged. **Fork caveat:** `pull_request_review` resolves
+  from the PR base branch, so it never fires on the pristine-base fork — that
+  surface needs a different re-review trigger, handled with the fork rollout.
 - **Phase 3** — convergence → auto-merge / escalation.
 
 ## History: how we got here
