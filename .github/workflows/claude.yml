@@ -129,7 +129,9 @@ on:
       MARVIN_TOKEN:
         description: >-
           Machine-account (marvin@meridianlabs.ai) fine-grained PAT. Optional;
-          stubs pass it via `secrets: inherit`. When present it's handed to
+          stubs pass it explicitly via a one-key `secrets:` map (not `secrets:
+          inherit`, which would expose every caller secret to this @main-pinned
+          workflow — this is the only secret consumed). When present it's handed to
           claude-code-action as github_token, so the agent acts as the machine
           account: its branch pushes and the PR the post-step opens then trigger
           CI and @review, which a GITHUB_TOKEN-authored PR cannot (GitHub's

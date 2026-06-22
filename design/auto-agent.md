@@ -192,9 +192,11 @@ The simple case ships first and is independently useful:
   machine-account PAT (`MARVIN_TOKEN`, owned by `marvin@meridianlabs.ai`) is
   passed as `github_token` in `claude.yml`, and the deterministic post-step
   reuses it. This gives reliable issue→PR creation *with* CI and auto-`@review`,
-  no loop yet. Stubs pass it via `secrets: inherit`; each caller repo's deployed
-  stub needs that line and the org secret scoped to it. (The roadmap called this
-  token `AUTO_TOKEN`; the provisioned secret is `MARVIN_TOKEN`.)
+  no loop yet. Stubs pass it explicitly (a one-key `secrets:` map, not `secrets:
+  inherit` — least privilege, so an external `@main`-pinned workflow never sees
+  the caller's other secrets); each caller repo's deployed stub needs that and
+  the org secret scoped to it. (The roadmap called this token `AUTO_TOKEN`; the
+  provisioned secret is `MARVIN_TOKEN`.)
 - **Phase 1** — CI-failure → fix trigger.
 - **Phase 2** — review→fix loop with the 3-round cap and label kill-switch.
 - **Phase 3** — convergence → auto-merge / escalation.
