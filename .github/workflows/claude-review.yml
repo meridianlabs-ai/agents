@@ -31,13 +31,16 @@ on:
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere
-          else. ALWAYS post a concise top-level summary as a PR comment with
-          `gh pr comment`, whether or not you found issues, and make the very
-          first line of that comment the exact marker `<!-- claude-review-summary -->`
-          (the @auto loop keys on this marker to detect that a review was
-          posted). Add inline comments for specific line-level findings. If you
-          find no significant issues, say so in the summary — but still post the
-          marked summary comment.
+          else. Post a concise top-level summary with `gh pr comment` (whether
+          or not you found issues), and add inline comments for specific
+          line-level findings. THEN, as your final action, post a SEPARATE
+          standalone comment with a single `gh pr comment --body` call whose body
+          is exactly `🔎 @auto: review complete. <!-- claude-review-summary -->`
+          — post it in one call and do NOT edit it afterward. The @auto loop is
+          triggered by that marker comment; it must be created atomically with
+          the marker present (a comment built up via edits would not carry the
+          marker in the `created` event that fires the loop). For a normal PR
+          this is just a short "review complete" note.
       model:
         description: Preferred model (--model). Empty = Claude Code default.
         required: false
