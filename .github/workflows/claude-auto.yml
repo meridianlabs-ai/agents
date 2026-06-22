@@ -1,0 +1,224 @@
+name: Claude Auto (reusable)
+
+# @auto Phase 1: the CI-failure -> fix loop. A caller stub triggers this on
+# `workflow_run` (completed) of the repo's CI workflow(s). When CI fails on a PR
+# that carries the `auto` label, this wakes the dev agent (as the machine
+# account) with the failing run to push a fix; marvin's push re-runs CI, closing
+# the loop. Bounded by fix_attempt_cap: at the cap it drops the `auto` label
+# (the kill-switch) and pings a human. See design/auto-agent.md.
+#
+# Why workflow_run, not check_suite: check_suite/check_run events are NOT
+# delivered when the check suite was created by GitHub Actions (GitHub's
+# recursion guard), so they never fire for Actions-based CI. workflow_run is the
+# supported way to react to a workflow completing — at the cost of the caller
+# naming its CI workflow(s) in on.workflow_run.workflows.
+#
+# The `auto` label is the authorization gate (a write-access human opts a PR in,
+# and removing it halts the loop), NOT authorship — a human may label their own
+# PR. The machine-account login only matters for attribution in later phases.
+
+on:
+  workflow_call:
+    inputs:
+      head_branch:
+        description: PR head branch whose CI failed (from workflow_run.head_branch).
+        required: true
+        type: string
+      ci_run_id:
+        description: The failed CI run id, so the agent can read its failing logs.
+        required: true
+        type: string
+      auto_label:
+        description: Label that opts a PR into the loop and acts as the kill-switch.
+        required: false
+        type: string
+        default: "auto"
+      fix_attempt_cap:
+        description: >-
+          Max consecutive CI-fix attempts before escalating to a human. Distinct
+          from the review-round cap; an unfixable failure would otherwise loop
+          forever (marvin's PAT pushes keep re-triggering CI).
+        required: false
+        type: number
+        default: 3
+      model:
+        required: false
+        type: string
+        default: "fable"
+      fallback_model:
+        required: false
+        type: string
+        default: "default"
+      append_system_prompt:
+        description: >-
+          Repo-specific guidance (e.g. the fork's branch/CHANGELOG rules), same
+          channel as claude.yml. Empty by default.
+        required: false
+        type: string
+        default: ""
+      settings:
+        description: >-
+          Claude Code settings JSON. Keep in sync with claude.yml's default —
+          the fix agent needs the same edit + verify-loop + git/gh allow-list.
+        required: false
+        type: string
+        default: >-
+          {"permissions":{"allow":["Read","Edit","Write",
+          "Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)","Bash(pip:*)",
+          "Bash(pip3:*)","Bash(uv:*)","Bash(python:*)","Bash(python3:*)",
+          "Bash(gh:*)",
+          "Bash(git fetch:*)","Bash(git merge:*)","Bash(git rebase:*)",
+          "Bash(git push:*)","Bash(git checkout:*)","Bash(git switch:*)",
+          "Bash(git branch:*)","Bash(git status:*)","Bash(git log:*)",
+          "Bash(git diff:*)","Bash(git show:*)","Bash(git rev-parse:*)",
+          "Bash(git remote:*)"]}}
+    secrets:
+      MARVIN_TOKEN:
+        description: >-
+          Machine-account PAT. Required for this loop: the fix push must come
+          from a real identity so the re-run of CI actually fires (a
+          GITHUB_TOKEN push wouldn't — recursion guard), and the same identity
+          drove the PR. Without it the loop can't function, so the job no-ops.
+        required: false
+
+jobs:
+  auto-ci-fix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read # read the failed CI run's logs
+    steps:
+      # Check out the PR branch so the agent fixes in place and pushes back to
+      # it. Authenticate the remote as the machine account (not the default
+      # GITHUB_TOKEN) so the agent's `git push` re-triggers CI — a GITHUB_TOKEN
+      # push would be silently dropped by the recursion guard, stalling the loop.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.head_branch }}
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+
+      # Resolve the PR, enforce the `auto`-label gate, and compute the attempt
+      # count (deterministically, in shell — it gates whether the agent runs).
+      # Decide: skip (no PR / not labeled / no token), escalate (over cap), or
+      # fix. The counter increments BEFORE the agent runs, so an agent that
+      # crashes still consumes an attempt rather than looping forever.
+      - name: Gate and count
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          HEAD: ${{ inputs.head_branch }}
+          AUTO_LABEL: ${{ inputs.auto_label }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+          HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
+          MARKER: "<!-- auto-fix-attempts -->"
+        run: |
+          set -euo pipefail
+          act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "No MARVIN_TOKEN; the fix loop can't push as a real identity. Skipping."
+            act skip; exit 0
+          fi
+          pr=$(gh pr list --repo "$REPO" --head "$HEAD" --state open \
+                 --json number,labels --jq '.[0] // empty')
+          if [ -z "$pr" ]; then
+            echo "No open PR for $HEAD; nothing to do."; act skip; exit 0
+          fi
+          number=$(jq -r '.number' <<<"$pr")
+          echo "pr=$number" >>"$GITHUB_OUTPUT"
+          if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr")" != "true" ]; then
+            echo "PR #$number is not @auto-labeled; skipping."; act skip; exit 0
+          fi
+          # Attempt counter: a single sticky marker comment we own.
+          cid=$(gh api "repos/$REPO/issues/$number/comments" --paginate \
+                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
+          prev=0
+          if [ -n "$cid" ]; then
+            prev=$(gh api "repos/$REPO/issues/comments/$cid" \
+                     --jq '.body' | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
+            prev=${prev:-0}
+          fi
+          next=$((prev + 1))
+          echo "attempt=$next" >>"$GITHUB_OUTPUT"
+          echo "cid=$cid" >>"$GITHUB_OUTPUT"
+          if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
+
+      # Over the cap: hand off to a human and disarm the loop by removing the
+      # label. Removing it is also what a human does to stop @auto manually.
+      - name: Escalate to human
+        if: steps.gate.outputs.act == 'escalate'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          AUTO_LABEL: ${{ inputs.auto_label }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "🤖 @auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again."
+          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+
+      # Record the attempt (idempotent sticky comment) before invoking the agent.
+      - name: Record attempt
+        if: steps.gate.outputs.act == 'fix'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          CID: ${{ steps.gate.outputs.cid }}
+          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+          MARKER: "<!-- auto-fix-attempts -->"
+        run: |
+          set -euo pipefail
+          body="$MARKER
+          🤖 @auto CI-fix attempts: $ATTEMPT (cap $CAP)."
+          if [ -n "$CID" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
+          fi
+
+      - name: Compose fix prompt
+        if: steps.gate.outputs.act == 'fix'
+        id: prompt
+        env:
+          PR: ${{ steps.gate.outputs.pr }}
+          HEAD: ${{ inputs.head_branch }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
+        run: |
+          # Single line: the prompt is spliced as one arg downstream.
+          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop." >>"$GITHUB_OUTPUT"
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.act == 'fix'
+        id: claude
+        with:
+          anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
+          anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
+          anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
+          anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
+          github_token: ${{ secrets.MARVIN_TOKEN }}
+          prompt: ${{ steps.prompt.outputs.value }}
+          settings: ${{ inputs.settings }}
+          claude_args: >-
+            ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
+            ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
+            ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
+
+      - name: Upload execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-auto-execution-output
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: ignore

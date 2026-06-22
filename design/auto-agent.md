@@ -174,9 +174,13 @@ Per CLAUDE.md, confirm the action's surface rather than assuming:
   events — must be bypassed for machine-account-driven turns).
 - **`github_token` ⇒ no revoke** across the action version we pin (currently
   inferred from `action.yml`; pin and re-verify on upgrades).
-- **CI-completion trigger** — which of `check_suite` / `workflow_run` /
-  `check_run` reliably fires for the PR's checks and reaches a default-branch
-  workflow.
+- **CI-completion trigger** — _resolved: `workflow_run`._ `check_suite` /
+  `check_run` are suppressed when the suite was created by GitHub Actions (the
+  recursion guard, per GitHub's docs), so they never fire for Actions-based CI.
+  `workflow_run(completed)` is the supported reaction; cost is that each caller
+  stub names its CI workflow(s). The 3-level `workflow_run` chaining cap doesn't
+  bite — marvin's fix push re-triggers CI via a fresh `pull_request` event, not
+  a `workflow_run` chain.
 - **Auto-merge / merge permission** — whether the machine account's *write*
   level can enable auto-merge under each repo's branch protection (the fork's
   pristine `main` stays human-merged regardless — architecture.md → branch
@@ -197,7 +201,13 @@ The simple case ships first and is independently useful:
   the caller's other secrets); each caller repo's deployed stub needs that and
   the org secret scoped to it. (The roadmap called this token `AUTO_TOKEN`; the
   provisioned secret is `MARVIN_TOKEN`.)
-- **Phase 1** — CI-failure → fix trigger.
+- **Phase 1 — CI-failure → fix trigger. _Built, in testing._** Reusable
+  `claude-auto.yml` + `examples/claude-auto-stub.yml`: on `workflow_run` failure
+  for an `auto`-labeled same-repo PR, the dev agent (as marvin) reads the failing
+  logs, fixes on the branch, and pushes — re-triggering CI. Bounded by a 3-attempt
+  cap (deterministic sticky-comment counter); at the cap it comments and removes
+  the `auto` label. The auto-stub needs a per-repo CI-workflow-name edit, so it's
+  installed manually (not via `enable-claude.sh`) until @auto matures.
 - **Phase 2** — review→fix loop with the 3-round cap and label kill-switch.
 - **Phase 3** — convergence → auto-merge / escalation.
 
