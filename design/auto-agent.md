@@ -213,12 +213,11 @@ The simple case ships first and is independently useful:
   turned CI green, confirming the prompt-mode push goes out as marvin (so CI
   re-triggers). _Not yet exercised:_ the cap/escalation path (no failure has
   survived 3 attempts) and the fork (only inspect_flow so far).
-- **Phase 2 — review→fix loop. _Built; verified on inspect_flow via
-  `pull_request_review`, then reworked to the unified `issue_comment` trigger
-  (re-test pending)._** Reusable `claude-auto-review.yml`: on the reviewer's
-  **marked summary comment** (`issue_comment`, body contains
-  `<!-- claude-review-summary -->`, author = `reviewer_login`, default
-  `claude[bot]`) on an `auto`-labeled, same-repo PR, wake the fixer agent (as
+- **Phase 2 — review→fix loop. _Verified on inspect_flow via the unified
+  `issue_comment` trigger._** Reusable `claude-auto-review.yml`: on the
+  reviewer's **dedicated marker comment** (`issue_comment`, body contains
+  `<!-- claude-review-summary -->`) on an `auto`-labeled, same-repo PR, wake the
+  fixer agent (as
   marvin) to address the feedback, push, and re-post `@review` — closing the
   loop. Bounded by a 3-round cap (deterministic sticky-comment counter, sharing
   claude-auto.yml's per-PR `concurrency` group); at the cap it comments and
@@ -234,16 +233,24 @@ The simple case ships first and is independently useful:
   PR head code under MARVIN_TOKEN). **`allowed_bots` gotcha:** the trigger actor
   is the reviewer bot, so the workflow sets `allowed_bots: "claude"` (never `*`)
   to lift claude-code-action's non-human-actor guard; the gate authorizes first.
-  (The earlier `pull_request_review` build verified the fix/cap/convergence
-  behavior end to end — planted clamp bug, fixed + re-requested, converged at
-  round 1; the rework changes only the trigger.)
-- **Phase 3 — convergence → human handoff. _Built (re-test pending with the
-  Phase 2 rework)._** **Decision: @auto hands off, it does NOT auto-merge** (the
+  **Atomic-marker gotcha (load-bearing):** `issue_comment:[created]` delivers the
+  comment body *as it was at creation*. `@review` builds its summary comment and
+  edits it, so the marker often wasn't present yet when `created` fired → the
+  trigger silently missed it (a review-fix run skipped despite the final body
+  having the marker; the culprit was `created != updated`). Fix: `@review` posts
+  the marker as a **dedicated standalone comment via a single `gh pr comment`
+  call, never edited**, so the `created` event reliably carries it. We do NOT add
+  `types: [edited]` — the reviewer may edit/stream repeatedly, which would fire
+  the loop multiple times and blow the round cap. Verified end to end on the
+  unified trigger: planted clamp bug → marker comment → review-fix → fix +
+  re-request → clean re-review → handoff.
+- **Phase 3 — convergence → human handoff. _Verified on inspect_flow (unified
+  trigger)._** **Decision: @auto hands off, it does NOT auto-merge** (the
   merge is the one irreversible step; a human keeps it). Two changes, no new
-  workflow: (1) `@review` **always posts a marked summary comment**
-  (`<!-- claude-review-summary -->`), findings and clean alike — this both fires
-  the unified `issue_comment` trigger and carries the verdict (replaces the
-  silent-when-clean behavior that was the Phase 2 finding). (2) In
+  workflow: (1) `@review` **always posts the dedicated marker comment** (see the
+  atomic-marker note above), findings and clean alike — this fires the unified
+  `issue_comment` trigger so the clean case no longer goes silent (the Phase 2
+  finding). (2) In
   `claude-auto-review.yml`, when the fixer agent has nothing to fix (the
   deterministic clean signal = it pushes no commit), it hands off: reports live
   CI + mergeable status and @-mentions the originating human, and does not merge
