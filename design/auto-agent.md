@@ -223,8 +223,14 @@ The simple case ships first and is independently useful:
   claude-auto.yml's per-PR `concurrency` group); at the cap it comments and
   removes the `auto` label. **Decisions:** only the automated reviewer drives the
   loop (human reviews are the escalation endpoint, not a turn); whether a review
-  needs another round is the fixer agent's judgment (fix + re-request, or "no
-  changes needed" → handoff). **Why `issue_comment`, not `pull_request_review`:**
+  needs another round is the fixer agent's judgment. The fixer is **aggressive**:
+  it addresses *minor / explicitly non-blocking* suggestions too (nits, naming,
+  small refactors, reuse) — the goal is the best-shape PR, not just unblocking —
+  and only declines an item it disagrees with / that's out of scope / not a net
+  improvement, replying with a rationale. It hands off when nothing remains worth
+  improving (clean review, or all remaining items declined-with-rationale). This
+  can use more rounds on a nitty review, but the 3-round cap still bounds it
+  (then escalate to a human). **Why `issue_comment`, not `pull_request_review`:**
   the latter resolves workflows from the PR base branch, so it never fires on the
   pristine-base fork; `issue_comment` resolves from the default branch and fires
   everywhere — one mechanism for all repos. The reviewer marks its summary
