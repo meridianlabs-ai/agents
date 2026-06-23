@@ -432,9 +432,12 @@ for the model that actually ran (the init line echoes the *requested* model).
 - **Slow tests on the fork** — move the scheduled slow-test suite + triage to
   the fork's `meridian` branch and close the triage → fix loop. Designed in
   [scheduled-tests-on-fork.md](scheduled-tests-on-fork.md); not yet implemented.
-- **`meridian-claude` machine account** — would enable board assignment
-  (`assignee_trigger`) and automated upstream PR promotion; deferred. Also the
-  identity that powers `@auto` ([auto-agent.md](auto-agent.md)): a non-`GITHUB_TOKEN`
-  PAT is the only way an agent-opened PR triggers CI and `@review`.
+- **`meridian-claude` machine account** — enables board assignment
+  (`assignee_trigger`) and automated upstream PR promotion. The identity that
+  powers `@auto` ([auto-agent.md](auto-agent.md)): a non-`GITHUB_TOKEN` PAT is
+  the only way an agent-opened PR triggers CI and `@review`. (Provisioned as
+  `marvin` — see [auto-agent.md].) Authorizing it upstream + a workflow there
+  would let `@review` run directly on `UKGovernmentBEIS/inspect_ai` PRs —
+  designed in [upstream-review.md](upstream-review.md); not rolled out.
 - **Shared CLAUDE.md/AGENTS.md across repos** — designed in
   [shared-instructions.md](shared-instructions.md); not yet implemented.
