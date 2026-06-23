@@ -232,6 +232,31 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
 
+      # Surface agent errors the action swallows (model overload/529, 404, etc.),
+      # which otherwise leave the fix run green with nothing pushed.
+      - name: Surface agent errors
+        if: always() && steps.gate.outputs.act == 'fix'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          NUM: ${{ steps.gate.outputs.pr }}
+        run: |
+          set -uo pipefail
+          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+          err=""
+          [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
+            err="the CI-fix step failed before producing a result (see the job logs)."
+          fi
+          [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
+          echo "::error::CI-fix run did not complete: $err"
+          if [ -n "${NUM:-}" ]; then
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The @auto CI-fix run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload). CI will re-trigger it on the next push, or re-run the workflow.' "$err")" || true
+          fi
+          exit 1
+
       - name: Upload execution log
         if: always()
         uses: actions/upload-artifact@v4

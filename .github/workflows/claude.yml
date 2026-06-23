@@ -286,6 +286,34 @@ jobs:
             '✅ Opened a pull request for this issue: %s\n\n(The "Create PR ➔" link in the run summary above is superseded — the PR is already open.)' \
             "$pr_url")" || true
 
+      # Surface agent errors the action swallows. A model API error (overload /
+      # 529, a model 404, etc.) leaves the run green at the workflow level but
+      # with no result — and a stale "I'll get back to you" comment. Detect
+      # is_error in the execution log (or a failed action step), post a visible
+      # comment, and fail the job so the run isn't a misleading success.
+      - name: Surface agent errors
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+          err=""
+          [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
+            err="the Claude Code step failed before producing a result (see the job logs)."
+          fi
+          [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
+          echo "::error::Claude run did not complete: $err"
+          if [ -n "${NUM:-}" ]; then
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ This Claude run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload or a model-availability blip). Re-trigger to retry; if it persists see https://status.claude.com.' "$err")" || true
+          fi
+          exit 1
+
       - name: Upload execution log
         if: always()
         uses: actions/upload-artifact@v4

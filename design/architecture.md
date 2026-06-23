@@ -134,7 +134,11 @@ distinct signature:
 
 Lesson encoded in the workflows: every run uploads its
 `claude-execution-output.json` as an artifact, so auth and model failures are
-diagnosable after the fact.
+diagnosable after the fact. A later "Surface agent errors" post-step also reads
+`is_error` from that log (e.g. a model overload/529 or 404) and posts a visible
+comment + fails the run — because claude-code-action otherwise exits 0 on a
+model-API error, leaving a misleading green run with no result (and a stale
+"I'll get back to you" comment).
 
 ## Model selection: prefer Fable, fall back gracefully
 
