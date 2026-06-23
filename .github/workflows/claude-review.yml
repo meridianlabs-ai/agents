@@ -65,7 +65,7 @@ on:
         type: string
         default: >-
           {"permissions":{
-          "allow":["Read","Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)",
+          "allow":["Read","Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)","Bash(pyright:*)",
           "Bash(pip:*)","Bash(pip3:*)","Bash(uv:*)","Bash(python:*)",
           "Bash(python3:*)","Bash(gh:*)","mcp__github_inline_comment"],
           "deny":["Edit","Write","Bash(git push:*)","Bash(git commit:*)"]}}

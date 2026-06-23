@@ -66,7 +66,7 @@ on:
         type: string
         default: >-
           {"permissions":{"allow":["Read","Edit","Write",
-          "Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)","Bash(pip:*)",
+          "Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)","Bash(pyright:*)","Bash(pip:*)",
           "Bash(pip3:*)","Bash(uv:*)","Bash(python:*)","Bash(python3:*)",
           "Bash(gh:*)",
           "Bash(git fetch:*)","Bash(git merge:*)","Bash(git rebase:*)",

@@ -68,7 +68,7 @@ on:
         type: string
         default: >-
           {"permissions":{"allow":["Read","Edit","Write",
-          "Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)","Bash(pip:*)",
+          "Bash(pytest:*)","Bash(ruff:*)","Bash(mypy:*)","Bash(pyright:*)","Bash(pip:*)",
           "Bash(pip3:*)","Bash(uv:*)","Bash(python:*)","Bash(python3:*)",
           "Bash(gh:*)",
           "Bash(git fetch:*)","Bash(git merge:*)","Bash(git rebase:*)",
@@ -278,6 +278,13 @@ jobs:
             echo "Issue #$ISSUE is $AUTO_LABEL-labeled; propagating to $pr_url."
             gh pr edit "$pr_url" --add-label "$AUTO_LABEL" || true
           fi
+          # Surface the real PR link on the issue. claude-code-action's own run
+          # summary only shows a prefilled "Create PR" compare link (which is now
+          # stale, since the PR exists), and never names the opened PR — so post
+          # it explicitly.
+          gh issue comment "$ISSUE" --repo "$REPO" --body "$(printf \
+            '✅ Opened a pull request for this issue: %s\n\n(The "Create PR ➔" link in the run summary above is superseded — the PR is already open.)' \
+            "$pr_url")" || true
 
       - name: Upload execution log
         if: always()
