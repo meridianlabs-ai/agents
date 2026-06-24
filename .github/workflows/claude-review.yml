@@ -34,15 +34,24 @@ on:
           else. Post a concise top-level summary with `gh pr comment` (whether
           or not you found issues), and add inline comments for specific
           line-level findings. THEN, as your final action, post a SEPARATE
-          standalone comment with a single `gh pr comment --body` call whose body
-          is exactly `🔎 Review complete. <!-- claude-review-summary -->` — post
-          it in one call and do NOT edit it afterward. (The trailing HTML comment
-          is a marker the @auto loop keys on; it must be created atomically with
-          the marker present, since a comment built up via edits would not carry
-          the marker in the `created` event. Keep the visible text neutral — do
-          NOT mention @auto, so it doesn't read as if @auto is acting on PRs that
-          aren't `auto`-labeled.) For a normal PR this is just a short
-          "review complete" note.
+          standalone comment with a single `gh pr comment --body` call — post it
+          in one call and do NOT edit it afterward. Its body must be EXACTLY one
+          of these two lines, chosen by whether you are asking the author to
+          change ANYTHING:
+          (a) if you have NO outstanding suggestions at all — no blocking issues
+          and no non-blocking nits, nothing you want changed:
+          `🔎 Review complete — no outstanding suggestions. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->`
+          (b) otherwise — you raised anything actionable, even a single minor or
+          explicitly non-blocking nit:
+          `🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->`
+          (The trailing HTML comments are markers the @auto loop keys on:
+          `claude-review-summary` fires the loop; `claude-review-verdict` tells it
+          whether the PR has converged — `clean` hands off to a human, `suggestions`
+          spends a fix round. They must be present in the body as first posted,
+          since a comment built up via edits would not carry them in the `created`
+          event. Keep the visible text neutral — do NOT mention @auto, so it
+          doesn't read as if @auto is acting on PRs that aren't `auto`-labeled.)
+          For a normal PR this is just a short "review complete" note.
       model:
         description: Preferred model (--model). Empty = Claude Code default.
         required: false

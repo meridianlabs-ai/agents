@@ -45,6 +45,14 @@ on:
         required: false
         type: number
         default: 3
+      handoff_mention:
+        description: >-
+          GitHub login to @-mention on convergence/escalation handoff. Empty
+          (default) derives the originating human from the PR's "Fixes/Closes
+          #N" linked-issue author; bots are skipped.
+        required: false
+        type: string
+        default: ""
       model:
         required: false
         type: string
@@ -108,6 +116,7 @@ jobs:
           REVIEWER: ${{ inputs.reviewer_login }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
+          HANDOFF_MENTION: ${{ inputs.handoff_mention }}
           HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
           MARKER: "<!-- auto-review-rounds -->"
         run: |
@@ -132,6 +141,35 @@ jobs:
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
           fi
           echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
+
+          # Human to @-mention on handoff/escalation: the author of the issue this
+          # PR closes (Fixes/Closes/Resolves #N), unless overridden. Bots are
+          # skipped — no point pinging the PR's own machine-account author.
+          mention="$HANDOFF_MENTION"
+          if [ -z "$mention" ]; then
+            inum=$(gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' \
+                     | grep -ioE '(fixes|closes|resolves)[[:space:]]+#[0-9]+' \
+                     | grep -oE '[0-9]+' | head -1 || true)
+            if [ -n "$inum" ]; then
+              mention=$(gh api "repos/$REPO/issues/$inum" \
+                          --jq 'if .user.type=="Bot" then "" else .user.login end' 2>/dev/null || true)
+            fi
+          fi
+          echo "mention=$mention" >>"$GITHUB_OUTPUT"
+
+          # Deterministic convergence: if the reviewer's latest summary carries a
+          # `clean` verdict (no outstanding suggestions), hand off to a human
+          # without spending a fix round. An absent verdict (older reviewer, or a
+          # caller that overrides review_prompt) falls through to the round-count
+          # path below, preserving prior behavior.
+          verdict=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                      --jq 'map(select(.body|contains("claude-review-summary"))) | last | .body' \
+                    | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
+          if [ "$verdict" = "clean" ]; then
+            echo "Reviewer verdict is clean; converging without a fix round."
+            act converged; exit 0
+          fi
+
           cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
           prev=0
@@ -145,6 +183,28 @@ jobs:
           echo "round=$next" >>"$GITHUB_OUTPUT"
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
 
+      # Reviewer reported no outstanding suggestions: hand off to a human for the
+      # final review/merge (@auto never merges). Idempotent so a later clean
+      # re-review doesn't re-ping. The `auto` label is left on, so further CI or
+      # human-review activity can still re-engage @auto.
+      - name: Converged handoff
+        if: steps.gate.outputs.act == 'converged'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          MENTION: ${{ steps.gate.outputs.mention }}
+          MARKER: "<!-- auto-converged -->"
+        run: |
+          set -euo pipefail
+          if gh api "repos/$REPO/issues/$PR/comments" --paginate \
+               --jq 'any(.[]; .body|contains("'"$MARKER"'"))' | grep -q true; then
+            echo "Handoff already posted; skipping."; exit 0
+          fi
+          ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
+          gh pr comment "$PR" --repo "$REPO" --body "$MARKER
+          ${ping}🤖 @auto: the reviewer has no outstanding feedback — this PR has converged. @auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; see the checks above for CI status. The \`auto\` label is left on, so @auto will still react to new review or CI activity; remove it to disengage."
+
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
         env:
@@ -153,10 +213,12 @@ jobs:
           PR: ${{ inputs.pr_number }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
+          MENTION: ${{ steps.gate.outputs.mention }}
         run: |
           set -euo pipefail
+          ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
           gh pr comment "$PR" --repo "$REPO" --body \
-            "🤖 @auto: the reviewer still has feedback after $CAP review rounds and I haven't converged. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating."
+            "${ping}🤖 @auto: the reviewer still has feedback after $CAP review rounds and I haven't converged. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating."
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
 
       # Check out the PR head (derived above); authenticate as the machine

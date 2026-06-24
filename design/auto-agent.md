@@ -257,16 +257,29 @@ The simple case ships first and is independently useful:
   atomic-marker note above), findings and clean alike — this fires the unified
   `issue_comment` trigger so the clean case no longer goes silent (the Phase 2
   finding). (2) In
-  `claude-auto-review.yml`, when the fixer agent has nothing to fix (the
-  deterministic clean signal = it pushes no commit), it hands off: reports live
-  CI + mergeable status and @-mentions the originating human, and does not merge
-  or re-request. Grounding: inspect_flow's `main` requires no approvals and
+  `claude-auto-review.yml`, when the review has converged, it hands off: posts a
+  handoff comment @-mentioning the originating human, and does not merge or
+  re-request. Grounding: inspect_flow's `main` requires no approvals and
   native auto-merge is off, so no `APPROVE` state or merge machinery is needed.
-  _Known v1 limitations:_ the handoff is agent-posted, so its CI status reflects
-  the moment (may read "running" if the review lands before CI); and a clean
-  review still consumes a round-counter increment (benign — escalation also
-  routes to a human). _Fork:_ the handoff wording becomes "ready to promote
-  upstream" via the fork's append-prompt (fork PRs are never merged in-fork).
+  _Fork:_ the handoff wording becomes "ready to promote upstream" via the fork's
+  append-prompt (fork PRs are never merged in-fork).
+  - **Convergence signal is deterministic (revised).** The original v1 used the
+    fixer agent's "I pushed no commit" as the clean signal and counted every
+    re-review as a round. That under-converged: with the fixer told to address
+    non-blocking nits too, it kept finding one more nit each round, re-`@review`d,
+    and walked clean PRs to the cap — then escalated with a misleading "still has
+    feedback" message (observed on inspect_flow#745, four rounds, all reviews
+    `COMMENTED`/clean). Fix, matching the "counting must be deterministic, not
+    LLM-maintained" principle: `@review`'s marker comment now carries a
+    **verdict** (`<!-- claude-review-verdict:clean|suggestions -->`). The gate
+    reads it: `clean` → converge + human handoff **without** spending a round;
+    `suggestions` → spend a fix round as before. Absent verdict (older reviewer,
+    or a caller overriding `review_prompt`) falls back to the round-count path, so
+    the change is backward-compatible. A clean review no longer consumes a round.
+  - **Handoff @-mentions the originating human** (author of the PR's
+    `Fixes/Closes #N` issue, bots skipped; overridable via the `handoff_mention`
+    input) — on **both** the convergence handoff and the cap escalation. The
+    escalation previously pinged no one.
 - **Fork rollout — _done; verified end to end on meridianlabs-ai/inspect_ai._**
   Auto-stub on the `meridian` branch (Phase 1 keyed to the fork's `Build`; Phase
   2/3 on the `issue_comment` marker — both resolve from the default branch, so
