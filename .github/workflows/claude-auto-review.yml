@@ -147,9 +147,22 @@ jobs:
           # skipped — no point pinging the PR's own machine-account author.
           mention="$HANDOFF_MENTION"
           if [ -z "$mention" ]; then
-            inum=$(gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' \
-                     | grep -ioE '(fixes|closes|resolves)[[:space:]]+#[0-9]+' \
-                     | grep -oE '[0-9]+' | head -1 || true)
+            # Match both `Fixes #N` and the fully-qualified `Fixes owner/repo#N`
+            # (the fork mandates the latter — a bare `#N` there silently rebinds
+            # to upstream when the branch is promoted). Only resolve a mention
+            # when the reference targets THIS repo: a cross-repo `owner/repo#N`
+            # points at a different tracker, so its number is meaningless here.
+            ref=$(gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' \
+                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
+                    | head -1 || true)
+            inum=""
+            if [ -n "$ref" ]; then
+              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
+              if [ -z "$refrepo" ] || \
+                 [ "$(printf '%s' "$refrepo" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              fi
+            fi
             if [ -n "$inum" ]; then
               mention=$(gh api "repos/$REPO/issues/$inum" \
                           --jq 'if .user.type=="Bot" then "" else .user.login end' 2>/dev/null || true)
