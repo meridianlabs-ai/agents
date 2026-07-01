@@ -75,7 +75,8 @@ on:
           "Bash(git push:*)","Bash(git checkout:*)","Bash(git switch:*)",
           "Bash(git branch:*)","Bash(git status:*)","Bash(git log:*)",
           "Bash(git diff:*)","Bash(git show:*)","Bash(git rev-parse:*)",
-          "Bash(git remote:*)"]}}
+          "Bash(git remote:*)",
+          "Bash(git add:*)","Bash(git commit:*)","Bash(git config:*)"]}}
       base_branch:
         description: >-
           Base branch for branches/PRs Claude creates (defaults to the repo's

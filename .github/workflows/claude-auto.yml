@@ -80,7 +80,8 @@ on:
           "Bash(git push:*)","Bash(git checkout:*)","Bash(git switch:*)",
           "Bash(git branch:*)","Bash(git status:*)","Bash(git log:*)",
           "Bash(git diff:*)","Bash(git show:*)","Bash(git rev-parse:*)",
-          "Bash(git remote:*)"]}}
+          "Bash(git remote:*)",
+          "Bash(git add:*)","Bash(git commit:*)","Bash(git config:*)"]}}
     secrets:
       MARVIN_TOKEN:
         description: >-
@@ -202,6 +203,13 @@ jobs:
             gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
           fi
 
+      # Capture the branch tip before the agent runs so the error-surfacing step
+      # can tell whether the agent's fix actually landed on the branch.
+      - name: Record base SHA
+        if: steps.gate.outputs.act == 'fix'
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+
       - name: Compose fix prompt
         if: steps.gate.outputs.act == 'fix'
         id: prompt
@@ -233,7 +241,9 @@ jobs:
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
 
       # Surface agent errors the action swallows (model overload/529, 404, etc.),
-      # which otherwise leave the fix run green with nothing pushed.
+      # which otherwise leave the fix run green with nothing pushed. Also catches
+      # the "completed-but-blocked" case: the agent finishes with no error but
+      # left its fix unlanded (see the landed/pending check below).
       - name: Surface agent errors
         if: always() && steps.gate.outputs.act == 'fix'
         env:
@@ -242,6 +252,8 @@ jobs:
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           NUM: ${{ steps.gate.outputs.pr }}
+          HEAD_BRANCH: ${{ inputs.head_branch }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -250,10 +262,28 @@ jobs:
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the CI-fix step failed before producing a result (see the job logs)."
           fi
+          # Completed-but-blocked: the action reports success, but the agent did
+          # work that never reached the branch — uncommitted edits or local
+          # commits it couldn't push (e.g. a git command outside the allow-list).
+          # A healthy fix either lands its changes (commit+push, or a server-side
+          # API commit — both advance the remote tip) or makes none at all
+          # (posting a blocker comment instead), so unlanded local work means the
+          # fix silently stalled and never reached CI. See design/auto-agent.md.
+          if [ -z "$err" ] && [ -n "${BASE_SHA:-}" ]; then
+            git fetch origin "$HEAD_BRANCH" --quiet 2>/dev/null || true
+            remote=$(git rev-parse "origin/$HEAD_BRANCH" 2>/dev/null || echo "$BASE_SHA")
+            pending=""
+            [ -n "$(git status --porcelain 2>/dev/null || true)" ] && pending=1
+            [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
+            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
+              summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 || true)
+              err="the agent finished but left changes it never landed on the branch (uncommitted edits or unpushed commits), so no fix reached CI.${summary:+ The agent's own summary: $summary}"
+            fi
+          fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::CI-fix run did not complete: $err"
           if [ -n "${NUM:-}" ]; then
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The @auto CI-fix run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload). CI will re-trigger it on the next push, or re-run the workflow.' "$err")" || true
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The @auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.' "$err")" || true
           fi
           exit 1
 
