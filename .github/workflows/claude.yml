@@ -176,24 +176,33 @@ jobs:
         if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
-      # Compose the two appended-system-prompt sources into ONE value, so we
-      # emit a single --append-system-prompt flag. Two flags would force a bet
-      # on undocumented CLI behavior (accumulate vs. last-one-wins), and they
-      # co-occur on PR follow-ups (branch_sync_prompt fires there, and
-      # append_system_prompt fires on every run). branch_sync_prompt is gated
-      # to PR context here (issue comment on a PR, or a review/review-comment
-      # event); fresh issue runs branch off the synced base and skip it. Joined
-      # on one line so the toJSON splice below stays a clean single-quoted arg
-      # (a newline would survive toJSON as a literal \n in the shell-parsed args).
+      # Compose the appended-system-prompt sources into ONE value, so we emit a
+      # single --append-system-prompt flag. Multiple flags would force a bet on
+      # undocumented CLI behavior (accumulate vs. last-one-wins), and the sources
+      # co-occur on PR follow-ups (branch_sync_prompt + review_etiquette fire
+      # there, and append_system_prompt fires on every run). The PR-gated sources
+      # (branch_sync_prompt, review_etiquette) are on for any PR-context event
+      # (issue comment on a PR, or a review/review-comment event); fresh issue
+      # runs branch off the synced base and skip them. Joined on one line so the
+      # toJSON splice below stays a clean single-quoted arg (a newline would
+      # survive toJSON as a literal \n in the shell-parsed args).
+      #
+      # REVIEW_ETIQUETTE mirrors the @auto review-fix loop's thread-resolution
+      # rule (claude-auto-review.yml): the dev agent is regularly invoked to
+      # address PR review comments (directly via @claude, or — as after an @auto
+      # escalation — because a handoff comment re-trips the kickoff gate), and
+      # without this it fixes the code but leaves the review thread open. gh api
+      # graphql is covered by the settings allow-list (Bash(gh:*)).
       - name: Compose appended system prompt
         id: sysprompt
         env:
           BRANCH_SYNC: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_prompt || '' }}
           BRANCH_SYNC_APPEND: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_append || '' }}
+          REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address.' || '' }}"
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
           combined=""
-          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$EXTRA"; do
+          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$REVIEW_ETIQUETTE" "$EXTRA"; do
             [ -n "$part" ] && combined="${combined:+$combined }$part"
           done
           echo "value=$combined" >> "$GITHUB_OUTPUT"
