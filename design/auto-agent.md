@@ -164,7 +164,12 @@ branch) that, after re-checking the `auto` label + author + round cap, invokes
 the dev agent authenticated as `AUTO_TOKEN`:
 
 1. **Kickoff** — `issues` labeled `auto` / `@auto` comment → fix, push, open PR
-   via the deterministic post-step, carry the label onto the PR.
+   via the deterministic post-step, carry the label onto the PR. An `@auto`
+   comment on an *existing* PR runs the same kickoff dev agent against that PR;
+   since it fixes-and-pushes rather than opening a PR, it must also post
+   `@review` to re-engage the loop (auto-review does not fire on push — the
+   more so on the fork, where the `pull_request` family never fires). The dev
+   agent's `@auto`-gated PR-context prompt in claude.yml handles this.
 2. **CI completed** — `check_suite`/`workflow_run` completed=failure on the PR's
    head → if failing, fix and push (CI re-runs because PAT).
 3. **Review posted** — `pull_request_review` submitted requesting changes → if

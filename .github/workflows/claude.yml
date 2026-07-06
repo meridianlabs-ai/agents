@@ -193,16 +193,26 @@ jobs:
       # escalation — because a handoff comment re-trips the kickoff gate), and
       # without this it fixes the code but leaves the review thread open. gh api
       # graphql is covered by the settings allow-list (Bash(gh:*)).
+      #
+      # REQUEST_REVIEW closes the loop when @auto is invoked on an *existing* PR
+      # (e.g. "@auto fix the review issue"): the kickoff runs this dev agent,
+      # which fixes and pushes — but the reviewer never re-runs on its own (no
+      # auto-review on push; on the fork the pull_request family doesn't fire at
+      # all), so without an explicit @review the loop stalls until a human asks.
+      # Gated to the @auto trigger (autonomous intent) so a plain @claude PR tweak
+      # doesn't spawn an unasked review, and to PR context (opening a PR from an
+      # issue is handled by the caller's own @review-on-open prompt).
       - name: Compose appended system prompt
         id: sysprompt
         env:
           BRANCH_SYNC: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_prompt || '' }}
           BRANCH_SYNC_APPEND: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_append || '' }}
           REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address.' || '' }}"
+          REQUEST_REVIEW: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.trigger_phrase == '@auto' && 'This is an autonomous run on an existing pull request. If your work pushed any new commit to the PR, finish by posting a top-level comment of exactly @review so the automated reviewer re-runs — it does not run automatically on push. Do not post it if you made no code changes.' || '' }}"
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
           combined=""
-          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$REVIEW_ETIQUETTE" "$EXTRA"; do
+          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$REVIEW_ETIQUETTE" "$REQUEST_REVIEW" "$EXTRA"; do
             [ -n "$part" ] && combined="${combined:+$combined }$part"
           done
           echo "value=$combined" >> "$GITHUB_OUTPUT"
