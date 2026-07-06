@@ -332,6 +332,15 @@ substring collision in trigger gates). Design choices:
   re-bill ~$0.40–1) on every fix commit, including the agent's own. On-demand
   re-review via `@review` is the lighter default. Enabling `synchronize` is the
   knob for continuous review if the manual re-review becomes tedious.
+- **Comprehensive per pass, not one finding at a time.** The prompt asks for
+  *every* confident finding in a single review (nits included), still behind a
+  high-confidence bar. This is mostly for the `@auto` loop: the reviewer runs
+  statelessly each round, so a "report only the top issue" bias made it surface
+  findings serially — one per round — which burned a whole review→fix round per
+  finding and pushed multi-issue PRs into escalation. Batching lets the fixer
+  clear them in one round. Some tail is irreducible (a finding only visible
+  after an earlier fix lands), which is what the round cap in auto-agent.md
+  absorbs.
 
 ### Why no automatic reviewer → fixer loop
 
@@ -351,7 +360,8 @@ spawning a new one from the issue).
 
 The `@auto` agent ([auto-agent.md](auto-agent.md)) deliberately revisits this
 decision — automating the review→fix loop, with the human gate replaced by a
-hard 3-round cap, an `auto`-label kill-switch, and opt-in-only triggering.
+hard round cap (7) plus a no-progress check, an `auto`-label kill-switch, and
+opt-in-only triggering.
 
 ## Branch protection on the fork
 

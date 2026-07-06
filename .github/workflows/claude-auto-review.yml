@@ -41,10 +41,13 @@ on:
         type: string
         default: "auto"
       review_round_cap:
-        description: Max review -> fix rounds before escalating to a human.
+        description: >-
+          Max review -> fix rounds before escalating to a human. This is the
+          hard ceiling on a *productive* loop; a separate no-progress check
+          (below) escalates earlier if a fix round pushes no new commit.
         required: false
         type: number
-        default: 3
+        default: 7
       handoff_mention:
         description: >-
           GitHub login to @-mention on convergence/escalation handoff. Empty
@@ -132,7 +135,7 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER'; ignoring."
             act skip; exit 0
           fi
-          pr_json=$(gh pr view "$PR" --repo "$REPO" --json headRefName,isCrossRepository,labels 2>/dev/null) || {
+          pr_json=$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
             echo "#$PR is not a pull request; skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
@@ -187,14 +190,31 @@ jobs:
           cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
           prev=0
+          prevsha=""
           if [ -n "$cid" ]; then
-            prev=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' \
-                     | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
+            mbody=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
+            prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
             prev=${prev:-0}
+            # Branch tip recorded when the previous round started (see Record round).
+            prevsha=$(printf '%s' "$mbody" | sed -n 's/.*auto-review-head:\([0-9a-f]*\).*/\1/p')
           fi
           next=$((prev + 1))
+          head=$(jq -r '.headRefOid' <<<"$pr_json")
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
           echo "round=$next" >>"$GITHUB_OUTPUT"
+          echo "head=$head" >>"$GITHUB_OUTPUT"
+
+          # No-progress escalation: the previous fix round pushed no new commit
+          # (branch tip unchanged since it was recorded) yet the reviewer still
+          # has suggestions. Re-running the agent against an unchanged tree would
+          # just repeat itself, so hand off early rather than burning rounds up
+          # to the cap. Only meaningful once a prior round recorded a tip; a
+          # marker without one (pre-upgrade) skips the check and falls through.
+          if [ "$prev" -ge 1 ] && [ -n "$prevsha" ] && [ "$head" = "$prevsha" ]; then
+            echo "No new commit since round $prev (tip $head unchanged); escalating for no progress."
+            echo "stalled=1" >>"$GITHUB_OUTPUT"
+            act escalate; exit 0
+          fi
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
 
       # Reviewer reported no outstanding suggestions: hand off to a human for the
@@ -228,11 +248,17 @@ jobs:
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
           MENTION: ${{ steps.gate.outputs.mention }}
+          STALLED: ${{ steps.gate.outputs.stalled }}
         run: |
           set -euo pipefail
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
+          if [ "${STALLED:-}" = "1" ]; then
+            reason="my last fix round pushed no new changes, so I'm not making progress on the reviewer's remaining feedback"
+          else
+            reason="the reviewer still has feedback after $CAP review rounds and I haven't converged"
+          fi
           gh pr comment "$PR" --repo "$REPO" --body \
-            "${ping}🤖 @auto: the reviewer still has feedback after $CAP review rounds and I haven't converged. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating."
+            "${ping}🤖 @auto: $reason. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating."
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
 
       # Check out the PR head (derived above); authenticate as the machine
@@ -262,11 +288,16 @@ jobs:
           CID: ${{ steps.gate.outputs.cid }}
           ROUND: ${{ steps.gate.outputs.round }}
           CAP: ${{ inputs.review_round_cap }}
+          HEAD: ${{ steps.gate.outputs.head }}
           MARKER: "<!-- auto-review-rounds -->"
         run: |
           set -euo pipefail
+          # The auto-review-head marker records the branch tip at the START of
+          # this round; next round's gate compares against it to detect a fix
+          # round that pushed nothing (no-progress escalation).
           body="$MARKER
-          🤖 @auto review rounds: $ROUND (cap $CAP)."
+          🤖 @auto review rounds: $ROUND (cap $CAP).
+          <!-- auto-review-head:$HEAD -->"
           if [ -n "$CID" ]; then
             gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent
           else

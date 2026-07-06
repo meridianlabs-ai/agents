@@ -26,8 +26,12 @@ on:
         type: string
         default: >-
           Review this pull request. Focus on correctness bugs, security
-          issues, and clear simplification or reuse opportunities — prefer a
-          few high-confidence findings over many speculative ones. You may run
+          issues, and clear simplification or reuse opportunities. Be
+          comprehensive within this single review: report every finding you are
+          confident about in one pass — including minor and non-blocking nits —
+          rather than surfacing one issue at a time, so the author can address
+          them together in a single round. Still hold a high-confidence bar: do
+          NOT pad the review with speculative or marginal guesses. You may run
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere

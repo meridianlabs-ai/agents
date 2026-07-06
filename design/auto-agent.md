@@ -22,12 +22,12 @@ The loop, where every arrow that "wakes" the agent is a *separate* Actions run
 issue (auto) ─▶ fix ─▶ open PR ─▶ CI + @review fire
                           ▲              │
                           │              ▼
-                 push fix ◀── CI fails / review requests changes  (≤ 3 review rounds)
+                 push fix ◀── CI fails / review requests changes  (≤ 7 review rounds)
                           │
                           ▼
         CI green + review satisfied ─▶ auto-merge / ping human
                           │
-              3 rounds unresolved ─▶ drop `auto` label, ping human
+      7 rounds, or a round with no new commit ─▶ drop `auto` label, ping human
 ```
 
 `@auto` is an **orchestration layer over the existing agents**, not a new model
@@ -107,13 +107,18 @@ escalation it **removes the label and pings a human**. On kickoff from an issue,
 the label is carried onto the PR so the switch stays in one place across the
 issue→PR boundary.
 
-## Autonomy ceiling and the 3-round cap
+## Autonomy ceiling and the round cap
 
-**Decision: drive to mergeable, but cap reviewer rounds at 3.** `@auto` may take
+**Decision: drive to mergeable, but cap reviewer rounds at 7.** `@auto` may take
 a PR all the way to merge (auto-merge once green + approved), with one hard
-limit: **at most 3 review→fix rounds.** If the PR still isn't satisfied after the
-third round, `@auto` stops, removes the `auto` label, and hands off to a human
-with a summary of what's unresolved.
+limit: **at most 7 review→fix rounds.** If the PR still isn't satisfied after the
+seventh round, `@auto` stops, removes the `auto` label, and hands off to a human
+with a summary of what's unresolved. (The cap was raised from 3 once the
+reviewer was made comprehensive per-pass — see architecture.md → reviewer — so a
+PR with several genuine, serially-surfaced findings can converge instead of
+escalating mid-productive-streak. The no-progress check below stops a *stuck*
+loop early, so the higher ceiling only costs rounds when the loop is actually
+moving.)
 
 A "round" is one *review→fix* cycle. After each fix push, `@auto` explicitly
 **requests re-review** (`@review` does not run on `synchronize` by design —
@@ -135,13 +140,18 @@ architecture.md → "Why no automatic reviewer→fixer loop" *deliberately* bloc
 this loop, for two reasons: unbounded token spend, and keeping a human as the
 quality gate. `@auto` opens the loop, so it must replace those protections:
 
-- **Hard round cap (3)** then mandatory human handoff — bounds spend and
+- **Hard round cap (7)** then mandatory human handoff — bounds spend and
   guarantees a human sees anything the agent can't resolve.
 - **Label kill-switch** — instant human override at any point.
 - **Opt-in only**, by a write-access author — nothing runs unattended without
   someone asking for it.
-- **Stuck-detection** — if a fix round doesn't change the CI/review outcome (no
-  forward progress), escalate early rather than spending the full 3 rounds.
+- **Stuck-detection (implemented)** — the gate records the branch tip at the
+  start of each round in the sticky marker (`auto-review-head:<sha>`); if the
+  next review fires with the tip unchanged, the last fix round pushed nothing,
+  so escalate immediately rather than re-running the agent against an unchanged
+  tree. This is what makes the higher round cap safe: a productive loop (every
+  round lands a commit) runs to convergence, a stuck one bails on the first
+  no-progress round.
 - **Flake handling** — don't treat infra/flaky CI failures as fix work; retry
   once, then escalate, so the loop doesn't chase non-determinism.
 - **Cost visibility** — the per-run `claude-execution-output.json` artifacts
@@ -161,8 +171,9 @@ the dev agent authenticated as `AUTO_TOKEN`:
    under the cap, address and push, then re-request review (= next round).
 4. **Converged** — CI green + review approved + no unresolved threads → enable
    auto-merge (or ping a human to merge, per repo policy).
-5. **Exhausted** — 3rd round still unresolved → summary comment @mentioning the
-   author, remove `auto` label, stop.
+5. **Exhausted** — the round cap (7) is reached still unresolved, or a fix round
+   makes no progress (no new commit) → summary comment @mentioning the author,
+   remove `auto` label, stop.
 
 ## Open questions — verify against claude-code-action before building
 
@@ -219,9 +230,10 @@ The simple case ships first and is independently useful:
   `<!-- claude-review-summary -->`) on an `auto`-labeled, same-repo PR, wake the
   fixer agent (as
   marvin) to address the feedback, push, and re-post `@review` — closing the
-  loop. Bounded by a 3-round cap (deterministic sticky-comment counter, sharing
-  claude-auto.yml's per-PR `concurrency` group); at the cap it comments and
-  removes the `auto` label. **Decisions:** only the automated reviewer drives the
+  loop. Bounded by a 7-round cap plus a no-progress check (deterministic
+  sticky-comment counter that also records the per-round branch tip, sharing
+  claude-auto.yml's per-PR `concurrency` group); at the cap — or on the first
+  round that pushes no new commit — it comments and removes the `auto` label. **Decisions:** only the automated reviewer drives the
   loop (human reviews are the escalation endpoint, not a turn); whether a review
   needs another round is the fixer agent's judgment. The fixer is **aggressive**:
   it addresses *minor / explicitly non-blocking* suggestions too (nits, naming,
@@ -229,8 +241,8 @@ The simple case ships first and is independently useful:
   and only declines an item it disagrees with / that's out of scope / not a net
   improvement, replying with a rationale. It hands off when nothing remains worth
   improving (clean review, or all remaining items declined-with-rationale). This
-  can use more rounds on a nitty review, but the 3-round cap still bounds it
-  (then escalate to a human). **Why `issue_comment`, not `pull_request_review`:**
+  can use more rounds on a nitty review, but the 7-round cap (and the
+  no-progress check) still bounds it (then escalate to a human). **Why `issue_comment`, not `pull_request_review`:**
   the latter resolves workflows from the PR base branch, so it never fires on the
   pristine-base fork; `issue_comment` resolves from the default branch and fires
   everywhere — one mechanism for all repos. The reviewer marks its summary
