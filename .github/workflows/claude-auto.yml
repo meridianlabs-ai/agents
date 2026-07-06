@@ -179,7 +179,7 @@ jobs:
         run: |
           set -euo pipefail
           gh pr comment "$PR" --repo "$REPO" --body \
-            "🤖 @auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again."
+            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again."
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
 
       # Record the attempt (idempotent sticky comment) before invoking the agent.
@@ -196,7 +196,7 @@ jobs:
         run: |
           set -euo pipefail
           body="$MARKER
-          🤖 @auto CI-fix attempts: $ATTEMPT (cap $CAP)."
+          🤖 auto CI-fix attempts: $ATTEMPT (cap $CAP)."
           if [ -n "$CID" ]; then
             gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent
           else
@@ -222,7 +222,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
         run: |
           # Single line: the prompt is spliced as one arg downstream.
-          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop." >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix'
@@ -283,7 +283,7 @@ jobs:
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::CI-fix run did not complete: $err"
           if [ -n "${NUM:-}" ]; then
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The @auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.' "$err")" || true
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.' "$err")" || true
           fi
           exit 1
 
