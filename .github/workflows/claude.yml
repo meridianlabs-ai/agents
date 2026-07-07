@@ -323,6 +323,32 @@ jobs:
               "$pr_url")" || true
           fi
 
+      # @auto invoked on an *existing* PR (e.g. "@auto fix the review issue"):
+      # opt that PR into the loop by applying the `auto` label. The review-fix
+      # loop (claude-auto-review.yml) gates on this label, so without it the
+      # kickoff fixes and re-requests review but the reviewer's suggestions get
+      # no follow-up — the label-propagation above only fires when the kickoff
+      # OPENS a PR from an issue, not when @auto runs on a PR that already
+      # exists. Gated to the @auto trigger: a write-access human typing @auto is
+      # exactly the opt-in the label represents (a plain @claude PR run stays
+      # one-shot). github.event.issue.number is the PR number on a PR comment.
+      # Idempotent; adding a label fires no workflow here (no stub triggers on
+      # pull_request `labeled`), so no recursion. Remove the label to disengage.
+      - name: Opt existing PR into the @auto loop
+        if: >-
+          github.event.issue.pull_request != '' &&
+          inputs.trigger_phrase == '@auto'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          AUTO_LABEL: "auto"
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR" --repo "$REPO" --add-label "$AUTO_LABEL" \
+            && echo "Opted PR #$PR into the @auto loop (added '$AUTO_LABEL')." \
+            || echo "Could not add '$AUTO_LABEL' to PR #$PR (label missing or no perms); continuing."
+
       # Surface agent errors the action swallows. A model API error (overload /
       # 529, a model 404, etc.) leaves the run green at the workflow level but
       # with no result — and a stale "I'll get back to you" comment. Detect
