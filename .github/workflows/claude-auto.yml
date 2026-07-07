@@ -277,7 +277,8 @@ jobs:
             [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
               summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 || true)
-              err="the agent finished but left changes it never landed on the branch (uncommitted edits or unpushed commits), so no fix reached CI.${summary:+ The agent's own summary: $summary}"
+              err="the agent finished but left changes it never landed on the branch (uncommitted edits or unpushed commits), so no fix reached CI."
+              [ -n "$summary" ] && err="$err Agent summary: $summary"
             fi
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
