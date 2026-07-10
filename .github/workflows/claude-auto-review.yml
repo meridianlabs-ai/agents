@@ -47,7 +47,7 @@ on:
           (below) escalates earlier if a fix round pushes no new commit.
         required: false
         type: number
-        default: 7
+        default: 10
       handoff_mention:
         description: >-
           GitHub login to @-mention on convergence/escalation handoff. Empty

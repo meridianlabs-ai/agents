@@ -22,12 +22,12 @@ The loop, where every arrow that "wakes" the agent is a *separate* Actions run
 issue (auto) ─▶ fix ─▶ open PR ─▶ CI + @review fire
                           ▲              │
                           │              ▼
-                 push fix ◀── CI fails / review requests changes  (≤ 7 review rounds)
+                 push fix ◀── CI fails / review requests changes  (≤ 10 review rounds)
                           │
                           ▼
         CI green + review satisfied ─▶ auto-merge / ping human
                           │
-      7 rounds, or a round with no new commit ─▶ drop `auto` label, ping human
+     10 rounds, or a round with no new commit ─▶ drop `auto` label, ping human
 ```
 
 `@auto` is an **orchestration layer over the existing agents**, not a new model
@@ -109,16 +109,16 @@ issue→PR boundary.
 
 ## Autonomy ceiling and the round cap
 
-**Decision: drive to mergeable, but cap reviewer rounds at 7.** `@auto` may take
+**Decision: drive to mergeable, but cap reviewer rounds at 10.** `@auto` may take
 a PR all the way to merge (auto-merge once green + approved), with one hard
-limit: **at most 7 review→fix rounds.** If the PR still isn't satisfied after the
-seventh round, `@auto` stops, removes the `auto` label, and hands off to a human
-with a summary of what's unresolved. (The cap was raised from 3 once the
-reviewer was made comprehensive per-pass — see architecture.md → reviewer — so a
-PR with several genuine, serially-surfaced findings can converge instead of
-escalating mid-productive-streak. The no-progress check below stops a *stuck*
-loop early, so the higher ceiling only costs rounds when the loop is actually
-moving.)
+limit: **at most 10 review→fix rounds.** If the PR still isn't satisfied after the
+tenth round, `@auto` stops, removes the `auto` label, and hands off to a human
+with a summary of what's unresolved. (The cap started at 3, was raised to 7 once
+the reviewer was made comprehensive per-pass — see architecture.md → reviewer —
+and then to 10, so a PR with several genuine, serially-surfaced findings can
+converge instead of escalating mid-productive-streak. The no-progress check below
+stops a *stuck* loop early, so the higher ceiling only costs rounds when the loop
+is actually moving.)
 
 A "round" is one *review→fix* cycle. After each fix push, `@auto` explicitly
 **requests re-review** (`@review` does not run on `synchronize` by design —
@@ -140,7 +140,7 @@ architecture.md → "Why no automatic reviewer→fixer loop" *deliberately* bloc
 this loop, for two reasons: unbounded token spend, and keeping a human as the
 quality gate. `@auto` opens the loop, so it must replace those protections:
 
-- **Hard round cap (7)** then mandatory human handoff — bounds spend and
+- **Hard round cap (10)** then mandatory human handoff — bounds spend and
   guarantees a human sees anything the agent can't resolve.
 - **Label kill-switch** — instant human override at any point.
 - **Opt-in only**, by a write-access author — nothing runs unattended without
@@ -190,12 +190,12 @@ the dev agent authenticated as `AUTO_TOKEN`:
    under the cap, address and push, then re-request review (= next round).
 4. **Converged** — CI green + review approved + no unresolved threads → enable
    auto-merge (or ping a human to merge, per repo policy).
-5. **Exhausted** — the round cap (7) is reached still unresolved, or a fix round
+5. **Exhausted** — the round cap (10) is reached still unresolved, or a fix round
    makes no progress (no new commit) → summary comment @mentioning the author,
    remove `auto` label, stop.
 6. **Re-engaged** — a human explicitly asks `@auto` to keep going on an exhausted
    PR (an `@auto` comment). The kickoff re-applies the `auto` label *and resets
-   the sticky round/attempt counters*, so the loop gets a fresh cap (another 7
+   the sticky round/attempt counters*, so the loop gets a fresh cap (another 10
    review rounds) rather than re-escalating on the leftover count. Without the
    reset, "continue" only buys the single kickoff fix, then the next review sees
    the old count (7) and immediately re-escalates (observed on inspect_ai#53).
@@ -255,7 +255,7 @@ The simple case ships first and is independently useful:
   `<!-- claude-review-summary -->`) on an `auto`-labeled, same-repo PR, wake the
   fixer agent (as
   marvin) to address the feedback, push, and re-post `@review` — closing the
-  loop. Bounded by a 7-round cap plus a no-progress check (deterministic
+  loop. Bounded by a 10-round cap plus a no-progress check (deterministic
   sticky-comment counter that also records the per-round branch tip, sharing
   claude-auto.yml's per-PR `concurrency` group); at the cap — or on the first
   round that pushes no new commit — it comments and removes the `auto` label. **Decisions:** only the automated reviewer drives the
@@ -266,7 +266,7 @@ The simple case ships first and is independently useful:
   and only declines an item it disagrees with / that's out of scope / not a net
   improvement, replying with a rationale. It hands off when nothing remains worth
   improving (clean review, or all remaining items declined-with-rationale). This
-  can use more rounds on a nitty review, but the 7-round cap (and the
+  can use more rounds on a nitty review, but the 10-round cap (and the
   no-progress check) still bounds it (then escalate to a human). **Why `issue_comment`, not `pull_request_review`:**
   the latter resolves workflows from the PR base branch, so it never fires on the
   pristine-base fork; `issue_comment` resolves from the default branch and fires

@@ -262,8 +262,8 @@ jobs:
             || echo "Could not add '$AUTO_LABEL' to PR #$PR (label missing or no perms); continuing."
           # Explicit re-engagement resets the @auto budgets. A human typing @auto
           # to continue a PR that already hit the cap should get a FRESH set of
-          # rounds — otherwise the leftover count in the sticky marker (e.g. "7
-          # (cap 7)") makes the very next review re-escalate immediately, so the
+          # rounds — otherwise the leftover count in the sticky marker (e.g. "10
+          # (cap 10)") makes the very next review re-escalate immediately, so the
           # loop only manages the single kickoff fix and stops (see inspect_ai#53).
           # Reset both sticky counters so the next review round starts at 1 and the
           # CI-fixer gets its full attempt budget again; the reset body carries no

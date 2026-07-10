@@ -360,7 +360,7 @@ spawning a new one from the issue).
 
 The `@auto` agent ([auto-agent.md](auto-agent.md)) deliberately revisits this
 decision — automating the review→fix loop, with the human gate replaced by a
-hard round cap (7) plus a no-progress check, an `auto`-label kill-switch, and
+hard round cap (10) plus a no-progress check, an `auto`-label kill-switch, and
 opt-in-only triggering.
 
 ## Branch protection on the fork
