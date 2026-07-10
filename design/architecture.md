@@ -365,11 +365,17 @@ opt-in-only triggering.
 
 ## Branch protection on the fork
 
-`main` (and `meridian`) carry a ruleset blocking deletion, force-push, and
-**update**, so PRs into the pristine mirror can't be merged accidentally
-(`mergeable_state: blocked`). The bypass is the **repository admin role**, so
-admins can still merge deliberately (with GitHub's explicit bypass) and the
-sync's pushes get through.
+`main` carries a ruleset (the "Meridian Branch" ruleset, scoped to
+`refs/heads/main`) blocking deletion, force-push, and **update**, so PRs into
+the pristine mirror can't be merged accidentally (`mergeable_state: blocked`).
+The bypass is the **repository admin role**, so admins can still merge
+deliberately (with GitHub's explicit bypass) and the sync's pushes get through.
+
+`meridian` (the default branch, holding the agent stubs) was originally covered
+too — the ruleset included `~DEFAULT_BRANCH` — but that was dropped: protecting
+it only forced every operational stub change through a PR (and blocked even
+admin-token API writes) without protecting anything pristine, since `meridian`
+is not the upstream mirror. Only `main` needs the guard.
 
 The sync therefore pushes via **`SYNC_TOKEN`** — an admin-owned fine-grained
 PAT (Contents read/write, that repo only) — because the default workflow
