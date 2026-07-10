@@ -172,6 +172,18 @@ the dev agent authenticated as `AUTO_TOKEN`:
    — and (b) post `@review` to re-engage the loop (auto-review does not fire on
    push; the more so on the fork, where the `pull_request` family never fires).
    Both are `@auto`-gated PR-context steps in claude.yml.
+
+   **Ordering matters — `@review` must come after the label.** The reviewer's
+   summary comment is what fires the review-fix loop, and that loop gates on the
+   `auto` label; if `@review` is posted before the label lands, a fast review can
+   post its summary while the PR is still unlabeled and the loop silently skips
+   it (observed on inspect_ai#52). So: for the **existing-PR** path the label
+   step runs *before* the agent (the PR already exists, so it can be labeled up
+   front, and the agent's later `@review` is safe). For the **issue→PR-open**
+   path the PR doesn't exist until the agent opens it mid-run, so the agent must
+   *not* post `@review` itself; instead the Open-or-adopt post-step posts it
+   *after* propagating the label (gated by the `request_review_after_open` input,
+   which the fork sets — elsewhere PR-open auto-review already covers it).
 2. **CI completed** — `check_suite`/`workflow_run` completed=failure on the PR's
    head → if failing, fix and push (CI re-runs because PAT).
 3. **Review posted** — `pull_request_review` submitted requesting changes → if

@@ -85,6 +85,21 @@ on:
         required: false
         type: string
         default: ""
+      request_review_after_open:
+        description: >-
+          After opening/adopting an issue-triggered PR and applying the `auto`
+          label, post an `@review` comment to start the reviewer. Set "true"
+          only where auto-review-on-open does not fire — i.e. the inspect_ai
+          fork, whose `pull_request` events never reach the workflow. Doing it
+          here (deterministically, AFTER labeling) instead of from the agent's
+          prompt closes a race: the agent used to post `@review` mid-run, before
+          the post-step applied the label, so a fast review could post its
+          summary while the PR was still unlabeled and the review-fix loop would
+          skip it. Leave "false" on repos where PR-open auto-review already fires
+          (posting @review here would double-review).
+        required: false
+        type: string
+        default: "false"
       branch_sync_prompt:
         description: >-
           Guidance appended to the system prompt (via --append-system-prompt,
@@ -200,8 +215,9 @@ jobs:
       # auto-review on push; on the fork the pull_request family doesn't fire at
       # all), so without an explicit @review the loop stalls until a human asks.
       # Gated to the @auto trigger (autonomous intent) so a plain @claude PR tweak
-      # doesn't spawn an unasked review, and to PR context (opening a PR from an
-      # issue is handled by the caller's own @review-on-open prompt).
+      # doesn't spawn an unasked review, and to PR context (the issue->PR-open
+      # case posts @review from the Open-or-adopt post-step instead, via
+      # request_review_after_open, so it lands after the label).
       - name: Compose appended system prompt
         id: sysprompt
         env:
@@ -216,6 +232,34 @@ jobs:
             [ -n "$part" ] && combined="${combined:+$combined }$part"
           done
           echo "value=$combined" >> "$GITHUB_OUTPUT"
+
+      # @auto invoked on an *existing* PR (e.g. "@auto fix the review issue"):
+      # opt that PR into the loop by applying the `auto` label. The review-fix
+      # loop (claude-auto-review.yml) gates on this label. Applied BEFORE the
+      # agent runs (not in a post-step) so the label is in place before the
+      # agent posts its @review — otherwise a fast reviewer could post its
+      # summary while the PR is still unlabeled and the loop would skip it (the
+      # same race the issue->PR path avoids via request_review_after_open). The
+      # PR already exists here, so we can label it up front. Gated to the @auto
+      # trigger: a write-access human typing @auto is exactly the opt-in the
+      # label represents (a plain @claude PR run stays one-shot).
+      # github.event.issue.number is the PR number on a PR comment. Idempotent;
+      # adding a label fires no workflow here (no stub triggers on pull_request
+      # `labeled`), so no recursion. Remove the label to disengage.
+      - name: Opt existing PR into the @auto loop
+        if: >-
+          github.event.issue.pull_request != '' &&
+          inputs.trigger_phrase == '@auto'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          AUTO_LABEL: "auto"
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR" --repo "$REPO" --add-label "$AUTO_LABEL" \
+            && echo "Opted PR #$PR into the @auto loop (added '$AUTO_LABEL')." \
+            || echo "Could not add '$AUTO_LABEL' to PR #$PR (label missing or no perms); continuing."
 
       - uses: anthropics/claude-code-action@v1
         id: claude
@@ -278,6 +322,7 @@ jobs:
           ISSUE: ${{ github.event.issue.number }}
           # Label that opts a PR into the @auto loop; propagated from the issue.
           AUTO_LABEL: "auto"
+          REQ_REVIEW: ${{ inputs.request_review_after_open }}
         run: |
           set -euo pipefail
           # The branch lives on origin; the initial checkout predates the push.
@@ -312,42 +357,27 @@ jobs:
             echo "Issue #$ISSUE is $AUTO_LABEL-labeled; propagating to $pr_url."
             gh pr edit "$pr_url" --add-label "$AUTO_LABEL" || true
           fi
+          # Start the reviewer — but only AFTER the label above, so the review-fix
+          # loop sees an authorized (labeled) PR when the reviewer's summary lands.
+          # Only where the caller opts in (the fork, where PR-open auto-review
+          # doesn't fire); elsewhere that native trigger already covers it. Posted
+          # as the machine account so it actually triggers the reviewer. This
+          # replaces the agent posting @review from its prompt, which raced the
+          # labeling above (see request_review_after_open).
+          if [ "${REQ_REVIEW:-false}" = "true" ]; then
+            echo "Requesting review on $pr_url (post-label)."
+            gh pr comment "$pr_url" --repo "$REPO" --body '@review' || true
+          fi
           # Surface the real PR link on the issue — only when WE opened it.
           # claude-code-action's own run summary only shows a prefilled "Create
           # PR" compare link (now stale) and never names the opened PR, so post
-          # it explicitly. When the agent opened its own PR it already linked it
-          # (and posted @review), so a second comment here would just be noise.
+          # it explicitly. When the agent opened its own PR it already linked it,
+          # so a second comment here would just be noise.
           if [ "$opened" = "true" ]; then
             gh issue comment "$ISSUE" --repo "$REPO" --body "$(printf \
               '✅ Opened a pull request for this issue: %s\n\n(The "Create PR ➔" link in the run summary above is superseded — the PR is already open.)' \
               "$pr_url")" || true
           fi
-
-      # @auto invoked on an *existing* PR (e.g. "@auto fix the review issue"):
-      # opt that PR into the loop by applying the `auto` label. The review-fix
-      # loop (claude-auto-review.yml) gates on this label, so without it the
-      # kickoff fixes and re-requests review but the reviewer's suggestions get
-      # no follow-up — the label-propagation above only fires when the kickoff
-      # OPENS a PR from an issue, not when @auto runs on a PR that already
-      # exists. Gated to the @auto trigger: a write-access human typing @auto is
-      # exactly the opt-in the label represents (a plain @claude PR run stays
-      # one-shot). github.event.issue.number is the PR number on a PR comment.
-      # Idempotent; adding a label fires no workflow here (no stub triggers on
-      # pull_request `labeled`), so no recursion. Remove the label to disengage.
-      - name: Opt existing PR into the @auto loop
-        if: >-
-          github.event.issue.pull_request != '' &&
-          inputs.trigger_phrase == '@auto'
-        env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.issue.number }}
-          AUTO_LABEL: "auto"
-        run: |
-          set -euo pipefail
-          gh pr edit "$PR" --repo "$REPO" --add-label "$AUTO_LABEL" \
-            && echo "Opted PR #$PR into the @auto loop (added '$AUTO_LABEL')." \
-            || echo "Could not add '$AUTO_LABEL' to PR #$PR (label missing or no perms); continuing."
 
       # Surface agent errors the action swallows. A model API error (overload /
       # 529, a model 404, etc.) leaves the run green at the workflow level but
