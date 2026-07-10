@@ -260,6 +260,24 @@ jobs:
           gh pr edit "$PR" --repo "$REPO" --add-label "$AUTO_LABEL" \
             && echo "Opted PR #$PR into the @auto loop (added '$AUTO_LABEL')." \
             || echo "Could not add '$AUTO_LABEL' to PR #$PR (label missing or no perms); continuing."
+          # Explicit re-engagement resets the @auto budgets. A human typing @auto
+          # to continue a PR that already hit the cap should get a FRESH set of
+          # rounds — otherwise the leftover count in the sticky marker (e.g. "7
+          # (cap 7)") makes the very next review re-escalate immediately, so the
+          # loop only manages the single kickoff fix and stops (see inspect_ai#53).
+          # Reset both sticky counters so the next review round starts at 1 and the
+          # CI-fixer gets its full attempt budget again; the reset body carries no
+          # "rounds:"/"attempts:" number, so each gate reads 0 and the record step
+          # re-initialises the marker. Dropping the stored auto-review-head also
+          # re-baselines the no-progress check. Best-effort; never fail the run.
+          for marker in "<!-- auto-review-rounds -->" "<!-- auto-fix-attempts -->"; do
+            cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                    --jq 'map(select(.body|contains("'"$marker"'"))) | last | .id // empty' 2>/dev/null || true)
+            [ -z "$cid" ] && continue
+            gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$marker
+          🤖 auto counters reset on re-engagement — fresh cap." --silent \
+              && echo "Reset counter: $marker" || true
+          done
 
       - uses: anthropics/claude-code-action@v1
         id: claude

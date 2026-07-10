@@ -193,6 +193,12 @@ the dev agent authenticated as `AUTO_TOKEN`:
 5. **Exhausted** — the round cap (7) is reached still unresolved, or a fix round
    makes no progress (no new commit) → summary comment @mentioning the author,
    remove `auto` label, stop.
+6. **Re-engaged** — a human explicitly asks `@auto` to keep going on an exhausted
+   PR (an `@auto` comment). The kickoff re-applies the `auto` label *and resets
+   the sticky round/attempt counters*, so the loop gets a fresh cap (another 7
+   review rounds) rather than re-escalating on the leftover count. Without the
+   reset, "continue" only buys the single kickoff fix, then the next review sees
+   the old count (7) and immediately re-escalates (observed on inspect_ai#53).
 
 ## Open questions — verify against claude-code-action before building
 
