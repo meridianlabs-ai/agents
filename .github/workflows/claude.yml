@@ -340,6 +340,10 @@ jobs:
           ISSUE: ${{ github.event.issue.number }}
           # Label that opts a PR into the @auto loop; propagated from the issue.
           AUTO_LABEL: "auto"
+          # The kickoff's trigger phrase — "@auto" for the autonomous kickoff job,
+          # whether it fired from the `auto` label OR an `@auto` mention. Used to
+          # label the PR even when the issue itself carries no `auto` label.
+          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           REQ_REVIEW: ${{ inputs.request_review_after_open }}
         run: |
           set -euo pipefail
@@ -365,14 +369,18 @@ jobs:
               --title "$title" --body "$body")"
             opened=true
           fi
-          # If the originating issue carries the `auto` label, propagate it onto
-          # the PR so the @auto loop engages (an `auto`-labeled issue means "drive
-          # this autonomously"). Idempotent, and independent of who opened the PR
-          # — this must run on the adopt path too, or fork/agent-opened PRs never
-          # get labeled. Harmless when absent.
-          if gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name' \
-               | grep -qx "$AUTO_LABEL"; then
-            echo "Issue #$ISSUE is $AUTO_LABEL-labeled; propagating to $pr_url."
+          # Label the PR `auto` so the @auto loop engages — whenever this is an
+          # @auto run. That's true if the kickoff's trigger phrase is `@auto`
+          # (fired by an `@auto` *mention*, even on an unlabeled issue) OR the
+          # originating issue carries the `auto` label. The mention case was the
+          # gap: "@auto please implement this" on an unlabeled issue opened an
+          # unlabeled PR, so the review-fix loop never engaged (inspect_ai#71/#74).
+          # Idempotent, and independent of who opened the PR — must run on the
+          # adopt path too, or fork/agent-opened PRs never get labeled.
+          if [ "$TRIGGER_PHRASE" = "@auto" ] \
+             || gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null \
+                  | grep -qx "$AUTO_LABEL"; then
+            echo "@auto run; labeling $pr_url with '$AUTO_LABEL'."
             gh pr edit "$pr_url" --add-label "$AUTO_LABEL" || true
           fi
           # Start the reviewer — but only AFTER the label above, so the review-fix
