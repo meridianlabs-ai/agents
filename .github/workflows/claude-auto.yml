@@ -137,11 +137,27 @@ jobs:
         run: |
           set -euo pipefail
           act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          # Retry a gh call on transient failure. A 5xx / secondary rate limit
+          # returns an HTML error page, which `gh --jq` then rejects with
+          # "invalid character '<'"; under `set -e` an unguarded call like that
+          # aborts the gate BEFORE it decides fix/escalate, so no fix and no
+          # escalation ever post and the loop silently stalls (see
+          # design/auto-agent.md). Retry with backoff; a persistent failure
+          # still returns non-zero so the gate-failure failsafe below surfaces
+          # it instead of dying quietly.
+          ghr() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then return 1; fi
+              sleep $((n*3))
+            done
+          }
           if [ "$HAS_TOKEN" != "true" ]; then
             echo "No MARVIN_TOKEN; the fix loop can't push as a real identity. Skipping."
             act skip; exit 0
           fi
-          pr=$(gh pr list --repo "$REPO" --head "$HEAD" --state open \
+          pr=$(ghr gh pr list --repo "$REPO" --head "$HEAD" --state open \
                  --json number,labels --jq '.[0] // empty')
           if [ -z "$pr" ]; then
             echo "No open PR for $HEAD; nothing to do."; act skip; exit 0
@@ -152,18 +168,36 @@ jobs:
             echo "PR #$number is not @auto-labeled; skipping."; act skip; exit 0
           fi
           # Attempt counter: a single sticky marker comment we own.
-          cid=$(gh api "repos/$REPO/issues/$number/comments" --paginate \
+          cid=$(ghr gh api "repos/$REPO/issues/$number/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
           prev=0
           if [ -n "$cid" ]; then
-            prev=$(gh api "repos/$REPO/issues/comments/$cid" \
-                     --jq '.body' | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
+            mbody=$(ghr gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
+            prev=$(printf '%s' "$mbody" | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
             prev=${prev:-0}
           fi
           next=$((prev + 1))
           echo "attempt=$next" >>"$GITHUB_OUTPUT"
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
+
+      # Failsafe: if the gate step itself errored (e.g. a transient API failure
+      # the retries above couldn't ride out), it never set `act`, so every step
+      # below skips and nothing reaches the PR — the loop would stall silently
+      # with the label still on. Surface it so a human knows to resume. Kept
+      # trigger-free ON PURPOSE: the body must not contain a literal @auto or
+      # @review, or this comment would re-fire the loop (see design/auto-agent.md).
+      - name: Surface gate failure
+        if: always() && steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr || inputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          [ -z "${PR:-}" ] && { echo "No PR number; nothing to surface."; exit 0; }
+          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the CI-fix run errored before it could act (a transient GitHub API failure in the gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or push a new commit to resume.' "$RUN_URL")" || true
 
       # Over the cap: hand off to a human and disarm the loop by removing the
       # label. Removing it is also what a human does to stop @auto manually.

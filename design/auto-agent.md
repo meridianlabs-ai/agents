@@ -154,6 +154,20 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
   no-progress round.
 - **Flake handling** — don't treat infra/flaky CI failures as fix work; retry
   once, then escalate, so the loop doesn't chase non-determinism.
+- **Gate resilience — no silent stall (implemented)** — the deterministic
+  "Gate and count" step runs under `set -euo pipefail`, so an unguarded `gh`
+  call that fails is fatal. A transient GitHub API failure (5xx / secondary
+  rate limit) returns an HTML error page, which `gh --jq` rejects with
+  `invalid character '<'`; that aborted the gate *before* it set `act`, so the
+  fix/escalate/error-surfacing steps (all gated on `act`) skipped and the loop
+  stalled with nothing posted and the label still on — indistinguishable from
+  "converged" to an observer (seen on inspect_ai#101 round 4). Two-part fix:
+  (a) a `ghr` retry wrapper rides out transient blips on every gate `gh` call;
+  (b) a `Surface gate failure` step (`if: always() && steps.gate.outcome ==
+  'failure'`) posts a comment when the gate crashes anyway, so a stall is
+  visible and recoverable. That comment is deliberately **trigger-free** (no
+  literal `@review`/`@auto`): a bot-authored comment carrying a live trigger
+  would re-fire the loop and, on a persistent gate failure, spin.
 - **Cost visibility** — the per-run `claude-execution-output.json` artifacts
   already make spend auditable after the fact.
 

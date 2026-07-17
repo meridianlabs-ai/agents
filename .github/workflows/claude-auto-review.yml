@@ -126,6 +126,22 @@ jobs:
         run: |
           set -euo pipefail
           act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          # Retry a gh call on transient failure. A 5xx / secondary rate limit
+          # returns an HTML error page, which `gh --jq` then rejects with
+          # "invalid character '<'"; under `set -e` an unguarded call like that
+          # aborts the gate BEFORE it decides fix/escalate/converge, so no fix,
+          # no escalation, no error comment ever posts and the loop silently
+          # stalls with the label still on (see design/auto-agent.md). Retry
+          # with backoff; a persistent failure still returns non-zero so the
+          # gate-failure failsafe below surfaces it instead of dying quietly.
+          ghr() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then return 1; fi
+              sleep $((n*3))
+            done
+          }
           echo "review-fix gate: pr=#$PR comment_author='$AUTHOR' reviewer_login='$REVIEWER'"
           if [ "$HAS_TOKEN" != "true" ]; then
             echo "No MARVIN_TOKEN; the review loop can't push/re-request as a real identity. Skipping."
@@ -135,8 +151,8 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER'; ignoring."
             act skip; exit 0
           fi
-          pr_json=$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
-            echo "#$PR is not a pull request; skipping."; act skip; exit 0; }
+          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
+            echo "#$PR is not a pull request (or the API is persistently unavailable); skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
             act skip; exit 0
@@ -156,7 +172,7 @@ jobs:
             # to upstream when the branch is promoted). Only resolve a mention
             # when the reference targets THIS repo: a cross-repo `owner/repo#N`
             # points at a different tracker, so its number is meaningless here.
-            ref=$(gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' \
+            ref=$(ghr gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' \
                     | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
                     | head -1 || true)
             inum=""
@@ -168,7 +184,7 @@ jobs:
               fi
             fi
             if [ -n "$inum" ]; then
-              mention=$(gh api "repos/$REPO/issues/$inum" \
+              mention=$(ghr gh api "repos/$REPO/issues/$inum" \
                           --jq 'if .user.type=="Bot" then "" else .user.login end' 2>/dev/null || true)
             fi
           fi
@@ -179,20 +195,20 @@ jobs:
           # without spending a fix round. An absent verdict (older reviewer, or a
           # caller that overrides review_prompt) falls through to the round-count
           # path below, preserving prior behavior.
-          verdict=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                      --jq 'map(select(.body|contains("claude-review-summary"))) | last | .body' \
-                    | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
+          summary=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                      --jq 'map(select(.body|contains("claude-review-summary"))) | last | .body')
+          verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
           if [ "$verdict" = "clean" ]; then
             echo "Reviewer verdict is clean; converging without a fix round."
             act converged; exit 0
           fi
 
-          cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
           prev=0
           prevsha=""
           if [ -n "$cid" ]; then
-            mbody=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
+            mbody=$(ghr gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
             prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
             prev=${prev:-0}
             # Branch tip recorded when the previous round started (see Record round).
@@ -216,6 +232,26 @@ jobs:
             act escalate; exit 0
           fi
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
+
+      # Failsafe: if the gate step itself errored (e.g. a transient API failure
+      # the retries above couldn't ride out), it never set `act`, so every step
+      # below skips and nothing reaches the PR — the loop would stall silently
+      # with the label still on. Surface it so a human knows to resume. Kept
+      # trigger-free ON PURPOSE: the body must not contain a literal @review or
+      # @auto, or this bot-authored comment would re-fire the loop and, on a
+      # persistent gate failure, spin (see design/auto-agent.md). The `auto`
+      # label is left on so re-running the job or a fresh review resumes cleanly.
+      - name: Surface gate failure
+        if: always() && steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          [ -z "${PR:-}" ] && { echo "No PR number; nothing to surface."; exit 0; }
+          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the review-fix run errored before it could act (a transient GitHub API failure in the gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or post a fresh review request to resume.' "$RUN_URL")" || true
 
       # Reviewer reported no outstanding suggestions: hand off to a human for the
       # final review/merge (@auto never merges). Idempotent so a later clean
