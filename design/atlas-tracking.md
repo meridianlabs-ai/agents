@@ -213,6 +213,15 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
   **not** auto-close the fork issue (cross-org, no `Fixes` link), so the sync
   sets `Done` / closes it explicitly. This is a backstop and can come after the
   initial rollout.
+  - **The sync reads state; it does not create the issue↔PR link.** There is no
+    API to link a PR to an issue — the *only* programmatic mechanism is a closing
+    keyword in the PR body (verified: no linking mutation exists;
+    `create/updatePullRequest` have no closing-issue field). For our promotions
+    that's fine — *we* author the upstream PR and the fork convention's `Fixes
+    meridianlabs-ai/inspect_ai#N` populates the Linked-PR sidebar at promotion
+    time (so the sync inherits a linked PR, e.g. #36/#109). It follows that the
+    sync **cannot** link an [external-review](#external-review-tracking) PR — we
+    don't author those and won't edit them — so those remain manual-UI links.
   - **Don't auto-discover the upstream PR via the issue's closing-PR
     references** (learned the hard way). Once promoted, the fork PR is typically
     *closed* (superseded), and the upstream PR usually references the fork issue
