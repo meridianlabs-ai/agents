@@ -224,10 +224,17 @@ event-driven transitions:
     **issue** (often with a "Draft PR #NN" / "Create PR" link) → **Human review**.
   - `@auto` converged → **`<!-- auto-converged -->`** comment on the **PR** →
     **Human review**.
-  - `@auto` escalated → "**handing this to a human**" comment on the **PR** →
-    **Human review**.
-  - Loop still running → last agent action is a bare **`@review`** and the
-    reviewer's latest verdict is `suggestions` → **Agent working**.
+  - `@auto` escalated (review-round / fix-attempt cap, or no-progress) → the
+    "**handing this to a human**" comment on the **PR** **and the `auto` label
+    removed** → **Human review**.
+  - Loop still running → the **`auto` label is still present** and the last
+    agent action is a bare **`@review`** (reviewer verdict `suggestions`) →
+    **Agent working**.
+  - **The `auto` label is the reliable discriminator.** A loop that looks active
+    (`@review`, verdict `suggestions`) can hit its cap and escalate between
+    glances — so don't infer Agent-working from a mid-loop comment alone; if the
+    `auto` label is gone, it has handed off (→ Human review), even if the last
+    visible agent comment was `@review`.
   - Promoted upstream → an **open upstream PR** matches the branch → **Sign-off**.
   A reconcile must read **both** the issue and the PR — `@claude` posts its
   handoff on the issue, `@auto` on the PR.
