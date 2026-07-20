@@ -46,3 +46,9 @@ script only reports `linked` when `closedByPullRequestsReferences` shows it.
 Sessions last ~2 weeks; rerun `--login` when prompted. If GitHub reshuffles
 the Development panel markup, run `--headed` and adjust the selector lists in
 `linkOne()`.
+
+Discovery also covers **fork-internal agent PRs**: open PRs on
+`claude/issue-N-*` branches whose issue lacks the chip (their `Fixes` refs are
+inert — closing keywords only register on PRs targeting the default branch,
+and agent PRs base on pristine `main`). One run links both kinds; `--pair`
+remains for one-offs.

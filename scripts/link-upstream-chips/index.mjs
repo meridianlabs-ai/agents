@@ -96,6 +96,32 @@ function linkedUrls(issue) {
   return out.data.repository.issue.closedByPullRequestsReferences.nodes.map((x) => x.url);
 }
 
+function pendingAgentPairs() {
+  // Fork-internal agent PRs: open PRs on claude/issue-N-* branches whose
+  // issue lacks THIS PR among its native links. Their Fixes refs are correct
+  // but inert — closing keywords only register on PRs targeting the DEFAULT
+  // branch, and fork agent PRs base on pristine `main` (default `meridian`) —
+  // so the chip only ever comes from the Development-panel link.
+  const prs = JSON.parse(gh(['api', `repos/${REPO}/pulls?state=open&per_page=100`]));
+  const rows = [];
+  for (const p of prs) {
+    const m = /^claude\/issue-(\d+)-/.exec(p.head.ref);
+    if (!m) continue;
+    const issue = Number(m[1]);
+    try {
+      if (linkedUrls(issue).includes(p.html_url)) continue;
+    } catch {
+      continue; // issue unreadable — skip rather than guess
+    }
+    rows.push({
+      issue,
+      issueUrl: `https://github.com/${REPO}/issues/${issue}`,
+      pr: p.html_url,
+    });
+  }
+  return rows;
+}
+
 async function loggedInUser(page) {
   return page
     .evaluate(() => document.querySelector('meta[name="user-login"]')?.content ?? '')
@@ -216,7 +242,7 @@ const rows = LOGIN_ONLY
         }
         return true;
       })
-    : pendingProxies();
+    : [...pendingProxies(), ...pendingAgentPairs()];
 if (!LOGIN_ONLY && rows.length === 0) {
   console.log('Nothing pending — every target already has its chip.');
   process.exit(0);
