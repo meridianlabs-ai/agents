@@ -72,9 +72,12 @@ design gate that would routinely use `Human review` is
   this; make it universal). That populates Atlas's **Linked pull requests**
   field, works cross-repo because Atlas is org-level, and gives
   PR-merge → issue-close → `Done` for free.
-- **Auto-add to Atlas** via a per-repo Projects *auto-add workflow* (filter to
-  `auto`/`claude`-labelled issues, or all new issues) so nothing depends on a
-  human remembering to add the item.
+- **Board membership needs no new mechanism.** The team already files most work
+  items on Atlas directly, and `set-stage` adds any agent-touched issue itself
+  (its `addProjectV2ItemById` step is idempotent). So an issue is on the board
+  either because it was filed there or the moment an agent first engages it — no
+  dependency on anyone remembering to add it, and no per-repo automation to
+  maintain. (A Projects *auto-add workflow* is optional; see Prerequisites.)
 
 ## Two surfaces for the stage
 
@@ -161,7 +164,13 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
   per-repo to be applied). A one-time script — or fold into
   [`scripts/enable-claude.sh`](../scripts/enable-claude.sh) so newly-onboarded
   repos get them.
-- **Per-repo auto-add workflow** on Atlas (mind the auto-add workflow cap).
+- **No auto-add workflow needed.** `set-stage` puts agent-touched issues on the
+  board itself, and most items are created on Atlas directly anyway. A Projects
+  *auto-add workflow* (Atlas → Settings → Workflows) is optional — its only
+  extra value is surfacing a brand-new issue as *Unstarted* before any agent
+  touches it — and on GitHub Team a project is capped at **5** auto-add
+  workflows (one repo each), fewer than the repos on the board. Skipping it for
+  now.
 
 ## Rollout
 
