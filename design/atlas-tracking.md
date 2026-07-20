@@ -183,7 +183,9 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
   session updates Atlas directly: a **skill/instructions** has the local agent,
   when it opens the upstream PR, (a) set the issue to `Sign-off`, (b) put the
   fully-qualified **`Fixes meridianlabs-ai/inspect_ai#N`** in the upstream PR
-  body, and (c) **post the upstream PR URL as a comment on the fork issue**. No
+  body, (c) **post the upstream PR URL as a comment on the fork issue**, and
+  (d) **write the URL into the item's `Upstream PR` field** (the machine join
+  key — see [External review tracking](#external-review-tracking)). No
   GitHub `@promote` workflow is needed (see [Deferred](#deferred)). This is why
   the owned-repo `review_requested` hook doesn't apply on the fork — there's no
   fork PR reviewer request; the promotion is the signal, and it's set locally.
@@ -269,6 +271,19 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   upstream PR from the issue's link graph and advance/close the proxy on
   upstream merge. GitHub's linked-PR rule suggests the merge may even auto-close
   the proxy (→ `Done`) — unverified cross-org; observe on the first merge.
+
+**The `Upstream PR` field — canonical machine join key.** A custom **text**
+field on Atlas (`PVTF_lADOC7YMCM4BU68pzhYZp9Q`) holds the upstream PR URL for
+every item with an upstream leg — external-review proxies *and* our promotions.
+Fully API-writable (`updateProjectV2ItemFieldValue` with `text`), so seeding,
+the promote skill, and the sync all read/write one place instead of parsing
+bodies. **Rendering caveat (verified on the board):** Projects text fields
+render as *filter chips*, not hyperlinks — clicking filters the view. So the
+field is the automation/at-a-glance surface only; **click-through comes from
+the native linked-PR chip** (the `Fixes` ref on PRs we author; the manual
+Development-panel link on external ones). The two mechanisms are complementary,
+not redundant: field = machine-readable everywhere; native link = clickable
+where it exists.
 
 **Scope (as seeded):** open upstream PRs where you're a requested reviewer or
 assignee, authored by **external community contributors** — *not* teammates'
