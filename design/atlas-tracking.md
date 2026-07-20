@@ -327,6 +327,13 @@ event-driven transitions:
   - Promoted upstream → an **open upstream PR** matches the branch → **Sign-off**.
   A reconcile must read **both** the issue and the PR — `@claude` posts its
   handoff on the issue, `@auto` on the PR.
+- **Scan ALL agent comments for the PR, not just the last one.** Issues often
+  accumulate several agent runs; the PR may be referenced by an *earlier*
+  "Claude finished" comment (a later run reuses or replaces the branch), and an
+  older PR may be closed/superseded by a newer one. Extract every
+  `/pull/N` reference from every machine-account comment, then keep the PR
+  that is still open (e.g. #81 had superseded #83 and current #115; keying on
+  the last comment's branch alone found nothing).
 - **Not every in-progress item is agent work.** Some carry a human-authored WIP
   PR (e.g. a design doc you drafted); those correctly get **no** stage — the
   overlay is opt-in to agent-touched work.
