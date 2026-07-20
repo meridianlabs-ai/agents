@@ -76,8 +76,9 @@ runs:
         # PR body — the same join rules the tracking design records.
         num="$NUM" pr_body=""
         if [ -n "$num" ]; then
-          pr=$(gh api "repos/$REPO/pulls/$num" 2>/dev/null || true)
-          if [ -n "$pr" ]; then
+          # Gate on exit code, NOT output: gh prints the JSON error body to
+          # stdout on a 404, so an issue number would otherwise look like a PR.
+          if pr=$(gh api "repos/$REPO/pulls/$num" 2>/dev/null); then
             BRANCH=$(jq -r '.head.ref // ""' <<<"$pr")
             pr_body=$(jq -r '.body // ""' <<<"$pr")
             num=""
