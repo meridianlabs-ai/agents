@@ -30,6 +30,12 @@ node index.mjs --login   # one-time interactive GitHub sign-in
 ```sh
 node index.mjs           # link every pending External proxy (headless)
 node index.mjs --headed  # watch it work / debug selector breakage
+
+# Explicit issue<->PR pairs (fork-internal chips): closing keywords are only
+# processed on PRs targeting the DEFAULT branch, and fork PRs base on pristine
+# `main` (default is `meridian`), so their `Fixes` refs are inert — the UI
+# route is the only one. Example:
+node index.mjs --pair 82:https://github.com/meridianlabs-ai/inspect_ai/pull/84
 ```
 
 Discovery is API-driven: open `External`-labeled issues in the fork with no

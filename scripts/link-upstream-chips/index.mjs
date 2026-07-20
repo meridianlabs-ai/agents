@@ -32,6 +32,23 @@ const [OWNER, NAME] = REPO.split('/');
 const HEADED = process.argv.includes('--headed');
 const LOGIN_ONLY = process.argv.includes('--login');
 
+// --pair <issue>:<pr-url> (repeatable): link explicit issue↔PR pairs instead of
+// the External-proxy discovery. Needed for fork-internal PRs, whose Fixes refs
+// are INERT: GitHub only processes closing keywords on PRs that target the
+// default branch, and fork PRs base on pristine `main` while the default is
+// `meridian` — so no chip ever forms from the body there.
+const PAIRS = [];
+for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] === '--pair') {
+    const [n, url] = process.argv[++i].split(/:(.+)/);
+    PAIRS.push({
+      issue: Number(n),
+      issueUrl: `https://github.com/${REPO}/issues/${n}`,
+      pr: url,
+    });
+  }
+}
+
 const gh = (args) => execFileSync('gh', args, { encoding: 'utf8' });
 const graphql = (query, fields = []) =>
   JSON.parse(gh(['api', 'graphql', '-f', `query=${query}`, ...fields]));
@@ -189,9 +206,19 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   throw new Error(`UI flow completed but the link never appeared for #${issue}`);
 }
 
-const rows = LOGIN_ONLY ? [] : pendingProxies();
+const rows = LOGIN_ONLY
+  ? []
+  : PAIRS.length
+    ? PAIRS.filter((r) => {
+        if (linkedUrls(r.issue).includes(r.pr)) {
+          console.log(`skip    #${r.issue} (already linked to ${r.pr})`);
+          return false;
+        }
+        return true;
+      })
+    : pendingProxies();
 if (!LOGIN_ONLY && rows.length === 0) {
-  console.log('Nothing pending — every External proxy already has its chip.');
+  console.log('Nothing pending — every target already has its chip.');
   process.exit(0);
 }
 

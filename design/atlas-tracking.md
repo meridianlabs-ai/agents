@@ -79,6 +79,13 @@ Two things that were easy to get wrong:
   the issue, giving `Awaiting Merge → Done` for free. (Genuinely cross-repo
   issue↔PR pairs don't auto-close; those are rare and fall to the fork-style
   sync or a manual close.)
+- **Closing keywords are only processed on PRs that target the DEFAULT
+  branch.** Verified on the fork: agent PRs carry a correct fully-qualified
+  `Fixes meridianlabs-ai/inspect_ai#N`, but they base on pristine `main` while
+  the default branch is `meridian` — so the ref is **inert**: no linked-PR chip,
+  no auto-close, ever. (Identical convention on inspect_flow, whose default IS
+  `main`, links automatically.) Fork-internal issue↔PR chips therefore need the
+  same UI route as external PRs — `link-upstream-chips --pair` covers it.
 - **In practice, agent PRs are usually NOT linked** (learned reconciling by
   hand — do not assume the link exists). claude-code-action's "Claude finished"
   comment opens a *draft* PR (or offers a "Create PR" link) with a generic body
