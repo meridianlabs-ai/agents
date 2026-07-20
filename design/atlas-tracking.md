@@ -1,12 +1,12 @@
 # Agent work tracking on Atlas (design)
 
 This document designs how agent-driven work becomes **visible** — on a board, an
-issue list, and a dashboard — by having the agents maintain the state of each
-issue on the org's **Atlas** GitHub Project as work progresses. It builds on the
-existing agents ([`claude.yml`](../.github/workflows/claude.yml),
+issue list, and a dashboard — by maintaining each issue's pipeline stage on the
+org's **Atlas** GitHub Project as work progresses. It builds on the existing
+agents ([`claude.yml`](../.github/workflows/claude.yml),
 [`claude-review.yml`](../.github/workflows/claude-review.yml),
 [`claude-auto.yml`](../.github/workflows/claude-auto.yml)); read
-[auto-agent.md](auto-agent.md) first — the stage transitions hang off the same
+[auto-agent.md](auto-agent.md) first — most stage transitions hang off the same
 lifecycle events that drive `@auto`.
 
 Status: **designed, not built.** Recorded so implementation doesn't relitigate
@@ -28,40 +28,44 @@ All three come from one signal if we put it in the right place.
 Atlas is an **org-level GitHub Projects v2 board** (`meridianlabs-ai` project #1,
 `PVT_kwDOC7YMCM4BU68p`) that already spans every repo agents touch (ts-mono,
 inspect_ai, inspect_flow, the fork, agents, …) and already carries the fields we
-need: a single-select **Status**, **Labels**,
-**Linked pull requests**, **Priority/Size**, and **Parent/Sub-issue**. So this is
-a *layer on Atlas*, not new infrastructure.
+need: a single-select **Status**, **Labels**, **Linked pull requests**,
+**Priority/Size**, and **Parent/Sub-issue**. So this is a *layer on Atlas*, not
+new infrastructure.
 
 ## The stage model
 
-Five states. (We deliberately fold the finer pipeline — separate design vs.
-implement phases, and separate design-review vs. implementation-review gates —
-into one "agent working" and one "human review"; see
-[Deferred](#deferred--the-finer-pipeline).)
+Six states in a mostly-linear pipeline. (We deliberately fold the finer pipeline
+— separate design vs. implement phases, and separate design-review vs.
+implementation-review gates — into one "Agent working" and one "Human review";
+see [Deferred](#deferred).)
 
 ```
-Todo ─▶ Agent working ─▶ Sign-off ─▶ Done
-                  ⇅                │
-             Human review          └── changes requested ─▶ Agent working
+Todo ─▶ Agent working ─▶ Human review ─▶ Sign-off ─▶ Awaiting Merge ─▶ Done
+              ▲                │
+              └─── re-engage ──┘   (@claude / @auto again)
 ```
 
 | Stage | Meaning | Ball is in… |
 |---|---|---|
 | **Todo** | On the board, no agent has picked it up (the existing `Status: Todo`) | — |
 | **Agent working** | An agent is designing/implementing — including opening the PR and running the automated `@review` loop to get it green | agent |
-| **Human review** | The driving human must make a decision: a design/approach gate, or an `@auto` escalation the agent couldn't resolve. Loops back to Agent working when they re-engage | driving human |
-| **Sign-off** | Work is complete and green; an **independent second human** approves it to merge — on the fork, promotes it upstream | second human |
+| **Human review** | The agent has handed back and *you* (the driver) review: re-engage the agent, or send it onward. Always the post-agent gate | driver |
+| **Sign-off** | You've sent it to an **independent second reviewer**; awaiting their approval. On the fork: promoted upstream, awaiting upstream | second reviewer |
+| **Awaiting Merge** | Approved; waiting for the merge action. `hold:release` (below) marks a deliberate hold vs. just-not-merged-yet | whoever merges |
 | **Done** | Issue closed / PR merged | — |
 
-The automated `@review` review→fix loop is **part of Agent working**, not a
-stage of its own — it's the agent iterating on its own PR. `Human review` and
-`Sign-off` are the two distinct human touchpoints: `Human review` is the driver
-*unblocking* the agent (and loops back to Agent working), `Sign-off` is an
-*independent* approver taking the final step. `@auto`'s convergence handoff
-enters `Sign-off`; its escalation/cap handoff enters `Human review`. Today's
-simple flow can go **Agent working → Sign-off directly** (no pre-PR gate); the
-design gate that would routinely use `Human review` is
-[Deferred](#deferred--the-finer-pipeline).
+Two things that were easy to get wrong:
+
+- **There is no `Agent working → Sign-off`.** Every `@auto` exit — *converged*
+  (CI green, bot-review clean) *or* *escalated* (couldn't converge) — hands back
+  to **Human review**. From there *you* decide: re-engage the agent (back to
+  Agent working) or send it to a reviewer (Sign-off). The automated `@review`
+  loop is part of **Agent working**, not a stage — it's the agent iterating on
+  its own PR.
+- **`Sign-off` and `Awaiting Merge` are separated by the approval.** `Sign-off` =
+  *awaiting* the reviewer; `Awaiting Merge` = *got* the approval, awaiting the
+  merge. This split is what lets you distinguish "held for a stable release
+  point" from "just haven't merged yet" — see [Flags](#orthogonal-flags-human-set).
 
 ## Data model: track the issue, link the PR
 
@@ -70,14 +74,16 @@ design gate that would routinely use `Human review` is
 - **The PR is not a separate board item.** Two rows would drift. Link it to the
   issue with a fully-qualified `Fixes owner/repo#N` (the fork already mandates
   this; make it universal). That populates Atlas's **Linked pull requests**
-  field, works cross-repo because Atlas is org-level, and gives
-  PR-merge → issue-close → `Done` for free.
+  field, and — because it's a *same-repo* reference — merging the PR auto-closes
+  the issue, giving `Awaiting Merge → Done` for free. (Genuinely cross-repo
+  issue↔PR pairs don't auto-close; those are rare and fall to the fork-style
+  sync or a manual close.)
 - **Board membership needs no new mechanism.** The team already files most work
   items on Atlas directly, and `set-stage` adds any agent-touched issue itself
   (its `addProjectV2ItemById` step is idempotent). So an issue is on the board
   either because it was filed there or the moment an agent first engages it — no
-  dependency on anyone remembering to add it, and no per-repo automation to
-  maintain. (A Projects *auto-add workflow* is optional; see Prerequisites.)
+  dependency on anyone remembering to add it. (A Projects *auto-add workflow* is
+  optional; see Prerequisites.)
 
 ## Two surfaces for the stage
 
@@ -103,105 +109,159 @@ Concrete mapping:
 | Agent working | In progress | Agent working | `stage:agent-working` |
 | Human review | In progress | Human review | `stage:human-review` |
 | Sign-off | In progress | Sign-off | `stage:sign-off` |
+| Awaiting Merge | In progress | Awaiting Merge | `stage:awaiting-merge` |
 | Done | Done | *(empty)* | *(none)* |
 
-Todo = open + no `stage:*` label; Done = closed. Only the three active
-middle states carry a label. Human-only items that never involve an agent simply
-never get a `Stage`/label and keep using `Status` as before — this overlay is
-opt-in by virtue of an agent touching the issue.
+Todo = open + no `stage:*` label; Done = closed. Only the four active middle
+stages carry a label. Human-only items that never involve an agent simply never
+get a `Stage`/label and keep using `Status` as before — this overlay is opt-in
+by virtue of an agent (or the local promote skill) touching the issue.
+
+## Orthogonal flags (human-set)
+
+Two situations aren't pipeline *positions* — they're pauses/holds that can
+overlay whatever stage the work is in. Model them as **labels with a distinct
+prefix** (`blocked:` / `hold:`) so they read as modifiers, not stages. Both are
+set by a human, not the agent:
+
+- **`blocked:input`** — waiting on another human's input before proceeding
+  (common right after Human review). Overlays the current stage. The agent
+  **respects** it: `@claude`/`@auto` no-op while it's present, so pinging the
+  agent doesn't resume work until you clear it.
+- **`hold:release`** — overlays `Awaiting Merge`: approved, but deliberately held
+  for a stable release point. Its presence is the differentiator:
+
+  | Situation | How it looks |
+  |---|---|
+  | Just haven't merged yet | `Awaiting Merge`, no hold label |
+  | Deliberately waiting for a stable point | `Awaiting Merge` + `hold:release` |
 
 ## Who moves the card, and when
 
-Split by what GitHub can detect natively vs. what needs agent knowledge.
+| Transition | Trigger | Driven by |
+|---|---|---|
+| Todo → Agent working | kickoff run starts | agent post-step (`claude.yml`/`@auto`) |
+| Agent working → Human review | `@auto` hands back (converged *or* escalated) | agent post-step (`claude-auto-review.yml`) |
+| Human review → Agent working | you re-engage (`@claude`/`@auto`) | agent post-step, next run |
+| Human review → Sign-off | you request a second reviewer on the PR | **PR-event hook** (`review_requested`) |
+| Sign-off → Awaiting Merge | that reviewer approves | **PR-event hook** (`pull_request_review` approved) |
+| Awaiting Merge → Done | PR merged → issue auto-closes | native Projects automation |
 
-**Native Projects automations** (configured once on Atlas) handle the endpoints:
-- item added → `Status: Todo`;
-- issue closed / linked PR merged → `Status: Done` + clear `Stage`.
+- **Native Projects automations** handle the endpoints: item added → `Status:
+  Todo`; issue closed / linked PR merged → `Status: Done` + clear `Stage`.
+- **Agent post-steps** call `set-stage` at the `@auto` lifecycle events that
+  already exist (kickoff, hand-back).
+- **The PR-event hook is new.** `review_requested` and `approved` are events on
+  the *PR*, but the board item is the *issue* — so a small workflow resolves the
+  PR's linked issue and calls `set-stage`. Merge → Done needs no hook (native via
+  issue-close).
 
-**Agents** set the middle stages from the reusable-workflow **post-steps**, at
-the lifecycle events that already exist:
+## The fork: promotion and the terminal sync
 
-| Transition | Where it fires (existing step) |
-|---|---|
-| → Agent working | `claude.yml` / `@auto` kickoff, at run start (covers PR open + the `@review` loop) |
-| → Sign-off | `claude-auto-review.yml` convergence handoff (CI green, reviewer satisfied) |
-| → Human review | `claude-auto-review.yml` escalation/cap handoff (agent couldn't converge); future design gate |
-| Human review → Agent working | next `@claude`/`@auto` run (human re-engaged) |
+The fork is the exception, because its PRs are never merged locally — a human
+promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
+`Done` comes from upstream merging.
 
-The agent side is a single idempotent operation — *set stage S on issue I* —
-which (a) ensures the issue is on Atlas, (b) sets the `Stage` field option, and
-(c) reconciles the `stage:*` labels. Factor it into **one reusable step** (a
-composite action or a tiny `set-stage.yml` reusable workflow) that every agent
-workflow calls, rather than duplicating GraphQL in each.
+- **`Human review → Sign-off` = the promotion, driven from the local session.**
+  You do fork review-and-promote from your local Claude Code session, so that
+  session updates Atlas directly: a **skill/instructions** has the local agent,
+  when it opens the upstream PR, set the issue to `Sign-off` and record the
+  upstream PR URL. No GitHub `@promote` workflow is needed (see
+  [Deferred](#deferred)). This is why the owned-repo `review_requested` hook
+  doesn't apply on the fork — there's no fork PR reviewer request; the promotion
+  is the signal, and it's set locally.
+- **`→ Done` needs a poll, not events.** Upstream isn't our repo, so we can't
+  hook its merge (and can't push workflows into it — even the narrower
+  authorize-marvin-upstream idea in [upstream-review.md](upstream-review.md) is
+  unbuilt). Instead a scheduled job in the fork (reuse the existing **Sync
+  upstream** cadence) reads upstream's *public* PR state — matching on the shared
+  head branch `meridianlabs-ai:<branch>` as the join key — and sets `Done` when
+  the upstream PR merges. Note an upstream merge does **not** auto-close the fork
+  issue (cross-org, no `Fixes` link), so the sync closes it / sets `Done`
+  explicitly. This is a backstop and can come after the initial rollout.
+
+`Awaiting Merge` and `hold:release` are mainly owned-repo concepts — on the fork
+we don't control upstream's merge timing, so the fork tail is the coarser
+`Sign-off → Done`.
 
 ## Implementation sketch
 
-A reusable `set-stage` step, given `issue` (owner/repo#N or PR) and `stage`:
+**`set-stage`** — a composite action in this repo
+(`.github/actions/set-stage/action.yml`), referenced fully-qualified
+(`meridianlabs-ai/agents/.github/actions/set-stage@main`) so the reusable
+workflows can call it as a step. Given `issue` (or a PR to resolve to its linked
+issue) and `stage`:
 
-1. Resolve/ensure the board item:
-   `addProjectV2ItemById` (idempotent — returns the existing item if present),
-   giving the item id.
-2. Set the field:
-   `updateProjectV2ItemFieldValue(projectId, itemId, fieldId, {singleSelectOptionId})`.
+1. Ensure the board item: `addProjectV2ItemById` (idempotent) → item id.
+2. Set the field: `updateProjectV2ItemFieldValue(projectId, itemId, StageFieldId,
+   {singleSelectOptionId})`, and nudge `Status` to `In progress`.
 3. Reconcile labels: remove other `stage:*`, add the one for `stage`.
+
+Best-effort/non-fatal: a board-sync hiccup emits a `::warning::` but does not
+fail the agent's real work.
+
+**PR-event hook** — a small workflow (in the reusable set, or a caller stub)
+triggered on `pull_request` `review_requested` and `pull_request_review`
+`submitted`(approved); it resolves the PR's linked issue and calls `set-stage`
+(`Sign-off` / `Awaiting Merge`).
 
 Stable IDs to bake in as constants (queried at setup, not per-run):
 - project `PVT_kwDOC7YMCM4BU68p`
-- `Status` `PVTSSF_lADOC7YMCM4BU68pzhKizZM` + its `In progress` option id — the
-  three middle stages nudge `Status` to `In progress` so the coarse rollup
-  tracks (no native automation covers that transition; the `Todo`/`Done`
-  endpoints are handled natively on add / close-merge).
+- `Status` `PVTSSF_lADOC7YMCM4BU68pzhKizZM` + its `In progress` option id.
 - `Stage` field id + per-option ids — **created at setup** (see Prerequisites).
 
 ## Prerequisites
 
 - **`MARVIN_TOKEN` needs `project` scope** (`read:project` + `project`). The
-  built-in `GITHUB_TOKEN` cannot mutate an org Projects v2 board, and the agents
-  already run as the machine account for their pushes — reuse that identity.
-  Verify/rotate the PAT before building.
-- **Create the `Stage` field** on Atlas with the four active options and capture
-  its field id + option ids.
-- **Create the `stage:*` labels** in each participating repo (labels must exist
-  per-repo to be applied). A one-time script — or fold into
+  built-in `GITHUB_TOKEN` cannot mutate an org Projects v2 board; the agents
+  already run as the machine account, so reuse that identity. Verify/rotate the
+  PAT before building.
+- **Create the `Stage` field** on Atlas with the four active options
+  (Agent working / Human review / Sign-off / Awaiting Merge) and capture its
+  field id + option ids.
+- **Create the labels** in each participating repo (labels must exist per-repo to
+  be applied): the four `stage:*` labels plus the `blocked:input` and
+  `hold:release` flags. A one-time script — or fold into
   [`scripts/enable-claude.sh`](../scripts/enable-claude.sh) so newly-onboarded
   repos get them.
 - **No auto-add workflow needed.** `set-stage` puts agent-touched issues on the
   board itself, and most items are created on Atlas directly anyway. A Projects
-  *auto-add workflow* (Atlas → Settings → Workflows) is optional — its only
-  extra value is putting a brand-new issue on the board (as *Todo*) before any agent
-  touches it — and on GitHub Team a project is capped at **5** auto-add
-  workflows (one repo each), fewer than the repos on the board. Skipping it for
-  now.
+  *auto-add workflow* (Atlas → Settings → Workflows) is optional — its only extra
+  value is putting a brand-new issue on the board (as *Todo*) before any agent
+  touches it — and on GitHub Team a project is capped at **5** auto-add workflows
+  (one repo each), fewer than the repos on the board. Skipping it for now.
 
 ## Rollout
 
-Pilot on one repo (inspect_flow or the fork), confirm the board reflects a full
-issue lifecycle end-to-end, then fold the `set-stage` step into the reusable
-workflows so every caller gets it via `@main`.
+1. Prereqs above; add `set-stage`.
+2. Wire the agent post-step transitions (`Todo`/`Agent working`/`Human review`)
+   into the reusable workflows so every caller gets them via `@main`. Pilot on
+   one repo (inspect_flow), confirm the board tracks a lifecycle end-to-end.
+3. Add the PR-event hook (`Sign-off`/`Awaiting Merge`).
+4. Fork: the local promote skill (updates `Sign-off`), then the upstream `→ Done`
+   sync as a backstop.
 
-## Deferred — the finer pipeline
+## Deferred
 
-The `Stage` single-select can gain options without breaking anything, so the
-folded states can re-expand when the workflow supports them:
-
-- **Designing vs. Implementing** — needs a distinct design phase in the agent
-  flow (agent produces a design, not just code). Not built; today it's all
-  "Agent working."
-- **Design review vs. Implementation review** — needs a pre-implementation human
-  gate (e.g. a `design-approved` label the agent waits on before coding). See the
-  gated-workflow option discussed when this was scoped.
+- **Fork `@promote` GitHub automation.** Initially the promotion is driven from
+  the local session via a skill (above). A repo-triggered `@promote` command
+  (issue interaction → workflow opens the upstream PR + advances the stage) is a
+  possible later convenience, not part of the initial implementation.
+- **Designing vs. Implementing.** Needs a distinct design phase in the agent flow
+  (agent produces a design, not just code). Today it's all "Agent working"; the
+  `Stage` single-select can gain options without breaking anything.
+- **Design review vs. Implementation review.** Needs a pre-implementation human
+  gate (e.g. a `design-approved` label the agent waits on before coding).
 
 ## Open questions
 
 - **Draft issues.** Atlas carries many draft items (project-only, no repo issue).
   Agents can't be triggered from them and can't be `Fixes`-linked; treat as out
   of scope — a draft must graduate to a real issue to enter the pipeline.
-- **Two human states, distinguished by *who*.** `Human review` is the driver
-  unblocking the agent (and loops back to Agent working); `Sign-off` is an
-  independent second human approving the finished work. On a small team the same
-  person may play both roles — the states still read correctly, since they
-  differ by what's being asked (a decision that resumes the agent vs. a final
-  approval that ends the work), not strictly by identity.
-- **Field vs. label as source of truth.** Proposed: the `set-stage` step writes
-  both atomically, so neither drifts. If they ever disagree, the `Stage` field
-  wins (the label is a projection for the issue-list view).
+- **Field vs. label as source of truth.** The `set-stage` step writes both
+  atomically, so neither drifts. If they ever disagree, the `Stage` field wins
+  (the label is a projection for the issue-list view).
+- **Small-team role overlap.** `Human review` (you) and `Sign-off` (a second
+  reviewer) may be the same person; the states still read correctly because they
+  differ by what's being asked (resume the agent vs. approve to merge), not by
+  identity.
