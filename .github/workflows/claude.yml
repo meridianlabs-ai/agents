@@ -176,6 +176,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Atlas tracking (design/atlas-tracking.md): the agent is picking this
+      # issue up, so move it to Agent Working. Best-effort — the action never
+      # fails the run. On PR-context events the PR resolves to its issue via
+      # the claude/issue-N-* branch (then a Fixes ref). Known noise, accepted:
+      # the stub's substring gate can fire on a comment the action then
+      # declines (word-boundary), briefly staging an unengaged issue.
+      - name: Stage - Agent Working
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Agent Working
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ github.event.issue.number || github.event.pull_request.number }}
+
       # Provision the project environment so the agent's allow-listed
       # pytest/ruff/mypy can actually run (a bare runner has neither the deps
       # nor the package installed). Convention-based opt-in: a caller repo adds
@@ -326,6 +340,7 @@ jobs:
       # (recursion guard). The `|| github.token` fallback only applies on repos
       # without the secret, where it degrades exactly as documented above.
       - name: Open or adopt PR for issue-triggered run
+        id: openpr
         if: >-
           github.event.issue.pull_request == '' &&
           github.event.pull_request == '' &&
@@ -404,6 +419,9 @@ jobs:
               '✅ Opened a pull request for this issue: %s\n\n(The "Create PR ➔" link in the run summary above is superseded — the PR is already open.)' \
               "$pr_url")" || true
           fi
+          # Expose the PR for the stage post-step: an @auto run that left a PR
+          # in the loop stays Agent Working; one that didn't hands back.
+          echo "url=$pr_url" >>"$GITHUB_OUTPUT"
 
       # Surface agent errors the action swallows. A model API error (overload /
       # 529, a model 404, etc.) leaves the run green at the workflow level but
@@ -411,6 +429,7 @@ jobs:
       # is_error in the execution log (or a failed action step), post a visible
       # comment, and fail the job so the run isn't a misleading success.
       - name: Surface agent errors
+        id: surface
         if: always()
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
@@ -432,6 +451,31 @@ jobs:
             gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ This Claude run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload or a model-availability blip). Re-trigger to retry; if it persists see https://status.claude.com.' "$err")" || true
           fi
           exit 1
+
+      # Atlas tracking: the one-shot dev agent hands back to a human when it's
+      # done — and an errored run also needs a human (the error comment asks
+      # for a re-trigger) — so move to Human Review. The exception is a
+      # SUCCESSFUL @auto run that left a PR in the loop (opened/adopted one, or
+      # ran on a PR): the automated review loop owns the stage from there
+      # (claude-auto-review.yml sets Human Review at its converged/escalated
+      # handoff). always(): this must run after a failed claude step or a
+      # failing Surface step — those are exactly the hand-back-to-human cases.
+      - name: Stage - Human Review (hand-back)
+        if: >-
+          always() && !(
+            inputs.trigger_phrase == '@auto' &&
+            steps.claude.outcome == 'success' &&
+            steps.surface.outcome == 'success' &&
+            (github.event.issue.pull_request != '' ||
+             github.event.pull_request != '' ||
+             steps.openpr.outputs.url != '')
+          )
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Human Review
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ github.event.issue.number || github.event.pull_request.number }}
 
       - name: Upload execution log
         if: always()

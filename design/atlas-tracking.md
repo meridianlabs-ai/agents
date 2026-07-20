@@ -409,6 +409,21 @@ issue) and `stage`:
 Best-effort/non-fatal: a board-sync hiccup emits a `::warning::` but does not
 fail the agent's real work.
 
+**Built**, with two v1 scopings: it writes the **field only** (step 3's
+`stage:*` labels were deliberately deferred at pilot time — they don't exist in
+the repos), and it only stages issues **assigned to `ransomr`**
+(`require-assignee` input; the hourly sync applies the same filter) — stage
+tracking is per-person for now. PR→issue resolution follows the reconcile
+rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. Wired:
+`claude.yml` sets **Agent Working** at run start and **Human Review** at
+hand-back — skipped only for a *successful `@auto` run that left a PR in the
+loop* (the review loop owns the stage from there; an errored run always hands
+back); `claude-auto.yml` sets Agent Working per CI-fix round, Human Review on
+escalation; `claude-auto-review.yml` sets Agent Working per review-fix round,
+Human Review on both the converged and escalated handoffs. Known accepted
+noise: the stub's substring gate can start a run the action then declines
+(word-boundary), briefly staging an unengaged issue.
+
 **PR-event hook** — a small workflow (in the reusable set, or a caller stub)
 triggered on `pull_request` `review_requested` and `pull_request_review`
 `submitted`(approved); it resolves the PR's linked issue and calls `set-stage`

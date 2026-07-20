@@ -1,0 +1,126 @@
+name: set-stage
+description: >-
+  Move an issue's Stage on the org Atlas board (design:
+  design/atlas-tracking.md). Best-effort by design: any failure emits a
+  warning and exits 0 — board sync must never fail the agent's real work.
+  v1 writes the project field only (the stage:* issue labels are deferred).
+  Referenced fully-qualified (meridianlabs-ai/agents/.github/actions/set-stage@main)
+  so it works regardless of what the job checked out, and has NO post step
+  (local composite actions with post steps break teardown on the fork).
+
+inputs:
+  stage:
+    description: >-
+      Target stage name: Agent Working | Human Review | Sign-off |
+      Awaiting Merge | Awaiting Contributor.
+    required: true
+  token:
+    description: >-
+      Token with org-project write (MARVIN_TOKEN — fine-grained PAT with
+      organization Projects read/write). Empty skips silently, so callers can
+      pass the secret unconditionally.
+    required: true
+  repo:
+    description: owner/name the issue lives in.
+    required: true
+  issue:
+    description: >-
+      Issue OR pull-request number. A PR is resolved to its issue via the
+      claude/issue-N-* head-branch convention, then a same-repo Fixes ref in
+      the PR body.
+    required: false
+    default: ""
+  branch:
+    description: Branch to parse (claude/issue-N-*) when no number is given.
+    required: false
+    default: ""
+  require-assignee:
+    description: >-
+      Only stage issues assigned to this login (pilot scoping — stage tracking
+      is per-person for now). Empty disables the check.
+    required: false
+    default: "ransomr"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        STAGE: ${{ inputs.stage }}
+        REPO: ${{ inputs.repo }}
+        NUM: ${{ inputs.issue }}
+        BRANCH: ${{ inputs.branch }}
+        REQUIRE_ASSIGNEE: ${{ inputs.require-assignee }}
+        PROJECT: PVT_kwDOC7YMCM4BU68p
+        STAGE_FIELD: PVTSSF_lADOC7YMCM4BU68pzhYZEwY
+        STATUS_FIELD: PVTSSF_lADOC7YMCM4BU68pzhKizZM
+        STATUS_IN_PROGRESS: 47fc9ee4
+      run: |
+        set -uo pipefail
+        skip() { echo "set-stage: $1; skipping."; exit 0; }
+        warn() { echo "::warning::set-stage: $1"; exit 0; }
+        [ -n "$GH_TOKEN" ] || skip "no token"
+
+        case "$STAGE" in
+          "Agent Working")        opt=18c9cd89 ;;
+          "Human Review")         opt=d261eb6b ;;
+          "Sign-off")             opt=da6137e6 ;;
+          "Awaiting Merge")       opt=add17478 ;;
+          "Awaiting Contributor") opt=39c05a50 ;;
+          *) warn "unknown stage '$STAGE'" ;;
+        esac
+
+        # Resolve the ISSUE number. A PR number resolves via its head branch
+        # (claude/issue-N-*), then a same-repo Fixes/Closes/Resolves ref in the
+        # PR body — the same join rules the tracking design records.
+        num="$NUM" pr_body=""
+        if [ -n "$num" ]; then
+          pr=$(gh api "repos/$REPO/pulls/$num" 2>/dev/null || true)
+          if [ -n "$pr" ]; then
+            BRANCH=$(jq -r '.head.ref // ""' <<<"$pr")
+            pr_body=$(jq -r '.body // ""' <<<"$pr")
+            num=""
+          fi
+        fi
+        if [ -z "$num" ] && [ -n "$BRANCH" ]; then
+          num=$(printf '%s' "$BRANCH" | sed -n 's#^claude/issue-\([0-9]\{1,\}\)-.*#\1#p')
+        fi
+        if [ -z "$num" ] && [ -n "$pr_body" ]; then
+          num=$(printf '%s' "$pr_body" \
+            | grep -oiE "(fix(e[sd])?|close[sd]?|resolve[sd]?)[[:space:]]+($REPO)?#[0-9]+" \
+            | head -1 | grep -oE '[0-9]+$' || true)
+        fi
+        [ -n "$num" ] || skip "no issue resolvable (issue='$NUM' branch='$BRANCH')"
+
+        issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
+          || warn "cannot read issue #$num in $REPO"
+        node=$(jq -r '.node_id' <<<"$issue_json")
+        if [ -n "$REQUIRE_ASSIGNEE" ] && \
+           ! jq -e --arg a "$REQUIRE_ASSIGNEE" 'any(.assignees[]; .login==$a)' <<<"$issue_json" >/dev/null; then
+          skip "#$num not assigned to $REQUIRE_ASSIGNEE (pilot scope)"
+        fi
+
+        item=$(gh api graphql \
+          -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+          -f p="$PROJECT" -f c="$node" \
+          --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null) \
+          || warn "cannot add/find #$num on the board (token lacks project scope?)"
+
+        current=$(gh api graphql \
+          -f query='query($i:ID!){node(id:$i){... on ProjectV2Item{fieldValueByName(name:"Stage"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}' \
+          -f i="$item" --jq '.data.node.fieldValueByName.name // ""' 2>/dev/null || echo "")
+        if [ "$current" = "$STAGE" ]; then
+          echo "set-stage: #$num already at '$STAGE'."
+          exit 0
+        fi
+
+        gh api graphql \
+          -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+          -f p="$PROJECT" -f i="$item" -f f="$STAGE_FIELD" -f o="$opt" >/dev/null 2>&1 \
+          || warn "stage write failed for #$num"
+        gh api graphql \
+          -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+          -f p="$PROJECT" -f i="$item" -f f="$STATUS_FIELD" -f o="$STATUS_IN_PROGRESS" >/dev/null 2>&1 \
+          || echo "::warning::set-stage: Status nudge failed for #$num (stage was set)"
+        echo "set-stage: #$num '$current' -> '$STAGE'."

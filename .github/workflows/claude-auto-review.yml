@@ -253,6 +253,31 @@ jobs:
           [ -z "${PR:-}" ] && { echo "No PR number; nothing to surface."; exit 0; }
           gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the review-fix run errored before it could act (a transient GitHub API failure in the gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or post a fresh review request to resume.' "$RUN_URL")" || true
 
+      # Atlas tracking (design/atlas-tracking.md): a review-fix round is the
+      # agent working the PR's issue; both @auto exits — converged AND
+      # escalated — hand back to a human (there is no Agent Working →
+      # Sign-off; the driver reaches Sign-off by sending it onward). The PR
+      # resolves to its issue via claude/issue-N-* (then a Fixes ref).
+      - name: Stage - Agent Working
+        if: steps.gate.outputs.act == 'fix'
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Agent Working
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ inputs.pr_number }}
+          branch: ${{ steps.gate.outputs.head_branch }}
+
+      - name: Stage - Human Review (handoff)
+        if: steps.gate.outputs.act == 'converged' || steps.gate.outputs.act == 'escalate'
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Human Review
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ inputs.pr_number }}
+          branch: ${{ steps.gate.outputs.head_branch }}
+
       # Reviewer reported no outstanding suggestions: hand off to a human for the
       # final review/merge (@auto never merges). Idempotent so a later clean
       # re-review doesn't re-ping. The `auto` label is left on, so further CI or
