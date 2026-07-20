@@ -257,6 +257,13 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   **manual UI step** per issue (unlike our own promotions, where the `Fixes` in
   the PR body populates it automatically). The body URL / a comment is the
   scriptable fallback.
+- **Once manually linked, the link IS machine-readable** (verified on
+  #120↔upstream#2615: the manual link emits a `connected` timeline event and the
+  PR appears in the issue's `closedByPullRequestsReferences` — same bucket as a
+  closing keyword). So a future external-review sweep can discover each proxy's
+  upstream PR from the issue's link graph and advance/close the proxy on
+  upstream merge. GitHub's linked-PR rule suggests the merge may even auto-close
+  the proxy (→ `Done`) — unverified cross-org; observe on the first merge.
 
 **Scope (as seeded):** open upstream PRs where you're a requested reviewer or
 assignee, authored by **external community contributors** — *not* teammates'
