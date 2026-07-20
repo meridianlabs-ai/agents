@@ -253,9 +253,14 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
 
 - **Label `External`** — marks the proxy as an upstream PR under review (vs. our
   own work).
-- **Stage `Awaiting Contributor`** — the off-pipeline state meaning "we're
-  waiting on the (external) contributor." Set on all of these; move any that are
-  actually awaiting *your* review yourself.
+- **Stage lifecycle** (decided when the hourly sync was specced): a new proxy
+  starts in **Human Review** — a review request means the ball is with *you*.
+  After you review, *you* move it to **Awaiting Contributor** (waiting on them
+  to address feedback). The sync flips it back to **Human Review** when the
+  contributor responds — deterministically approximated as *any contributor
+  activity (comment or re-review request) newer than your last activity on the
+  PR* (no intent-parsing of comment text). Merged/closed upstream → proxy
+  closes → **Done**.
 - The proxy issue is assigned to the reviewer, links the upstream PR by URL (no
   `@`-mention of the contributor), and is added to Atlas + staged like any item.
 - **The native "Linked pull requests" sidebar can't be populated by script here.**
@@ -292,12 +297,52 @@ Development-panel link on external ones). The two mechanisms are complementary,
 not redundant: field = machine-readable everywhere; native link = clickable
 where it exists.
 
-**Scope (as seeded):** open upstream PRs where you're a requested reviewer or
-assignee, authored by **external community contributors** — *not* teammates'
-upstream PRs, and *not* our own promotions (those are already tracked via their
-fork issue, e.g. an `Awaiting Merge` item). A future sync could refresh these
-(close the proxy when the upstream PR merges/closes), but seeding is manual for
-now.
+**Scope:** open upstream PRs where you're a requested reviewer or assignee,
+authored by **external community contributors** — *not* teammates' upstream PRs
+(determined by org membership, not a hardcoded name list), and *not* our own
+promotions (those are already tracked via their fork issue).
+
+## The hourly Atlas sync
+
+A single scheduled workflow on the fork's `meridian` branch (like
+`sync-upstream.yml` — fork-specific, so no reusable+stub split), hourly cron +
+`workflow_dispatch`, running as the machine account. Fully deterministic
+(`gh` + a script) — no agent invocation. Two tasks per run:
+
+**1. Discovery** — find open upstream PRs review-requested-to / assigned-to the
+reviewer, exclude org members' PRs and our own, dedup against already-tracked
+upstream URLs (open *and closed* proxies, so a Done proxy is never recreated),
+and seed each new one: proxy issue (template body with the upstream URL),
+`External` label, assignee, Atlas item, `Stage = Human Review`,
+`Status = In progress`, `Upstream PR` field. The chip stays a local
+`link-upstream-chips` run (no API); the job summary lists proxies pending a
+chip.
+
+**2. State sync** — enumerate open issues on Atlas with a non-empty
+`Upstream PR` field (this is the field's core job), read each upstream PR, and
+apply the population-specific mapping:
+
+| Upstream event | External proxy | Promotion |
+|---|---|---|
+| `APPROVED` | — | → Awaiting Merge |
+| `CHANGES_REQUESTED` | — | → Human Review |
+| approval dismissed (review required again) | — | Awaiting Merge → Sign-off only |
+| contributor activity newer than reviewer's last | Awaiting Contributor → Human Review | — |
+| merged | close, clear Stage → Done | close w/ comment, clear Stage → Done |
+| closed unmerged | close w/ comment → Done | → Human Review w/ comment |
+
+Rules: never touch stages a human parked outside the mapping's domain (e.g. a
+promotion sitting in Human Review stays there on `REVIEW_REQUIRED`); per-item
+failures warn and continue; every write is idempotent (skip when already at the
+target).
+
+**Preflight:** the job's first step verifies `MARVIN_TOKEN` carries the
+`project` scope (read the `X-OAuth-Scopes` header) and fails with a clear
+message if not — Atlas writes silently 403 otherwise.
+
+Constants the script needs (all recorded above): project id, `Stage` field +
+option ids, `Status` field + `In progress` `47fc9ee4` / `Done` `98236657`
+option ids, `Upstream PR` field id.
 
 ## Stage signals (from hand-reconciling the backlog)
 
