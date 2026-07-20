@@ -17,7 +17,7 @@ the model.
 Today an issue's agent state is only legible by reading its comments and hunting
 for the PR. We want, at a glance across every Meridian repo:
 
-- a **sprint board** — columns = pipeline stage, sliced by iteration;
+- a **board** — columns = pipeline stage (one pile of issues, no iterations);
 - an **issue list** view — the stage readable in each repo's native issue list;
 - a **dashboard** — counts / flow over time.
 
@@ -28,7 +28,7 @@ All three come from one signal if we put it in the right place.
 Atlas is an **org-level GitHub Projects v2 board** (`meridianlabs-ai` project #1,
 `PVT_kwDOC7YMCM4BU68p`) that already spans every repo agents touch (ts-mono,
 inspect_ai, inspect_flow, the fork, agents, …) and already carries the fields we
-need: a single-select **Status**, an **Iteration** (sprint) field, **Labels**,
+need: a single-select **Status**, **Labels**,
 **Linked pull requests**, **Priority/Size**, and **Parent/Sub-issue**. So this is
 a *layer on Atlas*, not new infrastructure.
 
@@ -88,8 +88,8 @@ surface gives all three views:
    `Status` — it's the org-wide `Todo/In progress/Done` used by lots of
    non-agent work; reshaping it would disrupt everyone). `Status` stays the
    coarse rollup; `Stage` is the agent pipeline. A saved **board view grouped by
-   `Stage`, sliced by `Iteration`** is the sprint board; Insights over `Stage` is
-   the dashboard.
+   `Stage`** gives the columns-by-stage board over the whole issue pile; Insights
+   over `Stage` is the dashboard.
 2. A **`stage:*` label** on the issue, because project fields don't render in a
    repo's native issue list but labels do — and agents already manage labels
    fluently. The label is the issue-list view and the agent's cheap write
@@ -147,9 +147,10 @@ A reusable `set-stage` step, given `issue` (owner/repo#N or PR) and `stage`:
 
 Stable IDs to bake in as constants (queried at setup, not per-run):
 - project `PVT_kwDOC7YMCM4BU68p`
-- `Status` `PVTSSF_lADOC7YMCM4BU68pzhKizZM`, `Iteration`
-  `PVTIF_lADOC7YMCM4BU68pzhKjCbs`, `Linked pull requests`
-  `PVTF_lADOC7YMCM4BU68pzhKizZk`
+- `Status` `PVTSSF_lADOC7YMCM4BU68pzhKizZM` + its `In progress` option id — the
+  three middle stages nudge `Status` to `In progress` so the coarse rollup
+  tracks (no native automation covers that transition; the `Todo`/`Done`
+  endpoints are handled natively on add / close-merge).
 - `Stage` field id + per-option ids — **created at setup** (see Prerequisites).
 
 ## Prerequisites
