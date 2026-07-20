@@ -1,0 +1,9 @@
+{
+  "name": "link-upstream-chips",
+  "private": true,
+  "type": "module",
+  "description": "Locally link External proxy issues to their upstream PRs via the GitHub web UI (no public API exists for this).",
+  "dependencies": {
+    "playwright": "^1.50.0"
+  }
+}
