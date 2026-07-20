@@ -409,11 +409,13 @@ issue) and `stage`:
 Best-effort/non-fatal: a board-sync hiccup emits a `::warning::` but does not
 fail the agent's real work.
 
-**Built**, with two v1 scopings: it writes the **field only** (step 3's
+**Built**, with one v1 scoping: it writes the **field only** (step 3's
 `stage:*` labels were deliberately deferred at pilot time — they don't exist in
-the repos), and it only stages issues **assigned to `ransomr`**
-(`require-assignee` input; the hourly sync applies the same filter) — stage
-tracking is per-person for now. PR→issue resolution follows the reconcile
+the repos). The agents stage **every** issue they touch; per-person scoping
+(issues assigned to `ransomr`) applies only to the **hourly sync**, which
+filters on its own side (the action's `require-assignee` input exists for
+callers that want narrower scoping, but defaults to off). PR→issue resolution
+follows the reconcile
 rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. Wired:
 `claude.yml` sets **Agent Working** at run start and **Human Review** at
 hand-back — skipped only for a *successful `@auto` run that left a PR in the

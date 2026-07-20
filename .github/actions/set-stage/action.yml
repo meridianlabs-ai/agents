@@ -36,10 +36,12 @@ inputs:
     default: ""
   require-assignee:
     description: >-
-      Only stage issues assigned to this login (pilot scoping — stage tracking
-      is per-person for now). Empty disables the check.
+      Only stage issues assigned to this login; empty (the default) stages any
+      issue. The agent workflows stage every issue they touch — per-person
+      scoping is the hourly sync's concern (it filters on its own side), not
+      the agents'. Available for callers that want narrower scoping.
     required: false
-    default: "ransomr"
+    default: ""
 
 runs:
   using: composite
