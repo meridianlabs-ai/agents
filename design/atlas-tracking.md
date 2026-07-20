@@ -40,14 +40,14 @@ into one "agent working" and one "human review"; see
 [Deferred](#deferred--the-finer-pipeline).)
 
 ```
-Unstarted ─▶ Agent working ─▶ Sign-off ─▶ Done
+Todo ─▶ Agent working ─▶ Sign-off ─▶ Done
                   ⇅                │
              Human review          └── changes requested ─▶ Agent working
 ```
 
 | Stage | Meaning | Ball is in… |
 |---|---|---|
-| **Unstarted** | On the board, no agent has picked it up | — |
+| **Todo** | On the board, no agent has picked it up (the existing `Status: Todo`) | — |
 | **Agent working** | An agent is designing/implementing — including opening the PR and running the automated `@review` loop to get it green | agent |
 | **Human review** | The driving human must make a decision: a design/approach gate, or an `@auto` escalation the agent couldn't resolve. Loops back to Agent working when they re-engage | driving human |
 | **Sign-off** | Work is complete and green; an **independent second human** approves it to merge — on the fork, promotes it upstream | second human |
@@ -99,13 +99,13 @@ Concrete mapping:
 
 | Stage | `Status` (existing) | `Stage` field (new) | Label |
 |---|---|---|---|
-| Unstarted | Todo | *(empty)* | *(none)* |
+| Todo | Todo | *(empty)* | *(none)* |
 | Agent working | In progress | Agent working | `stage:agent-working` |
 | Human review | In progress | Human review | `stage:human-review` |
 | Sign-off | In progress | Sign-off | `stage:sign-off` |
 | Done | Done | *(empty)* | *(none)* |
 
-Unstarted = open + no `stage:*` label; Done = closed. Only the three active
+Todo = open + no `stage:*` label; Done = closed. Only the three active
 middle states carry a label. Human-only items that never involve an agent simply
 never get a `Stage`/label and keep using `Status` as before — this overlay is
 opt-in by virtue of an agent touching the issue.
@@ -115,7 +115,7 @@ opt-in by virtue of an agent touching the issue.
 Split by what GitHub can detect natively vs. what needs agent knowledge.
 
 **Native Projects automations** (configured once on Atlas) handle the endpoints:
-- item added → `Status: Todo` (Unstarted);
+- item added → `Status: Todo`;
 - issue closed / linked PR merged → `Status: Done` + clear `Stage`.
 
 **Agents** set the middle stages from the reusable-workflow **post-steps**, at
@@ -167,7 +167,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 - **No auto-add workflow needed.** `set-stage` puts agent-touched issues on the
   board itself, and most items are created on Atlas directly anyway. A Projects
   *auto-add workflow* (Atlas → Settings → Workflows) is optional — its only
-  extra value is surfacing a brand-new issue as *Unstarted* before any agent
+  extra value is putting a brand-new issue on the board (as *Todo*) before any agent
   touches it — and on GitHub Team a project is capped at **5** auto-add
   workflows (one repo each), fewer than the repos on the board. Skipping it for
   now.
