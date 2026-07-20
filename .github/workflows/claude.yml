@@ -176,13 +176,50 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Atlas stage tracking must NOT trust the stub's cheap substring gate:
+      # reviewer summaries legitimately contain a backticked `@claude` ("reply
+      # with a top-level @claude comment"), which starts this workflow even
+      # though claude-code-action then declines (word-boundary check + bot
+      # actor). Without this pre-check those phantom runs flipped issues to
+      # Human Review after every review round. Mirror the action's word-boundary
+      # trigger match and bot-actor rejection; only stage when it passes.
+      - name: Check trigger (stage gating)
+        id: trig
+        env:
+          PHRASE: ${{ inputs.trigger_phrase }}
+          LABEL: ${{ inputs.label_trigger }}
+          EVENT: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ACTOR: ${{ github.actor }}
+          COMMENT: ${{ github.event.comment.body }}
+          REVIEW: ${{ github.event.review.body }}
+          IBODY: ${{ github.event.issue.body }}
+          ITITLE: ${{ github.event.issue.title }}
+          LNAME: ${{ github.event.label.name }}
+        run: |
+          ok=false
+          case "$ACTOR" in
+            *"[bot]"|i-am-marvin) ;; # bot/machine actors never stage
+            *)
+              text="$COMMENT$REVIEW"
+              if [ "$EVENT" = "issues" ]; then
+                text="$IBODY
+          $ITITLE"
+              fi
+              esc=$(printf '%s' "$PHRASE" | sed 's/[.[\*^$()+?{|]/\\&/g')
+              printf '%s' "$text" | grep -qE "(^|[[:space:]])$esc([[:space:],.!?;:]|$)" && ok=true
+              [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] && [ "$LNAME" = "$LABEL" ] && ok=true
+              ;;
+          esac
+          echo "trigger check for stage tracking: ok=$ok"
+          echo "ok=$ok" >>"$GITHUB_OUTPUT"
+
       # Atlas tracking (design/atlas-tracking.md): the agent is picking this
       # issue up, so move it to Agent Working. Best-effort — the action never
       # fails the run. On PR-context events the PR resolves to its issue via
-      # the claude/issue-N-* branch (then a Fixes ref). Known noise, accepted:
-      # the stub's substring gate can fire on a comment the action then
-      # declines (word-boundary), briefly staging an unengaged issue.
+      # the claude/issue-N-* branch (then a Fixes ref).
       - name: Stage - Agent Working
+        if: steps.trig.outputs.ok == 'true'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Agent Working
@@ -462,7 +499,7 @@ jobs:
       # failing Surface step — those are exactly the hand-back-to-human cases.
       - name: Stage - Human Review (hand-back)
         if: >-
-          always() && !(
+          always() && steps.trig.outputs.ok == 'true' && !(
             inputs.trigger_phrase == '@auto' &&
             steps.claude.outcome == 'success' &&
             steps.surface.outcome == 'success' &&
