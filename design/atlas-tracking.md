@@ -208,7 +208,9 @@ triggered on `pull_request` `review_requested` and `pull_request_review`
 Stable IDs to bake in as constants (queried at setup, not per-run):
 - project `PVT_kwDOC7YMCM4BU68p`
 - `Status` `PVTSSF_lADOC7YMCM4BU68pzhKizZM` + its `In progress` option id.
-- `Stage` field id + per-option ids — **created at setup** (see Prerequisites).
+- `Stage` field `PVTSSF_lADOC7YMCM4BU68pzhYZEwY` — options: Agent working
+  `18c9cd89`, Human review `d261eb6b`, Sign-off `da6137e6`, Awaiting Merge
+  `add17478`.
 
 ## Prerequisites
 
