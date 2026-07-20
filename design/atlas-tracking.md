@@ -257,6 +257,11 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   **manual UI step** per issue (unlike our own promotions, where the `Fixes` in
   the PR body populates it automatically). The body URL / a comment is the
   scriptable fallback.
+- **A closing keyword in a PR *comment* does NOT create the link** (verified in
+  the ts-mono-test sandbox, same-repo: `Closes #N` in a comment yields only a
+  `cross-referenced` timeline event; `closedByPullRequestsReferences` stays
+  empty). So "have marvin comment on the external PR" is not a linking
+  route — the keyword must be in the PR **body or a commit message**.
 - **Once manually linked, the link IS machine-readable** (verified on
   #120↔upstream#2615: the manual link emits a `connected` timeline event and the
   PR appears in the issue's `closedByPullRequestsReferences` — same bucket as a
