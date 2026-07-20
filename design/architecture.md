@@ -461,3 +461,6 @@ for the model that actually ran (the init line echoes the *requested* model).
   designed in [upstream-review.md](upstream-review.md); not rolled out.
 - **Shared CLAUDE.md/AGENTS.md across repos** — designed in
   [shared-instructions.md](shared-instructions.md); not yet implemented.
+- **Agent work tracking on Atlas** — agents maintain each issue's pipeline stage
+  on the org Atlas board (sprint board / issue list / dashboard visibility).
+  Designed in [atlas-tracking.md](atlas-tracking.md); not yet implemented.
