@@ -197,6 +197,13 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
   **not** auto-close the fork issue (cross-org, no `Fixes` link), so the sync
   sets `Done` / closes it explicitly. This is a backstop and can come after the
   initial rollout.
+  - **Don't auto-discover the upstream PR via the issue's closing-PR
+    references** (learned the hard way). Once promoted, the fork PR is typically
+    *closed* (superseded), and the upstream PR usually references the fork issue
+    *non-closingly* — so it never appears in `closedByPullRequestsReferences`
+    (which surfaces the stale closed fork PR instead). Match on the **recorded
+    upstream URL** (from the promote step) or the **head branch**, and read the
+    live upstream PR — don't trust the issue's link graph here.
 
 The fork therefore runs the **full** `Sign-off → Awaiting Merge → Done` tail —
 driven by the upstream PR's review state, not merge alone (so the poll must read
