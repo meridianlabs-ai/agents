@@ -67,7 +67,7 @@ function pendingProxies() {
   return rows;
 }
 
-function isLinked(issue, pr) {
+function linkedUrls(issue) {
   const q = `query($owner:String!,$name:String!,$n:Int!){
     repository(owner:$owner,name:$name){
       issue(number:$n){
@@ -76,9 +76,7 @@ function isLinked(issue, pr) {
     }
   }`;
   const out = graphql(q, ['-F', `owner=${OWNER}`, '-F', `name=${NAME}`, '-F', `n=${issue}`]);
-  return out.data.repository.issue.closedByPullRequestsReferences.nodes.some(
-    (x) => x.url === pr,
-  );
+  return out.data.repository.issue.closedByPullRequestsReferences.nodes.map((x) => x.url);
 }
 
 async function loggedInUser(page) {
@@ -130,6 +128,7 @@ async function firstVisible(locators) {
 
 async function linkOne(page, { issue, issueUrl, pr }) {
   const prNumber = pr.match(/\/pull\/(\d+)/)?.[1];
+  const preexisting = linkedUrls(issue); // baseline for wrong-link detection
   await page.goto(issueUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500); // let the React sidebar hydrate
 
@@ -154,13 +153,17 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   await search.fill(pr);
   await page.waitForTimeout(2000); // search debounce
 
+  // STRICT match only: the result must carry the exact PR number. Never click
+  // an arbitrary first option — a wrong link is far worse than no link (this
+  // exact bug linked a proxy to an unrelated fork PR once; see git history).
+  const numRe = new RegExp(`#${prNumber}(\\D|$)`);
   const result = await firstVisible([
-    dialog.getByRole('option', { name: new RegExp(`#${prNumber}\\b`) }),
-    dialog.getByRole('option'),
+    dialog.getByRole('option', { name: numRe }),
     dialog.locator(`label:has-text("#${prNumber}")`),
-    dialog.locator('[role="listbox"] > *'),
   ]);
-  if (!result) throw new Error(`No search result for ${pr} in the Development dialog`);
+  if (!result) throw new Error(`No result matching #${prNumber} for ${pr} — not clicking anything`);
+  const label = (await result.textContent())?.trim() ?? '';
+  if (!numRe.test(label)) throw new Error(`Result label ${JSON.stringify(label)} does not match #${prNumber}`);
   await result.click();
 
   // Persist: some variants have an explicit button, others save on close.
@@ -170,10 +173,18 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   if (apply) await apply.click();
   else await page.keyboard.press('Escape');
 
-  // Ground truth: poll the API for the link.
+  // Ground truth: poll the API for the link — and detect a WRONG link (some
+  // other URL newly appearing), which must be reported, not just retried.
+  const before = new Set(preexisting);
   for (let i = 0; i < 6; i++) {
     await page.waitForTimeout(2500);
-    if (isLinked(issue, pr)) return;
+    const now = linkedUrls(issue);
+    if (now.includes(pr)) return;
+    const wrong = now.filter((u) => !before.has(u));
+    if (wrong.length)
+      throw new Error(
+        `WRONG LINK on #${issue}: got ${wrong.join(', ')} instead of ${pr} — unlink it manually in the Development panel`,
+      );
   }
   throw new Error(`UI flow completed but the link never appeared for #${issue}`);
 }
