@@ -78,6 +78,21 @@ Two things that were easy to get wrong:
   the issue, giving `Awaiting Merge → Done` for free. (Genuinely cross-repo
   issue↔PR pairs don't auto-close; those are rare and fall to the fork-style
   sync or a manual close.)
+- **In practice, agent PRs are usually NOT linked** (learned reconciling by
+  hand — do not assume the link exists). claude-code-action's "Claude finished"
+  comment opens a *draft* PR (or offers a "Create PR" link) with a generic body
+  and **no `Fixes` ref**, so most agent PRs have no native issue link and won't
+  auto-`Done` on merge. Two consequences for the build:
+  - **Enforce the closing ref at PR-open** — the dev agent (or the PR-event
+    hook) must add `Fixes owner/repo#N`, or `merge → Done` silently never fires.
+    There is **no public API for a non-closing link** (the UI's Development-panel
+    link uses a private mutation; verified by schema introspection). The only
+    scriptable link is the closing keyword — which also auto-closes, so it's
+    correct only for a PR that actually *resolves* the issue, not a design-only
+    PR.
+  - **The reliable join key is the branch name** `claude/issue-<N>-<timestamp>`,
+    which embeds the issue number — use it to associate a PR with its issue when
+    no `Fixes` link exists (the same key the fork upstream sync already relies on).
 - **Board membership needs no new mechanism.** The team already files most work
   items on Atlas directly, and `set-stage` adds any agent-touched issue itself
   (its `addProjectV2ItemById` step is idempotent). So an issue is on the board
@@ -183,6 +198,41 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
 `Awaiting Merge` and `hold:release` are mainly owned-repo concepts — on the fork
 we don't control upstream's merge timing, so the fork tail is the coarser
 `Sign-off → Done`.
+
+## Stage signals (from hand-reconciling the backlog)
+
+Reconciling existing issues by hand surfaced which signals actually carry the
+stage — useful both for the reconcile pass below and as a cross-check for the
+event-driven transitions:
+
+- **Don't infer stage from PR draft/open state.** Agents open *draft* PRs and
+  then hand off while still draft, so "draft" does not mean Agent working. The
+  authoritative signal is the **handoff comment**, not the PR's status.
+- **Handoff signals, and where they live** (they differ by trigger):
+  - `@claude` one-shot → **`Claude finished @<user>'s task`** comment on the
+    **issue** (often with a "Draft PR #NN" / "Create PR" link) → **Human review**.
+  - `@auto` converged → **`<!-- auto-converged -->`** comment on the **PR** →
+    **Human review**.
+  - `@auto` escalated → "**handing this to a human**" comment on the **PR** →
+    **Human review**.
+  - Loop still running → last agent action is a bare **`@review`** and the
+    reviewer's latest verdict is `suggestions` → **Agent working**.
+  - Promoted upstream → an **open upstream PR** matches the branch → **Sign-off**.
+  A reconcile must read **both** the issue and the PR — `@claude` posts its
+  handoff on the issue, `@auto` on the PR.
+- **Not every in-progress item is agent work.** Some carry a human-authored WIP
+  PR (e.g. a design doc you drafted); those correctly get **no** stage — the
+  overlay is opt-in to agent-touched work.
+
+## Reconcile / backfill
+
+The transitions above are event-driven and only fire *going forward*. Existing
+issues (and any that drift) need a **reconcile pass** that derives the current
+stage from the signals above — handoff comments, the reviewer verdict, the
+branch-name join, and upstream branch-match. Worth keeping as a re-runnable
+sweep (not just a one-time backfill) to catch items that predate the automation
+or slip through. The manual reconcile that seeded the board is exactly this
+logic done by hand.
 
 ## Implementation sketch
 
