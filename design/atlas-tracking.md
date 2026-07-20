@@ -53,6 +53,7 @@ Todo ─▶ Agent working ─▶ Human review ─▶ Sign-off ─▶ Awaiting Me
 | **Sign-off** | You've sent it to an **independent second reviewer**; awaiting their approval. On the fork: promoted upstream, awaiting upstream | second reviewer |
 | **Awaiting Merge** | Approved; waiting for the merge action. `hold:release` (below) marks a deliberate hold vs. just-not-merged-yet | whoever merges |
 | **Done** | Issue closed / PR merged | — |
+| **Awaiting Contributor** | *Off the main pipeline* — an upstream PR you're reviewing, waiting on the (external) contributor. See [External review tracking](#external-review-tracking). | contributor |
 
 Two things that were easy to get wrong:
 
@@ -219,6 +220,28 @@ driven by the upstream PR's review state, not merge alone (so the poll must read
 `reviewDecision`, not just open/merged). Only `hold:release` stays an owned-repo
 concept — we don't control upstream's merge timing.
 
+## External review tracking
+
+Separate from the issue pipeline: **upstream PRs you review** (as an
+`inspect_ai` maintainer) should show up as in-progress work too. These live in
+`UKGovernmentBEIS/inspect_ai`, which can't be a board item directly, so each is
+tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
+
+- **Label `External`** — marks the proxy as an upstream PR under review (vs. our
+  own work).
+- **Stage `Awaiting Contributor`** — the off-pipeline state meaning "we're
+  waiting on the (external) contributor." Set on all of these; move any that are
+  actually awaiting *your* review yourself.
+- The proxy issue is assigned to the reviewer, links the upstream PR by URL (no
+  `@`-mention of the contributor), and is added to Atlas + staged like any item.
+
+**Scope (as seeded):** open upstream PRs where you're a requested reviewer or
+assignee, authored by **external community contributors** — *not* teammates'
+upstream PRs, and *not* our own promotions (those are already tracked via their
+fork issue, e.g. an `Awaiting Merge` item). A future sync could refresh these
+(close the proxy when the upstream PR merges/closes), but seeding is manual for
+now.
+
 ## Stage signals (from hand-reconciling the backlog)
 
 Reconciling existing issues by hand surfaced which signals actually carry the
@@ -287,7 +310,10 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 - `Status` `PVTSSF_lADOC7YMCM4BU68pzhKizZM` + its `In progress` option id.
 - `Stage` field `PVTSSF_lADOC7YMCM4BU68pzhYZEwY` — options: Agent working
   `18c9cd89`, Human review `d261eb6b`, Sign-off `da6137e6`, Awaiting Merge
-  `add17478`.
+  `add17478`, Awaiting Contributor `39c05a50`. (Add options via
+  `updateProjectV2Field` **passing the existing options back with their `id`s** —
+  the option input carries `id`, so existing values are preserved; omit `id`
+  only on the new option.)
 
 ## Prerequisites
 
@@ -299,8 +325,10 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
   (Agent working / Human review / Sign-off / Awaiting Merge) and capture its
   field id + option ids.
 - **Create the labels** in each participating repo (labels must exist per-repo to
-  be applied): the four `stage:*` labels plus the `blocked:input` and
-  `hold:release` flags. A one-time script — or fold into
+  be applied): the four `stage:*` labels, the `blocked:input` and `hold:release`
+  flags, and `External` (upstream PR under review; see
+  [External review tracking](#external-review-tracking)). A one-time script — or
+  fold into
   [`scripts/enable-claude.sh`](../scripts/enable-claude.sh) so newly-onboarded
   repos get them.
 - **No auto-add workflow needed.** `set-stage` puts agent-touched issues on the
