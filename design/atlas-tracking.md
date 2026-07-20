@@ -185,19 +185,23 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
   [Deferred](#deferred)). This is why the owned-repo `review_requested` hook
   doesn't apply on the fork — there's no fork PR reviewer request; the promotion
   is the signal, and it's set locally.
-- **`→ Done` needs a poll, not events.** Upstream isn't our repo, so we can't
-  hook its merge (and can't push workflows into it — even the narrower
-  authorize-marvin-upstream idea in [upstream-review.md](upstream-review.md) is
-  unbuilt). Instead a scheduled job in the fork (reuse the existing **Sync
-  upstream** cadence) reads upstream's *public* PR state — matching on the shared
-  head branch `meridianlabs-ai:<branch>` as the join key — and sets `Done` when
-  the upstream PR merges. Note an upstream merge does **not** auto-close the fork
-  issue (cross-org, no `Fixes` link), so the sync closes it / sets `Done`
-  explicitly. This is a backstop and can come after the initial rollout.
+- **The upstream tail needs a poll, not events.** Upstream isn't our repo, so we
+  can't hook its reviews/merge (and can't push workflows into it — even the
+  narrower authorize-marvin-upstream idea in
+  [upstream-review.md](upstream-review.md) is unbuilt). Instead a scheduled job
+  in the fork (reuse the existing **Sync upstream** cadence) reads upstream's
+  *public* PR state — matching on the shared head branch `meridianlabs-ai:<branch>`
+  as the join key — and advances the fork issue's stage from the upstream PR's
+  **`reviewDecision` + merge state**: open & unapproved → `Sign-off`,
+  **`APPROVED` → `Awaiting Merge`**, merged → `Done`. An upstream merge does
+  **not** auto-close the fork issue (cross-org, no `Fixes` link), so the sync
+  sets `Done` / closes it explicitly. This is a backstop and can come after the
+  initial rollout.
 
-`Awaiting Merge` and `hold:release` are mainly owned-repo concepts — on the fork
-we don't control upstream's merge timing, so the fork tail is the coarser
-`Sign-off → Done`.
+The fork therefore runs the **full** `Sign-off → Awaiting Merge → Done` tail —
+driven by the upstream PR's review state, not merge alone (so the poll must read
+`reviewDecision`, not just open/merged). Only `hold:release` stays an owned-repo
+concept — we don't control upstream's merge timing.
 
 ## Stage signals (from hand-reconciling the backlog)
 
