@@ -40,27 +40,28 @@ into one "agent working" and one "human review"; see
 [Deferred](#deferred--the-finer-pipeline).)
 
 ```
-        ┌──────────────── rework ◀───────────────┐
-        ▼                                         │
-Unstarted ─▶ Agent working ─▶ Human review ─▶ PR review ─▶ Done
-                  ▲                 │
-                  └──── re-engage ──┘
+Unstarted ─▶ Agent working ─▶ Sign-off ─▶ Done
+                  ⇅                │
+             Human review          └── changes requested ─▶ Agent working
 ```
 
 | Stage | Meaning | Ball is in… |
 |---|---|---|
 | **Unstarted** | On the board, no agent has picked it up | — |
-| **Agent working** | An agent is designing/implementing (one `@claude`/`@auto` run or a chain) | agent |
-| **Human review** | Agent produced something and is waiting on a human decision (pre-PR gate, or an `@auto` handoff/escalation) | human |
-| **PR review** | A PR is open and under review — the `@review` loop and/or a human reviewing it | human/agent loop |
+| **Agent working** | An agent is designing/implementing — including opening the PR and running the automated `@review` loop to get it green | agent |
+| **Human review** | The driving human must make a decision: a design/approach gate, or an `@auto` escalation the agent couldn't resolve. Loops back to Agent working when they re-engage | driving human |
+| **Sign-off** | Work is complete and green; an **independent second human** approves it to merge — on the fork, promotes it upstream | second human |
 | **Done** | Issue closed / PR merged | — |
 
-`Agent working` ⇄ `Human review` is a cycle (a human re-engages by
-commenting `@claude`/`@auto`; the agent flips it back). `PR review` is a distinct
-state because it's the specific, already-instrumented `@auto` review→fix loop.
-Note that today's simple flow can go **Agent working → PR review directly** (no
-pre-PR gate); `Human review` is entered on handoff/escalation and by the future
-design gate.
+The automated `@review` review→fix loop is **part of Agent working**, not a
+stage of its own — it's the agent iterating on its own PR. `Human review` and
+`Sign-off` are the two distinct human touchpoints: `Human review` is the driver
+*unblocking* the agent (and loops back to Agent working), `Sign-off` is an
+*independent* approver taking the final step. `@auto`'s convergence handoff
+enters `Sign-off`; its escalation/cap handoff enters `Human review`. Today's
+simple flow can go **Agent working → Sign-off directly** (no pre-PR gate); the
+design gate that would routinely use `Human review` is
+[Deferred](#deferred--the-finer-pipeline).
 
 ## Data model: track the issue, link the PR
 
@@ -98,7 +99,7 @@ Concrete mapping:
 | Unstarted | Todo | *(empty)* | *(none)* |
 | Agent working | In progress | Agent working | `stage:agent-working` |
 | Human review | In progress | Human review | `stage:human-review` |
-| PR review | In progress | PR review | `stage:pr-review` |
+| Sign-off | In progress | Sign-off | `stage:sign-off` |
 | Done | Done | *(empty)* | *(none)* |
 
 Unstarted = open + no `stage:*` label; Done = closed. Only the three active
@@ -119,9 +120,9 @@ the lifecycle events that already exist:
 
 | Transition | Where it fires (existing step) |
 |---|---|
-| → Agent working | `claude.yml` / `@auto` kickoff, at run start |
-| → PR review | `claude.yml` PR-open post-step / `@auto` after it opens the PR & posts `@review` |
-| → Human review | `claude-auto-review.yml` converged/escalation handoff; `claude.yml` when it hands back to a human |
+| → Agent working | `claude.yml` / `@auto` kickoff, at run start (covers PR open + the `@review` loop) |
+| → Sign-off | `claude-auto-review.yml` convergence handoff (CI green, reviewer satisfied) |
+| → Human review | `claude-auto-review.yml` escalation/cap handoff (agent couldn't converge); future design gate |
 | Human review → Agent working | next `@claude`/`@auto` run (human re-engaged) |
 
 The agent side is a single idempotent operation — *set stage S on issue I* —
@@ -185,9 +186,12 @@ folded states can re-expand when the workflow supports them:
 - **Draft issues.** Atlas carries many draft items (project-only, no repo issue).
   Agents can't be triggered from them and can't be `Fixes`-linked; treat as out
   of scope — a draft must graduate to a real issue to enter the pipeline.
-- **`Human review` vs. `PR review` overlap.** Both are human-facing. Kept
-  separate because `PR review` maps to the instrumented `@auto` loop; revisit if
-  the distinction proves noisy in practice.
+- **Two human states, distinguished by *who*.** `Human review` is the driver
+  unblocking the agent (and loops back to Agent working); `Sign-off` is an
+  independent second human approving the finished work. On a small team the same
+  person may play both roles — the states still read correctly, since they
+  differ by what's being asked (a decision that resumes the agent vs. a final
+  approval that ends the work), not strictly by identity.
 - **Field vs. label as source of truth.** Proposed: the `set-stage` step writes
   both atomically, so neither drifts. If they ever disagree, the `Stage` field
   wins (the label is a projection for the issue-list view).
