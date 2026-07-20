@@ -180,11 +180,20 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
 - **`Human review → Sign-off` = the promotion, driven from the local session.**
   You do fork review-and-promote from your local Claude Code session, so that
   session updates Atlas directly: a **skill/instructions** has the local agent,
-  when it opens the upstream PR, set the issue to `Sign-off` and record the
-  upstream PR URL. No GitHub `@promote` workflow is needed (see
-  [Deferred](#deferred)). This is why the owned-repo `review_requested` hook
-  doesn't apply on the fork — there's no fork PR reviewer request; the promotion
-  is the signal, and it's set locally.
+  when it opens the upstream PR, (a) set the issue to `Sign-off`, (b) put the
+  fully-qualified **`Fixes meridianlabs-ai/inspect_ai#N`** in the upstream PR
+  body, and (c) **post the upstream PR URL as a comment on the fork issue**. No
+  GitHub `@promote` workflow is needed (see [Deferred](#deferred)). This is why
+  the owned-repo `review_requested` hook doesn't apply on the fork — there's no
+  fork PR reviewer request; the promotion is the signal, and it's set locally.
+  - **Why (b) and (c) both matter — cross-org linking is weak.** A cross-org
+    upstream PR **never** appears in the fork issue's "linked pull requests"
+    (Development) panel — that's same-repo only. So the fork convention's
+    fully-qualified `Fixes` isn't cosmetic: it's the only thing that makes the
+    upstream PR show in the issue's **closing-PR references** (how the Atlas sync
+    auto-finds it, and how #36/#109 linked; #70 skipped it and had only a buried
+    timeline cross-reference). The comment (c) is the human-visible link on the
+    issue, since the Development panel can't carry it.
 - **The upstream tail needs a poll, not events.** Upstream isn't our repo, so we
   can't hook its reviews/merge (and can't push workflows into it — even the
   narrower authorize-marvin-upstream idea in
