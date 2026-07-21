@@ -214,6 +214,32 @@ jobs:
           echo "trigger check for stage tracking: ok=$ok"
           echo "ok=$ok" >>"$GITHUB_OUTPUT"
 
+      # Acknowledge the trigger with an 👀 reaction from the machine account, so
+      # the requester immediately sees the agent picked their message up
+      # (issue #3). Gated on the same word-boundary trigger check as stage
+      # tracking: no acks on phantom substring events, and no self-acks (the
+      # check excludes bot/machine actors). Reactions are idempotent, so an
+      # edited-comment re-trigger doesn't double up. pull_request_review has no
+      # reaction endpoint — that (rare) trigger path goes unacknowledged.
+      # Best-effort: an ack must never fail the run.
+      - name: Acknowledge trigger (eyes)
+        if: steps.trig.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          case "$EVENT" in
+            issue_comment)
+              gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes --silent || true ;;
+            pull_request_review_comment)
+              gh api "repos/$REPO/pulls/comments/$COMMENT_ID/reactions" -f content=eyes --silent || true ;;
+            issues)
+              gh api "repos/$REPO/issues/$ISSUE/reactions" -f content=eyes --silent || true ;;
+          esac
+
       # Atlas tracking (design/atlas-tracking.md): the agent is picking this
       # issue up, so move it to Agent Working. Best-effort — the action never
       # fails the run. On PR-context events the PR resolves to its issue via
