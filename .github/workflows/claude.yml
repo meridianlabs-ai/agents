@@ -221,6 +221,11 @@ jobs:
       # check excludes bot/machine actors). Reactions are idempotent, so an
       # edited-comment re-trigger doesn't double up. pull_request_review has no
       # reaction endpoint — that (rare) trigger path goes unacknowledged.
+      # Known divergence (shared with stage tracking): steps.trig does NOT
+      # mirror the action's write-access check on the commenter, so on repos
+      # where non-collaborators can comment (the public inspect_ai fork) an
+      # outsider's trigger gets an 👀 even though claude-code-action then
+      # declines the run — the ack means "seen", not "agent is running".
       # Best-effort: an ack must never fail the run.
       - name: Acknowledge trigger (eyes)
         if: steps.trig.outputs.ok == 'true'
