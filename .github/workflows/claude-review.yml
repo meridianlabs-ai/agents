@@ -111,6 +111,16 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      MARVIN_TOKEN:
+        description: >-
+          Machine-account PAT, consumed ONLY by the deterministic ack/stage
+          steps below (👀 reaction on the @review comment; board stage →
+          Agent Working while the review runs) — it is NEVER handed to
+          claude-code-action, so the review agent itself stays read-only (app
+          token + contents:read). Optional: absent, those steps no-op and the
+          reviewer behaves exactly as before.
+        required: false
 
 jobs:
   review:
@@ -122,6 +132,50 @@ jobs:
       id-token: write         # WIF auth
       actions: read
     steps:
+      # Ack + stage run BEFORE the checkout (no workspace needed; the clone
+      # costs ~1 min on large repos and the 👀 should land in seconds).
+      # Word-boundary gate for comment events so a summary that merely quotes
+      # `@review` in backticks doesn't ack; pull_request events (auto-review on
+      # open/ready) always count. Marvin's own loop-posted @review DOES get the
+      # ack — it doubles as "reviewer engaged" observability.
+      - name: Check trigger (ack/stage gating)
+        id: trig
+        env:
+          EVENT: ${{ github.event_name }}
+          COMMENT: ${{ github.event.comment.body }}
+        run: |
+          ok=false
+          if [ "$EVENT" = "pull_request" ]; then
+            ok=true
+          elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
+            ok=true
+          fi
+          echo "ok=$ok" >>"$GITHUB_OUTPUT"
+
+      - name: Acknowledge trigger (eyes)
+        if: steps.trig.outputs.ok == 'true' && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "no MARVIN_TOKEN; skipping ack"; exit 0; }
+          gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes --silent || true
+
+      # The @review loop is part of Agent Working (design/atlas-tracking.md):
+      # a review starting means the automated machinery is engaged again, so
+      # move the issue immediately rather than waiting for the review-fix
+      # round. Idempotent; resolves the PR to its issue via branch/Fixes; the
+      # set-stage action no-ops without the token.
+      - name: Stage - Agent Working (review running)
+        if: steps.trig.outputs.ok == 'true'
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Agent Working
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ github.event.issue.number || github.event.pull_request.number }}
+
       # On a pull_request event the default checkout is the PR merge ref. On an
       # @review comment (issue_comment) the default would be the repo default
       # branch, so resolve the PR head explicitly.
