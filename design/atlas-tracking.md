@@ -327,6 +327,7 @@ apply the population-specific mapping:
 | `APPROVED` | — | → Awaiting Merge |
 | `CHANGES_REQUESTED` | — | → Human Review |
 | approval dismissed (review required again) | — | Awaiting Merge → Sign-off only |
+| review re-requested after changes (sticky `CHANGES_REQUESTED` + pending request) | — | Human Review → Sign-off (the ONE transition out of Human Review — it's the driver's "handed back upstream" act; a fresh promotion parked in Human Review stays parked) |
 | contributor activity newer than reviewer's last | Awaiting Contributor → Human Review | — |
 | merged | close, clear Stage → Done | close w/ comment, clear Stage → Done |
 | closed unmerged | close w/ comment → Done | → Human Review w/ comment |
