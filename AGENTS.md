@@ -15,6 +15,10 @@ take effect on every repo's next run.
 
 - `.github/workflows/claude.yml` — reusable dev-agent workflow (`@claude`).
 - `.github/workflows/claude-review.yml` — reusable reviewer workflow (`@review`).
+- `.github/workflows/*-stub.yml` — this repo's OWN caller stubs (dogfood): the
+  agents run here too. `-stub` suffix because the canonical stub filenames are
+  taken by the reusable definitions; keep them in sync with `examples/`. No CI
+  here, so the @auto stub omits the CI-fix half.
 - `examples/` — stubs copied into caller repos by `scripts/enable-claude.sh`.
 - `design/` — rationale and history; read [design/architecture.md](design/architecture.md)
   before changing how the agents work.

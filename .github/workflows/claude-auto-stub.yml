@@ -1,0 +1,40 @@
+# The agents repo's OWN @auto-loop stub (adapted from
+# examples/claude-auto-stub.yml; -stub suffix because claude-auto.yml is the
+# reusable definition here). ONE deliberate deviation: this repo has NO CI
+# workflow ("no unit-test suite" — changes are validated by triggering the
+# agents), so the example's `workflow_run` trigger and ci-fix job are omitted —
+# there is nothing for the CI-fix loop to react to. Only the review->fix half
+# of @auto runs here. If a CI workflow is ever added, restore the ci-fix job
+# from the example and name the CI workflow in on.workflow_run.workflows.
+#
+# Requires the MARVIN_TOKEN org secret scoped to this repo.
+
+name: Claude Auto
+
+on:
+  # Phase 2/3: react to the reviewer's marked summary comment.
+  issue_comment:
+    types: [created]
+
+jobs:
+  # Review -> fix / handoff. Fire only on the reviewer's marked summary comment
+  # on a PR. Cheap gate here (it's a PR, body has the marker); the reusable
+  # workflow does the rest (comment author == reviewer, same-repo, `auto`
+  # label, round cap).
+  review-fix:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != '' &&
+      contains(github.event.comment.body, '<!-- claude-review-summary -->')
+    uses: meridianlabs-ai/agents/.github/workflows/claude-auto-review.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    secrets:
+      MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+    with:
+      pr_number: ${{ github.event.issue.number }}
+      comment_author: ${{ github.event.comment.user.login }}

@@ -1,0 +1,31 @@
+# The agents repo's OWN reviewer stub (copy of examples/claude-review-stub.yml;
+# -stub suffix because claude-review.yml is the reusable definition here).
+# Auto-reviews PRs on open (PRs here target main, which carries this file, so
+# the pull_request trigger fires — unlike the pristine-base fork) and on
+# demand via @review.
+name: Review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    # Run on PR events (skipping drafts — they get reviewed via
+    # ready_for_review when marked ready), or on a PR comment containing
+    # @review. An explicit @review still works on a draft. `@review` does not
+    # collide with the dev agent's `@claude` trigger.
+    if: >
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft != true) ||
+      (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '@review'))
+    uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+      actions: read
