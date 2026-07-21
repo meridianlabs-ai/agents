@@ -370,6 +370,11 @@ event-driven transitions:
   - Loop still running → the **`auto` label is still present** and the last
     agent action is a bare **`@review`** (reviewer verdict `suggestions`) →
     **Agent Working**.
+  - Review started (`@review` posted, or auto-review on PR open) → the
+    **reviewer workflow itself** sets **Agent Working** immediately (and 👀-acks
+    the `@review` comment) — the loop is engaged from the moment the review
+    begins, not from the first fix round. Its `MARVIN_TOKEN` is consumed only
+    by these deterministic steps; the review agent stays read-only.
   - **The `auto` label is the reliable discriminator.** A loop that looks active
     (`@review`, verdict `suggestions`) can hit its cap and escalate between
     glances — so don't infer Agent-working from a mid-loop comment alone; if the
