@@ -63,6 +63,14 @@ same-repo `Fixes` ref in the PR body.
      --head meridianlabs-ai:<branch> --title "<title>" --body "<body>"
    ```
 
+   Then assign `dragonstyle` and request their review (idempotent — skip
+   whichever is already set):
+
+   ```sh
+   gh api repos/UKGovernmentBEIS/inspect_ai/issues/<M>/assignees -X POST -f "assignees[]=dragonstyle"
+   gh api repos/UKGovernmentBEIS/inspect_ai/pulls/<M>/requested_reviewers -X POST -f "reviewers[]=dragonstyle"
+   ```
+
 3. **Bookkeeping** (each idempotent — check before writing):
 
    a. **`Upstream PR` field** ← the upstream PR URL (the sync's join key; a
@@ -104,7 +112,8 @@ same-repo `Fixes` ref in the PR body.
 
 - Never push to `main`/`meridian`; promotion only opens a PR from the existing
   branch.
-- Upstream is not ours: no labels, no assignees, no Meridian-internal markers
-  on the upstream PR beyond the `Fixes` ref.
+- Upstream is not ours: no labels and no Meridian-internal markers on the
+  upstream PR beyond the `Fixes` ref. The one exception is the `dragonstyle`
+  assignee + review request from step 2 (explicitly requested by Ransom).
 - Do not merge anything — upstream merges are upstream's call; the fork issue
   closes via the sync when that happens.
