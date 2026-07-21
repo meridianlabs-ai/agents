@@ -170,12 +170,12 @@ jobs:
       id-token: write
       actions: read
     steps:
-      # Full history + tags: setuptools-scm versioning needs tags, and Claude
-      # uses git log/blame to understand code. Costs ~1 min on large repos.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
+      # The trig check, the 👀 ack, and the Agent Working stage move all run
+      # BEFORE the checkout: none of them touch the workspace (env-only script;
+      # remotely-fetched composite action; API calls), and the fetch-depth-0
+      # clone costs ~1 min on large repos — the ack should land in seconds,
+      # not after the clone.
+      #
       # Atlas stage tracking must NOT trust the stub's cheap substring gate:
       # reviewer summaries legitimately contain a backticked `@claude` ("reply
       # with a top-level @claude comment"), which starts this workflow even
@@ -257,6 +257,12 @@ jobs:
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}
+
+      # Full history + tags: setuptools-scm versioning needs tags, and Claude
+      # uses git log/blame to understand code. Costs ~1 min on large repos.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Provision the project environment so the agent's allow-listed
       # pytest/ruff/mypy can actually run (a bare runner has neither the deps
