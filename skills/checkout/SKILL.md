@@ -1,64 +1,65 @@
 ---
 name: checkout
-description: Check out the PR branch for an issue — /checkout <issue-number> finds the issue's PR (linked-PR chip, then agent comments, then the claude/issue-N-* branch convention) and checks its branch out in the current repo clone.
+description: Check out the PR branch for an issue — /checkout <issue-number> finds the issue's PR (linked-PR chip fast path, then agent comments, then the claude/issue-N-* branch convention) and checks its branch out in the current repo clone.
 ---
 
 # Check out an issue's PR branch
 
-Given an issue number (`/checkout 97`), find the right PR for that issue in
-the **current directory's repo** and check out its branch.
+Given an issue number (`/checkout 97`), find the right PR for that issue and
+check out its branch. This is a mechanical skill: the common case is TWO
+commands — run them without narration and report one line at the end.
 
-## Steps
+**Which repo owns the issue:** the remote owned by `meridianlabs-ai` — NOT
+necessarily `origin`. Fork clones of inspect_ai have `origin` pointing at
+upstream (UKGovernmentBEIS) and the fork under another remote name; upstream's
+issue numbers are unrelated, so never query the issue there.
 
-1. **Repo + safety.** `REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)`
-   from the cwd. If `git status --porcelain` is non-empty, STOP and show the
-   dirty files — never switch branches over uncommitted work without the
-   user's say-so.
+## Fast path (usual case: issue has a linked-PR chip)
 
-2. **Find the PR** (the design-doc reconcile rules, in order):
+**Command 1** — dirty-check, resolve the meridian repo, chip query, all at once:
 
-   a. **Linked-PR chip** — authoritative when present:
+```sh
+git status --porcelain
+REPO=$(git remote -v | grep -om1 'meridianlabs-ai/[A-Za-z0-9._-]*' | head -1 | sed 's/\.git$//')
+gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){title closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state repository{nameWithOwner}}}}}}' \
+  -F o="${REPO%%/*}" -F r="${REPO##*/}" -F n=<N>
+```
 
-      ```sh
-      gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state repository{nameWithOwner}}}}}}' \
-        -F o=<owner> -F r=<repo> -F n=<N>
-      ```
+- Dirty tree → STOP, show the files (never switch over uncommitted work).
+- No meridian remote → fall back to `gh repo view --json nameWithOwner`.
 
-      Ignore cross-repo entries (an upstream promotion PR is not checkout-able
-      here — but see step 4). Prefer OPEN; a merged/closed one is a fallback.
+**Command 2** — when the chip shows an OPEN same-repo PR `M` (prefer open
+over closed; ignore cross-repo entries here — see fallbacks):
 
-   b. **Agent comments** — scan ALL `i-am-marvin` comments on the issue for
-      `/pull/<M>` references (not just the last comment: earlier runs may hold
-      the PR; superseded PRs may sit next to the live one). Collect every ref,
-      check each PR's state, keep the open one (newest if several).
+```sh
+gh pr checkout <M> -R "$REPO" && git log --oneline -3 && git branch --show-current
+```
 
-   c. **Branch convention** — list open PRs and match heads against
-      `claude/issue-<N>-*`:
+Report one line: branch, PR, issue title. Done.
 
-      ```sh
-      gh api "repos/$REPO/pulls?state=all&per_page=100" \
-        --jq '.[] | select(.head.ref|test("^claude/issue-<N>-")) | {number, state, head:.head.ref}'
-      ```
+## Slow path (no chip, or only closed/cross-repo entries)
 
-   If candidates disagree, prefer: open chip > open comment-ref > open
-   branch-match > most recently updated. Say which rule matched.
+b. **Agent comments** — scan ALL `i-am-marvin` comments on the issue for
+   `/pull/<M>` refs (not just the last comment; superseded PRs sit next to
+   live ones). Keep the open one, newest if several.
 
-3. **Check it out.**
+c. **Branch convention** — match PR heads against `claude/issue-<N>-*`:
 
    ```sh
-   gh pr checkout <M>
+   gh api "repos/$REPO/pulls?state=all&per_page=100" \
+     --jq '.[] | select(.head.ref|test("^claude/issue-<N>-")) | {number, state, head:.head.ref}'
    ```
 
-   (`gh pr checkout` fetches and tracks the PR branch; works for same-repo
-   heads, which all agent PRs are.) Confirm with `git log --oneline -3` and
-   report: issue, PR, branch, and how the PR was found.
+If candidates disagree: open chip > open comment-ref > open branch-match >
+most recently updated. Say which rule matched.
 
-4. **Fallbacks — tell the user instead of guessing:**
-   - **No PR but a branch exists** (a "Claude finished" comment names a
-     `claude/issue-N-*` branch that was never turned into a PR):
-     `git fetch origin <branch> && git switch <branch>` — say there's no PR.
-   - **Only a cross-repo (upstream) PR exists**: the work was promoted; the
-     branch usually still exists on the fork — check out the upstream PR's
-     head branch name from origin. Note it's under upstream review.
-   - **Nothing found**: list what WAS found (comments scanned, branches
-     probed) so the user can point at the right thing.
+## Fallbacks — tell the user instead of guessing
+
+- **No PR but a branch exists** (a "Claude finished" comment names a
+  `claude/issue-N-*` branch never turned into a PR): fetch + switch to it from
+  the meridian remote; say there's no PR.
+- **Only a cross-repo (upstream) chip**: the work was promoted (possibly
+  merged). Offer the upstream PR's head branch from the meridian remote and
+  say it's under upstream review / already merged.
+- **Nothing found**: list what was scanned so the user can point at the right
+  thing.
