@@ -359,6 +359,11 @@ event-driven transitions:
     **issue** (often with a "Draft PR #NN" / "Create PR" link) → **Human Review**.
   - `@auto` converged → **`<!-- auto-converged -->`** comment on the **PR** →
     **Human Review**.
+  - `@auto` self-handoff → **`<!-- auto-handoff -->`** comment on the **PR** →
+    **Human Review**. The review-fix agent ends the loop itself (no `@review`)
+    when a round was documentation-only nits, or when everything remaining was
+    declined with rationale; the workflow detects the marker and sets the
+    stage.
   - `@auto` escalated (review-round / fix-attempt cap, or no-progress) → the
     "**handing this to a human**" comment on the **PR** **and the `auto` label
     removed** → **Human Review**.

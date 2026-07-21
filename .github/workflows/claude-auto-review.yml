@@ -334,11 +334,15 @@ jobs:
           token: ${{ secrets.MARVIN_TOKEN || github.token }}
 
       # Capture the branch tip before the agent runs so the error-surfacing step
-      # can tell whether the agent's work actually landed on the branch.
+      # can tell whether the agent's work actually landed on the branch — and
+      # the start time, so the self-handoff detector below only matches
+      # comments this run posted.
       - name: Record base SHA
         if: steps.gate.outputs.act == 'fix'
         id: base
-        run: echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          echo "started=$(date -u +%FT%TZ)" >>"$GITHUB_OUTPUT"
 
       - name: Record round
         if: steps.gate.outputs.act == 'fix'
@@ -374,7 +378,7 @@ jobs:
           ROUND: ${{ steps.gate.outputs.round }}
           CAP: ${{ inputs.review_round_cap }}
         run: |
-          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, reply to that specific comment with a brief rationale instead of changing code. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, commit and push to the current branch as the machine account (this re-runs CI), then post a single top-level comment of exactly \`@review\` to request re-review. After pushing, resolve the inline review threads you fully addressed in code, so settled feedback is visibly closed: list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\`, \`isResolved\`, and its \`comments\`), then for each thread you resolved in code run the \`resolveReviewThread\` mutation, e.g. \`gh api graphql -f query='mutation(\$id:ID!){resolveReviewThread(input:{threadId:\$id}){thread{isResolved}}}' -F id=<threadId>\`. Leave UNRESOLVED any thread you deliberately declined (the one you replied to with a rationale) so a human can adjudicate it, and never resolve a thread you did not actually address. Hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, or every remaining suggestion is one you have deliberately declined with a posted rationale. To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then post ONE comment summarizing what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status, and @-mention the PR's originating human (the author of the issue referenced by \"Fixes #<n>\" in the PR body, if any). Do NOT merge — auto hands the final step to a human. In any comment you post here, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Skip posting if an equivalent handoff comment already exists." >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, reply to that specific comment with a brief rationale instead of changing code. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, commit and push to the current branch as the machine account (this re-runs CI), then post a single top-level comment of exactly \`@review\` to request re-review. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you pushed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT post @review — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. After pushing, resolve the inline review threads you fully addressed in code, so settled feedback is visibly closed: list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\`, \`isResolved\`, and its \`comments\`), then for each thread you resolved in code run the \`resolveReviewThread\` mutation, e.g. \`gh api graphql -f query='mutation(\$id:ID!){resolveReviewThread(input:{threadId:\$id}){thread{isResolved}}}' -F id=<threadId>\`. Leave UNRESOLVED any thread you deliberately declined (the one you replied to with a rationale) so a human can adjudicate it, and never resolve a thread you did not actually address. Hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a posted rationale, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then post ONE comment whose FIRST line is exactly \`<!-- auto-handoff -->\` (the workflow moves the board stage on that marker), followed by a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status, and @-mention the PR's originating human (the author of the issue referenced by \"Fixes #<n>\" in the PR body, if any). Do NOT merge — auto hands the final step to a human. In any comment you post here, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Skip posting if an equivalent handoff comment already exists." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix'
@@ -395,6 +399,39 @@ jobs:
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
+
+      # The agent may end the loop itself instead of posting @review — a
+      # documentation-only nit round, or all remaining feedback declined with
+      # rationale — by posting a handoff comment whose first line is
+      # <!-- auto-handoff -->. Detect a fresh one (posted by the machine
+      # account after this run started) and move the board to Human Review;
+      # without this the stage would stay parked at Agent Working, since the
+      # deterministic converged/escalate paths only fire on reviewer verdicts.
+      - name: Detect agent self-handoff
+        id: selfhandoff
+        if: steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          SINCE: ${{ steps.base.outputs.started }}
+        run: |
+          set -euo pipefail
+          n=$(gh api "repos/$REPO/issues/$PR/comments?since=$SINCE" \
+                --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|contains("<!-- auto-handoff -->")))] | length' \
+                2>/dev/null || echo 0)
+          echo "self-handoff comments since $SINCE: $n"
+          echo "found=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+
+      - name: Stage - Human Review (self-handoff)
+        if: steps.selfhandoff.outputs.found == 'true'
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Human Review
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ inputs.pr_number }}
+          branch: ${{ steps.gate.outputs.head_branch }}
 
       # Surface agent errors the action swallows (model overload/529, 404, etc.),
       # which otherwise leave the review-fix run green with no fix/handoff posted.

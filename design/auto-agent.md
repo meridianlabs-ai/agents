@@ -126,6 +126,18 @@ architecture.md → reviewer — to avoid re-billing every push), and the result
 review is the next round. Counting explicit review requests, not raw pushes,
 keeps CI-only fix iterations from burning the budget.
 
+**Documentation-only nit rounds end the loop instead of re-reviewing** (added
+2026-07-21): when every suggestion the fix agent acted on was explicitly
+non-blocking (nit-level) AND every change it pushed is documentation-only
+(markdown/doc files, code comments, docstrings — zero behavioral code), it
+skips `@review` and hands off to a human directly — another review round would
+just re-read prose. The judgment lives in the agent's prompt; the *detection*
+is deterministic: any agent self-handoff comment starts with the
+`<!-- auto-handoff -->` marker, which the workflow keys on (it moves the Atlas
+stage to Human Review — see atlas-tracking.md). The same marker covers the
+older self-handoff case (all remaining feedback declined with rationale),
+which previously ended the loop without any deterministic trace.
+
 **Counting must be deterministic, not LLM-maintained** — it gates whether the
 agent runs at all. The orchestration step counts completed review cycles for the
 PR via the API (`@review` submissions on this PR) and compares to 3 before
