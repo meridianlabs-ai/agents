@@ -473,7 +473,12 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
    one repo (inspect_flow), confirm the board tracks a lifecycle end-to-end.
 3. Add the PR-event hook (`Sign-off`/`Awaiting Merge`).
 4. Fork: the local promote skill (updates `Sign-off`), then the upstream `→ Done`
-   sync as a backstop.
+   sync as a backstop. **Both built**: the sync is the hourly `atlas-sync.yml`
+   on the fork's `meridian` branch; the promote skill is
+   [skills/promote/SKILL.md](../skills/promote/SKILL.md) (canonical here,
+   symlinked into `~/.claude/skills/promote` so it loads in any local
+   session). The skill is idempotent — running it on an already-promoted issue
+   verifies/heals the four bookkeeping items instead of duplicating.
 
 ## Deferred
 
