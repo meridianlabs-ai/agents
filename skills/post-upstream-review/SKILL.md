@@ -81,8 +81,10 @@ relay ("only the blocking one", "soften the tone", "also ask about X").
 ## Cautions
 
 - Outward-facing: everything posted lands on a public PR under the user's
-  name. When instructions and findings conflict, instructions win; when in
-  doubt about tone or inclusion, show the composed review and ask BEFORE
-  posting.
+  name — and invoking this skill IS the authorization to post: the maintainer
+  reviews the findings on the proxy before invoking, so compose and post
+  directly, no preview step. Stop and ask only when something is genuinely
+  unresolvable: no findings comment on the proxy, instructions that contradict
+  each other, or a finding that no longer matches the PR's current state.
 - Do not edit the contributor's PR, push to their branch, or touch labels /
   assignees upstream.
