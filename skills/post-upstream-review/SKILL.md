@@ -26,8 +26,8 @@ relay ("only the blocking one", "soften the tone", "also ask about X").
    finding). Rewrite each finding as direct maintainer-to-contributor
    feedback:
    - courteous, concrete, actionable; no internal jargon;
-   - NEVER mention the proxy issue, the automation, Claude, marvin, or
-     Meridian tracking — this is the maintainer's own review;
+   - NEVER mention the proxy issue, marvin, or Meridian tracking internals —
+     but the AI origin IS disclosed, via the standard footer in step 4;
    - keep blocking/non-blocking framing ("needs fixing before merge" vs
      "optional/nit").
 
@@ -51,6 +51,13 @@ relay ("only the blocking one", "soften the tone", "also ask about X").
    relaying any blocking finding, else `COMMENT` — overridable by the user's
    instructions. Never `APPROVE` from this skill; approval is a separate
    deliberate act.
+
+   The review body MUST end with the AI-generation disclaimer footer:
+
+   ```
+   ---
+   *This review was AI-generated, and reviewed by a maintainer before posting.*
+   ```
 
 5. **Bookkeeping.**
    - Proxy stage → **Awaiting Contributor** (ball is with them now):
