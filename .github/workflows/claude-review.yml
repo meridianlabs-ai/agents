@@ -231,11 +231,16 @@ jobs:
         if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
-      # External mode swaps the prompt: review the upstream diff, post ONE
-      # findings comment on the PROXY issue — never on the contributor's
-      # upstream PR (the maintainer decides what to relay), and never the
-      # claude-review-summary marker (this is for the human, not the @auto
-      # loop). Tests can't run (environment unprovisioned) — static review.
+      # External mode keeps the caller's review_prompt (and the
+      # append_system_prompt guidance, which flows in via claude_args as
+      # always) — Meridian maintains the upstream repo, so its review
+      # standards apply there too. Only the MECHANICS are overridden, appended
+      # after the prompt so they win: review the upstream diff; post the
+      # ENTIRE review as ONE comment on the PROXY issue — never anything on
+      # the contributor's upstream PR (the maintainer decides what to relay),
+      # no inline comments, no claude-review-summary marker (this output is
+      # for the human, not the @auto loop), and no test runs (environment
+      # unprovisioned — static review).
       - name: Compose review prompt
         id: reviewprompt
         env:
@@ -250,7 +255,7 @@ jobs:
             printf 'value=%s\n' "$DEFAULT_PROMPT" >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          printf 'value=%s\n' "You are reviewing an EXTERNAL contributor's upstream pull request on behalf of the maintainer. The PR is $UP_REPO#$UP_NUM; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, using the checked-out tree to verify claims by reading the surrounding code. Focus on correctness bugs, security issues, API-design concerns, and fit with the project's conventions. This is a STATIC review: the environment is not provisioned, so do not run tests, and do NOT modify any files. Post your findings as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\` — do NOT comment on, review, or react to the upstream PR itself (the maintainer decides what feedback to relay), and do NOT include any claude-review-summary marker (this review is for a human, not the automation loop). Structure the comment: a one-line verdict (looks ready to approve / changes needed / needs discussion), then findings with file:line references, each tagged blocking or non-blocking; if the diff is clean say so concisely. You MUST post the comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
+          printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING to the upstream PR — no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay. Instead post your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\`. Do NOT post the '🔎 Review complete' marker comment at all — this review is for a human, not the automation loop. The environment is NOT provisioned: skip pytest/ruff/mypy entirely and review statically. Do not modify any files. You MUST post the proxy-issue comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         id: claude
