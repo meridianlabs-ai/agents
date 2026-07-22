@@ -1,6 +1,6 @@
 ---
 name: post-upstream-review
-description: Relay an external review upstream — /post-upstream-review <proxy-issue-number> [instructions] takes the review findings from an External proxy issue, posts them as a single review on the contributor's upstream PR (inline comments on the right lines where possible), then moves the proxy to Awaiting Contributor.
+description: Relay an external review upstream — /post-upstream-review <proxy-issue-number> [instructions] takes the review findings from an External proxy issue, posts them as a single review on the contributor's upstream PR (inline comments on the right lines where possible), then moves the proxy to Contributor.
 ---
 
 # Post external review comments upstream
@@ -60,7 +60,7 @@ relay ("only the blocking one", "soften the tone", "also ask about X").
    ```
 
 5. **Bookkeeping.**
-   - Proxy stage → **Awaiting Contributor** (ball is with them now):
+   - Proxy stage → **Contributor** (ball is with them now):
 
      ```sh
      # item id: issue -> projectItems (project 1), then:

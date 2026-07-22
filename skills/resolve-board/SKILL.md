@@ -64,6 +64,6 @@ preflight failure, WRONG LINK).
 - The sync only manages issues assigned to `ransomr` (pilot scoping) and only
   those with an `Upstream PR` field for the promotion tail; promotion
   bookkeeping itself is the `promote` skill's job.
-- Neither mechanism touches Agent Working / Human Review transitions driven by
+- Neither mechanism touches Agent / Review transitions driven by
   the agent workflows — this skill reconciles the upstream tail and the chips,
   not the agent lifecycle.

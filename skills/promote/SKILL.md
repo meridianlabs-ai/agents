@@ -87,7 +87,7 @@ same-repo `Fixes` ref in the PR body.
    b. **Stage → `Sign-off`** (and `Status → In progress`), same mutation shape
       with field `PVTSSF_lADOC7YMCM4BU68pzhYZEwY` option `da6137e6` (and
       `PVTSSF_lADOC7YMCM4BU68pzhKizZM` option `47fc9ee4`). Skip if already at
-      Sign-off or beyond (Awaiting Merge — the sync may have advanced it).
+      Sign-off or beyond (Merge — the sync may have advanced it).
 
    c. **Comment the upstream link on the fork issue** (the human-visible
       pointer; the Development chip comes from the `Fixes` ref, not this):
@@ -104,8 +104,8 @@ same-repo `Fixes` ref in the PR body.
 
 4. **Report.** Upstream PR link, issue link, stage set, and which bookkeeping
    steps were created vs. already present (healed vs. no-op). From here the
-   hourly Atlas sync owns the tail: approval → Awaiting Merge, merge → Done
-   (it closes the fork issue), changes-requested → Human Review, re-request →
+   hourly Atlas sync owns the tail: approval → Merge, merge → Done
+   (it closes the fork issue), changes-requested → Review, re-request →
    Sign-off.
 
 ## Cautions

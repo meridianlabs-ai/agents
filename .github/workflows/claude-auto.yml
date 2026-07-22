@@ -202,21 +202,21 @@ jobs:
       # Atlas tracking (design/atlas-tracking.md): a CI-fix round is the agent
       # working the PR's issue; an escalation hands it to a human. The PR
       # branch resolves to its issue via claude/issue-N-* (then a Fixes ref).
-      - name: Stage - Agent Working
+      - name: Stage - Agent
         if: steps.gate.outputs.act == 'fix'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Agent Working
+          stage: Agent
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ steps.gate.outputs.pr }}
           branch: ${{ inputs.head_branch }}
 
-      - name: Stage - Human Review (escalation)
+      - name: Stage - Review (escalation)
         if: steps.gate.outputs.act == 'escalate'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Human Review
+          stage: Review
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ steps.gate.outputs.pr }}

@@ -255,24 +255,24 @@ jobs:
 
       # Atlas tracking (design/atlas-tracking.md): a review-fix round is the
       # agent working the PR's issue; both @auto exits — converged AND
-      # escalated — hand back to a human (there is no Agent Working →
+      # escalated — hand back to a human (there is no Agent →
       # Sign-off; the driver reaches Sign-off by sending it onward). The PR
       # resolves to its issue via claude/issue-N-* (then a Fixes ref).
-      - name: Stage - Agent Working
+      - name: Stage - Agent
         if: steps.gate.outputs.act == 'fix'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Agent Working
+          stage: Agent
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ inputs.pr_number }}
           branch: ${{ steps.gate.outputs.head_branch }}
 
-      - name: Stage - Human Review (handoff)
+      - name: Stage - Review (handoff)
         if: steps.gate.outputs.act == 'converged' || steps.gate.outputs.act == 'escalate'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Human Review
+          stage: Review
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ inputs.pr_number }}
@@ -404,8 +404,8 @@ jobs:
       # documentation-only nit round, or all remaining feedback declined with
       # rationale — by posting a handoff comment whose first line is
       # <!-- auto-handoff -->. Detect a fresh one (posted by the machine
-      # account after this run started) and move the board to Human Review;
-      # without this the stage would stay parked at Agent Working, since the
+      # account after this run started) and move the board to Review;
+      # without this the stage would stay parked at Agent, since the
       # deterministic converged/escalate paths only fire on reviewer verdicts.
       - name: Detect agent self-handoff
         id: selfhandoff
@@ -423,11 +423,11 @@ jobs:
           echo "self-handoff comments since $SINCE: $n"
           echo "found=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
 
-      - name: Stage - Human Review (self-handoff)
+      - name: Stage - Review (self-handoff)
         if: steps.selfhandoff.outputs.found == 'true'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Human Review
+          stage: Review
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ inputs.pr_number }}

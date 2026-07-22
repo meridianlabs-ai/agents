@@ -11,8 +11,8 @@ description: >-
 inputs:
   stage:
     description: >-
-      Target stage name: Agent Working | Human Review | Sign-off |
-      Awaiting Merge | Awaiting Contributor.
+      Target stage name: Agent | Review | Sign-off |
+      Merge | Contributor.
     required: true
   token:
     description: >-
@@ -65,11 +65,11 @@ runs:
         [ -n "$GH_TOKEN" ] || skip "no token"
 
         case "$STAGE" in
-          "Agent Working")        opt=18c9cd89 ;;
-          "Human Review")         opt=d261eb6b ;;
+          "Agent")        opt=18c9cd89 ;;
+          "Review")         opt=d261eb6b ;;
           "Sign-off")             opt=da6137e6 ;;
-          "Awaiting Merge")       opt=add17478 ;;
-          "Awaiting Contributor") opt=39c05a50 ;;
+          "Merge")       opt=add17478 ;;
+          "Contributor") opt=39c05a50 ;;
           *) warn "unknown stage '$STAGE'" ;;
         esac
 

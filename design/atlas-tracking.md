@@ -36,11 +36,11 @@ new infrastructure.
 
 Six states in a mostly-linear pipeline. (We deliberately fold the finer pipeline
 — separate design vs. implement phases, and separate design-review vs.
-implementation-review gates — into one "Agent Working" and one "Human Review";
+implementation-review gates — into one "Agent" and one "Review";
 see [Deferred](#deferred).)
 
 ```
-Todo ─▶ Agent Working ─▶ Human Review ─▶ Sign-off ─▶ Awaiting Merge ─▶ Done
+Todo ─▶ Agent ─▶ Review ─▶ Sign-off ─▶ Merge ─▶ Done
               ▲                │
               └─── re-engage ──┘   (@claude / @auto again)
 ```
@@ -48,23 +48,23 @@ Todo ─▶ Agent Working ─▶ Human Review ─▶ Sign-off ─▶ Awaiting Me
 | Stage | Meaning | Ball is in… |
 |---|---|---|
 | **Todo** | On the board, no agent has picked it up (the existing `Status: Todo`) | — |
-| **Agent Working** | An agent is designing/implementing — including opening the PR and running the automated `@review` loop to get it green | agent |
-| **Human Review** | The agent has handed back and *you* (the driver) review: re-engage the agent, or send it onward. Always the post-agent gate | driver |
+| **Agent** | An agent is designing/implementing — including opening the PR and running the automated `@review` loop to get it green | agent |
+| **Review** | The agent has handed back and *you* (the driver) review: re-engage the agent, or send it onward. Always the post-agent gate | driver |
 | **Sign-off** | You've sent it to an **independent second reviewer**; awaiting their approval. On the fork: promoted upstream, awaiting upstream | second reviewer |
-| **Awaiting Merge** | Approved; waiting for the merge action. `hold:release` (below) marks a deliberate hold vs. just-not-merged-yet | whoever merges |
+| **Merge** | Approved; waiting for the merge action. `hold:release` (below) marks a deliberate hold vs. just-not-merged-yet | whoever merges |
 | **Done** | Issue closed / PR merged | — |
-| **Awaiting Contributor** | *Off the main pipeline* — an upstream PR you're reviewing, waiting on the (external) contributor. See [External review tracking](#external-review-tracking). | contributor |
+| **Contributor** | *Off the main pipeline* — an upstream PR you're reviewing, waiting on the (external) contributor. See [External review tracking](#external-review-tracking). | contributor |
 
 Two things that were easy to get wrong:
 
-- **There is no `Agent Working → Sign-off`.** Every `@auto` exit — *converged*
+- **There is no `Agent → Sign-off`.** Every `@auto` exit — *converged*
   (CI green, bot-review clean) *or* *escalated* (couldn't converge) — hands back
-  to **Human Review**. From there *you* decide: re-engage the agent (back to
-  Agent Working) or send it to a reviewer (Sign-off). The automated `@review`
-  loop is part of **Agent Working**, not a stage — it's the agent iterating on
+  to **Review**. From there *you* decide: re-engage the agent (back to
+  Agent) or send it to a reviewer (Sign-off). The automated `@review`
+  loop is part of **Agent**, not a stage — it's the agent iterating on
   its own PR.
-- **`Sign-off` and `Awaiting Merge` are separated by the approval.** `Sign-off` =
-  *awaiting* the reviewer; `Awaiting Merge` = *got* the approval, awaiting the
+- **`Sign-off` and `Merge` are separated by the approval.** `Sign-off` =
+  *awaiting* the reviewer; `Merge` = *got* the approval, awaiting the
   merge. This split is what lets you distinguish "held for a stable release
   point" from "just haven't merged yet" — see [Flags](#orthogonal-flags-human-set).
 
@@ -76,7 +76,7 @@ Two things that were easy to get wrong:
   issue with a fully-qualified `Fixes owner/repo#N` (the fork already mandates
   this; make it universal). That populates Atlas's **Linked pull requests**
   field, and — because it's a *same-repo* reference — merging the PR auto-closes
-  the issue, giving `Awaiting Merge → Done` for free. (Genuinely cross-repo
+  the issue, giving `Merge → Done` for free. (Genuinely cross-repo
   issue↔PR pairs don't auto-close; those are rare and fall to the fork-style
   sync or a manual close.)
 - **Closing keywords are only processed on PRs that target the DEFAULT
@@ -129,10 +129,10 @@ Concrete mapping:
 | Stage | `Status` (existing) | `Stage` field (new) | Label |
 |---|---|---|---|
 | Todo | Todo | *(empty)* | *(none)* |
-| Agent Working | In progress | Agent Working | `stage:agent-working` |
-| Human Review | In progress | Human Review | `stage:human-review` |
+| Agent | In progress | Agent | `stage:agent` |
+| Review | In progress | Review | `stage:review` |
 | Sign-off | In progress | Sign-off | `stage:sign-off` |
-| Awaiting Merge | In progress | Awaiting Merge | `stage:awaiting-merge` |
+| Merge | In progress | Merge | `stage:merge` |
 | Done | Done | *(empty)* | *(none)* |
 
 Todo = open + no `stage:*` label; Done = closed. Only the four active middle
@@ -148,27 +148,27 @@ prefix** (`blocked:` / `hold:`) so they read as modifiers, not stages. Both are
 set by a human, not the agent:
 
 - **`blocked:input`** — waiting on another human's input before proceeding
-  (common right after Human Review). Overlays the current stage. The agent
+  (common right after Review). Overlays the current stage. The agent
   **respects** it: `@claude`/`@auto` no-op while it's present, so pinging the
   agent doesn't resume work until you clear it.
-- **`hold:release`** — overlays `Awaiting Merge`: approved, but deliberately held
+- **`hold:release`** — overlays `Merge`: approved, but deliberately held
   for a stable release point. Its presence is the differentiator:
 
   | Situation | How it looks |
   |---|---|
-  | Just haven't merged yet | `Awaiting Merge`, no hold label |
-  | Deliberately waiting for a stable point | `Awaiting Merge` + `hold:release` |
+  | Just haven't merged yet | `Merge`, no hold label |
+  | Deliberately waiting for a stable point | `Merge` + `hold:release` |
 
 ## Who moves the card, and when
 
 | Transition | Trigger | Driven by |
 |---|---|---|
-| Todo → Agent Working | kickoff run starts | agent post-step (`claude.yml`/`@auto`) |
-| Agent Working → Human Review | `@auto` hands back (converged *or* escalated) | agent post-step (`claude-auto-review.yml`) |
-| Human Review → Agent Working | you re-engage (`@claude`/`@auto`) | agent post-step, next run |
-| Human Review → Sign-off | you request a second reviewer on the PR | **PR-event hook** (`review_requested`) |
-| Sign-off → Awaiting Merge | that reviewer approves | **PR-event hook** (`pull_request_review` approved) |
-| Awaiting Merge → Done | PR merged → issue auto-closes | native Projects automation |
+| Todo → Agent | kickoff run starts | agent post-step (`claude.yml`/`@auto`) |
+| Agent → Review | `@auto` hands back (converged *or* escalated) | agent post-step (`claude-auto-review.yml`) |
+| Review → Agent | you re-engage (`@claude`/`@auto`) | agent post-step, next run |
+| Review → Sign-off | you request a second reviewer on the PR | **PR-event hook** (`review_requested`) |
+| Sign-off → Merge | that reviewer approves | **PR-event hook** (`pull_request_review` approved) |
+| Merge → Done | PR merged → issue auto-closes | native Projects automation |
 
 - **Native Projects automations** handle the endpoints: item added → `Status:
   Todo`; issue closed / linked PR merged → `Status: Done` + clear `Stage`.
@@ -185,7 +185,7 @@ The fork is the exception, because its PRs are never merged locally — a human
 promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
 `Done` comes from upstream merging.
 
-- **`Human Review → Sign-off` = the promotion, driven from the local session.**
+- **`Review → Sign-off` = the promotion, driven from the local session.**
   You do fork review-and-promote from your local Claude Code session, so that
   session updates Atlas directly: a **skill/instructions** has the local agent,
   when it opens the upstream PR, (a) set the issue to `Sign-off`, (b) put the
@@ -218,7 +218,7 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
   *public* PR state — matching on the shared head branch `meridianlabs-ai:<branch>`
   as the join key — and advances the fork issue's stage from the upstream PR's
   **`reviewDecision` + merge state**: open & unapproved → `Sign-off`,
-  **`APPROVED` → `Awaiting Merge`**, merged → `Done`. An upstream merge does
+  **`APPROVED` → `Merge`**, merged → `Done`. An upstream merge does
   **not** auto-close the fork issue (cross-org, no `Fixes` link), so the sync
   sets `Done` / closes it explicitly. This is a backstop and can come after the
   initial rollout.
@@ -239,7 +239,7 @@ promotes work by opening an **upstream** PR (`UKGovernmentBEIS/inspect_ai`), and
     upstream URL** (from the promote step) or the **head branch**, and read the
     live upstream PR — don't trust the issue's link graph here.
 
-The fork therefore runs the **full** `Sign-off → Awaiting Merge → Done` tail —
+The fork therefore runs the **full** `Sign-off → Merge → Done` tail —
 driven by the upstream PR's review state, not merge alone (so the poll must read
 `reviewDecision`, not just open/merged). Only `hold:release` stays an owned-repo
 concept — we don't control upstream's merge timing.
@@ -261,12 +261,12 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   mechanics are overridden), and posts ONE findings comment on the **proxy
   issue** — never anything on the contributor's upstream PR (the maintainer
   decides what to relay) and never the `claude-review-summary` marker (it's
-  for the human, not the `@auto` loop). Eyes ack + `Agent Working` while
-  running; back to `Human Review` when the findings post.
+  for the human, not the `@auto` loop). Eyes ack + `Agent` while
+  running; back to `Review` when the findings post.
 - **Stage lifecycle** (decided when the hourly sync was specced): a new proxy
-  starts in **Human Review** — a review request means the ball is with *you*.
-  After you review, *you* move it to **Awaiting Contributor** (waiting on them
-  to address feedback). The sync flips it back to **Human Review** when the
+  starts in **Review** — a review request means the ball is with *you*.
+  After you review, *you* move it to **Contributor** (waiting on them
+  to address feedback). The sync flips it back to **Review** when the
   contributor responds — deterministically approximated as *any contributor
   activity (comment or re-review request) newer than your last activity on the
   PR* (no intent-parsing of comment text). Merged/closed upstream → proxy
@@ -323,7 +323,7 @@ A single scheduled workflow on the fork's `meridian` branch (like
 reviewer, exclude org members' PRs and our own, dedup against already-tracked
 upstream URLs (open *and closed* proxies, so a Done proxy is never recreated),
 and seed each new one: proxy issue (template body with the upstream URL),
-`External` label, assignee, Atlas item, `Stage = Human Review`,
+`External` label, assignee, Atlas item, `Stage = Review`,
 `Status = In progress`, `Upstream PR` field. The chip stays a local
 `link-upstream-chips` run (no API); the job summary lists proxies pending a
 chip.
@@ -334,16 +334,16 @@ apply the population-specific mapping:
 
 | Upstream event | External proxy | Promotion |
 |---|---|---|
-| `APPROVED` | — | → Awaiting Merge |
-| `CHANGES_REQUESTED` | — | → Human Review |
-| approval dismissed (review required again) | — | Awaiting Merge → Sign-off only |
-| review re-requested after changes (sticky `CHANGES_REQUESTED` + pending request) | — | Human Review → Sign-off (the ONE transition out of Human Review — it's the driver's "handed back upstream" act; a fresh promotion parked in Human Review stays parked) |
-| contributor activity newer than reviewer's last | Awaiting Contributor → Human Review | — |
+| `APPROVED` | — | → Merge |
+| `CHANGES_REQUESTED` | — | → Review |
+| approval dismissed (review required again) | — | Merge → Sign-off only |
+| review re-requested after changes (sticky `CHANGES_REQUESTED` + pending request) | — | Review → Sign-off (the ONE transition out of Review — it's the driver's "handed back upstream" act; a fresh promotion parked in Review stays parked) |
+| contributor activity newer than reviewer's last | Contributor → Review | — |
 | merged | close, clear Stage → Done | close w/ comment, clear Stage → Done |
-| closed unmerged | close w/ comment → Done | → Human Review w/ comment |
+| closed unmerged | close w/ comment → Done | → Review w/ comment |
 
 Rules: never touch stages a human parked outside the mapping's domain (e.g. a
-promotion sitting in Human Review stays there on `REVIEW_REQUIRED`); per-item
+promotion sitting in Review stays there on `REVIEW_REQUIRED`); per-item
 failures warn and continue; every write is idempotent (skip when already at the
 target).
 
@@ -362,33 +362,33 @@ stage — useful both for the reconcile pass below and as a cross-check for the
 event-driven transitions:
 
 - **Don't infer stage from PR draft/open state.** Agents open *draft* PRs and
-  then hand off while still draft, so "draft" does not mean Agent Working. The
+  then hand off while still draft, so "draft" does not mean Agent. The
   authoritative signal is the **handoff comment**, not the PR's status.
 - **Handoff signals, and where they live** (they differ by trigger):
   - `@claude` one-shot → **`Claude finished @<user>'s task`** comment on the
-    **issue** (often with a "Draft PR #NN" / "Create PR" link) → **Human Review**.
+    **issue** (often with a "Draft PR #NN" / "Create PR" link) → **Review**.
   - `@auto` converged → **`<!-- auto-converged -->`** comment on the **PR** →
-    **Human Review**.
+    **Review**.
   - `@auto` self-handoff → **`<!-- auto-handoff -->`** comment on the **PR** →
-    **Human Review**. The review-fix agent ends the loop itself (no `@review`)
+    **Review**. The review-fix agent ends the loop itself (no `@review`)
     when a round was documentation-only nits, or when everything remaining was
     declined with rationale; the workflow detects the marker and sets the
     stage.
   - `@auto` escalated (review-round / fix-attempt cap, or no-progress) → the
     "**handing this to a human**" comment on the **PR** **and the `auto` label
-    removed** → **Human Review**.
+    removed** → **Review**.
   - Loop still running → the **`auto` label is still present** and the last
     agent action is a bare **`@review`** (reviewer verdict `suggestions`) →
-    **Agent Working**.
+    **Agent**.
   - Review started (`@review` posted, or auto-review on PR open) → the
-    **reviewer workflow itself** sets **Agent Working** immediately (and 👀-acks
+    **reviewer workflow itself** sets **Agent** immediately (and 👀-acks
     the `@review` comment) — the loop is engaged from the moment the review
     begins, not from the first fix round. Its `MARVIN_TOKEN` is consumed only
     by these deterministic steps; the review agent stays read-only.
   - **The `auto` label is the reliable discriminator.** A loop that looks active
     (`@review`, verdict `suggestions`) can hit its cap and escalate between
     glances — so don't infer Agent-working from a mid-loop comment alone; if the
-    `auto` label is gone, it has handed off (→ Human Review), even if the last
+    `auto` label is gone, it has handed off (→ Review), even if the last
     visible agent comment was `@review`.
   - Promoted upstream → an **open upstream PR** matches the branch → **Sign-off**.
   A reconcile must read **both** the issue and the PR — `@claude` posts its
@@ -438,26 +438,26 @@ filters on its own side (the action's `require-assignee` input exists for
 callers that want narrower scoping, but defaults to off). PR→issue resolution
 follows the reconcile
 rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. Wired:
-`claude.yml` sets **Agent Working** at run start and **Human Review** at
+`claude.yml` sets **Agent** at run start and **Review** at
 hand-back — skipped only for a *successful `@auto` run that left a PR in the
 loop* (the review loop owns the stage from there; an errored run always hands
-back); `claude-auto.yml` sets Agent Working per CI-fix round, Human Review on
-escalation; `claude-auto-review.yml` sets Agent Working per review-fix round,
-Human Review on both the converged and escalated handoffs. Known accepted
+back); `claude-auto.yml` sets Agent per CI-fix round, Review on
+escalation; `claude-auto-review.yml` sets Agent per review-fix round,
+Review on both the converged and escalated handoffs. Known accepted
 noise: the stub's substring gate can start a run the action then declines
 (word-boundary), briefly staging an unengaged issue.
 
 **PR-event hook** — a small workflow (in the reusable set, or a caller stub)
 triggered on `pull_request` `review_requested` and `pull_request_review`
 `submitted`(approved); it resolves the PR's linked issue and calls `set-stage`
-(`Sign-off` / `Awaiting Merge`).
+(`Sign-off` / `Merge`).
 
 Stable IDs to bake in as constants (queried at setup, not per-run):
 - project `PVT_kwDOC7YMCM4BU68p`
 - `Status` `PVTSSF_lADOC7YMCM4BU68pzhKizZM` + its `In progress` option id.
-- `Stage` field `PVTSSF_lADOC7YMCM4BU68pzhYZEwY` — options: Agent Working
-  `18c9cd89`, Human Review `d261eb6b`, Sign-off `da6137e6`, Awaiting Merge
-  `add17478`, Awaiting Contributor `39c05a50`. (Add options via
+- `Stage` field `PVTSSF_lADOC7YMCM4BU68pzhYZEwY` — options: Agent
+  `18c9cd89`, Review `d261eb6b`, Sign-off `da6137e6`, Merge
+  `add17478`, Contributor `39c05a50`. (Add options via
   `updateProjectV2Field` **passing the existing options back with their `id`s** —
   the option input carries `id`, so existing values are preserved; omit `id`
   only on the new option.)
@@ -469,7 +469,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
   already run as the machine account, so reuse that identity. Verify/rotate the
   PAT before building.
 - **Create the `Stage` field** on Atlas with the four active options
-  (Agent Working / Human Review / Sign-off / Awaiting Merge) and capture its
+  (Agent / Review / Sign-off / Merge) and capture its
   field id + option ids.
 - **Create the labels** in each participating repo (labels must exist per-repo to
   be applied): the four `stage:*` labels, the `blocked:input` and `hold:release`
@@ -488,10 +488,10 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 ## Rollout
 
 1. Prereqs above; add `set-stage`.
-2. Wire the agent post-step transitions (`Todo`/`Agent Working`/`Human Review`)
+2. Wire the agent post-step transitions (`Todo`/`Agent`/`Review`)
    into the reusable workflows so every caller gets them via `@main`. Pilot on
    one repo (inspect_flow), confirm the board tracks a lifecycle end-to-end.
-3. Add the PR-event hook (`Sign-off`/`Awaiting Merge`).
+3. Add the PR-event hook (`Sign-off`/`Merge`).
 4. Fork: the local promote skill (updates `Sign-off`), then the upstream `→ Done`
    sync as a backstop. **Both built**: the sync is the hourly `atlas-sync.yml`
    on the fork's `meridian` branch; the promote skill is
@@ -507,7 +507,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
   (issue interaction → workflow opens the upstream PR + advances the stage) is a
   possible later convenience, not part of the initial implementation.
 - **Designing vs. Implementing.** Needs a distinct design phase in the agent flow
-  (agent produces a design, not just code). Today it's all "Agent Working"; the
+  (agent produces a design, not just code). Today it's all "Agent"; the
   `Stage` single-select can gain options without breaking anything.
 - **Design review vs. Implementation review.** Needs a pre-implementation human
   gate (e.g. a `design-approved` label the agent waits on before coding).
@@ -520,7 +520,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 - **Field vs. label as source of truth.** The `set-stage` step writes both
   atomically, so neither drifts. If they ever disagree, the `Stage` field wins
   (the label is a projection for the issue-list view).
-- **Small-team role overlap.** `Human Review` (you) and `Sign-off` (a second
+- **Small-team role overlap.** `Review` (you) and `Sign-off` (a second
   reviewer) may be the same person; the states still read correctly because they
   differ by what's being asked (resume the agent vs. approve to merge), not by
   identity.

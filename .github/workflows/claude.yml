@@ -170,7 +170,7 @@ jobs:
       id-token: write
       actions: read
     steps:
-      # The trig check, the 👀 ack, and the Agent Working stage move all run
+      # The trig check, the 👀 ack, and the Agent stage move all run
       # BEFORE the checkout: none of them touch the workspace (env-only script;
       # remotely-fetched composite action; API calls), and the fetch-depth-0
       # clone costs ~1 min on large repos — the ack should land in seconds,
@@ -181,7 +181,7 @@ jobs:
       # with a top-level @claude comment"), which starts this workflow even
       # though claude-code-action then declines (word-boundary check + bot
       # actor). Without this pre-check those phantom runs flipped issues to
-      # Human Review after every review round. Mirror the action's word-boundary
+      # Review after every review round. Mirror the action's word-boundary
       # trigger match and bot-actor rejection; only stage when it passes.
       - name: Check trigger (stage gating)
         id: trig
@@ -246,14 +246,14 @@ jobs:
           esac
 
       # Atlas tracking (design/atlas-tracking.md): the agent is picking this
-      # issue up, so move it to Agent Working. Best-effort — the action never
+      # issue up, so move it to Agent. Best-effort — the action never
       # fails the run. On PR-context events the PR resolves to its issue via
       # the claude/issue-N-* branch (then a Fixes ref).
-      - name: Stage - Agent Working
+      - name: Stage - Agent
         if: steps.trig.outputs.ok == 'true'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Agent Working
+          stage: Agent
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}
@@ -494,7 +494,7 @@ jobs:
               "$pr_url")" || true
           fi
           # Expose the PR for the stage post-step: an @auto run that left a PR
-          # in the loop stays Agent Working; one that didn't hands back.
+          # in the loop stays Agent; one that didn't hands back.
           echo "url=$pr_url" >>"$GITHUB_OUTPUT"
 
       # Surface agent errors the action swallows. A model API error (overload /
@@ -528,13 +528,13 @@ jobs:
 
       # Atlas tracking: the one-shot dev agent hands back to a human when it's
       # done — and an errored run also needs a human (the error comment asks
-      # for a re-trigger) — so move to Human Review. The exception is a
+      # for a re-trigger) — so move to Review. The exception is a
       # SUCCESSFUL @auto run that left a PR in the loop (opened/adopted one, or
       # ran on a PR): the automated review loop owns the stage from there
-      # (claude-auto-review.yml sets Human Review at its converged/escalated
+      # (claude-auto-review.yml sets Review at its converged/escalated
       # handoff). always(): this must run after a failed claude step or a
       # failing Surface step — those are exactly the hand-back-to-human cases.
-      - name: Stage - Human Review (hand-back)
+      - name: Stage - Review (hand-back)
         if: >-
           always() && steps.trig.outputs.ok == 'true' && !(
             inputs.trigger_phrase == '@auto' &&
@@ -546,7 +546,7 @@ jobs:
           )
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Human Review
+          stage: Review
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}

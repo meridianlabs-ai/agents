@@ -119,7 +119,7 @@ on:
         description: >-
           Machine-account PAT, consumed ONLY by the deterministic ack/stage
           steps below (👀 reaction on the @review comment; board stage →
-          Agent Working while the review runs) — it is NEVER handed to
+          Agent while the review runs) — it is NEVER handed to
           claude-code-action, so the review agent itself stays read-only (app
           token + contents:read). Optional: absent, those steps no-op and the
           reviewer behaves exactly as before.
@@ -186,16 +186,16 @@ jobs:
           [ -n "$GH_TOKEN" ] || { echo "no MARVIN_TOKEN; skipping ack"; exit 0; }
           gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes --silent || true
 
-      # The @review loop is part of Agent Working (design/atlas-tracking.md):
+      # The @review loop is part of Agent (design/atlas-tracking.md):
       # a review starting means the automated machinery is engaged again, so
       # move the issue immediately rather than waiting for the review-fix
       # round. Idempotent; resolves the PR to its issue via branch/Fixes; the
       # set-stage action no-ops without the token.
-      - name: Stage - Agent Working (review running)
+      - name: Stage - Agent (review running)
         if: steps.trig.outputs.ok == 'true'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Agent Working
+          stage: Agent
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}
@@ -281,11 +281,11 @@ jobs:
       # the maintainer's judgment — hand the stage back (mirrors the dev
       # agent's hand-back; without this the proxy would stay parked at Agent
       # Working after the review posts).
-      - name: Stage - Human Review (external review posted)
+      - name: Stage - Review (external review posted)
         if: steps.trig.outputs.mode == 'external' && steps.claude.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
-          stage: Human Review
+          stage: Review
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number }}

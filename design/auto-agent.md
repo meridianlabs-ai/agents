@@ -134,7 +134,7 @@ skips `@review` and hands off to a human directly — another review round would
 just re-read prose. The judgment lives in the agent's prompt; the *detection*
 is deterministic: any agent self-handoff comment starts with the
 `<!-- auto-handoff -->` marker, which the workflow keys on (it moves the Atlas
-stage to Human Review — see atlas-tracking.md). The same marker covers the
+stage to Review — see atlas-tracking.md). The same marker covers the
 older self-handoff case (all remaining feedback declined with rationale),
 which previously ended the loop without any deterministic trace.
 

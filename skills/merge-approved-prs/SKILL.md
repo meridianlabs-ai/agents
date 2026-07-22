@@ -1,12 +1,12 @@
 ---
 name: merge-approved-prs
-description: Merge approved upstream inspect_ai PRs from the Atlas board's Awaiting Merge stage, one at a time — resolve conflicts against main, guard CHANGELOG/submodule invariants, coordinate companion ts-mono PRs and submodule pointer bumps when the viewer schema changed, watch CI, merge, and clean up the board. Items whose issue carries hold:release are skipped unless holds are explicitly included (the post-release sweep). Use when Ransom says he's ready to merge approved PRs / clear the Awaiting Merge queue.
+description: Merge approved upstream inspect_ai PRs from the Atlas board's Merge stage, one at a time — resolve conflicts against main, guard CHANGELOG/submodule invariants, coordinate companion ts-mono PRs and submodule pointer bumps when the viewer schema changed, watch CI, merge, and clean up the board. Items whose issue carries hold:release are skipped unless holds are explicitly included (the post-release sweep). Use when Ransom says he's ready to merge approved PRs / clear the Merge queue.
 ---
 
-# Merge approved inspect_ai PRs (Awaiting Merge queue)
+# Merge approved inspect_ai PRs (Merge queue)
 
 Merge the approved upstream PRs linked from Atlas-board issues in the
-**Awaiting Merge** stage, strictly one at a time — they usually conflict with
+**Merge** stage, strictly one at a time — they usually conflict with
 each other, so each must land before the next is rebased.
 
 Remotes in `~/git/viewer`: `origin` = UKGovernmentBEIS/inspect_ai (upstream,
@@ -17,7 +17,7 @@ pushed).
 
 ```bash
 gh project item-list 1 --owner meridianlabs-ai --format json --limit 1000 \
-  | jq -r '.items[] | select(.stage == "Awaiting Merge")
+  | jq -r '.items[] | select(.stage == "Merge")
       | [(.content.number|tostring), .repository, .title,
          ((.["linked pull requests"] // []) | join(","))] | @tsv'
 ```
@@ -161,7 +161,7 @@ neighbors (`LogUpdate`, `ProvenanceData`).
   just wait for :17). Manual cleanup below is the immediate path or the
   missing-field fallback.
 - Issues auto-close and board `Status` auto-moves to Done, but the `Stage`
-  field stays at "Awaiting Merge" — clear it per item:
+  field stays at "Merge" — clear it per item:
   ```bash
   gh project item-edit --id <ITEM_ID> --project-id PVT_kwDOC7YMCM4BU68p \
     --field-id <STAGE_FIELD_ID> --clear
