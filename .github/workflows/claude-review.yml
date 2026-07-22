@@ -143,14 +143,34 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           COMMENT: ${{ github.event.comment.body }}
+          IS_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
+          EXTERNAL: ${{ contains(github.event.issue.labels.*.name, 'External') && 'true' || 'false' }}
+          IBODY: ${{ github.event.issue.body }}
         run: |
-          ok=false
+          ok=false mode=pr upstream=""
           if [ "$EVENT" = "pull_request" ]; then
             ok=true
           elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
-            ok=true
+            if [ "$IS_PR" = "true" ]; then
+              ok=true
+            elif [ "$EXTERNAL" = "true" ]; then
+              # External-review mode: @review on an External proxy ISSUE means
+              # "review the tracked upstream PR" (see design/atlas-tracking.md
+              # → External review tracking). The upstream URL comes from the
+              # proxy body's template line.
+              upstream=$(printf '%s' "$IBODY" \
+                | grep -oE 'https://github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+' | head -1)
+              if [ -n "$upstream" ]; then ok=true mode=external; fi
+            fi
           fi
-          echo "ok=$ok" >>"$GITHUB_OUTPUT"
+          echo "ok=$ok  mode=$mode  upstream=$upstream"
+          {
+            echo "ok=$ok"
+            echo "mode=$mode"
+            echo "upstream=$upstream"
+            echo "up_repo=$(printf '%s' "$upstream" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/.*#\1#')"
+            echo "up_num=$(printf '%s' "$upstream" | grep -oE '[0-9]+$')"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Acknowledge trigger (eyes)
         if: steps.trig.outputs.ok == 'true' && github.event_name == 'issue_comment'
@@ -179,10 +199,22 @@ jobs:
       # On a pull_request event the default checkout is the PR merge ref. On an
       # @review comment (issue_comment) the default would be the repo default
       # branch, so resolve the PR head explicitly.
-      - uses: actions/checkout@v4
+      - if: steps.trig.outputs.mode != 'external'
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
+
+      # External-review mode checks out the UPSTREAM PR's head (public read)
+      # so the reviewer has the tree for context; the claude-setup provisioning
+      # below is naturally skipped (the upstream tree carries no such action),
+      # so this is a static review — same posture as the fork.
+      - if: steps.trig.outputs.mode == 'external'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.trig.outputs.up_repo }}
+          ref: refs/pull/${{ steps.trig.outputs.up_num }}/head
+          fetch-depth: 0
 
       # Provision the project environment so the agent's allow-listed
       # pytest/ruff/mypy can actually run, instead of falling back to py_compile
@@ -199,6 +231,27 @@ jobs:
         if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
+      # External mode swaps the prompt: review the upstream diff, post ONE
+      # findings comment on the PROXY issue — never on the contributor's
+      # upstream PR (the maintainer decides what to relay), and never the
+      # claude-review-summary marker (this is for the human, not the @auto
+      # loop). Tests can't run (environment unprovisioned) — static review.
+      - name: Compose review prompt
+        id: reviewprompt
+        env:
+          MODE: ${{ steps.trig.outputs.mode }}
+          UP_REPO: ${{ steps.trig.outputs.up_repo }}
+          UP_NUM: ${{ steps.trig.outputs.up_num }}
+          PROXY: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          DEFAULT_PROMPT: ${{ inputs.review_prompt }}
+        run: |
+          if [ "$MODE" != "external" ]; then
+            printf 'value=%s\n' "$DEFAULT_PROMPT" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'value=%s\n' "You are reviewing an EXTERNAL contributor's upstream pull request on behalf of the maintainer. The PR is $UP_REPO#$UP_NUM; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, using the checked-out tree to verify claims by reading the surrounding code. Focus on correctness bugs, security issues, API-design concerns, and fit with the project's conventions. This is a STATIC review: the environment is not provisioned, so do not run tests, and do NOT modify any files. Post your findings as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\` — do NOT comment on, review, or react to the upstream PR itself (the maintainer decides what feedback to relay), and do NOT include any claude-review-summary marker (this review is for a human, not the automation loop). Structure the comment: a one-line verdict (looks ready to approve / changes needed / needs discussion), then findings with file:line references, each tagged blocking or non-blocking; if the diff is clean say so concisely. You MUST post the comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
+
       - uses: anthropics/claude-code-action@v1
         id: claude
         with:
@@ -206,7 +259,7 @@ jobs:
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
-          prompt: ${{ inputs.review_prompt }}
+          prompt: ${{ steps.reviewprompt.outputs.value }}
           settings: ${{ inputs.settings }}
           allowed_bots: ${{ inputs.allowed_bots }}
           claude_args: >-
@@ -214,6 +267,19 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
             ${{ inputs.claude_args }}
+
+      # External review finished: the findings sit on the proxy issue awaiting
+      # the maintainer's judgment — hand the stage back (mirrors the dev
+      # agent's hand-back; without this the proxy would stay parked at Agent
+      # Working after the review posts).
+      - name: Stage - Human Review (external review posted)
+        if: steps.trig.outputs.mode == 'external' && steps.claude.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Human Review
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ github.event.issue.number }}
 
       # Surface agent errors the action swallows (e.g. a model overload/529 or a
       # model 404), which otherwise leave the run green with no review posted.

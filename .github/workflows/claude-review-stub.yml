@@ -15,12 +15,18 @@ jobs:
   review:
     # Run on PR events (skipping drafts — they get reviewed via
     # ready_for_review when marked ready), or on a PR comment containing
-    # @review. An explicit @review still works on a draft. `@review` does not
+    # @review — or an @review comment on an External-labeled proxy ISSUE, which
+    # reviews the tracked upstream PR and posts findings on the proxy (external
+    # mode; see the reusable workflow). An explicit @review still works on a draft. `@review` does not
     # collide with the dev agent's `@claude` trigger.
     if: >
       (github.event_name == 'pull_request' &&
-       github.event.pull_request.draft != true) ||
+       github.event.pull_request.draft != true &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '@review')) ||
+      (github.event.issue.pull_request == null &&
+       contains(github.event.issue.labels.*.name, 'External') &&
        contains(github.event.comment.body, '@review'))
     uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
     # Machine-account PAT for the deterministic ack/stage steps only (eyes
