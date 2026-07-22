@@ -141,10 +141,24 @@ jobs:
       # `@review` in backticks doesn't ack; pull_request events (auto-review on
       # open/ready) always count. Marvin's own loop-posted @review DOES get the
       # ack — it doubles as "reviewer engaged" observability.
-      - name: Check trigger (ack/stage gating)
+      # `ok` gates the whole run pipeline (checkout, agent, verify): the
+      # caller stub's cheap substring gate admits events this word-boundary /
+      # structure check rejects (a comment merely QUOTING @review; an External
+      # issue with no upstream URL), and those used to reach checkout with
+      # refs/pull/<issue#>/head — a ref that can't exist for a plain issue —
+      # failing the job red with no feedback. `ack` additionally requires a
+      # non-bot actor WITH WRITE ACCESS before the marvin-authenticated 👀 /
+      # stage steps run — on a public repo, a drive-by @review must not move
+      # the board or spend reactions (the agent itself was always actor-gated
+      # by claude-code-action; this brings ack/stage to parity). Marvin has
+      # write, so loop-posted @review keeps its ack.
+      - name: Check trigger (run + ack/stage gating)
         id: trig
         env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           EVENT: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          GH_REPO: ${{ github.repository }}
           COMMENT: ${{ github.event.comment.body }}
           IS_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
           EXTERNAL: ${{ contains(github.event.issue.labels.*.name, 'External') && 'true' || 'false' }}
@@ -166,9 +180,25 @@ jobs:
               if [ -n "$upstream" ]; then ok=true mode=external; fi
             fi
           fi
-          echo "ok=$ok  mode=$mode  upstream=$upstream"
+          ack=false
+          if [ "$ok" = "true" ]; then
+            if [ "$EVENT" = "pull_request" ]; then
+              ack=true  # auto-review on open; same-repo PRs only (stub gate)
+            else
+              case "$ACTOR" in
+                *"[bot]") ;; # bots never ack/stage
+                *)
+                  perm=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" \
+                           --jq '.permission' 2>/dev/null || echo none)
+                  case "$perm" in admin|write|maintain) ack=true ;; esac
+                  ;;
+              esac
+            fi
+          fi
+          echo "ok=$ok  ack=$ack  mode=$mode  upstream=$upstream"
           {
             echo "ok=$ok"
+            echo "ack=$ack"
             echo "mode=$mode"
             echo "upstream=$upstream"
             echo "up_repo=$(printf '%s' "$upstream" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/.*#\1#')"
@@ -177,7 +207,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Acknowledge trigger (eyes)
-        if: steps.trig.outputs.ok == 'true' && github.event_name == 'issue_comment'
+        if: steps.trig.outputs.ack == 'true' && github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
           REPO: ${{ github.repository }}
@@ -192,7 +222,7 @@ jobs:
       # round. Idempotent; resolves the PR to its issue via branch/Fixes; the
       # set-stage action no-ops without the token.
       - name: Stage - Agent (review running)
-        if: steps.trig.outputs.ok == 'true'
+        if: steps.trig.outputs.ack == 'true'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Agent
@@ -203,7 +233,7 @@ jobs:
       # On a pull_request event the default checkout is the PR merge ref. On an
       # @review comment (issue_comment) the default would be the repo default
       # branch, so resolve the PR head explicitly.
-      - if: steps.trig.outputs.mode != 'external'
+      - if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -213,7 +243,7 @@ jobs:
       # so the reviewer has the tree for context; the claude-setup provisioning
       # below is naturally skipped (the upstream tree carries no such action),
       # so this is a static review — same posture as the fork.
-      - if: steps.trig.outputs.mode == 'external'
+      - if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.trig.outputs.up_repo }}
@@ -246,6 +276,7 @@ jobs:
       # for the human, not the @auto loop), and no test runs (environment
       # unprovisioned — static review).
       - name: Compose review prompt
+        if: steps.trig.outputs.ok == 'true'
         id: reviewprompt
         env:
           MODE: ${{ steps.trig.outputs.mode }}
@@ -262,6 +293,7 @@ jobs:
           printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING to the upstream PR — no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay. Instead post your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\`. Do NOT post the '🔎 Review complete' marker comment at all — this review is for a human, not the automation loop. The environment is NOT provisioned: skip pytest/ruff/mypy entirely and review statically. Do not modify any files. You MUST post the proxy-issue comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
+        if: steps.trig.outputs.ok == 'true'
         id: claude
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
@@ -293,7 +325,7 @@ jobs:
       # Surface agent errors the action swallows (e.g. a model overload/529 or a
       # model 404), which otherwise leave the run green with no review posted.
       - name: Surface agent errors
-        if: always()
+        if: always() && steps.trig.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
