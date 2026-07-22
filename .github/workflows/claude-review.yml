@@ -35,7 +35,10 @@ on:
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere
-          else. Post a concise top-level summary with `gh pr comment` (whether
+          else — and you MUST post it within THIS run: a run cannot resume
+          after your turn ends, so never finish intending to post later (if
+          you delegate verification to subagents, wait for their results
+          before ending). Post a concise top-level summary with `gh pr comment` (whether
           or not you found issues), and add inline comments for specific
           line-level findings. THEN, as your final action, post a SEPARATE
           standalone comment with a single `gh pr comment --body` call — post it
@@ -170,6 +173,7 @@ jobs:
             echo "upstream=$upstream"
             echo "up_repo=$(printf '%s' "$upstream" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/.*#\1#')"
             echo "up_num=$(printf '%s' "$upstream" | grep -oE '[0-9]+$')"
+            echo "started=$(date -u +%FT%TZ)"
           } >>"$GITHUB_OUTPUT"
 
       - name: Acknowledge trigger (eyes)
@@ -309,6 +313,36 @@ jobs:
           if [ -n "${NUM:-}" ]; then
             gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The @review run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload). Re-trigger with @review; if it persists see https://status.claude.com.' "$err")" || true
           fi
+          exit 1
+
+      # A review run that ends without POSTING anything is a silent stall the
+      # error surfacing above cannot see (observed: the agent spawned
+      # verification subagents and ended its turn "to post once their results
+      # arrive" — a run cannot resume, so nothing ever posted and the @auto
+      # loop hung). Deterministic check: a successful run must have produced a
+      # new claude[bot]/machine-account comment or PR review since run start;
+      # otherwise post a visible re-trigger nudge and fail the run.
+      - name: Verify the review was posted
+        if: always() && steps.trig.outputs.ok == 'true' && steps.claude.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ steps.trig.outputs.mode }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          SINCE: ${{ steps.trig.outputs.started }}
+        run: |
+          set -uo pipefail
+          bots='select(.user.login=="claude[bot]" or .user.login=="i-am-marvin")'
+          n=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
+                --jq "[.[] | $bots] | length" 2>/dev/null || echo 0)
+          if [ "$MODE" != "external" ]; then
+            r=$(gh api "repos/$REPO/pulls/$NUM/reviews" \
+                  --jq "[.[] | $bots | select(.submitted_at >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
+            n=$((n + r))
+          fi
+          [ "${n:-0}" -gt 0 ] && { echo "review output detected ($n items)."; exit 0; }
+          echo "::error::review run succeeded but posted nothing since $SINCE"
+          gh issue comment "$NUM" --repo "$REPO" --body "⚠️ The review run completed without posting a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with @review." || true
           exit 1
 
       - name: Upload execution log
