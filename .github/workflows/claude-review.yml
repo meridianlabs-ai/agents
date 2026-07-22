@@ -128,6 +128,20 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # One review per PR at a time, NEWEST WINS: a fresh trigger (push + Ready,
+    # another @review, a loop re-request) cancels an in-flight review of
+    # now-stale code — stale findings actively mislead the @auto fix agent,
+    # and a cancelled review posts no summary marker, so it burns neither an
+    # @auto round nor the model cost. Safe to cancel because the reviewer is
+    # read-only/stateless (contrast claude-auto.yml's fixers, which are
+    # mutating and use cancel-in-progress: false). Keyed per PR — or per proxy
+    # issue in external-review mode (same number namespace). Rare cosmetic
+    # edge: cancellation can land between the agent's summary comment and its
+    # marker comment, leaving an orphan partial summary; the superseding
+    # review posts a complete fresh set.
+    concurrency:
+      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     permissions:
       contents: read          # read code to review; cannot push
       pull-requests: write    # post review + inline comments
