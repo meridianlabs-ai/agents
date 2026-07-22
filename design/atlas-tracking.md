@@ -253,6 +253,14 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
 
 - **Label `External`** — marks the proxy as an upstream PR under review (vs. our
   own work).
+- **`@review` on a proxy issue reviews the upstream PR** (external mode, built
+  into `claude-review.yml`): the reviewer checks out the upstream PR head
+  (public read, static review — no provisioning), reviews the diff, and posts
+  ONE findings comment on the **proxy issue** — never on the contributor's
+  upstream PR (the maintainer decides what to relay) and never with the
+  `claude-review-summary` marker (it's for the human, not the `@auto` loop).
+  Eyes ack + `Agent Working` while running; back to `Human Review` when the
+  findings post.
 - **Stage lifecycle** (decided when the hourly sync was specced): a new proxy
   starts in **Human Review** — a review request means the ball is with *you*.
   After you review, *you* move it to **Awaiting Contributor** (waiting on them
