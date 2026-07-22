@@ -263,6 +263,10 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   decides what to relay) and never the `claude-review-summary` marker (it's
   for the human, not the `@auto` loop). Eyes ack + `Agent` while
   running; back to `Review` when the findings post.
+- **New proxies auto-request their review**: discovery posts `@review` on each
+  proxy it creates (marvin's comment fires external mode), so the automated
+  findings are already on the proxy when the maintainer first looks.
+  Creation-time only; a manual `@review` is the re-run path.
 - **Stage lifecycle** (decided when the hourly sync was specced): a new proxy
   starts in **Review** — a review request means the ball is with *you*.
   After you review, *you* move it to **Contributor** (waiting on them
