@@ -1,6 +1,6 @@
 ---
 name: merge-approved-prs
-description: Merge approved upstream inspect_ai PRs from the Atlas board's Merge stage, one at a time — resolve conflicts against main, guard CHANGELOG/submodule invariants, coordinate companion ts-mono PRs and submodule pointer bumps when the viewer schema changed, watch CI, merge, and clean up the board. Items whose issue carries hold:release are skipped unless holds are explicitly included (the post-release sweep). Use when Ransom says he's ready to merge approved PRs / clear the Merge queue.
+description: Merge approved upstream inspect_ai PRs from the Atlas board's Merge stage, one at a time — resolve conflicts against main, guard CHANGELOG/submodule invariants, coordinate companion ts-mono PRs and submodule pointer bumps when the viewer schema changed, watch CI, merge, and clean up the board. Handles both promotions (our branches) and approved External contributor PRs (their fork branches; maintainerCanModify is the prereq — skip and report those without it). Items whose issue carries hold:release are skipped unless holds are explicitly included (the post-release sweep). Use when Ransom says he's ready to merge approved PRs / clear the Merge queue.
 ---
 
 # Merge approved inspect_ai PRs (Merge queue)
@@ -31,6 +31,15 @@ gh project item-list 1 --owner meridianlabs-ai --format json --limit 1000 \
   the report. EXCEPTION: when the user explicitly says to include holds
   ("merge the holds too", "post-release sweep"), process them like the rest —
   and remove the `hold:release` label from each issue after its PR merges.
+- **External items**: the same labels call reveals the `External` label —
+  these are contributor PRs the sync queued on approval. Their linked-PR chip
+  is usually absent (it can't be scripted for cross-org PRs), so take the
+  upstream PR URL from the proxy issue body's `Upstream PR:` line instead.
+  Then the prereq: `gh pr view <n> --repo UKGovernmentBEIS/inspect_ai --json
+  maintainerCanModify` must be `true` — if not, SKIP it (leave it queued),
+  and report it with the remedy: ask the contributor to enable "Allow edits
+  by maintainers", or merge manually. Process externals per the "External
+  PRs" section below.
 - Confirm each upstream PR: `state=OPEN`, `reviewDecision=APPROVED`, note
   `mergeable` (usually `CONFLICTING`).
 
@@ -93,6 +102,35 @@ auto-merge armed, which fires the moment checks pass. Always confirm with
 
 Then `git fetch origin main` and start the next PR — it now conflicts with
 what just landed.
+
+## External PRs (contributor-owned branches)
+
+Same flow as above with these substitutions — the branch lives on the
+*contributor's* fork, not meridianlabs-ai:
+
+- **Checkout/push**: instead of `git checkout -B <branch> meridianlabs-ai/<branch>`,
+  use `gh pr checkout <n> --repo UKGovernmentBEIS/inspect_ai` in `~/git/viewer`
+  — with `maintainerCanModify` it wires the branch's push remote to the
+  contributor's fork, so after `git merge origin/main` a plain `git push`
+  lands on their branch (verify with `git push --dry-run` the first time).
+  Never rebase or force-push a contributor branch — merge commits only;
+  their local clone must stay fast-forwardable.
+- **Approval can be dismissed by your push** (repo setting–dependent):
+  re-check `reviewDecision` after pushing. You can re-approve — pushing to
+  someone else's PR doesn't make you its author — but if branch protection
+  requires approval of the most recent push by someone else, surface that in
+  the report instead of looping.
+- **Invariants are unchanged** (CHANGELOG entries under `## Unreleased`, no
+  net submodule change) — but they were *reviewed*, not authored, by us, so
+  check them even more mechanically. A violation that needs real rework goes
+  back to the contributor: comment on the upstream PR, move the proxy to
+  Contributor, and skip — don't rewrite their PR beyond conflict resolution.
+- **ts-mono companions**: an external contributor can't author one in
+  meridianlabs-ai/ts-mono — if the PR needs a schema/pointer bump, you author
+  the companion yourself and follow the same sequence below.
+- **Cleanup**: there is no fork review PR to close; the hourly sync closes
+  the proxy on merge as usual (external proxies always carry the
+  `Upstream PR` field, its join key).
 
 ## PRs that need a ts-mono change
 
