@@ -6,7 +6,7 @@ description: Check out the PR branch for an issue — /checkout <issue-number> f
 # Check out an issue's PR branch
 
 Given an issue number (`/checkout 97`), find the right PR for that issue and
-check out its branch. This is a mechanical skill: the common case is TWO
+check out its branch. This is a mechanical skill: the common case is THREE
 commands — run them without narration and report one line at the end.
 
 **Which repo owns the issue:** the remote owned by `meridianlabs-ai` — NOT
@@ -35,6 +35,19 @@ over closed; ignore cross-repo entries here — see fallbacks):
 gh pr checkout <M> -R "$REPO" && git log --oneline -3 && git branch --show-current
 ```
 
+**Command 3** — wire up the VS Code GitHub PR extension, which `gh pr
+checkout` doesn't: without `github-pr-owner-number` the extension never
+associates the branch with the PR, and VS Code guesses `vscode-merge-base`
+as the branch's own upstream (branch vs itself = empty diff). `BASE` is the
+remote-qualified default branch of the checkout's base repo (usually
+`origin/main`):
+
+```sh
+BRANCH=$(git branch --show-current)
+git config "branch.$BRANCH.github-pr-owner-number" "${REPO%%/*}#${REPO##*/}#<M>"
+git config "branch.$BRANCH.vscode-merge-base" origin/main
+```
+
 Report one line: branch, PR, issue title. Done.
 
 ## Slow path (no chip, or only closed/cross-repo entries)
@@ -57,7 +70,8 @@ most recently updated. Say which rule matched.
 
 - **No PR but a branch exists** (a "Claude finished" comment names a
   `claude/issue-N-*` branch never turned into a PR): fetch + switch to it from
-  the meridian remote; say there's no PR.
+  the meridian remote; say there's no PR. Still set `vscode-merge-base`
+  (Command 3, minus the PR association line).
 - **Only a cross-repo (upstream) chip**: the work was promoted (possibly
   merged). Offer the upstream PR's head branch from the meridian remote and
   say it's under upstream review / already merged.
