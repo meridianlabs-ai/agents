@@ -77,6 +77,9 @@ on:
           deny overlay makes read-only intent explicit; the real boundary is
           the job's contents:read token, which can't push regardless. deny
           beats allow, so it holds even against any claude_args override.
+          In external-review mode a sandbox overlay is merged in at runtime
+          (see the compose-settings step) so the reviewer can execute the
+          untrusted contributor tree safely.
         required: false
         type: string
         default: >-
@@ -254,15 +257,43 @@ jobs:
           ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
 
       # External-review mode checks out the UPSTREAM PR's head (public read)
-      # so the reviewer has the tree for context; the claude-setup provisioning
-      # below is naturally skipped (the upstream tree carries no such action),
-      # so this is a static review — same posture as the fork.
+      # so the reviewer has the tree for context. The claude-setup provisioning
+      # below is still skipped (the upstream tree carries no such action, and
+      # installing a contributor's package outside a sandbox would execute
+      # their build hooks next to this job's credentials); instead the
+      # reviewer provisions and tests INSIDE the OS-level Bash sandbox set up
+      # by the next two steps. persist-credentials:false because checkout
+      # otherwise writes the job token into .git/config, where sandboxed
+      # contributor code could read it — the repo is public, nothing after
+      # this needs an authenticated remote. See design/architecture.md →
+      # External reviews.
       - if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.trig.outputs.up_repo }}
           ref: refs/pull/${{ steps.trig.outputs.up_num }}/head
           fetch-depth: 0
+          persist-credentials: false
+
+      # External mode runs UNTRUSTED contributor code (installs execute build
+      # hooks; pytest executes the tree), so it gets Claude Code's OS-level
+      # Bash sandbox (bubblewrap + network proxy): every Bash command and
+      # child process is confined to workspace writes and PyPI-only egress,
+      # with the job's tokens hidden via the settings overlay below. The
+      # seccomp filter (sandbox-runtime) is NOT optional here: without it
+      # sandboxed code can connect to Unix domain sockets, and GitHub runners
+      # expose /var/run/docker.sock — a full sandbox escape.
+      - name: Install review sandbox
+        if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq bubblewrap socat
+          sudo npm install -g @anthropic-ai/sandbox-runtime
+          # Ubuntu 24.04+ AppArmor can block the unprivileged user namespaces
+          # bubblewrap needs; lift the restriction if this runner enforces it.
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       # Provision the project environment so the agent's allow-listed
       # pytest/ruff/mypy can actually run, instead of falling back to py_compile
@@ -287,8 +318,9 @@ jobs:
       # ENTIRE review as ONE comment on the PROXY issue — never anything on
       # the contributor's upstream PR (the maintainer decides what to relay),
       # no inline comments, no claude-review-summary marker (this output is
-      # for the human, not the @auto loop), and no test runs (environment
-      # unprovisioned — static review).
+      # for the human, not the @auto loop), and test runs happen INSIDE the
+      # sandbox installed above (self-provisioned venv; static fallback when
+      # the sandbox blocks something).
       - name: Compose review prompt
         if: steps.trig.outputs.ok == 'true'
         id: reviewprompt
@@ -304,7 +336,54 @@ jobs:
             printf 'value=%s\n' "$DEFAULT_PROMPT" >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING to the upstream PR — no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay. Instead post your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\`. Do NOT post the '🔎 Review complete' marker comment at all — this review is for a human, not the automation loop. The environment is NOT provisioned: skip pytest/ruff/mypy entirely and review statically. Do not modify any files. You MUST post the proxy-issue comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
+          printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING to the upstream PR — no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay. Instead post your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\`. Do NOT post the '🔎 Review complete' marker comment at all — this review is for a human, not the automation loop. The environment is not pre-provisioned, but every Bash command you run is confined by an OS-level sandbox (writes limited to the workspace, network egress limited to PyPI, repo and API tokens hidden from your commands), so you MAY install dependencies and run tests to verify findings: create a venv (\`python3 -m venv .venv\`), \`.venv/bin/pip install -e '.[dev]'\` (or the project's documented dev install), then run TARGETED tests near the changed code — not the full suite. If a command fails from a sandbox restriction (blocked host or path) or the install proves impractical, fall back to static review of that point: unsandboxed retries are disabled, so do not fight the sandbox, and do not let environment wrangling crowd out the review itself. You may write scratch test files inside the workspace via shell, but do not alter the contributor's code, and never commit or push. You MUST post the proxy-issue comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
+
+      # External mode merges a sandbox overlay into the caller's settings (the
+      # allow/deny permission rules are unchanged). failIfUnavailable makes a
+      # broken sandbox a hard failure instead of a silent fallback to
+      # unsandboxed execution; allowUnsandboxedCommands:false removes the
+      # escape hatch that retries sandbox-blocked commands OUTSIDE the sandbox
+      # (where the pytest allow rule would wave them through with credentials
+      # intact). Egress is PyPI-only — broad domains (e.g. github.com) would
+      # open domain-fronting exfiltration, since the sandbox proxy decides by
+      # client-supplied hostname without TLS inspection. The env-var denies
+      # unset the job's tokens inside the sandbox (sandboxed commands inherit
+      # the parent env by default); the three Anthropic names cover the
+      # action's possible auth vars — explicit denies rather than
+      # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB so normal-mode reviews on caller
+      # repos are untouched. `gh` is excluded from the sandbox so the agent
+      # can post its findings: exclusion applies to commands the AGENT issues —
+      # a gh spawned by sandboxed contributor code stays sandboxed and
+      # credential-less. This protects against malicious contributor CODE; a
+      # prompt-injected agent is a separate (pre-existing) channel.
+      - name: Compose settings (external sandbox overlay)
+        if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
+        id: reviewsettings
+        env:
+          SETTINGS: ${{ inputs.settings }}
+        run: |
+          [ -n "$SETTINGS" ] || SETTINGS='{}'
+          overlay='{"sandbox":{
+            "enabled":true,
+            "failIfUnavailable":true,
+            "allowUnsandboxedCommands":false,
+            "excludedCommands":["gh *"],
+            "network":{"allowedDomains":["pypi.org","files.pythonhosted.org"]},
+            "credentials":{"envVars":[
+              {"name":"GITHUB_TOKEN","mode":"deny"},
+              {"name":"GH_TOKEN","mode":"deny"},
+              {"name":"ACTIONS_ID_TOKEN_REQUEST_TOKEN","mode":"deny"},
+              {"name":"ACTIONS_RUNTIME_TOKEN","mode":"deny"},
+              {"name":"ANTHROPIC_API_KEY","mode":"deny"},
+              {"name":"ANTHROPIC_AUTH_TOKEN","mode":"deny"},
+              {"name":"CLAUDE_CODE_OAUTH_TOKEN","mode":"deny"}
+            ]}}}'
+          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson o "$overlay" '. * $o')
+          {
+            echo "value<<SETTINGS_EOF"
+            printf '%s\n' "$merged"
+            echo "SETTINGS_EOF"
+          } >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         if: steps.trig.outputs.ok == 'true'
@@ -315,7 +394,7 @@ jobs:
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           prompt: ${{ steps.reviewprompt.outputs.value }}
-          settings: ${{ inputs.settings }}
+          settings: ${{ steps.reviewsettings.outputs.value || inputs.settings }}
           allowed_bots: ${{ inputs.allowed_bots }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}

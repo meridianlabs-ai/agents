@@ -255,7 +255,9 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   own work).
 - **`@review` on a proxy issue reviews the upstream PR** (external mode, built
   into `claude-review.yml`): the reviewer checks out the upstream PR head
-  (public read, static review — no provisioning), reviews the diff **under the
+  (public read; no claude-setup provisioning — it self-provisions and runs
+  tests inside an OS-level Bash sandbox, see architecture.md → External
+  reviews: sandboxed execution of untrusted code), reviews the diff **under the
   caller's normal review guidance** (`review_prompt` + `append_system_prompt`
   apply — Meridian maintains upstream, so its standards do too; only the
   mechanics are overridden), and posts ONE findings comment on the **proxy

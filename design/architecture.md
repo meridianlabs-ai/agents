@@ -267,6 +267,64 @@ out different things on the inspect_ai fork:
   since the fork's diffs are validated by upstream's own CI. For normal
   (non-fork) repos both agents provision identically.
 
+### External reviews: sandboxed execution of untrusted code
+
+External-review mode (`@review` on an `External` proxy issue) checks out an
+outside contributor's PR head — **untrusted code** — into a job that holds
+credentials: `id-token: write` (any process in the job can mint an OIDC token
+and exchange it through the WIF rule for Anthropic API access),
+`pull-requests: write` via the app token, and the agent's own Anthropic auth
+in its step env. Installing the package (`pip install -e .` runs the
+contributor's build hooks) or running pytest (collection imports every test
+module) would execute that code next to those credentials — the
+`pull_request_target` anti-pattern by another route. External reviews were
+therefore originally static: the prompt forbade test runs outright.
+
+That gave up real verification, so the reviewer now gets **interactive test
+execution inside Claude Code's OS-level Bash sandbox** (bubblewrap + network
+proxy on Linux) instead. The principle: the danger was never the agent
+*running* code, it's untrusted code running in a context with something to
+steal — so isolate the execution, not the agent. Enforcement is on the
+running process (and all children), not on the command string, unlike the
+permission allow-list.
+
+The pieces, and why each is load-bearing (all in `claude-review.yml`,
+external mode only — normal reviews are untouched):
+
+- **Install step**: `bubblewrap` + `socat`, plus the
+  `@anthropic-ai/sandbox-runtime` seccomp filter. The filter is *not*
+  optional on a GitHub runner: without it sandboxed code can connect to Unix
+  domain sockets, and runners expose `/var/run/docker.sock` — a full escape.
+  Also lifts Ubuntu ≥ 24.04's AppArmor user-namespace restriction if enforced.
+- **Settings overlay** (jq-merged into the caller's `settings` at runtime):
+  `failIfUnavailable` (a broken sandbox is a hard failure, never a silent
+  fallback to today's exposure); `allowUnsandboxedCommands: false` (kills the
+  escape hatch that retries sandbox-blocked commands *outside* the sandbox,
+  where the pytest allow rule would wave them through with credentials
+  intact); egress limited to PyPI (the proxy decides by client-supplied
+  hostname without TLS inspection, so broad domains like `github.com` open
+  domain-fronting exfiltration); env-var `deny` entries unsetting the GitHub
+  and Anthropic tokens inside the sandbox (sandboxed commands inherit the
+  parent env by default — the sandbox alone does not hide it). Explicit
+  denies were chosen over `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` so nothing
+  changes for normal-mode reviews on caller repos.
+- **`excludedCommands: ["gh *"]`**: `gh` runs outside the sandbox so the
+  agent can post its findings to the proxy issue. Safe because exclusion
+  applies to commands the *agent* issues — a `gh` spawned from sandboxed
+  contributor code is a child of a sandboxed process and stays confined and
+  credential-less.
+- **`persist-credentials: false`** on the external checkout: checkout
+  otherwise writes the job token into `.git/config`, inside the workspace the
+  sandbox lets contributor code read. The upstream repo is public; nothing
+  after checkout needs an authenticated remote.
+
+Residual risks, accepted deliberately: this defends against malicious
+contributor *code*, not a prompt-injected *agent* — the agent itself still
+holds credentials and an unsandboxed `gh`, a channel that existed in
+static-review mode too (it reads untrusted text either way). And the PyPI
+egress needed for `pip install` is a (narrow) exfiltration path for code
+running during the install itself.
+
 ### Branch sync before work
 
 A `@claude merge my branch` run exposed two gaps. First, `git fetch`/`git
