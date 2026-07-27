@@ -38,14 +38,21 @@ gh pr checkout <M> -R "$REPO" && git log --oneline -3 && git branch --show-curre
 **Command 3** — wire up the VS Code GitHub PR extension, which `gh pr
 checkout` doesn't: without `github-pr-owner-number` the extension never
 associates the branch with the PR, and VS Code guesses `vscode-merge-base`
-as the branch's own upstream (branch vs itself = empty diff). `BASE` is the
-remote-qualified default branch of the checkout's base repo (usually
-`origin/main`):
+as the branch's own upstream (branch vs itself = empty diff). The merge base
+must be the PR's **base branch on the base repo's remote** — i.e. `$REPO`'s
+remote, NOT `origin` (in fork clones `origin` is upstream, and an upstream
+base gives a wrong/stale diff), and the PR's `baseRefName`, NOT the default
+branch (on the inspect_ai fork PRs base on `meridian`; a `main` merge base
+would show every meridian-only file as changed). Derive both and fetch so
+the ref is current:
 
 ```sh
 BRANCH=$(git branch --show-current)
+BASE_REMOTE=$(git remote -v | grep -im1 "github.com[:/]${REPO}" | cut -f1)
+BASE_REF=$(gh pr view <M> -R "$REPO" --json baseRefName -q .baseRefName)
+git fetch "$BASE_REMOTE" "$BASE_REF"
 git config "branch.$BRANCH.github-pr-owner-number" "${REPO%%/*}#${REPO##*/}#<M>"
-git config "branch.$BRANCH.vscode-merge-base" origin/main
+git config "branch.$BRANCH.vscode-merge-base" "$BASE_REMOTE/$BASE_REF"
 ```
 
 Report one line: branch, PR, issue title. Done.
@@ -71,7 +78,9 @@ most recently updated. Say which rule matched.
 - **No PR but a branch exists** (a "Claude finished" comment names a
   `claude/issue-N-*` branch never turned into a PR): fetch + switch to it from
   the meridian remote; say there's no PR. Still set `vscode-merge-base`
-  (Command 3, minus the PR association line).
+  (Command 3, minus the PR association line; with no PR to read the base
+  from, use the branch's fork point — `meridian` on the fork, the default
+  branch elsewhere).
 - **Only a cross-repo (upstream) chip**: the work was promoted (possibly
   merged). Offer the upstream PR's head branch from the meridian remote and
   say it's under upstream review / already merged.
