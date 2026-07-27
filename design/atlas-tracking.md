@@ -277,6 +277,16 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   activity (comment or re-review request) newer than your last activity on the
   PR* (no intent-parsing of comment text). Merged/closed upstream → proxy
   closes → **Done**.
+- **Approval queues at Merge**: upstream `reviewDecision == APPROVED` moves
+  the proxy to **Merge**, the same queue the merge-approved-prs skill drains
+  for promotions. The skill's external mode drives the contributor's branch
+  home (conflict-merge + push via `maintainerCanModify` — its prereq; PRs
+  without it are skipped and reported; never rebase/force-push a contributor
+  branch). APPROVED is sticky, so a queued card that gets moved re-queues
+  hourly — dismissing the approval or requesting changes upstream is the way
+  to pull one back, and a proxy in Merge without a standing approval drops to
+  **Review** (the ball is the maintainer's to re-decide, not the
+  contributor's).
 - The proxy issue is assigned to the reviewer, links the upstream PR by URL (no
   `@`-mention of the contributor), and is added to Atlas + staged like any item.
 - **The native "Linked pull requests" sidebar can't be populated by script here.**
