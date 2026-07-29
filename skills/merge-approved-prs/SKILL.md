@@ -83,21 +83,36 @@ sanity-check locally before pushing: `ruff check` + `ruff format --check` on
 touched files, `mypy <touched files>`, and any targeted tests that cover the
 conflicted area. Pure CHANGELOG/docs conflicts can go straight to CI.
 
-### Push, CI, merge
+### Push, arm auto-merge, watch
 
 ```bash
-git push meridianlabs-ai <branch>
-gh pr view <n> --repo UKGovernmentBEIS/inspect_ai --json mergeable,mergeStateStatus
+git push meridianlabs-ai <branch>   # externals: plain `git push` (contributor fork)
+gh pr merge <n> --repo UKGovernmentBEIS/inspect_ai --auto --squash
 ```
 
-Expect `MERGEABLE` + `BLOCKED` (checks pending). Watch CI in a background
-task: `gh pr checks <n> --repo UKGovernmentBEIS/inspect_ai --watch
---fail-fast`. On failure, investigate and fix; on success merge with
-`gh pr merge <n> --repo UKGovernmentBEIS/inspect_ai --squash` (repo history
-uses squash for these).
+Arm auto-merge (squash — repo history uses it) **per PR as you reach it,
+never on the whole queue up front**: the later PRs' green CI is against
+stale main, and arming them all can land semantically-conflicting merges
+concurrently.
 
-**"Pull request was already merged" is success** — these PRs typically have
-auto-merge armed, which fires the moment checks pass. Always confirm with
+Then watch in a background monitor (poll ~60s) for FOUR terminal
+conditions — the last two are silent stalls that a merged-or-failed watch
+never fires on (observed: checks green, auto-merge armed, PR sat `BEHIND`
+until someone happened to look):
+
+- **MERGED** → confirm, fetch main, next PR.
+- **any check failed** → investigate and fix.
+- **checks green but `mergeStateStatus: BEHIND`** → main moved during CI and
+  branch protection wants branches current, so auto-merge waits forever:
+  merge `origin/main` again, RE-VERIFY the CHANGELOG/submodule invariants
+  (every merge re-rolls the relocation dice — clean auto-merges relocated an
+  entry into a released section twice in one day), push. Each loop costs one
+  more CI round; expect several on a busy release day.
+- **checks green but `mergeStateStatus: DIRTY`** → main now genuinely
+  conflicts; resolve per the invariants above.
+
+**"Pull request was already merged" is success** — auto-merge fired the
+moment checks passed. Always confirm with
 `gh pr view <n> --json state,mergedAt` → `state=MERGED`.
 
 Then `git fetch origin main` and start the next PR — it now conflicts with
