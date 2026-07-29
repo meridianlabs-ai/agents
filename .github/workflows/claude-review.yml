@@ -440,7 +440,7 @@ jobs:
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Review did not complete: $err"
           if [ -n "${NUM:-}" ]; then
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The @review run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload). Re-trigger with @review; if it persists see https://status.claude.com.' "$err")" || true
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The `@review` run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload). Re-trigger with `@review`; if it persists see https://status.claude.com.' "$err")" || true
           fi
           exit 1
 
@@ -471,7 +471,10 @@ jobs:
           fi
           [ "${n:-0}" -gt 0 ] && { echo "review output detected ($n items)."; exit 0; }
           echo "::error::review run succeeded but posted nothing since $SINCE"
-          gh issue comment "$NUM" --repo "$REPO" --body "⚠️ The review run completed without posting a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with @review." || true
+          # Single-quoted body, backticked token: this posts as MARVIN, and a
+          # bare @review here would re-trigger the review — a failed run would
+          # then spawn its own retry loop.
+          gh issue comment "$NUM" --repo "$REPO" --body '⚠️ The review run completed without posting a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with `@review`.' || true
           exit 1
 
       - name: Upload execution log
