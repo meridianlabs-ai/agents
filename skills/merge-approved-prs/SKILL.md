@@ -223,4 +223,9 @@ neighbors (`LogUpdate`, `ProvenanceData`).
   fetch item ids one at a time — batched jq lookups have returned empty ids.)
 - Close any still-open fork review PRs (meridianlabs-ai/inspect_ai) with a
   comment linking the merged upstream PR.
+- **Then check for newly-ready work**: approvals often land while a set is
+  merging, and the board only reflects them after a sync. Dispatch the Atlas
+  sync (or `/resolve-board`) and re-run step 1 — if new items entered Merge,
+  process them as the next set. Repeat until the queue comes back empty; only
+  then write the final report.
 - Report per-PR: what conflicted, how it was resolved, merge commit oid.
