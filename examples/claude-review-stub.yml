@@ -1,6 +1,7 @@
 # Copy to .github/workflows/claude-review.yml in any Meridian repo to add the
 # read-only reviewer. Auto-reviews PRs when they open (drafts are skipped
-# until marked ready for review) and on demand via an @review comment.
+# until marked ready for review; release-please PRs are skipped too, gated in
+# the reusable workflow) and on demand via an @review comment.
 # Independent of the dev agent (claude.yml) — different trigger, different
 # (lower) permissions.
 #
