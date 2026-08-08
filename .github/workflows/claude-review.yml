@@ -131,6 +131,15 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Skip auto-review of release-please PRs: they are generated
+    # changelog/version bumps with nothing to review, and the run would only
+    # fail fast anyway (bot author, rejected by checkHumanActor), leaving a
+    # red X on every release PR. Gated here rather than in the caller stubs so
+    # all repos pick it up without recopying. An explicit @review comment
+    # (issue_comment event) still works.
+    if: >
+      github.event_name != 'pull_request' ||
+      !startsWith(github.event.pull_request.head.ref, 'release-please--')
     # One review per PR at a time, NEWEST WINS: a fresh trigger (push + Ready,
     # another @review, a loop re-request) cancels an in-flight review of
     # now-stale code — stale findings actively mislead the @auto fix agent,
