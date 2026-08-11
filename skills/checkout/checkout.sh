@@ -2,8 +2,13 @@
 # Fast path of /checkout (see SKILL.md): chip lookup -> VS Code PR-extension
 # config -> checkout, in one invocation and two network calls.
 #
+# Chip selection: an OPEN same-repo chip wins; otherwise a single OPEN
+# cross-repo chip (an External proxy's upstream PR, or a promotion) is
+# checked out against ITS repo — gh pr checkout handles personal-fork heads
+# and wires the push remote when maintainerCanModify.
+#
 # Exit codes: 0 ok; 2 dirty tree (never switch over uncommitted work);
-# 3 no open same-repo chip (fall back to the slow path); 4 repo unresolvable.
+# 3 no usable chip (fall back to the slow path); 4 repo unresolvable.
 set -euo pipefail
 
 N=${1:?usage: checkout.sh <issue-number>}
@@ -27,11 +32,19 @@ JSON=$(gh api graphql \
   -F o="${REPO%%/*}" -F r="${REPO##*/}" -F n="$N")
 
 TITLE=$(jq -r '.data.repository.issue.title' <<<"$JSON")
-PICK=$(jq -c --arg repo "$REPO" \
-  '[.data.repository.issue.closedByPullRequestsReferences.nodes[]
-    | select(.repository.nameWithOwner==$repo) | select(.state=="OPEN")][0] // empty' <<<"$JSON")
+OPEN=$(jq -c '[.data.repository.issue.closedByPullRequestsReferences.nodes[] | select(.state=="OPEN")]' <<<"$JSON")
+PICK=$(jq -c --arg repo "$REPO" '[.[] | select(.repository.nameWithOwner==$repo)][0] // empty' <<<"$OPEN")
+CROSS=""
 if [ -z "$PICK" ]; then
-  echo "NO OPEN SAME-REPO CHIP for issue #$N — use the slow path. Chips seen:" >&2
+  # No same-repo chip: accept a SINGLE open cross-repo chip (ambiguity goes
+  # to the slow path's judgment).
+  if [ "$(jq length <<<"$OPEN")" = "1" ]; then
+    PICK=$(jq -c '.[0]' <<<"$OPEN")
+    CROSS=1
+  fi
+fi
+if [ -z "$PICK" ]; then
+  echo "NO USABLE OPEN CHIP for issue #$N — use the slow path. Chips seen:" >&2
   jq -r '.data.repository.issue.closedByPullRequestsReferences.nodes[]
          | "  #\(.number) \(.state) \(.repository.nameWithOwner)"' <<<"$JSON" >&2
   exit 3
@@ -39,17 +52,18 @@ fi
 M=$(jq -r .number <<<"$PICK")
 BRANCH=$(jq -r .headRefName <<<"$PICK")
 BASE_REF=$(jq -r .baseRefName <<<"$PICK")
+PR_REPO=$(jq -r .repository.nameWithOwner <<<"$PICK")
 
 # Merge base = the PR's base branch on the BASE repo's remote (origin is
 # upstream in fork clones — wrong diff), and baseRefName, not the default
 # branch (fork PRs base on meridian).
-BASE_REMOTE=$(git remote -v | grep -im1 "github.com[:/]${REPO}" | cut -f1 || true)
+BASE_REMOTE=$(git remote -v | grep -im1 "github.com[:/]${PR_REPO}" | cut -f1 || true)
 [ -n "$BASE_REMOTE" ] || BASE_REMOTE=origin
 
 # Config BEFORE the checkout: the PR extension re-reads branch config on the
 # HEAD-change event; written after, it is only noticed on the NEXT switch.
-git config "branch.$BRANCH.github-pr-owner-number" "${REPO%%/*}#${REPO##*/}#$M"
-git config "branch.$BRANCH.vscode-merge-base" "$BASE_REMOTE/$BASE_REF"
+git config --replace-all "branch.$BRANCH.github-pr-owner-number" "${PR_REPO%%/*}#${PR_REPO##*/}#$M"
+git config --replace-all "branch.$BRANCH.vscode-merge-base" "$BASE_REMOTE/$BASE_REF"
 
 # No submodule recursion, for fetch OR checkout (clones set
 # submodule.recurse=true): switching branches only moves the gitlink
@@ -59,6 +73,8 @@ git fetch -q --no-recurse-submodules "$BASE_REMOTE" "$BASE_REF"
 GIT_CONFIG_COUNT=2 \
   GIT_CONFIG_KEY_0=fetch.recurseSubmodules GIT_CONFIG_VALUE_0=false \
   GIT_CONFIG_KEY_1=submodule.recurse GIT_CONFIG_VALUE_1=false \
-  gh pr checkout "$M" -R "$REPO"
+  gh pr checkout "$M" -R "$PR_REPO"
 
-echo "OK branch=$(git branch --show-current) pr=#$M issue=#$N ($TITLE)"
+NOTE=""
+[ -n "$CROSS" ] && NOTE=" [cross-repo: $PR_REPO — upstream PR, don't push without cause]"
+echo "OK branch=$(git branch --show-current) pr=$PR_REPO#$M issue=#$N ($TITLE)$NOTE"

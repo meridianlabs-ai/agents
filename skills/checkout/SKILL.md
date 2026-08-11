@@ -25,13 +25,18 @@ the VS Code PR-extension branch config (written BEFORE the checkout — the
 extension reads it on the HEAD-change event), and a submodule-recursion-free
 fetch + `gh pr checkout`.
 
+Chip selection: an OPEN same-repo chip wins; otherwise a single OPEN
+cross-repo chip is checked out against its own repo — this covers External
+proxies (the contributor's upstream PR) and promotions still open upstream.
+
 Exit codes:
 
-- **0** — prints `OK branch=… pr=#M issue=#N (title)`; report that line, done.
+- **0** — prints `OK branch=… pr=… issue=#N (title)`; report that line, done
+  (a `[cross-repo: …]` suffix means an upstream PR — relay its caution).
 - **2** — dirty tree (files listed on stderr): STOP, show the user; never
   switch over uncommitted work.
-- **3** — no OPEN same-repo chip (stderr lists the chips it saw, including
-  closed/cross-repo ones): use the slow path below.
+- **3** — no usable open chip (stderr lists the chips it saw, including
+  closed ones and ambiguous multiples): use the slow path below.
 - **4** — repo unresolvable: no meridianlabs-ai remote and no gh default.
 
 ## Slow path (no chip, or only closed/cross-repo entries)
@@ -61,8 +66,8 @@ checkout (`branch.<B>.github-pr-owner-number` = `owner#repo#M`,
   the meridian remote; say there's no PR. Still set `vscode-merge-base`
   before the switch (with no PR to read the base from, use the branch's fork
   point — `meridian` on the fork, the default branch elsewhere).
-- **Only a cross-repo (upstream) chip**: the work was promoted (possibly
-  merged). Offer the upstream PR's head branch from the meridian remote and
-  say it's under upstream review / already merged.
+- **Only a MERGED/CLOSED cross-repo chip** (the script handles open ones):
+  the work was promoted and already landed upstream. Say so; offer the
+  branch only if the user still wants it.
 - **Nothing found**: list what was scanned so the user can point at the right
   thing.
