@@ -306,9 +306,18 @@ jobs:
       # doesn't spawn an unasked review, and to PR context (the issue->PR-open
       # case posts @review from the Open-or-adopt post-step instead, via
       # request_review_after_open, so it lands after the label).
+      # LANDING is always-on: the agent's work exists only on the ephemeral
+      # runner until pushed, and a run can never resume after its final turn.
+      # Observed failure (inspect_ai#195): full fix implemented and tested,
+      # then the agent ended its turn "waiting on" a verification subagent
+      # before committing — everything was lost, and the green run + tidy
+      # summary made it look done. Same lesson the reviewer prompt already
+      # carries; the deterministic backstop is the "Verify agent work landed"
+      # step below.
       - name: Compose appended system prompt
         id: sysprompt
         env:
+          LANDING: "Your work exists ONLY on this ephemeral runner until it is committed and pushed — and a run can NEVER resume after your final turn ends. Never end your turn waiting on anything: if you delegate verification or review to subagents, collect their results and complete the commit, push, and any PR or comment inside THIS run. Sequencing verification before landing is fine, but ending the turn in between loses all of your work silently."
           BRANCH_SYNC: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_prompt || '' }}
           BRANCH_SYNC_APPEND: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_append || '' }}
           REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address.' || '' }}"
@@ -316,7 +325,7 @@ jobs:
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
           combined=""
-          for part in "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$REVIEW_ETIQUETTE" "$REQUEST_REVIEW" "$EXTRA"; do
+          for part in "$LANDING" "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$REVIEW_ETIQUETTE" "$REQUEST_REVIEW" "$EXTRA"; do
             [ -n "$part" ] && combined="${combined:+$combined }$part"
           done
           echo "value=$combined" >> "$GITHUB_OUTPUT"
@@ -496,6 +505,46 @@ jobs:
           # Expose the PR for the stage post-step: an @auto run that left a PR
           # in the loop stays Agent; one that didn't hands back.
           echo "url=$pr_url" >>"$GITHUB_OUTPUT"
+
+      # A run can end with its work stranded on the runner: the agent edits (and
+      # maybe commits) locally, spawns a verification subagent, and ends its
+      # turn "waiting" — a run can never resume, so everything evaporates with
+      # the runner while the green run + tidy summary hide it (observed:
+      # inspect_ai#195 — fix implemented and tested, zero bytes landed, stage
+      # handed back to Review with nothing to review). Deterministic backstop
+      # for the LANDING prompt rule: on issue-triggered runs, tracked-file
+      # edits left uncommitted (untracked files are ignored — test caches and
+      # scratch leftovers are normal), a reported branch that never reached
+      # origin, or local commits contained in no remote ref all mean the work
+      # did NOT land — say so visibly and fail the run.
+      - name: Verify agent work landed
+        if: >-
+          always() && steps.claude.outcome == 'success' &&
+          github.event.issue.pull_request == '' &&
+          github.event.pull_request == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          BRANCH: ${{ steps.claude.outputs.branch_name }}
+          START_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          unlanded=""
+          dirty=$(git status --porcelain --untracked-files=no 2>/dev/null || true)
+          [ -n "$dirty" ] && unlanded="uncommitted edits to tracked files"
+          if [ -n "$BRANCH" ] && ! git fetch --quiet origin "$BRANCH" 2>/dev/null; then
+            unlanded="${unlanded:+$unlanded; }branch $BRANCH never reached origin"
+          fi
+          head=$(git rev-parse HEAD 2>/dev/null || echo "")
+          if [ -n "$head" ] && [ "$head" != "$START_SHA" ] \
+             && ! git branch -r --contains "$head" 2>/dev/null | grep -q .; then
+            unlanded="${unlanded:+$unlanded; }local commits contained in no remote branch"
+          fi
+          [ -z "$unlanded" ] && { echo "Work landed (or the run made no changes)."; exit 0; }
+          echo "::error::agent work did not land: $unlanded"
+          gh issue comment "$ISSUE" --repo "$REPO" --body "$(printf '⚠️ The agent run finished WITHOUT landing its work (%s). The runner is ephemeral, so those changes are gone — the summary above may describe work that exists on no branch. Re-trigger to redo the task.' "$unlanded")" || true
+          exit 1
 
       # Surface agent errors the action swallows. A model API error (overload /
       # 529, a model 404, etc.) leaves the run green at the workflow level but
