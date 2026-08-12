@@ -147,10 +147,11 @@ esac
 if [ "$UP_URL" != "(dry-run)" ]; then
   # Match either spelling of the upstream PR ref — the comment this script
   # posts uses owner/repo#M, humans and chips use the full URL. Paginated:
-  # oldest-first pages mean recent comments live beyond page 1 on busy issues.
+  # oldest-first pages mean recent comments live beyond page 1 on busy
+  # issues. Plain grep, not jq --arg: gh's --jq flag takes only an
+  # expression and silently misparses jq arguments.
   HAVE=$(gh api --paginate "repos/$FORK/issues/$N/comments?per_page=100" \
-    --jq --arg u "$UP_URL" --arg s "UKGovernmentBEIS/inspect_ai#$M" \
-    '.[] | select((.body | contains($u)) or (.body | contains($s))) | .id' 2>/dev/null | wc -l | tr -d ' ')
+    --jq '.[].body' 2>/dev/null | grep -cF -e "$UP_URL" -e "UKGovernmentBEIS/inspect_ai#$M" || true)
   if [ "${HAVE:-0}" -eq 0 ]; then
     NOTE="awaiting review"
     [ -n "$UP_PICK" ] && [ "$(jq -r .state <<<"$UP_PICK")" != "OPEN" ] && NOTE="already $(jq -r .state <<<"$UP_PICK" | tr 'A-Z' 'a-z')"
