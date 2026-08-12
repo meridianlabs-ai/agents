@@ -477,6 +477,7 @@ jobs:
           NUM: ${{ inputs.pr_number }}
           HEAD_BRANCH: ${{ steps.gate.outputs.head_branch }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          MENTION: ${{ steps.gate.outputs.mention }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -511,9 +512,45 @@ jobs:
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::review-fix run did not complete: $err"
           if [ -n "${NUM:-}" ]; then
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto review-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), re-trigger with `@review`; otherwise it likely needs a human.' "$err")" || true
+            # cc the responsible human (gate-derived): without a mention these
+            # error reports on agent-authored PRs email nobody.
+            cc=""
+            [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto review-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), re-trigger with `@review`; otherwise it likely needs a human.%s' "$err" "$cc")" || true
           fi
           exit 1
+
+      # Infra crashes must not burn review rounds (mirror of claude-auto.yml's
+      # attempt refund): a step that died with NO execution output attempted
+      # nothing. Rebuild the sticky counter body including the head marker the
+      # next gate's no-progress check reads. Per-PR concurrency serializes us.
+      - name: Refund infra-crashed round
+        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
+          ROUND: ${{ steps.gate.outputs.round }}
+          CAP: ${{ inputs.review_round_cap }}
+          HEAD: ${{ steps.gate.outputs.head }}
+          MARKER: "<!-- auto-review-rounds -->"
+        run: |
+          set -uo pipefail
+          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+          if [ -s "$file" ]; then
+            echo "Execution output exists — a real round ran; not refunding."
+            exit 0
+          fi
+          prev=$((ROUND - 1))
+          cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' 2>/dev/null || true)
+          [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
+          body="$MARKER
+          🤖 auto review rounds: $prev (cap $CAP). (one round refunded — the fix agent crashed before starting: infrastructure, not the fix)
+          <!-- auto-review-head:$HEAD -->"
+          gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
+          echo "Refunded round $ROUND -> $prev."
 
       - name: Upload execution log
         if: always()

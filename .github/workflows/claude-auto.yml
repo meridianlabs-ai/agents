@@ -368,7 +368,9 @@ jobs:
             [ -n "$(git status --porcelain 2>/dev/null || true)" ] && pending=1
             [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
-              summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 || true)
+              # Strip the @ from trigger tokens in agent-authored text — this
+              # is embedded in a marvin-authored comment (see claude-auto-review).
+              summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
               err="the agent finished but left changes it never landed on the branch (uncommitted edits or unpushed commits), so no fix reached CI."
               [ -n "$summary" ] && err="$err Agent summary: $summary"
             fi
@@ -376,9 +378,61 @@ jobs:
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::CI-fix run did not complete: $err"
           if [ -n "${NUM:-}" ]; then
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.' "$err")" || true
+            # @-mention the responsible human (the Fixes-ref issue's author,
+            # same-repo refs only, bots skipped): without a mention, these
+            # error reports on agent-authored PRs generate no email for
+            # anyone — non-participants never hear about the failure.
+            mention=""
+            ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
+                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
+                    | head -1 || true)
+            if [ -n "$ref" ]; then
+              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
+              if [ -z "$refrepo" ] || \
+                 [ "$(printf '%s' "$refrepo" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                [ -n "$inum" ] && mention=$(gh api "repos/$REPO/issues/$inum" \
+                  --jq 'if .user.type=="Bot" then "" else .user.login end' 2>/dev/null || true)
+              fi
+            fi
+            cc=""
+            [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.%s' "$err" "$cc")" || true
           fi
           exit 1
+
+      # Infra crashes must not burn fix attempts: the counter increments
+      # BEFORE the agent runs (so real crashes still consume attempts), but a
+      # step that died with NO execution output at all (bootstrap failure —
+      # observed: "socket hang up" before the agent started) attempted no fix,
+      # and two such blips nearly escalated a PR spuriously. Roll the sticky
+      # counter back one; any run that produced execution output still counts.
+      # Safe from races: the job's per-PR concurrency group serializes us.
+      - name: Refund infra-crashed attempt
+        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
+          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+          MARKER: "<!-- auto-fix-attempts -->"
+        run: |
+          set -uo pipefail
+          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+          if [ -s "$file" ]; then
+            echo "Execution output exists — a real attempt ran; not refunding."
+            exit 0
+          fi
+          prev=$((ATTEMPT - 1))
+          cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' 2>/dev/null || true)
+          [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
+          body="$MARKER
+          🤖 auto CI-fix attempts: $prev (cap $CAP). (one attempt refunded — the fix agent crashed before starting: infrastructure, not the fix)"
+          gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
+          echo "Refunded attempt $ATTEMPT -> $prev."
 
       - name: Upload execution log
         if: always()
