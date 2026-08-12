@@ -58,9 +58,11 @@ CUR_UP=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.n
 # ---- preflight (branch pushed; review verdict + CI are advisory)
 gh api "repos/$FORK/branches/$BRANCH" --silent 2>/dev/null ||
   { echo "branch $BRANCH not on the fork" >&2; exit 4; }
-VERDICT=$(gh api "repos/$FORK/issues/$FPR/comments?per_page=100" \
-  --jq '[.[] | select(.body | contains("claude-review-verdict"))] | last | .body // ""' 2>/dev/null \
-  | grep -o 'verdict:[a-z]*' || echo "verdict:none")
+# --paginate: busy @auto issues/PRs exceed 100 comments, and the API returns
+# oldest-first — a single page never sees recent comments.
+VERDICT=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
+  --jq '.[] | select(.body | contains("claude-review-verdict")) | .body' 2>/dev/null \
+  | tail -1 | grep -o 'verdict:[a-z]*' || echo "verdict:none")
 CI=$(gh pr checks "$FPR" -R "$FORK" 2>&1 | awk -F'\t' '{print $2}' | sort | uniq -c | tr '\n' ' ' || true)
 echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}"
 
@@ -144,10 +146,11 @@ esac
 # ---- fork-issue comment (skip if any comment already links the upstream PR)
 if [ "$UP_URL" != "(dry-run)" ]; then
   # Match either spelling of the upstream PR ref — the comment this script
-  # posts uses owner/repo#M, humans and chips use the full URL.
-  HAVE=$(gh api "repos/$FORK/issues/$N/comments?per_page=100" \
+  # posts uses owner/repo#M, humans and chips use the full URL. Paginated:
+  # oldest-first pages mean recent comments live beyond page 1 on busy issues.
+  HAVE=$(gh api --paginate "repos/$FORK/issues/$N/comments?per_page=100" \
     --jq --arg u "$UP_URL" --arg s "UKGovernmentBEIS/inspect_ai#$M" \
-    '[.[] | select((.body | contains($u)) or (.body | contains($s)))] | length' 2>/dev/null || echo 0)
+    '.[] | select((.body | contains($u)) or (.body | contains($s))) | .id' 2>/dev/null | wc -l | tr -d ' ')
   if [ "${HAVE:-0}" -eq 0 ]; then
     NOTE="awaiting review"
     [ -n "$UP_PICK" ] && [ "$(jq -r .state <<<"$UP_PICK")" != "OPEN" ] && NOTE="already $(jq -r .state <<<"$UP_PICK" | tr 'A-Z' 'a-z')"
