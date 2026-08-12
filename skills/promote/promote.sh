@@ -86,13 +86,18 @@ body = re.sub(r"\b(Fixes|Closes|Resolves)\s+#%s\b" % n,
 if ("meridianlabs-ai/inspect_ai#%s" % n) not in body:
     body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body
 print(body)')
+  # Org forks cannot be resolved as `owner:branch` heads — PR creation needs
+  # an explicit head_repo, which `gh pr create` lacks (cli/cli#6462; see the
+  # fork's AGENTS.md → "Opening an upstream PR from an org fork").
   if [ "$DRY" = "--dry-run" ]; then
-    echo "DRY-RUN: gh pr create --repo $UPSTREAM --head meridianlabs-ai:$BRANCH --title \"$FPR_TITLE\" --body <transformed fork-PR body>"
+    echo "DRY-RUN: gh api repos/$UPSTREAM/pulls -X POST -f base=main -f head=$BRANCH -f head_repo=$FORK -f title=\"$FPR_TITLE\" -f body=<transformed fork-PR body>"
     UP_URL="(dry-run)"; M=0
   else
-    UP_URL=$(gh pr create --repo "$UPSTREAM" --head "meridianlabs-ai:$BRANCH" \
-      --title "$FPR_TITLE" --body "$BODY")
-    M=$(grep -oE '[0-9]+$' <<<"$UP_URL")
+    CREATED=$(gh api "repos/$UPSTREAM/pulls" -X POST \
+      -f base=main -f head="$BRANCH" -f head_repo="$FORK" \
+      -f title="$FPR_TITLE" -f body="$BODY" --jq '{number, html_url}')
+    M=$(jq -r .number <<<"$CREATED")
+    UP_URL=$(jq -r .html_url <<<"$CREATED")
     echo "CREATED upstream PR #$M"
   fi
 fi
@@ -138,8 +143,11 @@ esac
 
 # ---- fork-issue comment (skip if any comment already links the upstream PR)
 if [ "$UP_URL" != "(dry-run)" ]; then
+  # Match either spelling of the upstream PR ref — the comment this script
+  # posts uses owner/repo#M, humans and chips use the full URL.
   HAVE=$(gh api "repos/$FORK/issues/$N/comments?per_page=100" \
-    --jq --arg u "$UP_URL" '[.[] | select(.body | contains($u))] | length' 2>/dev/null || echo 0)
+    --jq --arg u "$UP_URL" --arg s "UKGovernmentBEIS/inspect_ai#$M" \
+    '[.[] | select((.body | contains($u)) or (.body | contains($s)))] | length' 2>/dev/null || echo 0)
   if [ "${HAVE:-0}" -eq 0 ]; then
     NOTE="awaiting review"
     [ -n "$UP_PICK" ] && [ "$(jq -r .state <<<"$UP_PICK")" != "OPEN" ] && NOTE="already $(jq -r .state <<<"$UP_PICK" | tr 'A-Z' 'a-z')"
