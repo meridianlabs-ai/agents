@@ -293,6 +293,7 @@ jobs:
       # sandboxed code can connect to Unix domain sockets, and GitHub runners
       # expose /var/run/docker.sock — a full sandbox escape.
       - name: Install review sandbox
+        id: sandbox
         if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
         run: |
           sudo apt-get update -q
@@ -316,6 +317,7 @@ jobs:
       # cut from pristine main and carry no meridian files — the action is
       # absent and this is skipped; see design/architecture.md.
       - name: Provision project environment
+        id: setup
         if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
@@ -437,12 +439,22 @@ jobs:
           REPO: ${{ github.repository }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
-          [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          # Pre-agent setup failures skip the agent step entirely, so without
+          # these checks no comment posts and the trigger silently goes red
+          # (observed: a transient curl failure downloading uv in claude-setup).
+          if [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+            err="environment provisioning (claude-setup) failed before the reviewer started — usually a transient dependency-download/network error; re-trigger to retry."
+          elif [ "${SANDBOX_OUTCOME:-}" = "failure" ]; then
+            err="the external-review sandbox install failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
+          fi
+          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review step failed before producing a result (see the job logs)."
           fi

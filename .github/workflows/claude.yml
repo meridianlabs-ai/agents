@@ -276,6 +276,7 @@ jobs:
       # Fatal on failure: a broken setup surfaces loudly rather than silently
       # degrading to static-only checks. See design/architecture.md.
       - name: Provision project environment
+        id: setup
         if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
@@ -559,12 +560,19 @@ jobs:
           REPO: ${{ github.repository }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
-          [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          # Provisioning died before the agent started (observed: a transient
+          # curl failure downloading uv) — without this, the issue gets no
+          # comment at all because the agent step was skipped, not failed.
+          if [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+            err="environment provisioning (claude-setup) failed before the agent started — usually a transient dependency-download/network error; re-trigger to retry."
+          fi
+          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the Claude Code step failed before producing a result (see the job logs)."
           fi
