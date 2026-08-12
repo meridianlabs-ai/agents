@@ -110,6 +110,17 @@ until someone happened to look):
   more CI round; expect several on a busy release day.
 - **checks green but `mergeStateStatus: DIRTY`** → main now genuinely
   conflicts; resolve per the invariants above.
+- **runs stuck in `action_required`** → the fork-PR workflow-approval gate:
+  first-time contributors need a maintainer "Approve and run" on EVERY push,
+  including ours (repeat externals don't hit this). Detect via
+  `gh api "repos/<upstream>/actions/runs?head_sha=<sha>"` and approve with
+  `gh api -X POST .../actions/runs/<id>/approve` — but only for the exact
+  sha WE pushed; never blind-approve a head someone else moved.
+- Watch-script pitfalls (both produced silent hour-long stalls): `gh pr
+  checks` prints "no checks reported" on STDERR — capture `2>&1` or the
+  gated state looks like an empty happy loop; and never hand-extend an
+  abbreviated push sha into a query — `head_sha=` with a fabricated tail
+  matches nothing and the poll spins forever. Resolve with `git rev-parse`.
 
 **"Pull request was already merged" is success** — auto-merge fired the
 moment checks passed. Always confirm with
