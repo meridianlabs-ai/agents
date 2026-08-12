@@ -56,6 +56,16 @@ created vs already present (healed vs no-op). From here the hourly Atlas
 sync owns the tail: approval → Merge, merge → Done (it closes the fork
 issue), changes-requested → Review, re-request → Sign-off.
 
+## Design decision: org-fork heads are deliberate
+
+The fork's AGENTS.md prefers personal-fork promotion because GitHub grants
+no maintainer-edits on org-fork PR heads. That concern doesn't apply to our
+promotions: every upstream maintainer has write access to the meridianlabs
+fork itself, so they can update or fix the PR branch directly (decision:
+Ransom, 2026-08-12). Keep promoting from the org fork; the script's REST
+`head_repo` creation is the required mechanism (GraphQL/`gh pr create`
+cannot resolve org-fork heads at all).
+
 ## Cautions
 
 - Never push to `main`/`meridian`; promotion only opens a PR from the
