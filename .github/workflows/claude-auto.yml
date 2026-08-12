@@ -260,12 +260,14 @@ jobs:
             gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
           fi
 
-      # Capture the branch tip before the agent runs so the error-surfacing step
-      # can tell whether the agent's fix actually landed on the branch.
+      # Capture the branch tip and a timestamp before the agent runs so later
+      # steps can tell whether the agent's fix landed and what it posted.
       - name: Record base SHA
         if: steps.gate.outputs.act == 'fix'
         id: base
-        run: echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          echo "ts=$(date -u +%FT%TZ)" >>"$GITHUB_OUTPUT"
 
       - name: Compose fix prompt
         if: steps.gate.outputs.act == 'fix'
@@ -279,7 +281,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
         run: |
           # Single line: the prompt is spliced as one arg downstream.
-          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. After pushing your fix, post a top-level PR comment of exactly @review so the automated reviewer re-checks the change and the loop can converge or hand off — the reviewer does not run on push, and without it a post-convergence CI fix leaves the loop with no hand-back. Do not post it if you pushed nothing. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop." >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix'
@@ -296,6 +298,39 @@ jobs:
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
+
+      # Backstop for the ending contract above: a fix round that pushed ANY
+      # commit must re-request review — the push invalidates the standing
+      # verdict, and without the @review comment (the loop's only hand-back
+      # from a CI fix) the board strands at Agent with nothing running
+      # (observed: inspect_ai#195 — a post-convergence fix pushed a main-merge
+      # + doc move and posted nothing). The remedy is mechanical, so complete
+      # the contract deterministically instead of failing red: post the
+      # re-review request as the machine account (whose comments trigger the
+      # reviewer). Exact-body comment; the reviewer's word-boundary gate and
+      # per-PR newest-wins concurrency make a duplicate harmless.
+      - name: Ensure hand-back after push
+        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          HEAD_BRANCH: ${{ inputs.head_branch }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          SINCE: ${{ steps.base.outputs.ts }}
+        run: |
+          set -uo pipefail
+          git fetch --quiet origin "$HEAD_BRANCH" 2>/dev/null || true
+          tip=$(git rev-parse "origin/$HEAD_BRANCH" 2>/dev/null || echo "$BASE_SHA")
+          [ "$tip" = "$BASE_SHA" ] && { echo "No push this round; no hand-back owed."; exit 0; }
+          posted=$(gh api "repos/$REPO/issues/$PR/comments?since=$SINCE" \
+            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | contains("auto-handoff")))] | length' 2>/dev/null || echo 0)
+          if [ "${posted:-0}" -gt 0 ]; then
+            echo "Hand-back already posted this round."
+          else
+            echo "Agent pushed ($BASE_SHA -> $tip) without a hand-back; posting the re-review request."
+            gh pr comment "$PR" --repo "$REPO" --body '@review' || true
+          fi
 
       # Surface agent errors the action swallows (model overload/529, 404, etc.),
       # which otherwise leave the fix run green with nothing pushed. Also catches
