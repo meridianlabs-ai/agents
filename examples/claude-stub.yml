@@ -67,7 +67,7 @@ jobs:
     # blocks the edit path. Acceptable for a cheap gate (no regex in workflow
     # expressions); the action remains the authoritative check on what fires.
     if: |
-      github.actor != 'i-am-marvin' && (
+      github.actor != 'i-am-marvin' && !endsWith(github.actor, '[bot]') && (
         ( github.event.action == 'edited'
           && ( contains(github.event.comment.body, '@claude')
             || contains(github.event.comment.body, '@i-am-marvin') )
@@ -145,7 +145,7 @@ jobs:
     # the loop-prone trigger, so keep the machine account from kicking it off
     # (nothing in the designed loop relies on marvin posting @auto).
     if: |
-      github.actor != 'i-am-marvin' && (
+      github.actor != 'i-am-marvin' && !endsWith(github.actor, '[bot]') && (
         ( github.event.action == 'edited'
           && contains(github.event.comment.body, '@auto')
           && !contains(github.event.changes.body.from, '@auto') ) ||
