@@ -6,114 +6,62 @@ description: Promote a reviewed inspect_ai fork branch upstream — open the UKG
 # Promote fork work upstream
 
 Promote work from `meridianlabs-ai/inspect_ai` (the fork) to
-`UKGovernmentBEIS/inspect_ai` (upstream), performing the full tracking
-contract from `meridianlabs-ai/agents` design/atlas-tracking.md → "The fork:
-promotion and the terminal sync". Every step is idempotent: running this on an
-already-promoted issue verifies and heals its bookkeeping instead of
-duplicating anything.
+`UKGovernmentBEIS/inspect_ai` (upstream), per the tracking contract in
+`meridianlabs-ai/agents` design/atlas-tracking.md → "The fork: promotion and
+the terminal sync".
 
-Constants (from the design doc; stable):
+## Fast path (issue number in hand)
 
-- Atlas project: `PVT_kwDOC7YMCM4BU68p`
-- `Stage` field `PVTSSF_lADOC7YMCM4BU68pzhYZEwY`; `Sign-off` option `da6137e6`
-- `Status` field `PVTSSF_lADOC7YMCM4BU68pzhKizZM`; `In progress` option `47fc9ee4`
-- `Upstream PR` field (text): `PVTF_lADOC7YMCM4BU68pzhYZp9Q`
+Run the script that lives next to this skill (substitute this skill's base
+directory). Add `--dry-run` first if the user asked to preview:
 
-## Inputs
+```sh
+bash <skill-base-dir>/promote.sh <N> [--dry-run]
+```
 
-Resolve from what the user gives (issue number, fork PR number, or branch):
+One invocation does everything, each write check-before-write (idempotent —
+rerunning heals an already-promoted issue): resolves the fork PR + branch
+from the issue's chips; prints preflight ADVISORY lines (review verdict, fork
+CI) — **relay these to the user, and pause for confirmation if the verdict
+isn't `clean` or CI shows failures**; adopts the existing upstream PR via the
+issue's cross-repo chip (the REST `pulls?head=` filter silently fails for
+this org-fork pair — never use it) or creates it with the fully-qualified
+`Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
+would rebind to upstream's tracker); assigns + requests review from
+`dragonstyle` on open PRs; sets the board's `Upstream PR` field (the sync's
+join key — the #90 lesson), stage → Sign-off + Status → In progress (never
+on a CLOSED issue, never downgrading Sign-off/Merge); comments the upstream
+link on the fork issue; supersedes and closes the open fork PR.
 
-- **fork issue `N`** — the unit of work on the board.
-- **branch** — the work branch (convention `claude/issue-N-*`, but human
-  branches happen; get it from the fork PR's head).
-- **fork PR** — the fork's review-surface PR for the branch (may be absent).
+Exit codes: **0** ok (report the `OK …` line plus which steps were created
+vs already present); **3** no fork-PR chip — resolve inputs via the slow
+path below, then run the script anyway if a branch emerges (it only needs
+the chip for resolution); **4** branch not on the fork; **5** preflight
+hard failure.
 
-From an issue: find the fork PR via its linked-PR chip
-(`closedByPullRequestsReferences`) or by scanning machine-account comments for
-`/pull/` refs (take the one still open; see the design doc's reconcile rules).
-From a PR or branch: the issue number comes from the branch name, else a
-same-repo `Fixes` ref in the PR body.
+## Slow path (no chip)
 
-## Steps
+From an issue with no linked-PR chip: scan machine-account comments for
+`/pull/` refs (take the still-open one). From a PR or branch: the issue
+number comes from the branch name (`claude/issue-N-*`), else a same-repo
+`Fixes` ref in the PR body. Human-named branches: get the branch from the
+fork PR's head. Once resolved, prefer fixing the chip (run the
+link-upstream-chips sweep) and re-running the script over hand-executing
+its steps.
 
-1. **Preflight.** Confirm the branch exists on the fork and is pushed
-   (`gh api repos/meridianlabs-ai/inspect_ai/branches/<branch>`). Advisory,
-   not blocking: note whether the fork PR's review converged (last
-   `claude-review-verdict` marker) and whether fork CI is green — surface
-   anything unfinished to the user before proceeding.
+## Report
 
-2. **Open (or adopt) the upstream PR.** Check for an existing one first:
-
-   ```sh
-   gh api "repos/UKGovernmentBEIS/inspect_ai/pulls?head=meridianlabs-ai:<branch>&state=all" \
-     --jq '.[] | {number, state, merged_at}'
-   ```
-
-   - If one exists (open or merged): **adopt it** — skip creation, continue to
-     bookkeeping (this is the heal path).
-   - Else create it, deriving title/body from the fork PR (or the issue when
-     there is no fork PR). The body MUST contain the fully-qualified
-     **`Fixes meridianlabs-ai/inspect_ai#N`** — this is what populates the
-     fork issue's linked-PR chip cross-org and makes the PR discoverable to
-     the sync; a bare `#N` would rebind to upstream's tracker. Keep the
-     upstream PR-template checklist if the fork PR body carries one.
-
-   ```sh
-   gh pr create --repo UKGovernmentBEIS/inspect_ai \
-     --head meridianlabs-ai:<branch> --title "<title>" --body "<body>"
-   ```
-
-   Then assign `dragonstyle` and request their review (idempotent — skip
-   whichever is already set):
-
-   ```sh
-   gh api repos/UKGovernmentBEIS/inspect_ai/issues/<M>/assignees -X POST -f "assignees[]=dragonstyle"
-   gh api repos/UKGovernmentBEIS/inspect_ai/pulls/<M>/requested_reviewers -X POST -f "reviewers[]=dragonstyle"
-   ```
-
-3. **Bookkeeping** (each idempotent — check before writing):
-
-   a. **`Upstream PR` field** ← the upstream PR URL (the sync's join key; a
-      promotion without it is invisible to the hourly sync — the #90 lesson):
-
-      ```sh
-      ITEM=$(gh api graphql -f query='{repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:N){projectItems(first:5){nodes{id project{number}}}}}}' \
-        --jq '.data.repository.issue.projectItems.nodes[] | select(.project.number==1) | .id')
-      # if empty: addProjectV2ItemById with the issue node_id first
-      gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{text:$t}}){projectV2Item{id}}}' \
-        -f p=PVT_kwDOC7YMCM4BU68p -f i="$ITEM" -f f=PVTF_lADOC7YMCM4BU68pzhYZp9Q -f t="<upstream url>"
-      ```
-
-   b. **Stage → `Sign-off`** (and `Status → In progress`), same mutation shape
-      with field `PVTSSF_lADOC7YMCM4BU68pzhYZEwY` option `da6137e6` (and
-      `PVTSSF_lADOC7YMCM4BU68pzhKizZM` option `47fc9ee4`). Skip if already at
-      Sign-off or beyond (Merge — the sync may have advanced it).
-
-   c. **Comment the upstream link on the fork issue** (the human-visible
-      pointer; the Development chip comes from the `Fixes` ref, not this):
-      skip if any comment already contains the upstream PR URL; else:
-
-      ```sh
-      gh issue comment N --repo meridianlabs-ai/inspect_ai \
-        --body "Promoted upstream → UKGovernmentBEIS/inspect_ai#M (awaiting review)."
-      ```
-
-   d. **Supersede the fork PR** (if one exists and is open): comment
-      `Superseded by the upstream PR: UKGovernmentBEIS/inspect_ai#M` and close
-      it — the fork PR is a review surface, never merged.
-
-4. **Report.** Upstream PR link, issue link, stage set, and which bookkeeping
-   steps were created vs. already present (healed vs. no-op). From here the
-   hourly Atlas sync owns the tail: approval → Merge, merge → Done
-   (it closes the fork issue), changes-requested → Review, re-request →
-   Sign-off.
+Upstream PR link, issue link, stage set, and which bookkeeping steps were
+created vs already present (healed vs no-op). From here the hourly Atlas
+sync owns the tail: approval → Merge, merge → Done (it closes the fork
+issue), changes-requested → Review, re-request → Sign-off.
 
 ## Cautions
 
-- Never push to `main`/`meridian`; promotion only opens a PR from the existing
-  branch.
+- Never push to `main`/`meridian`; promotion only opens a PR from the
+  existing branch.
 - Upstream is not ours: no labels and no Meridian-internal markers on the
   upstream PR beyond the `Fixes` ref. The one exception is the `dragonstyle`
-  assignee + review request from step 2 (explicitly requested by Ransom).
-- Do not merge anything — upstream merges are upstream's call; the fork issue
-  closes via the sync when that happens.
+  assignee + review request (explicitly requested by Ransom).
+- Do not merge anything — upstream merges are upstream's call; the fork
+  issue closes via the sync when that happens.

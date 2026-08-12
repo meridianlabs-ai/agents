@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Fast path of /promote (see SKILL.md): fork issue -> upstream PR + full
+# tracking bookkeeping, in one invocation. Every write is check-before-write
+# (idempotent), so re-running heals an already-promoted issue.
+#
+# Usage: promote.sh <issue-number> [--dry-run]
+# Exit codes: 0 ok; 3 no open same-repo fork PR chip (resolve inputs via the
+# skill's slow path); 4 branch not on the fork; 5 preflight hard failure.
+set -euo pipefail
+
+FORK=meridianlabs-ai/inspect_ai
+UPSTREAM=UKGovernmentBEIS/inspect_ai
+PROJECT=PVT_kwDOC7YMCM4BU68p
+STAGE_FIELD=PVTSSF_lADOC7YMCM4BU68pzhYZEwY   # Sign-off option below
+SIGNOFF_OPT=da6137e6
+STATUS_FIELD=PVTSSF_lADOC7YMCM4BU68pzhKizZM  # In progress option below
+INPROGRESS_OPT=47fc9ee4
+UPSTREAM_PR_FIELD=PVTF_lADOC7YMCM4BU68pzhYZp9Q
+REVIEWER=dragonstyle
+
+N=${1:?usage: promote.sh <issue-number> [--dry-run]}
+DRY=${2:-}
+
+write() {  # guard every mutation; --dry-run prints instead
+  if [ "$DRY" = "--dry-run" ]; then echo "DRY-RUN: $*"; else "$@"; fi
+}
+
+# ---- one GraphQL round trip: chips (with PR bodies) + board item + fields
+JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state
+  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName repository{nameWithOwner}}}
+  projectItems(first:5){nodes{id project{number}
+    stage: fieldValueByName(name:"Stage"){... on ProjectV2ItemFieldSingleSelectValue{name}}
+    up: fieldValueByName(name:"Upstream PR"){... on ProjectV2ItemFieldTextValue{text}}}}}}}' -F n="$N")
+
+ISSUE_NODE=$(jq -r '.data.repository.issue.id' <<<"$JSON")
+ISSUE_TITLE=$(jq -r '.data.repository.issue.title' <<<"$JSON")
+ISSUE_STATE=$(jq -r '.data.repository.issue.state' <<<"$JSON")
+# Prefer the OPEN fork PR; fall back to a closed one (the heal path — a
+# promoted issue's fork PR is already superseded and closed).
+PICK=$(jq -c --arg repo "$FORK" '([.data.repository.issue.closedByPullRequestsReferences.nodes[]
+  | select(.repository.nameWithOwner==$repo)] | (map(select(.state=="OPEN")) + .))[0] // empty' <<<"$JSON")
+if [ -z "$PICK" ]; then
+  echo "NO FORK PR CHIP for issue #$N — resolve inputs via the slow path. Chips seen:" >&2
+  jq -r '.data.repository.issue.closedByPullRequestsReferences.nodes[]
+         | "  #\(.number) \(.state) \(.repository.nameWithOwner) head=\(.headRefName)"' <<<"$JSON" >&2
+  exit 3
+fi
+FPR_STATE=$(jq -r .state <<<"$PICK")
+FPR=$(jq -r .number <<<"$PICK")
+BRANCH=$(jq -r .headRefName <<<"$PICK")
+FPR_TITLE=$(jq -r .title <<<"$PICK")
+FPR_BODY=$(jq -r .body <<<"$PICK")
+
+ITEM=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].id // empty' <<<"$JSON")
+CUR_STAGE=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].stage.name // empty' <<<"$JSON")
+CUR_UP=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].up.text // empty' <<<"$JSON")
+
+# ---- preflight (branch pushed; review verdict + CI are advisory)
+gh api "repos/$FORK/branches/$BRANCH" --silent 2>/dev/null ||
+  { echo "branch $BRANCH not on the fork" >&2; exit 4; }
+VERDICT=$(gh api "repos/$FORK/issues/$FPR/comments?per_page=100" \
+  --jq '[.[] | select(.body | contains("claude-review-verdict"))] | last | .body // ""' 2>/dev/null \
+  | grep -o 'verdict:[a-z]*' || echo "verdict:none")
+CI=$(gh pr checks "$FPR" -R "$FORK" 2>&1 | awk -F'\t' '{print $2}' | sort | uniq -c | tr '\n' ' ' || true)
+echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}"
+
+# ---- upstream PR: adopt or create. Adoption detection uses the issue's own
+# cross-repo chip (same branch, upstream repo) — the REST `pulls?head=org:br`
+# filter silently returns [] for this org-fork pair (verified against a known
+# merged PR), so it cannot be trusted.
+UP_PICK=$(jq -c --arg up "$UPSTREAM" --arg br "$BRANCH" \
+  '[.data.repository.issue.closedByPullRequestsReferences.nodes[]
+    | select(.repository.nameWithOwner==$up) | select(.headRefName==$br)][0] // empty' <<<"$JSON")
+M=$(jq -r '.number // empty' <<<"$UP_PICK")
+if [ -n "$M" ]; then
+  UP_URL="https://github.com/$UPSTREAM/pull/$M"
+  echo "ADOPTED existing upstream PR #$M ($(jq -r .state <<<"$UP_PICK"))"
+else
+  # Fully-qualified Fixes ref: qualify any bare same-repo ref, else prepend.
+  BODY=$(ISSUE_N="$N" FPR_BODY="$FPR_BODY" python3 -c '
+import os, re
+n = os.environ["ISSUE_N"]
+body = os.environ["FPR_BODY"]
+body = re.sub(r"\b(Fixes|Closes|Resolves)\s+#%s\b" % n,
+              r"\1 meridianlabs-ai/inspect_ai#%s" % n, body)
+if ("meridianlabs-ai/inspect_ai#%s" % n) not in body:
+    body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body
+print(body)')
+  if [ "$DRY" = "--dry-run" ]; then
+    echo "DRY-RUN: gh pr create --repo $UPSTREAM --head meridianlabs-ai:$BRANCH --title \"$FPR_TITLE\" --body <transformed fork-PR body>"
+    UP_URL="(dry-run)"; M=0
+  else
+    UP_URL=$(gh pr create --repo "$UPSTREAM" --head "meridianlabs-ai:$BRANCH" \
+      --title "$FPR_TITLE" --body "$BODY")
+    M=$(grep -oE '[0-9]+$' <<<"$UP_URL")
+    echo "CREATED upstream PR #$M"
+  fi
+fi
+
+# ---- assignee + review request (skip whichever is already set)
+if [ "$M" != "0" ]; then
+  UP_STATE=$(gh api "repos/$UPSTREAM/pulls/$M" --jq '{a: [.assignees[].login], r: [.requested_reviewers[].login], state}' 2>/dev/null || echo '{}')
+  if [ "$(jq -r .state <<<"$UP_STATE")" = "open" ]; then
+    jq -e --arg u "$REVIEWER" '.a | index($u)' <<<"$UP_STATE" >/dev/null 2>&1 ||
+      write gh api "repos/$UPSTREAM/issues/$M/assignees" -X POST -f "assignees[]=$REVIEWER" --silent
+    jq -e --arg u "$REVIEWER" '.r | index($u)' <<<"$UP_STATE" >/dev/null 2>&1 ||
+      write gh api "repos/$UPSTREAM/pulls/$M/requested_reviewers" -X POST -f "reviewers[]=$REVIEWER" --silent
+  fi
+fi
+
+# ---- board bookkeeping (the #90 lesson: the Upstream PR field is the sync's join key)
+if [ -z "$ITEM" ]; then
+  ITEM=$(write gh api graphql -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+    -f p="$PROJECT" -f c="$ISSUE_NODE" --jq '.data.addProjectV2ItemById.item.id' || echo "")
+  echo "board: item added"
+fi
+if [ "$CUR_UP" != "$UP_URL" ] && [ -n "$ITEM" ] && [ "$UP_URL" != "(dry-run)" ]; then
+  write gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{text:$t}}){projectV2Item{id}}}' \
+    -f p="$PROJECT" -f i="$ITEM" -f f="$UPSTREAM_PR_FIELD" -f t="$UP_URL" --silent
+  echo "board: Upstream PR field set"
+else
+  echo "board: Upstream PR field already current (or dry-run)"
+fi
+# Never re-stage a closed (Done) issue — healing must not resurrect it.
+[ "$ISSUE_STATE" = "CLOSED" ] && CUR_STAGE="__issue-closed__"
+case "$CUR_STAGE" in
+  __issue-closed__) echo "board: issue is CLOSED — stage left alone" ;;
+  Sign-off|Merge) echo "board: stage already $CUR_STAGE — left alone" ;;
+  *)
+    if [ -n "$ITEM" ]; then
+      write gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+        -f p="$PROJECT" -f i="$ITEM" -f f="$STAGE_FIELD" -f o="$SIGNOFF_OPT" --silent
+      write gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+        -f p="$PROJECT" -f i="$ITEM" -f f="$STATUS_FIELD" -f o="$INPROGRESS_OPT" --silent
+      echo "board: stage -> Sign-off (was ${CUR_STAGE:-unset})"
+    fi ;;
+esac
+
+# ---- fork-issue comment (skip if any comment already links the upstream PR)
+if [ "$UP_URL" != "(dry-run)" ]; then
+  HAVE=$(gh api "repos/$FORK/issues/$N/comments?per_page=100" \
+    --jq --arg u "$UP_URL" '[.[] | select(.body | contains($u))] | length' 2>/dev/null || echo 0)
+  if [ "${HAVE:-0}" -eq 0 ]; then
+    NOTE="awaiting review"
+    [ -n "$UP_PICK" ] && [ "$(jq -r .state <<<"$UP_PICK")" != "OPEN" ] && NOTE="already $(jq -r .state <<<"$UP_PICK" | tr 'A-Z' 'a-z')"
+    write gh issue comment "$N" --repo "$FORK" \
+      --body "Promoted upstream → UKGovernmentBEIS/inspect_ai#$M ($NOTE)."
+    echo "issue: promotion comment posted"
+  else
+    echo "issue: promotion comment already present"
+  fi
+fi
+
+# ---- supersede the fork PR if still open (review surface, never merged)
+if [ "$FPR_STATE" = "OPEN" ]; then
+  write gh pr comment "$FPR" --repo "$FORK" \
+    --body "Superseded by the upstream PR: UKGovernmentBEIS/inspect_ai#$M"
+  write gh pr close "$FPR" --repo "$FORK"
+  echo "fork PR #$FPR: superseded and closed"
+else
+  echo "fork PR #$FPR: already closed"
+fi
+
+echo "OK issue=#$N forkPR=#$FPR upstream=$UP_URL ($ISSUE_TITLE)"
