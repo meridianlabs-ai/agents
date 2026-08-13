@@ -9,9 +9,36 @@ Merge the approved upstream PRs linked from Atlas-board issues in the
 **Merge** stage, strictly one at a time — they usually conflict with
 each other, so each must land before the next is rebased.
 
-Remotes in `~/git/viewer`: `origin` = UKGovernmentBEIS/inspect_ai (upstream,
-where PRs merge), `meridianlabs-ai` = the fork (where PR branches live and are
-pushed).
+**Workspace: a throwaway worktree of `~/git/inspect_ai`**, so queue work
+never collides with in-progress work in the main checkout or leftovers from
+a previous queue run (a stale checked-out branch once absorbed a stray
+`git merge origin/main` meant for the next queue item). Remotes in that
+clone: `origin` = UKGovernmentBEIS/inspect_ai (upstream, where PRs merge),
+`meridian` = the fork (where PR branches live and are pushed).
+
+```bash
+cd ~/git/inspect_ai && git fetch origin main
+git worktree add --detach <scratch>/merge-queue origin/main
+cd <scratch>/merge-queue
+```
+
+Worktree rules (learned the hard way):
+- NEVER run `git submodule update --init` inside the worktree — git's
+  worktree+submodule handling writes a broken `.git` pointer file that then
+  poisons every later command. Run fetch/checkout with submodule recursion
+  off instead: `git fetch --no-recurse-submodules`, and for `gh pr checkout`
+  set `GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=fetch.recurseSubmodules
+  GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=submodule.recurse
+  GIT_CONFIG_VALUE_1=false`. The queue never needs submodule contents
+  (the gitlink invariant is checked via `git diff`, not the worktree).
+- A branch already checked out in another worktree (e.g. the user has it
+  open in the main clone) can't be checked out again — coordinate rather
+  than force.
+- `git worktree remove` it in cleanup.
+- EXCEPTION — "PRs that need a ts-mono change" (below) require real
+  submodule contents and pnpm builds: do those in a primary clone
+  (historically `~/git/viewer`, remotes `origin`/`meridianlabs-ai`), not a
+  worktree.
 
 ## 1. Find the queue
 
@@ -47,9 +74,17 @@ gh project item-list 1 --owner meridianlabs-ai --format json --limit 1000 \
 
 ```bash
 git fetch origin main
-git checkout -B <branch> meridianlabs-ai/<branch>
+git fetch meridian <branch>
+git checkout -B <branch> meridian/<branch>
 git merge origin/main
 ```
+
+Take `<branch>` from the PR JSON already in hand (`headRefName`) — NEVER
+type it from memory: a guessed branch name once failed the checkout and the
+follow-on `git merge origin/main` landed on whatever branch was current.
+Same rule for chained commands: don't pipe state-changing git commands
+through `| tail`/`| head` inside `&&` chains — the pipe's exit status masks
+the failure (run them bare; inspect output separately).
 
 ### Conflict resolution invariants
 
@@ -86,7 +121,7 @@ conflicted area. Pure CHANGELOG/docs conflicts can go straight to CI.
 ### Push, arm auto-merge, watch
 
 ```bash
-git push meridianlabs-ai <branch>   # externals: plain `git push` (contributor fork)
+git push meridian <branch>   # externals: plain `git push` (contributor fork)
 gh pr merge <n> --repo UKGovernmentBEIS/inspect_ai --auto --squash
 ```
 
@@ -134,8 +169,9 @@ what just landed.
 Same flow as above with these substitutions — the branch lives on the
 *contributor's* fork, not meridianlabs-ai:
 
-- **Checkout/push**: instead of `git checkout -B <branch> meridianlabs-ai/<branch>`,
-  use `gh pr checkout <n> --repo UKGovernmentBEIS/inspect_ai` in `~/git/viewer`
+- **Checkout/push**: instead of `git checkout -B <branch> meridian/<branch>`,
+  use `gh pr checkout <n> --repo UKGovernmentBEIS/inspect_ai` in the worktree
+  (with the submodule-recursion-off GIT_CONFIG env from the worktree rules)
   — with `maintainerCanModify` it wires the branch's push remote to the
   contributor's fork, so after `git merge origin/main` a plain `git push`
   lands on their branch (verify with `git push --dry-run` the first time).
