@@ -526,9 +526,15 @@ jobs:
       # handed back to Review with nothing to review). Deterministic backstop
       # for the LANDING prompt rule: on issue-triggered runs, tracked-file
       # edits left uncommitted (untracked files are ignored — test caches and
-      # scratch leftovers are normal), a reported branch that never reached
-      # origin, or local commits contained in no remote ref all mean the work
-      # did NOT land — say so visibly and fail the run.
+      # scratch leftovers are normal), a reported branch carrying local commits
+      # that never reached origin, or local commits contained in no remote ref
+      # all mean the work did NOT land — say so visibly and fail the run.
+      # The branch check only applies when the branch exists locally with
+      # commits beyond the start SHA: the action mints a per-run branch name
+      # even when the task is to update an EXISTING PR branch, and in that flow
+      # the minted branch is legitimately never pushed (observed: inspect_ai#67
+      # — review fixes pushed to the existing PR branch, false ⚠️ posted for
+      # the unused per-run branch).
       - name: Verify agent work landed
         if: >-
           always() && steps.claude.outcome == 'success' &&
@@ -545,8 +551,12 @@ jobs:
           unlanded=""
           dirty=$(git status --porcelain --untracked-files=no 2>/dev/null || true)
           [ -n "$dirty" ] && unlanded="uncommitted edits to tracked files"
-          if [ -n "$BRANCH" ] && ! git fetch --quiet origin "$BRANCH" 2>/dev/null; then
-            unlanded="${unlanded:+$unlanded; }branch $BRANCH never reached origin"
+          local_tip=$(git rev-parse --quiet --verify "refs/heads/${BRANCH:-}" || true)
+          if [ -n "$local_tip" ] && [ "$local_tip" != "$START_SHA" ]; then
+            git fetch --quiet origin "$BRANCH" 2>/dev/null || true
+            if ! git branch -r --contains "$local_tip" 2>/dev/null | grep -q .; then
+              unlanded="${unlanded:+$unlanded; }branch $BRANCH has local commits that never reached origin"
+            fi
           fi
           head=$(git rev-parse HEAD 2>/dev/null || echo "")
           if [ -n "$head" ] && [ "$head" != "$START_SHA" ] \
