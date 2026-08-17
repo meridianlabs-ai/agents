@@ -118,6 +118,24 @@ sanity-check locally before pushing: `ruff check` + `ruff format --check` on
 touched files, `mypy <touched files>`, and any targeted tests that cover the
 conflicted area. Pure CHANGELOG/docs conflicts can go straight to CI.
 
+- **Run pytest with `PYTHONPATH=$PWD/src`** (from the worktree root). The
+  venv's editable install points at the PRIMARY clone's `src/`, so without
+  it pytest imports the main checkout's code and silently tests the wrong
+  tree (observed: a green run that hadn't exercised the merge at all —
+  caught only when a branch-side import didn't exist in the main clone).
+  Verify once per session:
+  `PYTHONPATH=$PWD/src python -c 'import inspect_ai; print(inspect_ai.__file__)'`
+  must print the worktree path. (`ruff`/`mypy` take file paths, so they
+  check the worktree files regardless.)
+- **A merged branch may owe more than textual resolution**: when main has
+  established a new cross-cutting contract (e.g. mutation verbs carry
+  `--terse` with piped-output default; human output goes through the `_echo`
+  sanitizer wrappers, enforced by a meta-test), a branch that ADDS a new
+  command or path in that family must honor the contract even where git
+  reports no conflict — thread the new flags/wrappers through the branch's
+  additions and pin pre-contract tests (`--no-terse`) the way main's own
+  tests were adapted.
+
 ### Push, arm auto-merge, watch
 
 ```bash
