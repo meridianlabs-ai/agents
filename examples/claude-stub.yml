@@ -144,8 +144,17 @@ jobs:
     # otherwise open a duplicate PR). Same machine-account guard too: @auto is
     # the loop-prone trigger, so keep the machine account from kicking it off
     # (nothing in the designed loop relies on marvin posting @auto).
+    # Machine-account EXCEPTION — the auto-LABEL path: automation (e.g. a
+    # triage pipeline) may add the `auto` label as the machine account, and a
+    # label event's actor is whoever added it. The hoisted marvin guard ate
+    # that trigger (observed: inspect_ai#236). Labeling is safe to exempt:
+    # the gate reads the label NAME (no quoted-token hazard) and labeling
+    # requires write access. Comment/body paths keep the full guard.
     if: |
-      github.actor != 'i-am-marvin' && !endsWith(github.actor, '[bot]') && (
+      ( github.event_name == 'issues' && github.event.action == 'labeled'
+        && github.event.label.name == 'auto'
+        && !endsWith(github.actor, '[bot]') ) ||
+      ( github.actor != 'i-am-marvin' && !endsWith(github.actor, '[bot]') && (
         ( github.event.action == 'edited'
           && contains(github.event.comment.body, '@auto')
           && !contains(github.event.changes.body.from, '@auto') ) ||
@@ -156,7 +165,7 @@ jobs:
             contains(github.event.issue.title, '@auto') ||
             github.event.label.name == 'auto'
         ) )
-      )
+      ) )
     uses: meridianlabs-ai/agents/.github/workflows/claude.yml@main
     secrets:
       MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
