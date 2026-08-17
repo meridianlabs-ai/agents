@@ -36,9 +36,15 @@ on:
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere
           else — and you MUST post it within THIS run: a run cannot resume
-          after your turn ends, so never finish intending to post later (if
-          you delegate verification to subagents, wait for their results
-          before ending). Post a concise top-level summary with `gh pr comment` (whether
+          after your turn ends, so never finish intending to post later. In
+          THIS environment nothing can wake you: background subagents do NOT
+          re-invoke you when they finish, so if you delegate verification to
+          subagents, launch them with run_in_background false and do not end
+          your turn while any are still running — a turn that ends "waiting
+          on" subagents has failed and posted nothing. If results are not in
+          hand near the end of your budget, post the review from what you
+          have verified yourself rather than ending unposted. Post a concise
+          top-level summary with `gh pr comment` (whether
           or not you found issues), and add inline comments for specific
           line-level findings. THEN, as your final action, post a SEPARATE
           standalone comment with a single `gh pr comment --body` call — post it
