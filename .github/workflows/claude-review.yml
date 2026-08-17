@@ -430,6 +430,45 @@ jobs:
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number }}
 
+      # @-mention target for the failure comments below: without one, error
+      # reports on agent/marvin-authored threads email nobody (the thread has
+      # no human participants). Same derivation as claude-auto.yml: closing
+      # ref → claude/issue-N-* branch → issue author unless bot/machine
+      # account → first assignee. On issue threads (external proxies) the
+      # issue itself is the source.
+      - name: Derive responsible human for error cc
+        id: who
+        if: always() && steps.trig.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          IS_PR: ${{ (github.event.issue.pull_request != null || github.event.pull_request != null) && 'true' || 'false' }}
+        run: |
+          set -uo pipefail
+          mention=""
+          inum=""
+          if [ "${IS_PR:-}" = "true" ]; then
+            ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
+                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
+                    | head -1 || true)
+            if [ -n "$ref" ]; then
+              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
+              if [ -z "$refrepo" ] || \
+                 [ "$(printf '%s' "$refrepo" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              fi
+            fi
+            [ -z "$inum" ] && inum=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq '.headRefName // ""' 2>/dev/null \
+                                       | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+          else
+            inum="$NUM"
+          fi
+          [ -n "$inum" ] && mention=$(gh api "repos/$REPO/issues/$inum" \
+            --jq 'if (.user.type=="Bot" or .user.login=="i-am-marvin") then (.assignees[0].login // "") else .user.login end' 2>/dev/null || true)
+          echo "mention=$mention" >> "$GITHUB_OUTPUT"
+          echo "cc target: ${mention:-none}"
+
       # Surface agent errors the action swallows (e.g. a model overload/529 or a
       # model 404), which otherwise leave the run green with no review posted.
       - name: Surface agent errors
@@ -442,6 +481,7 @@ jobs:
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          MENTION: ${{ steps.who.outputs.mention }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -461,7 +501,9 @@ jobs:
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Review did not complete: $err"
           if [ -n "${NUM:-}" ]; then
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The `@review` run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload). Re-trigger with `@review`; if it persists see https://status.claude.com.' "$err")" || true
+            cc=""
+            [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The `@review` run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload, or a GitHub-side outage). Re-trigger with `@review`; if it persists check https://status.claude.com and https://githubstatus.com.%s' "$err" "$cc")" || true
           fi
           exit 1
 
@@ -480,6 +522,7 @@ jobs:
           MODE: ${{ steps.trig.outputs.mode }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           SINCE: ${{ steps.trig.outputs.started }}
+          MENTION: ${{ steps.who.outputs.mention }}
         run: |
           set -uo pipefail
           bots='select(.user.login=="claude[bot]" or .user.login=="i-am-marvin")'
@@ -492,10 +535,12 @@ jobs:
           fi
           [ "${n:-0}" -gt 0 ] && { echo "review output detected ($n items)."; exit 0; }
           echo "::error::review run succeeded but posted nothing since $SINCE"
-          # Single-quoted body, backticked token: this posts as MARVIN, and a
-          # bare @review here would re-trigger the review — a failed run would
-          # then spawn its own retry loop.
-          gh issue comment "$NUM" --repo "$REPO" --body '⚠️ The review run completed without posting a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with `@review`.' || true
+          # Backticked token: this posts as MARVIN, and a bare @review here
+          # would re-trigger the review — a failed run would then spawn its
+          # own retry loop. The cc mention is a login, never a trigger token.
+          cc=""
+          [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
+          gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The review run completed without posting a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with `@review`.%s' "$cc")" || true
           exit 1
 
       - name: Upload execution log
