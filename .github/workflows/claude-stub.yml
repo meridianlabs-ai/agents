@@ -147,8 +147,9 @@ jobs:
     # triage pipeline) may add the `auto` label as the machine account, and a
     # label event's actor is whoever added it. The hoisted marvin guard ate
     # that trigger (observed: inspect_ai#236). Labeling is safe to exempt:
-    # the gate reads the label NAME (no quoted-token hazard) and labeling
-    # requires write access. Comment/body paths keep the full guard.
+    # the gate reads the label NAME (no quoted-token hazard), labeling needs
+    # triage access, and the action separately verifies the actor has write
+    # access before running. Comment/body paths keep the full guard.
     if: |
       ( github.event_name == 'issues' && github.event.action == 'labeled'
         && github.event.label.name == 'auto'

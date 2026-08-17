@@ -198,8 +198,19 @@ jobs:
           LNAME: ${{ github.event.label.name }}
         run: |
           ok=false
+          # The label path is exempt from the machine-account exclusion: the
+          # triage pipeline labels issues `auto` AS marvin, and that labeled
+          # event is the intended kickoff (fork PR inspect_ai#237) — without
+          # this, marvin-labeled kickoffs ran the agent but skipped the ack
+          # and both Atlas stage steps, so the board never showed the pickup.
+          # Reading the label NAME carries no quoted-token hazard; bots stay
+          # excluded everywhere.
+          if [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] \
+             && [ -n "$LABEL" ] && [ "$LNAME" = "$LABEL" ]; then
+            case "$ACTOR" in *"[bot]") ;; *) ok=true ;; esac
+          fi
           case "$ACTOR" in
-            *"[bot]"|i-am-marvin) ;; # bot/machine actors never stage
+            *"[bot]"|i-am-marvin) ;; # bot/machine actors never stage (label path above excepted)
             *)
               text="$COMMENT$REVIEW"
               if [ "$EVENT" = "issues" ]; then
