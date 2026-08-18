@@ -75,6 +75,17 @@ GIT_CONFIG_COUNT=2 \
   GIT_CONFIG_KEY_1=submodule.recurse GIT_CONFIG_VALUE_1=false \
   gh pr checkout "$M" -R "$PR_REPO"
 
+# The recursion-free switch moves gitlink pointers without touching submodule
+# working trees, leaving them at the previous branch's commits (status shows
+# them modified). Sync them to the recorded pointers; this only hits the
+# network if a recorded commit is missing locally. --init is safe ONLY in the
+# primary clone: in a linked worktree it writes a broken submodule .git
+# pointer file that poisons every later git command, so skip the sync there
+# (worktree submodules were never initialized; there is nothing to sync).
+if [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then
+  git submodule update --init --quiet
+fi
+
 NOTE=""
 [ -n "$CROSS" ] && NOTE=" [cross-repo: $PR_REPO — upstream PR, don't push without cause]"
 echo "OK branch=$(git branch --show-current) pr=$PR_REPO#$M issue=#$N ($TITLE)$NOTE"

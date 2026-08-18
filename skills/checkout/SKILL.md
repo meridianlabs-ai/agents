@@ -22,8 +22,9 @@ One invocation does everything: dirty-tree guard, meridian-repo resolution
 (NOT necessarily `origin` — fork clones point origin at upstream, whose issue
 numbers are unrelated), a single GraphQL call for the chip + head/base refs,
 the VS Code PR-extension branch config (written BEFORE the checkout — the
-extension reads it on the HEAD-change event), and a submodule-recursion-free
-fetch + `gh pr checkout`.
+extension reads it on the HEAD-change event), a submodule-recursion-free
+fetch + `gh pr checkout`, and a `git submodule update` so submodule working
+trees match the new branch (no spurious `M` in status).
 
 Chip selection: an OPEN same-repo chip wins; otherwise a single OPEN
 cross-repo chip is checked out against its own repo — this covers External
@@ -57,7 +58,8 @@ most recently updated. Say which rule matched. Once a PR number is in hand,
 finish with the script's tail by hand: write both branch configs BEFORE the
 checkout (`branch.<B>.github-pr-owner-number` = `owner#repo#M`,
 `branch.<B>.vscode-merge-base` = `<base-remote>/<baseRefName>`), then
-`gh pr checkout <M> -R "$REPO"`.
+`gh pr checkout <M> -R "$REPO"`, then `git submodule update --init --quiet`
+so submodule working trees match the new branch.
 
 ## Fallbacks — tell the user instead of guessing
 
