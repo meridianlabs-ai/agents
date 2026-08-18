@@ -440,7 +440,20 @@ jobs:
             echo "Hand-back already posted this round."
           else
             echo "Agent pushed ($BASE_SHA -> $tip) without a hand-back; posting the re-review request."
-            gh pr comment "$PR" --repo "$REPO" --body '@review' || true
+            # Retry with backoff: this comment IS the hand-back — a swallowed
+            # failure (observed: GitHub 503 during an outage) strands the
+            # board at Agent with green CI and nobody notified. Fail the run
+            # loudly if it never lands.
+            ok=""
+            for i in 1 2 3 4 5; do
+              if gh pr comment "$PR" --repo "$REPO" --body '@review'; then ok=1; break; fi
+              echo "hand-back post failed (attempt $i); retrying"
+              sleep $((i * 15))
+            done
+            if [ -z "$ok" ]; then
+              echo "::error::hand-back @review comment failed after 5 attempts — post it manually"
+              exit 1
+            fi
           fi
 
       # rationale — by posting a handoff comment whose first line is
