@@ -27,10 +27,7 @@ isn't `clean` or CI shows failures**; adopts the existing upstream PR via the
 issue's cross-repo chip (the REST `pulls?head=` filter silently fails for
 this org-fork pair — never use it) or creates it with the fully-qualified
 `Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
-would rebind to upstream's tracker); before creating, squashes the branch
-to a single tree-preserving commit based on upstream main's merge-base
-(create path only — an adopted PR's history is never rewritten under
-review); assigns + requests review from
+would rebind to upstream's tracker); assigns + requests review from
 `dragonstyle` on open PRs; sets the board's `Upstream PR` field (the sync's
 join key — the #90 lesson), stage → Sign-off + Status → In progress (never
 on a CLOSED issue, never downgrading Sign-off/Merge); comments the upstream

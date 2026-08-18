@@ -78,43 +78,6 @@ if [ -n "$M" ]; then
   UP_URL="https://github.com/$UPSTREAM/pull/$M"
   echo "ADOPTED existing upstream PR #$M ($(jq -r .state <<<"$UP_PICK"))"
 else
-  # Squash the branch to ONE commit before opening upstream (decision: Ransom,
-  # 2026-08-18): agent branches accumulate WIP and merge-main commits that
-  # upstream shouldn't have to scroll past. Tree-preserving — the squashed
-  # commit reuses the head commit's tree, so the content (and the fork CI
-  # advisory above) is unchanged. First promotion only: this is the create
-  # path, so an adopted upstream PR's history is never rewritten under review.
-  # The merge base must come from UPSTREAM main (agent branches merge upstream
-  # main directly, so fork main can lag; squashing onto a stale base would
-  # fold upstream's own commits into ours). Cross-repo compare 404s for this
-  # org-fork pair like pulls?head= does, but the fork shares upstream's object
-  # network, so comparing upstream's head SHA inside the fork works.
-  UP_MAIN=$(gh api "repos/$UPSTREAM/branches/main" --jq .commit.sha)
-  CMP=$(gh api "repos/$FORK/compare/$UP_MAIN...$BRANCH" \
-    --jq '{base: .merge_base_commit.sha, ahead: .ahead_by}')
-  AHEAD=$(jq -r .ahead <<<"$CMP")
-  if [ "$AHEAD" -gt 1 ]; then
-    HEADC=$(gh api "repos/$FORK/git/ref/heads/$BRANCH" --jq '.object.sha')
-    CDATA=$(gh api "repos/$FORK/git/commits/$HEADC" \
-      --jq '{tree: .tree.sha, an: .author.name, ae: .author.email, ad: .author.date}')
-    if [ "$DRY" = "--dry-run" ]; then
-      echo "DRY-RUN: squash $AHEAD commits on $BRANCH into one (tree-preserving, parent $(jq -r .base <<<"$CMP")) and force-update the ref"
-    else
-      NEWC=$(gh api "repos/$FORK/git/commits" -X POST \
-        -f message="$FPR_TITLE" \
-        -f tree="$(jq -r .tree <<<"$CDATA")" \
-        -f "parents[]=$(jq -r .base <<<"$CMP")" \
-        -f "author[name]=$(jq -r .an <<<"$CDATA")" \
-        -f "author[email]=$(jq -r .ae <<<"$CDATA")" \
-        -f "author[date]=$(jq -r .ad <<<"$CDATA")" \
-        --jq '.sha')
-      gh api "repos/$FORK/git/refs/heads/$BRANCH" -X PATCH \
-        -f sha="$NEWC" -F force=true --silent
-      echo "branch: squashed $AHEAD commits -> 1 ($NEWC)"
-    fi
-  else
-    echo "branch: already a single commit ahead of upstream main — no squash needed"
-  fi
   # Fully-qualified Fixes ref: qualify any bare same-repo ref, else prepend.
   BODY=$(ISSUE_N="$N" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
