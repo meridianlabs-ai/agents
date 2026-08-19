@@ -61,6 +61,12 @@ path above and proceed.
 The script itself runs that sweep as its last step (best-effort: an
 expired browser login is reported, never fatal), so a normal promotion
 leaves no chips pending — including the new upstream PR's own chip.
+If the tail reports the sweep failed on an expired login, recover the
+same way resolve-board does — it's the same interactive session: run
+`node index.mjs --login` in `scripts/link-upstream-chips`, let the user
+complete the GitHub sign-in in the window that opens (good for ~2
+weeks), then re-run the sweep. The script deliberately never does this
+itself: a promotion must not block on a browser sign-in.
 
 ## Report
 
