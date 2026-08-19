@@ -549,6 +549,42 @@ jobs:
           gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The review run completed without posting a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with `@review`.%s' "$cc")" || true
           exit 1
 
+      # "Stage - Agent (review running)" above assumes the @auto loop follows
+      # every review — but the loop engages only on PRs carrying the `auto`
+      # label. For a review on an unlabeled PR nothing follows, so leaving the
+      # stage at Agent strands the issue (observed: inspect_ai#253 — the dev
+      # agent's hand-back set Review, the reviewer starting on its draft PR
+      # re-set Agent, and with no fix loop to hand off, the stage stuck).
+      # When the loop does NOT own the PR, hand the stage back to Review once
+      # the review run ends — failed runs included, since their ⚠️ asks a
+      # human to re-trigger.
+      - name: Check whether the auto loop owns this PR
+        id: autoloop
+        if: always() && steps.trig.outputs.ack == 'true' && steps.trig.outputs.mode != 'external'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          n=$(gh api "repos/$REPO/issues/$NUM/labels" \
+                --jq '[.[] | select(.name == "auto")] | length' 2>/dev/null || echo 0)
+          if [ "${n:-0}" -gt 0 ]; then engaged=true; else engaged=false; fi
+          echo "engaged=$engaged" >>"$GITHUB_OUTPUT"
+          echo "auto loop owns PR #$NUM: $engaged"
+
+      - name: Stage - Review (hand-back, no auto loop)
+        if: >-
+          always() && steps.trig.outputs.ack == 'true' &&
+          steps.trig.outputs.mode != 'external' &&
+          steps.autoloop.outputs.engaged != 'true'
+        uses: meridianlabs-ai/agents/.github/actions/set-stage@main
+        with:
+          stage: Review
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          issue: ${{ github.event.issue.number || github.event.pull_request.number }}
+
       - name: Upload execution log
         if: always()
         uses: actions/upload-artifact@v4
