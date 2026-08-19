@@ -49,6 +49,15 @@ fork PR's head. Once resolved, prefer fixing the chip (run the
 link-upstream-chips sweep) and re-running the script over hand-executing
 its steps.
 
+NEVER wait for GitHub to materialize a missing chip: on the fork, closing
+refs (`Fixes #N`) are inert — GitHub only processes them for PRs based on
+the default branch, and fork PRs base on `meridian` — so no amount of
+editing the PR body or polling produces one (observed: a session polled
+5 minutes for a chip that can never appear). Chips on the fork come ONLY
+from the link-upstream-chips sweep (`scripts/link-upstream-chips` in the
+agents checkout, or `/resolve-board`); run it, or resolve via the slow
+path above and proceed.
+
 ## Report
 
 Upstream PR link, issue link, stage set, and which bookkeeping steps were
