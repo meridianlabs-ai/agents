@@ -378,13 +378,15 @@ jobs:
             git fetch origin "$HEAD_BRANCH" --quiet 2>/dev/null || true
             remote=$(git rev-parse "origin/$HEAD_BRANCH" 2>/dev/null || echo "$BASE_SHA")
             pending=""
-            [ -n "$(git status --porcelain 2>/dev/null || true)" ] && pending=1
+            # untracked files are normal scratch (test caches, venvs) — only
+            # tracked-file edits count as unlanded work (see claude-auto-review)
+            [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ] && pending=1
             [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
               # Strip the @ from trigger tokens in agent-authored text — this
               # is embedded in a marvin-authored comment (see claude-auto-review).
               summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
-              err="the agent finished but left changes it never landed on the branch (uncommitted edits or unpushed commits), so no fix reached CI."
+              err="the agent finished but left edits to tracked files (or unpushed commits) that never landed on the branch — whatever its summary reports, no code change reached CI."
               [ -n "$summary" ] && err="$err Agent summary: $summary"
             fi
           fi
