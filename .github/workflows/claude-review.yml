@@ -301,6 +301,11 @@ jobs:
       - name: Install review sandbox
         id: sandbox
         if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
+        # A hung apt/npm here once sat for 3+ hours with no output (the job
+        # had no timeout at all, so only GitHub's 6h ceiling would end it).
+        # Fail fast instead: SANDBOX_OUTCOME=failure feeds the Surface step,
+        # which posts the ⚠️ + cc asking for a re-trigger.
+        timeout-minutes: 10
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq bubblewrap socat
