@@ -173,4 +173,20 @@ else
   echo "fork PR #$FPR: already closed"
 fi
 
+# ---- best-effort chip sweep: Development-panel links have no API and fork
+# closing refs are inert (non-default base), so the Playwright sweep is the
+# ONLY thing that ever creates the issue<->PR chips. Run it here so promote
+# leaves no chip pending — but never let it block or fail the promotion:
+# an expired browser login just gets reported for a later /resolve-board.
+if [ "$DRY" != "--dry-run" ]; then
+  SWEEP="$(cd "$(dirname "$(realpath "$0")")/../.." && pwd)/scripts/link-upstream-chips"
+  if [ -d "$SWEEP" ]; then
+    if (cd "$SWEEP" && node index.mjs) 2>&1 | tail -3; then
+      echo "chips: sweep ran"
+    else
+      echo "chips: sweep failed (expired login? run /resolve-board later) — promotion unaffected"
+    fi
+  fi
+fi
+
 echo "OK issue=#$N forkPR=#$FPR upstream=$UP_URL ($ISSUE_TITLE)"

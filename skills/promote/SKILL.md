@@ -58,6 +58,10 @@ from the link-upstream-chips sweep (`scripts/link-upstream-chips` in the
 agents checkout, or `/resolve-board`); run it, or resolve via the slow
 path above and proceed.
 
+The script itself runs that sweep as its last step (best-effort: an
+expired browser login is reported, never fatal), so a normal promotion
+leaves no chips pending — including the new upstream PR's own chip.
+
 ## Report
 
 Upstream PR link, issue link, stage set, and which bookkeeping steps were
