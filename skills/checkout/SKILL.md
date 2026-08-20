@@ -24,7 +24,10 @@ numbers are unrelated), a single GraphQL call for the chip + head/base refs,
 the VS Code PR-extension branch config (written BEFORE the checkout — the
 extension reads it on the HEAD-change event), a submodule-recursion-free
 fetch + `gh pr checkout`, and a `git submodule update` so submodule working
-trees match the new branch (no spurious `M` in status).
+trees match the new branch (no spurious `M` in status). If an open ts-mono
+companion PR exists for the same branch name (the dev-agent convention for
+viewer work), the submodule is switched onto that branch — the parent
+gitlink intentionally shows modified until the merge-time pointer bump.
 
 Chip selection: an OPEN same-repo chip wins; otherwise a single OPEN
 cross-repo chip is checked out against its own repo — this covers External

@@ -98,8 +98,25 @@ GIT_CONFIG_COUNT=2 \
 # (worktree submodules were never initialized; there is nothing to sync).
 if [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then
   git submodule update --init --quiet
+
+  # ts-mono companion: work that spans the viewer lives on a ts-mono branch
+  # with the SAME name as this one (dev-agent convention; the parent gitlink
+  # only bumps at merge time, so the recorded pointer is NOT the companion).
+  # If an open companion PR exists, put the submodule on its branch so both
+  # halves of the issue are editable together.
+  TSMONO=$(git config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null              | awk '$2 ~ /ts-mono/ {print $2; exit}' || true)
+  if [ -n "$TSMONO" ] && [ -z "$CROSS" ]; then
+    COMP=$(gh pr list --repo meridianlabs-ai/ts-mono --head "$BRANCH" --state open              --json number --jq '.[0].number // empty' 2>/dev/null || true)
+    if [ -n "$COMP" ]; then
+      if [ -z "$(git -C "$TSMONO" status --porcelain 2>/dev/null)" ]; then
+        git -C "$TSMONO" fetch -q origin "$BRANCH"           && git -C "$TSMONO" checkout -q -B "$BRANCH" "origin/$BRANCH"           && NOTE_TSMONO=" [ts-mono companion: PR meridianlabs-ai/ts-mono#$COMP — submodule on branch $BRANCH; parent gitlink intentionally differs until the merge-time bump]"           || NOTE_TSMONO=" [ts-mono companion PR #$COMP exists but submodule checkout failed — handle manually]"
+      else
+        NOTE_TSMONO=" [ts-mono companion PR #$COMP exists but the submodule tree is dirty — not switching it]"
+      fi
+    fi
+  fi
 fi
 
-NOTE=""
-[ -n "$CROSS" ] && NOTE=" [cross-repo: $PR_REPO — upstream PR, don't push without cause]"
+NOTE="${NOTE_TSMONO:-}"
+[ -n "$CROSS" ] && NOTE="$NOTE [cross-repo: $PR_REPO — upstream PR, don't push without cause]"
 echo "OK branch=$(git branch --show-current) pr=$PR_REPO#$M issue=#$N ($TITLE)$NOTE"
