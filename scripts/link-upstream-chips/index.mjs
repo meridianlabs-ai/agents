@@ -122,6 +122,50 @@ function pendingAgentPairs() {
   return rows;
 }
 
+function pendingCompanionPairs() {
+  // ts-mono companion PRs: viewer halves of fork issues, named by the
+  // dev-agent convention (same claude/issue-N-* branch in both repos).
+  // Linking them into the anchor issue's Development panel is the one
+  // visible cross-repo surface (the sync reads companions by convention;
+  // the chip is for humans). Cross-repo Development links only ever come
+  // from this sweep.
+  const TS_MONO = process.env.LINKCHIPS_TSMONO ?? 'meridianlabs-ai/ts-mono';
+  let prs;
+  try {
+    prs = JSON.parse(gh(['api', `repos/${TS_MONO}/pulls?state=open&per_page=100`]));
+  } catch {
+    return []; // repo unreadable — companions are a nice-to-have
+  }
+  const rows = [];
+  for (const p of prs) {
+    const m = /^claude\/issue-(\d+)-/.exec(p.head.ref);
+    if (!m) continue;
+    // ts-mono's OWN dev agent also mints claude/issue-N-* branches where N
+    // is a ts-mono issue — a companion is only claimed when the SAME branch
+    // exists on the fork (the actual convention: one branch name, two repos).
+    try {
+      execFileSync('gh', ['api', `repos/${REPO}/branches/${encodeURIComponent(p.head.ref)}`], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'], // expected 404s stay silent
+      });
+    } catch {
+      continue; // no fork twin — a ts-mono-native branch, not a companion
+    }
+    const issue = Number(m[1]);
+    try {
+      if (linkedUrls(issue).includes(p.html_url)) continue;
+    } catch {
+      continue; // no such fork issue — the branch name is a coincidence
+    }
+    rows.push({
+      issue,
+      issueUrl: `https://github.com/${REPO}/issues/${issue}`,
+      pr: p.html_url,
+    });
+  }
+  return rows;
+}
+
 async function loggedInUser(page) {
   return page
     .evaluate(() => document.querySelector('meta[name="user-login"]')?.content ?? '')
@@ -252,7 +296,7 @@ const rows = LOGIN_ONLY
         }
         return true;
       })
-    : [...pendingProxies(), ...pendingAgentPairs()];
+    : [...pendingProxies(), ...pendingAgentPairs(), ...pendingCompanionPairs()];
 if (!LOGIN_ONLY && rows.length === 0) {
   console.log('Nothing pending — every target already has its chip.');
   process.exit(0);
