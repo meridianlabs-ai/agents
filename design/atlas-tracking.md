@@ -371,6 +371,44 @@ Constants the script needs (all recorded above): project id, `Stage` field +
 option ids, `Status` field + `In progress` `47fc9ee4` / `Done` `98236657`
 option ids, `Upstream PR` field id.
 
+## Multi-repo issues (ts-mono companions)
+
+An issue that touches the embedded viewer spans two repos: the inspect_ai
+change plus a companion PR in meridianlabs-ai/ts-mono (schema/types, viewer
+code, pointer bump at merge time — see the merge-queue skill's "PRs that
+need a ts-mono change"). The board deliberately does NOT grow per-repo
+items for these: Projects v2 has no rollups over custom fields, so child
+items would mean hand-built aggregation plus stale rows. Instead the fork
+issue stays the single anchor and the companion is an *input* to its
+stage, resolved by the hourly sync:
+
+- **Join key**: the companion is discovered by branch-name convention —
+  the ts-mono PR whose head equals the upstream PR's `headRefName` (the
+  dev agent names companion branches identically, e.g.
+  `claude/issue-251-20260818-2127` in both repos). An explicit
+  `Companion PR: <url>` line in the anchor issue body overrides the
+  convention for human-named branches. Like `Upstream PR`, the recorded
+  line is the durable form; chips are cosmetic.
+- **Merge gate**: `upstream approved -> Merge` additionally requires the
+  companion (when one exists) to be merged or approved. An open
+  unreviewed companion holds the item at Sign-off with a
+  "waiting on companion" summary line — the merge queue can merge an
+  open companion (it sequences ts-mono first), but a substantive viewer
+  change should pass ts-mono's own review before the queue slams it in;
+  regenerate-style companions authored *during* a queue run never have a
+  board item in flight and are unaffected.
+- **Done sanity check**: upstream CI (`submodule-on-main`) forces the
+  companion onto ts-mono main before the upstream PR can merge, so
+  `upstream merged` implies the companion landed. If the companion PR is
+  somehow still open at that point the sync warns in its summary (a
+  leftover to close by hand) but still closes the issue — the upstream
+  merge is ground truth.
+- **Single-writer discipline**: ts-mono's own agent workflows (dev,
+  reviewer, auto loop) run on ts-mono PRs but never write Atlas stage;
+  the sync is the only component that folds companion state into the
+  board. This avoids adding event-time stage writers that race the
+  existing ones.
+
 ## Stage signals (from hand-reconciling the backlog)
 
 Reconciling existing issues by hand surfaced which signals actually carry the
