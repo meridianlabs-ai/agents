@@ -403,11 +403,21 @@ stage, resolved by the hourly sync:
   somehow still open at that point the sync warns in its summary (a
   leftover to close by hand) but still closes the issue — the upstream
   merge is ground truth.
+- **Lifecycle reflection**: pre-promotion, a companion being driven by
+  the @auto loop is the active work — the sync enumerates open
+  auto-labeled ts-mono PRs named `claude/issue-N-*` and sets the anchor
+  to Agent while the loop owns the ball, Review when it hands back,
+  reading ownership from the loop's ending-contract markers (continue:
+  re-review trigger / verdict:suggestions; stop: auto-handoff /
+  auto-converged / verdict:clean). Only items already in Agent/Review
+  move; parked stages stay parked.
 - **Single-writer discipline**: ts-mono's own agent workflows (dev,
   reviewer, auto loop) run on ts-mono PRs but never write Atlas stage;
   the sync is the only component that folds companion state into the
   board. This avoids adding event-time stage writers that race the
-  existing ones.
+  existing ones. Caveat that follows: labeling a companion `auto` AFTER
+  its review posted does not engage the loop (the loop keys on the
+  marker comment's creation event) — re-trigger the review to light it.
 
 ## Stage signals (from hand-reconciling the backlog)
 
