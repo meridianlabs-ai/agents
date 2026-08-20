@@ -161,7 +161,11 @@ async function firstVisible(locators) {
   for (const loc of locators) {
     try {
       const el = loc.first();
-      if (await el.isVisible({ timeout: 1500 })) return el;
+      // waitFor actually waits; isVisible({timeout}) ignores the timeout and
+      // returns immediately — with a slow-rendering panel (the 2026-08
+      // SelectPanel) that exhausted every variant before anything appeared.
+      await el.waitFor({ state: 'visible', timeout: 1500 });
+      return el;
     } catch {
       /* try next */
     }
@@ -188,6 +192,10 @@ async function linkOne(page, { issue, issueUrl, pr }) {
 
   const dialog = page.getByRole('dialog').last();
   const search = await firstVisible([
+    // 2026-08 Primer SelectPanel: the search is a combobox in an anchored
+    // overlay ("Search pull requests"), no longer a dialog-scoped textbox.
+    page.getByRole('combobox', { name: /search pull requests/i }),
+    dialog.getByRole('combobox', { name: /search/i }),
     dialog.getByRole('textbox'),
     dialog.locator('input[placeholder*="Search" i]'),
     dialog.locator('input[type="text"]'),
@@ -202,6 +210,8 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   const numRe = new RegExp(`#${prNumber}(\\D|$)`);
   const result = await firstVisible([
     dialog.getByRole('option', { name: numRe }),
+    // SelectPanel renders options in the overlay, outside the dialog node
+    page.getByRole('option', { name: numRe }),
     dialog.locator(`label:has-text("#${prNumber}")`),
   ]);
   if (!result) throw new Error(`No result matching #${prNumber} for ${pr} — not clicking anything`);
