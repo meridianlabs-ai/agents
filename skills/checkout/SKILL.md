@@ -29,6 +29,9 @@ trees match the new branch (no spurious `M` in status).
 Chip selection: an OPEN same-repo chip wins; otherwise a single OPEN
 cross-repo chip is checked out against its own repo — this covers External
 proxies (the contributor's upstream PR) and promotions still open upstream.
+With no chip at all, the script falls back to the proxy body's
+machine-written `Upstream PR:` line before giving up — chips only exist
+after the browser sweep runs, so fresh proxies often lack one.
 
 Exit codes:
 

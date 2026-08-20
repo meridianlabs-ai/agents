@@ -44,6 +44,20 @@ if [ -z "$PICK" ]; then
   fi
 fi
 if [ -z "$PICK" ]; then
+  # External-proxy fallback: the sync writes a canonical "Upstream PR:" line
+  # into every proxy body, and chips only exist after the (browser) sweep
+  # runs — so resolve the upstream PR from the body instead of requiring a
+  # chip. Same shape as a cross-repo chip pick.
+  UP_URL=$(gh issue view "$N" --repo "$REPO" --json body     --jq '.body' 2>/dev/null | grep -ioE 'Upstream PR:[[:space:]]*https://github\.com/[^[:space:]]+/pull/[0-9]+'     | head -1 | grep -oE 'https://[^[:space:]]+' || true)
+  if [ -n "$UP_URL" ]; then
+    UP_REPO=$(printf '%s' "$UP_URL" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/.*#\1#')
+    UP_NUM=$(printf '%s' "$UP_URL" | grep -oE '[0-9]+$')
+    PICK=$(gh pr view "$UP_NUM" --repo "$UP_REPO"       --json number,state,headRefName,baseRefName 2>/dev/null       | jq -c --arg r "$UP_REPO" 'select(.state=="OPEN")
+          | {number, state, headRefName, baseRefName, repository:{nameWithOwner:$r}}' || true)
+    [ -n "$PICK" ] && { CROSS=1; echo "note: no chip — resolved via the proxy body's Upstream PR line" >&2; }
+  fi
+fi
+if [ -z "$PICK" ]; then
   echo "NO USABLE OPEN CHIP for issue #$N — use the slow path. Chips seen:" >&2
   jq -r '.data.repository.issue.closedByPullRequestsReferences.nodes[]
          | "  #\(.number) \(.state) \(.repository.nameWithOwner)"' <<<"$JSON" >&2
