@@ -49,6 +49,13 @@ fork PR's head. Once resolved, prefer fixing the chip (run the
 link-upstream-chips sweep) and re-running the script over hand-executing
 its steps.
 
+Multiple chips are normal: an issue can carry its fork PR, a ts-mono
+companion, and (after promotion) the upstream PR. Resolution filters by
+repo, so extra chips never confuse it. A ts-mono companion (same branch
+name, open) additionally gets the SAME reviewer assigned and
+review-requested at promotion time — ts-mono has no promotion step of
+its own, so this is where the viewer half enters human sign-off.
+
 NEVER wait for GitHub to materialize a missing chip: on the fork, closing
 refs (`Fixes #N`) are inert — GitHub only processes them for PRs based on
 the default branch, and fork PRs base on `meridian` — so no amount of

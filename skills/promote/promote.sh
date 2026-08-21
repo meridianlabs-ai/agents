@@ -10,6 +10,7 @@ set -euo pipefail
 
 FORK=meridianlabs-ai/inspect_ai
 UPSTREAM=UKGovernmentBEIS/inspect_ai
+TSMONO=meridianlabs-ai/ts-mono
 PROJECT=PVT_kwDOC7YMCM4BU68p
 STAGE_FIELD=PVTSSF_lADOC7YMCM4BU68pzhYZEwY   # Sign-off option below
 SIGNOFF_OPT=da6137e6
@@ -113,6 +114,20 @@ if [ "$M" != "0" ]; then
     jq -e --arg u "$REVIEWER" '.r | index($u)' <<<"$UP_STATE" >/dev/null 2>&1 ||
       write gh api "repos/$UPSTREAM/pulls/$M/requested_reviewers" -X POST -f "reviewers[]=$REVIEWER" --silent
   fi
+fi
+
+# ---- ts-mono companion: the viewer half needs the SAME human reviewer.
+# Companions share the branch name (dev-agent convention; the sync and the
+# chip sweep key on it). ts-mono has no promotion step — its PR merges in
+# place — so sign-off review is requested here, at promotion time.
+COMPANION=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open   --json number --jq '.[0].number // empty' 2>/dev/null || true)
+if [ -n "$COMPANION" ]; then
+  C_STATE=$(gh api "repos/$TSMONO/pulls/$COMPANION" --jq '{a: [.assignees[].login], r: [.requested_reviewers[].login]}' 2>/dev/null || echo '{}')
+  jq -e --arg u "$REVIEWER" '.a | index($u)' <<<"$C_STATE" >/dev/null 2>&1 ||
+    write gh api "repos/$TSMONO/issues/$COMPANION/assignees" -X POST -f "assignees[]=$REVIEWER" --silent
+  jq -e --arg u "$REVIEWER" '.r | index($u)' <<<"$C_STATE" >/dev/null 2>&1 ||
+    write gh api "repos/$TSMONO/pulls/$COMPANION/requested_reviewers" -X POST -f "reviewers[]=$REVIEWER" --silent
+  echo "companion $TSMONO#$COMPANION: $REVIEWER assigned + review requested"
 fi
 
 # ---- board bookkeeping (the #90 lesson: the Upstream PR field is the sync's join key)
