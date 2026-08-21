@@ -371,6 +371,19 @@ Constants the script needs (all recorded above): project id, `Stage` field +
 option ids, `Status` field + `In progress` `47fc9ee4` / `Done` `98236657`
 option ids, `Upstream PR` field id.
 
+## Duplicates of upstream work
+
+When a fork PR turns out to duplicate an upstream PR (upstream fixed it
+independently), closing the fork PR strands the issue: fork closing refs
+are inert, and the sync's terminal transitions only fire for issues with
+an `Upstream PR` field (observed: #306, closed by hand after its fork PR
+was closed as a duplicate of upstream #4992). The zero-code path: at
+duplicate-declaration time, set the issue's `Upstream PR` field to the
+DUPLICATING upstream PR — the sync then closes the issue and cleans the
+board when that PR merges, exactly as for our own promotions. If the
+upstream PR already merged, just close the issue with an attributing
+comment and clear the stage by hand.
+
 ## Multi-repo issues (ts-mono companions)
 
 An issue that touches the embedded viewer spans two repos: the inspect_ai
