@@ -110,6 +110,14 @@ on:
         required: false
         type: string
         default: ""
+      anchor_repo:
+        description: >-
+          Repo whose issues this repo's claude/issue-N-* branch numbers
+          reference when the same-named branch also exists there (the
+          companion convention). Used only for @-mention derivation.
+        required: false
+        type: string
+        default: ""
       allowed_bots:
         description: >-
           Comma-separated bot logins whose events may trigger the reviewer, or
@@ -455,27 +463,40 @@ jobs:
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != null || github.event.pull_request != null) && 'true' || 'false' }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
         run: |
           set -uo pipefail
           mention=""
           inum=""
+          issue_repo="$REPO"
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
           if [ "${IS_PR:-}" = "true" ]; then
             ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
                     | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
                     | head -1 || true)
             if [ -n "$ref" ]; then
               refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-              if [ -z "$refrepo" ] || \
-                 [ "$(printf '%s' "$refrepo" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
                 inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                issue_repo="$ANCHOR_REPO"
               fi
             fi
-            [ -z "$inum" ] && inum=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq '.headRefName // ""' 2>/dev/null \
-                                       | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+            if [ -z "$inum" ]; then
+              hb=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq '.headRefName // ""' 2>/dev/null || true)
+              inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+              # companion branch numbers reference the anchor repo's tracker —
+              # only when the twin branch exists there
+              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
+                 gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
+                issue_repo="$ANCHOR_REPO"
+              fi
+            fi
           else
             inum="$NUM"
           fi
-          [ -n "$inum" ] && mention=$(gh api "repos/$REPO/issues/$inum" \
+          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
             --jq 'if .pull_request then "" elif (.user.type=="Bot" or .user.login=="i-am-marvin") then (.assignees[0].login // "") else .user.login end' 2>/dev/null || true)
           echo "mention=$mention" >> "$GITHUB_OUTPUT"
           echo "cc target: ${mention:-none}"

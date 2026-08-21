@@ -56,6 +56,17 @@ on:
         required: false
         type: string
         default: ""
+      anchor_repo:
+        description: >-
+          Repo whose issues this repo's claude/issue-N-* branch numbers
+          reference when the same-named branch also exists THERE (the
+          companion convention — e.g. ts-mono sets meridianlabs-ai/inspect_ai).
+          Mention derivation resolves companion branch numbers and
+          fully-qualified closing refs against it, so the right human is
+          found without naming anyone in config. Empty = this repo only.
+        required: false
+        type: string
+        default: ""
       model:
         required: false
         type: string
@@ -121,6 +132,7 @@ jobs:
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
           HANDOFF_MENTION: ${{ inputs.handoff_mention }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
           HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
           MARKER: "<!-- auto-review-rounds -->"
         run: |
@@ -176,26 +188,40 @@ jobs:
                     | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
                     | head -1 || true)
             inum=""
+            issue_repo="$REPO"
+            lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
             if [ -n "$ref" ]; then
               refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-              if [ -z "$refrepo" ] || \
-                 [ "$(printf '%s' "$refrepo" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
                 inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
+                # companion PR referencing its anchor issue cross-repo
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                issue_repo="$ANCHOR_REPO"
               fi
             fi
             # Fallback for the MENTION only (closing semantics untouched): a PR
             # may deliberately use a non-closing ref — observed: "Refs ...#103"
             # on a docs-only PR that must not close its issue — so derive the
             # issue from the claude/issue-N-* branch convention when no closing
-            # ref matched.
+            # ref matched. On a companion repo the branch number references the
+            # ANCHOR repo's tracker — but only when the same branch exists
+            # there (this repo's own agent mints identically-shaped names for
+            # native issues), so check for the twin before resolving remotely.
             if [ -z "$inum" ]; then
-              inum=$(jq -r '.headRefName' <<<"$pr_json" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+              hb=$(jq -r '.headRefName' <<<"$pr_json")
+              inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
+                 gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
+                issue_repo="$ANCHOR_REPO"
+              fi
             fi
             if [ -n "$inum" ]; then
               # Author, unless it's a bot or the machine account (marvin is a
               # User, not a Bot — triage-created issues are marvin-authored);
-              # then the first assignee.
-              mention=$(ghr gh api "repos/$REPO/issues/$inum" \
+              # then the first assignee. Never a PR (the /issues/N endpoint
+              # returns PRs too — observed pinging an unrelated PR author).
+              mention=$(ghr gh api "repos/$issue_repo/issues/$inum" \
                           --jq 'if .pull_request then "" elif (.user.type=="Bot" or .user.login=="i-am-marvin") then (.assignees[0].login // "") else .user.login end' 2>/dev/null || true)
             fi
           fi

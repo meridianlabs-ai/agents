@@ -23,6 +23,14 @@ on:
         required: false
         type: string
         default: "@claude"
+      anchor_repo:
+        description: >-
+          Repo whose issues this repo's claude/issue-N-* branch numbers
+          reference when the same-named branch also exists there (the
+          companion convention). Used only for @-mention derivation.
+        required: false
+        type: string
+        default: ""
       label_trigger:
         description: Issue label that triggers Claude
         required: false
@@ -584,6 +592,7 @@ jobs:
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -615,15 +624,26 @@ jobs:
                       | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
                       | head -1 || true)
               inum=""
+              issue_repo="$REPO"
+              lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
               if [ -n "$ref" ]; then
                 refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-                if [ -z "$refrepo" ] || \
-                   [ "$(printf '%s' "$refrepo" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+                if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
                   inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
+                  inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                  issue_repo="$ANCHOR_REPO"
                 fi
               fi
-              [ -z "$inum" ] && inum=$(jq -r '.headRefName // ""' <<<"$prj" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
-              [ -n "$inum" ] && mention=$(gh api "repos/$REPO/issues/$inum" \
+              if [ -z "$inum" ]; then
+                hb=$(jq -r '.headRefName // ""' <<<"$prj")
+                inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+                if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
+                   gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
+                  issue_repo="$ANCHOR_REPO"
+                fi
+              fi
+              [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
                 --jq 'if .pull_request then "" elif (.user.type=="Bot" or .user.login=="i-am-marvin") then (.assignees[0].login // "") else .user.login end' 2>/dev/null || true)
               [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
             fi

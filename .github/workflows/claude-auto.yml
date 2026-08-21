@@ -65,6 +65,14 @@ on:
         required: false
         type: string
         default: ""
+      anchor_repo:
+        description: >-
+          Repo whose issues this repo's claude/issue-N-* branch numbers
+          reference when the same-named branch also exists there (the
+          companion convention). Used only for @-mention derivation.
+        required: false
+        type: string
+        default: ""
       settings:
         description: >-
           Claude Code settings JSON. Keep in sync with claude.yml's default —
@@ -358,6 +366,7 @@ jobs:
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           NUM: ${{ steps.gate.outputs.pr }}
           HEAD_BRANCH: ${{ inputs.head_branch }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           set -uo pipefail
@@ -402,19 +411,31 @@ jobs:
                     | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
                     | head -1 || true)
             inum=""
+            issue_repo="$REPO"
+            lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
             if [ -n "$ref" ]; then
               refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-              if [ -z "$refrepo" ] || \
-                 [ "$(printf '%s' "$refrepo" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
                 inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                issue_repo="$ANCHOR_REPO"
               fi
             fi
             # Mention-only fallback: non-closing refs (deliberate "Refs ...#N")
             # or no ref — derive from the claude/issue-N-* branch convention.
-            [ -z "$inum" ] && inum=$(printf '%s' "$HEAD_BRANCH" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+            # On a companion repo the number references the anchor repo's
+            # tracker, but only when the twin branch exists there.
+            if [ -z "$inum" ]; then
+              inum=$(printf '%s' "$HEAD_BRANCH" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
+                 gh api "repos/$ANCHOR_REPO/branches/$HEAD_BRANCH" --silent >/dev/null 2>&1; then
+                issue_repo="$ANCHOR_REPO"
+              fi
+            fi
             # Author, unless bot or machine account (marvin is a User, not a
             # Bot — triage issues are marvin-authored); then first assignee.
-            [ -n "$inum" ] && mention=$(gh api "repos/$REPO/issues/$inum" \
+            [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
               --jq 'if .pull_request then "" elif (.user.type=="Bot" or .user.login=="i-am-marvin") then (.assignees[0].login // "") else .user.login end' 2>/dev/null || true)
             cc=""
             [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
