@@ -25,9 +25,12 @@ the VS Code PR-extension branch config (written BEFORE the checkout — the
 extension reads it on the HEAD-change event), a submodule-recursion-free
 fetch + `gh pr checkout`, and a `git submodule update` so submodule working
 trees match the new branch (no spurious `M` in status). If an open ts-mono
-companion PR exists for the same branch name (the dev-agent convention for
-viewer work), the submodule is switched onto that branch — the parent
-gitlink intentionally shows modified until the merge-time pointer bump.
+companion PR exists for the same branch name (the agent convention for
+viewer work — fork branches and External contributors' upstream branches
+alike; only agent-authored ts-mono PRs count, so generic contributor
+branch names can't false-match), the submodule is switched onto that
+branch — the parent gitlink intentionally shows modified until the
+merge-time pointer bump.
 
 Chip selection: an OPEN same-repo chip wins; otherwise a single OPEN
 cross-repo chip is checked out against its own repo — this covers External

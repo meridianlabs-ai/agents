@@ -105,8 +105,13 @@ if [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then
   # If an open companion PR exists, put the submodule on its branch so both
   # halves of the issue are editable together.
   TSMONO=$(git config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null              | awk '$2 ~ /ts-mono/ {print $2; exit}' || true)
-  if [ -n "$TSMONO" ] && [ -z "$CROSS" ]; then
-    COMP=$(gh pr list --repo meridianlabs-ai/ts-mono --head "$BRANCH" --state open              --json number --jq '.[0].number // empty' 2>/dev/null || true)
+  # Companions exist for fork branches AND External contributors' upstream
+  # branches (the agent names its ts-mono half after the primary branch), so
+  # no cross-repo gate. Guard instead on authorship: contributor branch
+  # names are arbitrary, and an unrelated ts-mono PR sharing a generic name
+  # must not be treated as a companion.
+  if [ -n "$TSMONO" ]; then
+    COMP=$(gh pr list --repo meridianlabs-ai/ts-mono --head "$BRANCH" --state open              --json number,author,headRefName --jq '[.[] | select((.author.login == "i-am-marvin") or (.author.login == "app/claude") or (.headRefName | startswith("claude/issue-")))][0].number // empty' 2>/dev/null || true)
     if [ -n "$COMP" ]; then
       if [ -z "$(git -C "$TSMONO" status --porcelain 2>/dev/null)" ]; then
         git -C "$TSMONO" fetch -q origin "$BRANCH"           && git -C "$TSMONO" checkout -q -B "$BRANCH" "origin/$BRANCH"           && NOTE_TSMONO=" [ts-mono companion: PR meridianlabs-ai/ts-mono#$COMP — submodule on branch $BRANCH; parent gitlink intentionally differs until the merge-time bump]"           || NOTE_TSMONO=" [ts-mono companion PR #$COMP exists but submodule checkout failed — handle manually]"
