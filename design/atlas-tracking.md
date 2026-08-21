@@ -384,6 +384,37 @@ board when that PR merges, exactly as for our own promotions. If the
 upstream PR already merged, just close the issue with an attributing
 comment and clear the stage by hand.
 
+## Imported upstream issues
+
+The inverse of promotion's entry point: an issue reported **upstream** that we
+want `@auto` to work. The agents have no upstream write access and the
+workflows live on the fork, so the work must anchor on a fork issue. The
+`/import` skill ([skills/import/SKILL.md](../skills/import/SKILL.md)) creates
+that mirror:
+
+- Title copied; body = machine-readable first line `Upstream issue: <url>`
+  plus a snapshot of the upstream body with bare `#N` refs qualified (in fork
+  context they'd rebind to unrelated fork issue numbers). Snapshot only — no
+  comment/state syncing; canonical discussion stays upstream.
+- Added to Atlas with `Status = Todo`; Stage stays unset (the agent post-step
+  owns `Todo → Agent`).
+- Dedup key: the upstream URL in the body line (issue search, open *and*
+  closed — a Done import is never recreated).
+- Deliberately does **not** kick `@auto` — the human usually has guidance to
+  add to that comment — and does not comment on the upstream issue.
+
+**The loop closes at promotion.** promote.sh reads the `Upstream issue:` line
+and adds a second closing ref — bare `Fixes #<up>` — to the upstream PR body
+it creates. Bare refs resolve fine there (upstream PRs base on upstream
+`main`), so the upstream issue gets the native linked-PR chip and auto-closes
+on merge; the fork issue closes via the hourly sync as usual. Creation-time
+only: an adopted (pre-existing) upstream PR's body is never edited.
+
+**Not the External-proxy mechanism.** Imports are our own work in the normal
+`Todo → Agent → Review → Sign-off → …` pipeline — no `External` label, no
+proxy lifecycle. External proxies track *someone else's PR*; an import tracks
+*our work on someone's issue report*.
+
 ## Multi-repo issues (ts-mono companions)
 
 An issue that touches the embedded viewer spans two repos: the inspect_ai

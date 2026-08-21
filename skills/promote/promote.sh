@@ -27,7 +27,7 @@ write() {  # guard every mutation; --dry-run prints instead
 }
 
 # ---- one GraphQL round trip: chips (with PR bodies) + board item + fields
-JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state
+JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state body
   closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName repository{nameWithOwner}}}
   projectItems(first:5){nodes{id project{number}
     stage: fieldValueByName(name:"Stage"){... on ProjectV2ItemFieldSingleSelectValue{name}}
@@ -36,6 +36,13 @@ JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai
 ISSUE_NODE=$(jq -r '.data.repository.issue.id' <<<"$JSON")
 ISSUE_TITLE=$(jq -r '.data.repository.issue.title' <<<"$JSON")
 ISSUE_STATE=$(jq -r '.data.repository.issue.state' <<<"$JSON")
+# Imported issues (skills/import) carry an "Upstream issue:" body line; the
+# upstream PR then gets a bare `Fixes #<up>` too, so the upstream issue links
+# and auto-closes on merge (bare refs resolve there — upstream PRs base on
+# upstream main).
+UP_ISSUE=$(jq -r '.data.repository.issue.body // ""' <<<"$JSON" \
+  | grep -oE 'Upstream issue: https://github.com/UKGovernmentBEIS/inspect_ai/issues/[0-9]+' \
+  | head -1 | grep -oE '[0-9]+$' || true)
 # Prefer the OPEN fork PR; fall back to a closed one (the heal path — a
 # promoted issue's fork PR is already superseded and closed).
 PICK=$(jq -c --arg repo "$FORK" '([.data.repository.issue.closedByPullRequestsReferences.nodes[]
@@ -80,7 +87,8 @@ if [ -n "$M" ]; then
   echo "ADOPTED existing upstream PR #$M ($(jq -r .state <<<"$UP_PICK"))"
 else
   # Fully-qualified Fixes ref: qualify any bare same-repo ref, else prepend.
-  BODY=$(ISSUE_N="$N" FPR_BODY="$FPR_BODY" python3 -c '
+  # For imported issues, also prepend the bare upstream `Fixes #<up>`.
+  BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
 n = os.environ["ISSUE_N"]
 body = os.environ["FPR_BODY"]
@@ -88,6 +96,9 @@ body = re.sub(r"\b(Fixes|Closes|Resolves)\s+#%s\b" % n,
               r"\1 meridianlabs-ai/inspect_ai#%s" % n, body)
 if ("meridianlabs-ai/inspect_ai#%s" % n) not in body:
     body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body
+up = os.environ["UP_ISSUE"]
+if up and not re.search(r"\b(Fixes|Closes|Resolves)\s+#%s\b" % up, body):
+    body = "Fixes #%s\n" % up + body
 print(body)')
   # Org forks cannot be resolved as `owner:branch` heads — PR creation needs
   # an explicit head_repo, which `gh pr create` lacks (cli/cli#6462; see the
