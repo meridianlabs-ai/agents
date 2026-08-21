@@ -15,6 +15,7 @@ BRANCH="enable-claude-code"
 STUBS=(
   "claude-stub.yml:claude.yml"
   "claude-review-stub.yml:claude-review.yml"
+  "claude-auto-stub.yml:claude-auto.yml"
 )
 
 tmp="$(mktemp -d)"
