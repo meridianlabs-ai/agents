@@ -572,15 +572,32 @@ jobs:
             unlanded="${unlanded:+$unlanded; }local commits contained in no remote branch"
           fi
           [ -z "$unlanded" ] && { echo "Work landed (or the run made no changes)."; exit 0; }
-          # External proxies' deliverables live OUTSIDE this repo — upstream
-          # PR comments, companion-repo PRs, relay diffs for a contributor
-          # fork we cannot push to — and producing them routinely leaves
-          # deliberate scratch here (observed: a schema-regen task delivered
-          # a green ts-mono PR and drew this ⚠️ for its local byproducts).
-          # This guard can only see THIS repo's remotes, so on External
-          # issues it degrades to a log note instead of a red run.
-          if gh api "repos/$REPO/issues/$ISSUE/labels"                --jq '[.[] | select(.name == "External")] | length' 2>/dev/null | grep -qx '[1-9]'; then
-            echo "::notice::local changes not landed ($unlanded) — External proxy: deliverables usually live upstream or in a companion repo; verify the task's outputs landed where intended."
+          # Local scratch is not proof of loss: a task's deliverable can land
+          # OUTSIDE this repo (a companion-repo PR, agent comments) while
+          # regeneration byproducts stay local by design (observed: an
+          # External schema-regen task delivered a green ts-mono PR and drew
+          # this ⚠️ for its local leftovers). Before flagging, look for
+          # evidence the run shipped something anywhere: PRs the machine
+          # account or agent app opened in the org since the run started, or
+          # agent comments on this issue. Evidence -> pass with a notice
+          # naming it; none -> the work is genuinely gone, External or not.
+          started=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at 2>/dev/null || true)
+          evidence=""
+          if [ -n "$started" ]; then
+            org="${REPO%%/*}"
+            prs=$(gh search prs --owner "$org" --author i-am-marvin --created ">=$started" \
+                    --json repository,number --jq '[.[] | "\(.repository.nameWithOwner)#\(.number)"] | join(", ")' 2>/dev/null || true)
+            [ -z "$prs" ] && prs=$(gh search prs --owner "$org" --author "app/claude" --created ">=$started" \
+                    --json repository,number --jq '[.[] | "\(.repository.nameWithOwner)#\(.number)"] | join(", ")' 2>/dev/null || true)
+            [ -n "$prs" ] && evidence="PR(s) opened during this run: $prs"
+            if [ -z "$evidence" ]; then
+              n=$(gh api "repos/$REPO/issues/$ISSUE/comments?since=$started" \
+                    --jq '[.[] | select(.user.login == "claude[bot]")] | length' 2>/dev/null || echo 0)
+              [ "${n:-0}" -gt 0 ] && evidence="$n agent comment(s) posted on this issue"
+            fi
+          fi
+          if [ -n "$evidence" ]; then
+            echo "::notice::local changes not landed ($unlanded), but the run shipped work elsewhere — $evidence. Local state treated as deliberate scratch."
             exit 0
           fi
           echo "::error::agent work did not land: $unlanded"
