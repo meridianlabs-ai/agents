@@ -24,8 +24,9 @@ rerunning heals an already-promoted issue): resolves the fork PR + branch
 from the issue's chips; prints preflight ADVISORY lines (review verdict, fork
 CI) — **relay these to the user, and pause for confirmation if the verdict
 isn't `clean` or CI shows failures**; adopts the existing upstream PR via the
-issue's cross-repo chip (the REST `pulls?head=` filter silently fails for
-this org-fork pair — never use it) or creates it with the fully-qualified
+issue's cross-repo chip (the REST `pulls?head=` filter silently returns
+[] for org-owned heads — observed on the org-fork pair AND same-repo on
+the fork itself — never use it anywhere) or creates it with the fully-qualified
 `Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
 would rebind to upstream's tracker), plus a bare `Fixes #<up>` when the
 fork issue was imported from upstream (its `Upstream issue:` body line —
