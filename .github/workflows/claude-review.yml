@@ -575,8 +575,19 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           SINCE: ${{ steps.trig.outputs.started }}
           MENTION: ${{ steps.who.outputs.mention }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -uo pipefail
+          # No execution file at all = the agent never launched — the action's
+          # own pull_request workflow-validation skip (a PR editing this very
+          # workflow file runs the PR's copy, which the action refuses for
+          # security). That is a deliberate no-op, not a silent stall: a real
+          # stall (agent ran, posted nothing) always leaves an execution file.
+          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+          if [ ! -f "$file" ]; then
+            echo "::notice::no execution output — the action skipped itself (workflow-validation or equivalent pre-launch skip); nothing to verify. Reviews of workflow-editing PRs need a comment trigger, which resolves the workflow from the default branch."
+            exit 0
+          fi
           bots='select(.user.login=="claude[bot]" or .user.login=="i-am-marvin")'
           n=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
                 --jq "[.[] | $bots] | length" 2>/dev/null || echo 0)
