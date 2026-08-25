@@ -31,7 +31,27 @@ on:
           confident about in one pass — including minor and non-blocking nits —
           rather than surfacing one issue at a time, so the author can address
           them together in a single round. Still hold a high-confidence bar: do
-          NOT pad the review with speculative or marginal guesses. You may run
+          NOT pad the review with speculative or marginal guesses. Beyond the
+          diff itself, assess REGRESSION RISK: what existing behavior could
+          this change break? Consider changed defaults or config semantics;
+          public API signature/type changes; compatibility of serialized data
+          (files written by older versions must still read); wire/protocol
+          version skew; removed or reshaped CLI flags and outputs that scripts
+          parse; error paths that newly raise or newly swallow; and
+          timing/concurrency interactions with existing machinery — shared
+          resource pools, event-loop stalls from synchronous work, cancellation
+          paths that skip cleanup handlers, poll-gap races, staleness checks
+          missing from long phases. The high-confidence bar does NOT apply to
+          regression findings — a plausible, concrete risk is reportable — but
+          each one must name four things: the behavior that changes, who or
+          what depends on it, the trigger scenario, and a classification:
+          regression-blocking (breaks a documented contract, or silently
+          changes or damages existing users' behavior or data, with no
+          migration note) or regression-accepted (unlikely, guarded, or
+          mitigation costs more than the risk — say why). Only
+          regression-blocking findings count as actionable for your verdict;
+          regression-accepted notes are informational and must NOT flip the
+          verdict to `suggestions` on their own. You may run
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere
