@@ -1,12 +1,18 @@
 # The agents repo's OWN reviewer stub (copy of examples/claude-review-stub.yml;
 # -stub suffix because claude-review.yml is the reusable definition here).
-# Auto-reviews PRs on open (PRs here target main, which carries this file, so
-# the pull_request trigger fires — unlike the pristine-base fork; release-please
+# Auto-reviews PRs on open (pull_request_target — the workflow resolves from
+# the base branch, so even reviewer-file PRs auto-review; release-please
 # PRs are skipped, gated in the reusable workflow) and on demand via @review.
 name: Review
 
 on:
-  pull_request:
+  # pull_request_target, NOT pull_request: the workflow (and the agent's
+  # prompt/permissions) resolve from the BASE branch, so a PR editing the
+  # reviewer's own files still auto-reviews — the PR's copy never runs, which
+  # also satisfies the token exchange's workflow validation. Secrets come
+  # from the base repo, so the same-repo gate below is the trust boundary;
+  # fork PRs stay comment-triggered only.
+  pull_request_target:
     types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
@@ -14,13 +20,16 @@ on:
 jobs:
   review:
     # Run on PR events (skipping drafts — they get reviewed via
-    # ready_for_review when marked ready), or on a PR comment containing
+    # ready_for_review when marked ready — and fork PRs: under
+    # pull_request_target the event runs with base-repo secrets, so the
+    # same-repo check below is a SECURITY boundary, not an ergonomic
+    # skip), or on a PR comment containing
     # @review — or an @review comment on an External-labeled proxy ISSUE, which
     # reviews the tracked upstream PR and posts findings on the proxy (external
     # mode; see the reusable workflow). An explicit @review still works on a draft. `@review` does not
     # collide with the dev agent's `@claude` trigger.
     if: >
-      (github.event_name == 'pull_request' &&
+      (github.event_name == 'pull_request_target' &&
        github.event.pull_request.draft != true &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event.issue.pull_request != null &&

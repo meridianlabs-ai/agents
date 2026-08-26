@@ -385,6 +385,21 @@ substring collision in trigger gates). Design choices:
   allow-listing `gh` and the inline-comment MCP so it can actually *post* the
   review — an early version produced a good review that went nowhere because no
   posting tool was allowed.
+- **Auto-review triggers on `pull_request_target`, not `pull_request`**
+  (2026-08-26). The workflow — prompt, permissions, args — resolves from the
+  BASE branch, so a PR editing the reviewer's own files still auto-reviews
+  and the PR's copy never runs; this also satisfies the app-token exchange's
+  server-side workflow validation, which refuses OIDC tokens attesting a
+  workflow that differs from the default branch. The trust model: prt runs
+  carry base-repo secrets and the reviewer checks out and exercises the PR
+  head, so the same-repo gate (enforced twice — the stub's `if:` and the
+  reusable trig step's fork-head refusal) is a SECURITY boundary, not an
+  ergonomic skip. Same-repo heads imply write-access authors — the same
+  trust level as the `@review` comment path, which has always checked out
+  heads. No TOCTOU: a PR's head *repo* is immutable, so the payload gate
+  cannot be raced by later pushes (those only add same-repo commits). Fork
+  PRs get no auto-review run at all; the comment path is the explicit
+  human-decision route (its own gating gap is tracked in issue #13).
 - **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
   `synchronize` fires on every push, so reviewing on it would re-review (and
   re-bill ~$0.40–1) on every fix commit, including the agent's own. On-demand
