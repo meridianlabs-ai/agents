@@ -330,8 +330,9 @@ promotions (those are already tracked via their fork issue).
 
 ## The hourly Atlas sync
 
-A single scheduled workflow on the fork's `meridian` branch (like
-`sync-upstream.yml` — fork-specific, so no reusable+stub split), hourly cron +
+A single scheduled workflow hosted in the agents repo (migrated from the
+fork's `meridian` branch 2026-08-26 — org-wide board infrastructure;
+hosting only provides cron + script + secret visibility), hourly cron +
 `workflow_dispatch`, running as the machine account. Fully deterministic
 (`gh` + a script) — no agent invocation. Two tasks per run:
 
@@ -602,7 +603,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 3. Add the PR-event hook (`Sign-off`/`Merge`).
 4. Fork: the local promote skill (updates `Sign-off`), then the upstream `→ Done`
    sync as a backstop. **Both built**: the sync is the hourly `atlas-sync.yml`
-   on the fork's `meridian` branch; the promote skill is
+   in THIS repo (migrated from the fork 2026-08-26); the promote skill is
    [skills/promote/SKILL.md](../skills/promote/SKILL.md) (canonical here,
    symlinked into `~/.claude/skills/promote` so it loads in any local
    session). The skill is idempotent — running it on an already-promoted issue
@@ -611,7 +612,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 ## Deferred
 
 - **KNOWN GAP — ts-mono-native issues get no hourly reconciliation.** The
-  sync is hosted on the fork and assumes fork-anchored work: `FORK` is
+  sync assumes fork-anchored work: `FORK` is
   hardcoded as the anchor repo (discovery seeds proxies there,
   `lifecycle_item()` resolves issue numbers against it, pilot scoping
   checks fork assignees). A ts-mono issue on the Atlas board gets
@@ -619,11 +620,10 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
   closes natively on merge (ts-mono PRs base on the default branch, so
   `Fixes` refs work — no chip sweep needed), but no sync pass: no stage
   cleanup on close, no stranded-stage healing, and no companion
-  reflection in the ts-mono→inspect_ai direction. Proposed fix, when a
-  native ts-mono issue actually shows up: relocate the sync to the
-  agents repo's own cron (it is org-wide board infrastructure — this doc
-  already lives here) and parameterize the anchor repo into a per-repo
-  list with per-repo rules — ts-mono anchors skip the upstream tail
+  reflection in the ts-mono→inspect_ai direction. The relocation half landed
+  2026-08-26 (the sync now runs from the agents repo's cron); remaining
+  when a native ts-mono issue shows up: parameterize the anchor repo
+  into a per-repo list with per-repo rules — ts-mono anchors skip the upstream tail
   entirely, and native closing refs leave less to reconcile.
   (Anchor-in-fork shadow issues were considered and rejected: the anchor
   should live where the work is.)
