@@ -17,9 +17,7 @@
 # the same-repo gate below is the security boundary (do not remove it: it is
 # what keeps untrusted fork heads from being checked out and exercised with
 # base credentials). A maintainer can still review a fork PR with an @review
-# comment, same trust decision made explicitly — the reusable's trig check
-# enforces it (fork-head @review requires a commenter with write access,
-# checked before checkout).
+# comment, same trust decision made explicitly.
 
 name: Review
 
