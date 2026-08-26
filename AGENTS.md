@@ -25,6 +25,20 @@ take effect on every repo's next run.
 
 ## Conventions
 
+- **This repo's work is tracked on the Atlas board** (org project 1,
+  `PVT_kwDOC7YMCM4BU68p`). When you open an issue or a STANDALONE PR here,
+  add it to the board in the same breath:
+  `gh api graphql -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' -f p=PVT_kwDOC7YMCM4BU68p -f c=<node_id>`.
+  Anchored agent PRs (`claude/issue-N-*` branches) get NO card — the board's
+  model is track-the-issue, link-the-PR; their issue is the card. If you
+  notice an untracked open item, backfill it. (Deliberately instructions,
+  not a workflow: creators here are instruction-bound sessions or anchored
+  loop PRs, and a board-add workflow would need org-PAT secrets on
+  pull_request_target for near-zero marginal coverage — decision: Ransom,
+  2026-08-26.) Stage moves come from the agent workflows; stage cleanup on
+  close is manual (see design/atlas-tracking.md → Deferred — no hourly sync
+  reconciliation for this repo's items).
+
 - **The `@main` contract is load-bearing.** Every caller repo's stub calls these
   workflows at `@main`, so a change merged here is live everywhere immediately.
   Change deliberately; prefer backward-compatible edits to reusable-workflow
