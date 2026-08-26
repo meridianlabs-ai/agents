@@ -16,18 +16,16 @@ The shared, tool-agnostic instructions for this repo are in `AGENTS.md`
   change; the claude-api skill for any Anthropic-API / model-id questions.
 - Per-repo distribution of these instructions to other Meridian repos is
   planned but not built — see [design/shared-instructions.md](design/shared-instructions.md).
-- **Workflow changes go through PR + review** (policy change, Ransom,
-  2026-08-26): anything under `.github/workflows/` lands via a PR — the
-  `@main` contract means a direct push goes live on every caller repo's
-  next run, and the automated reviews have caught real bugs in every
-  round of the sync's evolution. Two mechanics to know: auto-review-on-
-  open SKIPS for workflow-editing PRs (claude-code-action's workflow-
-  validation security check — the PR's copy of the file differs from
-  main's), so request the review with a top-level `@review` comment,
-  which resolves the workflow from main; and the loop can drive fixes
-  if you add the `auto` label.
-- Everything else (skills/, design/, scripts/, README) may still be
-  committed directly to `main` — no feature branch needed. (This
-  overrides the default "branch before committing on the default
-  branch" behavior.) scripts/ run locally, not at `@main`, so their
-  blast radius is a failed local invocation, not every caller repo.
+- **All changes land via PR — main rejects direct pushes** (repo
+  ruleset; policy: Ransom, 2026-08-26). The `@main` contract means a
+  workflow push goes live on every caller repo's next run, and the
+  automated reviews caught real bugs in every round of the sync's
+  evolution. The ruleset requires a PR but zero approvals, so the flow
+  stays fast: branch, PR, let the reviewer run, merge. Mechanics:
+  auto-review-on-open SKIPS for PRs that edit `.github/workflows/`
+  files (claude-code-action's workflow-validation security check — the
+  PR's copy differs from main's), so request those reviews with a
+  top-level `@review` comment, which resolves the workflow from main;
+  the `auto` label lets the loop drive fix rounds. For low-blast-radius
+  changes (skills/, design/, docs — nothing at `@main`), merging right
+  after the PR opens is fine; workflow PRs should wait for the review.
