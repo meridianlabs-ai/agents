@@ -395,11 +395,16 @@ substring collision in trigger gates). Design choices:
   head, so the same-repo gate (enforced twice — the stub's `if:` and the
   reusable trig step's fork-head refusal) is a SECURITY boundary, not an
   ergonomic skip. Same-repo heads imply write-access authors — the same
-  trust level as the `@review` comment path, which has always checked out
-  heads. No TOCTOU: a PR's head *repo* is immutable, so the payload gate
-  cannot be raced by later pushes (those only add same-repo commits). Fork
-  PRs get no auto-review run at all; the comment path is the explicit
-  human-decision route (its own gating gap is tracked in issue #13).
+  trust level the `@review` comment path enforces in the reusable's trig
+  check (issue #13): before checkout, the comment path requires a same-repo
+  head or a commenter with write access, and external mode always requires
+  the trusted commenter (its checkout is an untrusted upstream head; the
+  `claude-setup` step is additionally mode-gated so an upstream tree can
+  never supply it). No TOCTOU: a PR's head *repo* is immutable, so the
+  payload gate cannot be raced by later pushes (those only add same-repo
+  commits). Fork PRs get no auto-review run at all; the comment path is the
+  explicit human-decision route, a maintainer's `@review` being the same
+  trust decision made explicitly.
 - **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
   `synchronize` fires on every push, so reviewing on it would re-review (and
   re-bill ~$0.40–1) on every fix commit, including the agent's own. On-demand

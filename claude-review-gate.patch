@@ -1,0 +1,132 @@
+diff --git a/.github/workflows/claude-review.yml b/.github/workflows/claude-review.yml
+index 28e7826..94c6a27 100644
+--- a/.github/workflows/claude-review.yml
++++ b/.github/workflows/claude-review.yml
+@@ -208,12 +208,23 @@ jobs:
+       # structure check rejects (a comment merely QUOTING @review; an External
+       # issue with no upstream URL), and those used to reach checkout with
+       # refs/pull/<issue#>/head — a ref that can't exist for a plain issue —
+-      # failing the job red with no feedback. `ack` additionally requires a
+-      # non-bot actor WITH WRITE ACCESS before the marvin-authenticated 👀 /
+-      # stage steps run — on a public repo, a drive-by @review must not move
+-      # the board or spend reactions (the agent itself was always actor-gated
+-      # by claude-code-action; this brings ack/stage to parity). Marvin has
+-      # write, so loop-posted @review keeps its ack.
++      # failing the job red with no feedback. The comment path ALSO gates `ok`
++      # on TRUST, not just structure: checkout of the PR head and the
++      # ./.github/actions/claude-setup run from that tree happen BEFORE
++      # claude-code-action's own actor gate fires, so on a public repo a fork
++      # PR plus the attacker's own @review comment could otherwise execute
++      # attacker-supplied setup code with the job token and OIDC minting
++      # available (issue #13 — the comment-path twin of the prt fork-head
++      # refusal above). Admission requires a same-repo head (write-access
++      # authors only — covers claude[bot]'s loop-posted @review on agent
++      # branches) or a commenter WITH WRITE ACCESS (the explicit fork-PR
++      # escape hatch the stub documents). External mode always requires the
++      # trusted commenter — its checkout is an untrusted upstream head
++      # (discovery's auto-@review posts as marvin, which has write). `ack`
++      # additionally requires that trusted non-bot commenter before the
++      # marvin-authenticated 👀 / stage steps run — a drive-by @review must
++      # not move the board or spend reactions. Marvin has write, so
++      # loop-posted @review keeps its ack.
+       - name: Check trigger (run + ack/stage gating)
+         id: trig
+         env:
+@@ -223,11 +234,12 @@ jobs:
+           GH_REPO: ${{ github.repository }}
+           COMMENT: ${{ github.event.comment.body }}
+           IS_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
++          PR_NUM: ${{ github.event.issue.number }}
+           EXTERNAL: ${{ contains(github.event.issue.labels.*.name, 'External') && 'true' || 'false' }}
+           IBODY: ${{ github.event.issue.body }}
+           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+         run: |
+-          ok=false mode=pr upstream=""
++          ok=false mode=pr upstream="" trusted=false
+           if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
+             # Defense in depth (stubs gate this too, but stub copies drift):
+             # pull_request_target runs with base-repo secrets and this
+@@ -239,9 +251,27 @@ jobs:
+               ok=true
+             fi
+           elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
++            # Commenter trust: a non-bot actor with write access. Bots never
++            # pass (claude[bot]'s loop-posted @review rides the same-repo-head
++            # branch below; marvin is a machine account with write, not a
++            # "[bot]"). API failure degrades to none — refuse, don't admit.
++            case "$ACTOR" in
++              *"[bot]") ;;
++              *)
++                perm=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" \
++                         --jq '.permission' 2>/dev/null || echo none)
++                case "$perm" in admin|write|maintain) trusted=true ;; esac
++                ;;
++            esac
+             if [ "$IS_PR" = "true" ]; then
+-              ok=true
+-            elif [ "$EXTERNAL" = "true" ]; then
++              head_repo=$(gh api "repos/$GH_REPO/pulls/$PR_NUM" \
++                            --jq '.head.repo.full_name // ""' 2>/dev/null || echo "")
++              if [ "$head_repo" = "$GH_REPO" ] || [ "$trusted" = "true" ]; then
++                ok=true
++              else
++                echo "::warning::@review by $ACTOR (no write access) on a fork-head PR — refusing (the run would check out and execute the fork head); a collaborator can re-trigger"
++              fi
++            elif [ "$EXTERNAL" = "true" ] && [ "$trusted" = "true" ]; then
+               # External-review mode: @review on an External proxy ISSUE means
+               # "review the tracked upstream PR" (see design/atlas-tracking.md
+               # → External review tracking). The upstream URL comes from the
+@@ -256,14 +286,7 @@ jobs:
+             if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
+               ack=true  # auto-review on open; same-repo enforced above
+             else
+-              case "$ACTOR" in
+-                *"[bot]") ;; # bots never ack/stage
+-                *)
+-                  perm=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" \
+-                           --jq '.permission' 2>/dev/null || echo none)
+-                  case "$perm" in admin|write|maintain) ack=true ;; esac
+-                  ;;
+-              esac
++              ack=$trusted
+             fi
+           fi
+           echo "ok=$ok  ack=$ack  mode=$mode  upstream=$upstream"
+@@ -317,9 +340,10 @@ jobs:
+ 
+       # External-review mode checks out the UPSTREAM PR's head (public read)
+       # so the reviewer has the tree for context. The claude-setup provisioning
+-      # below is still skipped (the upstream tree carries no such action, and
+-      # installing a contributor's package outside a sandbox would execute
+-      # their build hooks next to this job's credentials); instead the
++      # below is skipped — gated on mode, not just on the upstream tree
++      # happening to lack the action file (a malicious upstream PR could add
++      # one, and installing a contributor's package outside a sandbox would
++      # execute their build hooks next to this job's credentials); instead the
+       # reviewer provisions and tests INSIDE the OS-level Bash sandbox set up
+       # by the next two steps. persist-credentials:false because checkout
+       # otherwise writes the job token into .git/config, where sandboxed
+@@ -367,13 +391,18 @@ jobs:
+       # existing, cache-backed CI setup; the GitHub cache is the caller's, so it
+       # hits the entries normal CI populates. `./` resolves against the
+       # checked-out workspace. The hashFiles guard makes this a no-op for repos
+-      # that don't define it. Fatal on failure. NOTE: the reviewer checks out
+-      # the PR head (above), so on the inspect_ai fork — whose PR branches are
+-      # cut from pristine main and carry no meridian files — the action is
+-      # absent and this is skipped; see design/architecture.md.
++      # that don't define it. Fatal on failure. NEVER in external mode: the
++      # workspace there is an untrusted upstream head, which could supply its
++      # own action — external provisioning happens inside the sandbox instead.
++      # NOTE: the reviewer checks out the PR head (above), so on the
++      # inspect_ai fork — whose PR branches are cut from pristine main and
++      # carry no meridian files — the action is absent and this is skipped;
++      # see design/architecture.md.
+       - name: Provision project environment
+         id: setup
+-        if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
++        if: >-
++          steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external' &&
++          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+         uses: ./.github/actions/claude-setup
+ 
+       # External mode keeps the caller's review_prompt (and the
