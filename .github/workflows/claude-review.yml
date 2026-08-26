@@ -172,7 +172,7 @@ jobs:
     # all repos pick it up without recopying. An explicit @review comment
     # (issue_comment event) still works.
     if: >
-      github.event_name != 'pull_request' ||
+      (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') ||
       !startsWith(github.event.pull_request.head.ref, 'release-please--')
     # One review per PR at a time, NEWEST WINS: a fresh trigger (push + Ready,
     # another @review, a loop re-request) cancels an in-flight review of
@@ -225,7 +225,7 @@ jobs:
           IBODY: ${{ github.event.issue.body }}
         run: |
           ok=false mode=pr upstream=""
-          if [ "$EVENT" = "pull_request" ]; then
+          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
             ok=true
           elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
             if [ "$IS_PR" = "true" ]; then
@@ -297,7 +297,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
+          # issue_comment default would be the repo default branch;
+          # pull_request_target's would be the BASE branch (the action requires
+          # not defaulting to an untrusted ref — same-repo PRs, our only
+          # auto-review population, are same-trust as comment-triggered
+          # reviews, which also check out the head). Resolve explicitly.
+          ref: ${{ (github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number)) || (github.event_name == 'pull_request_target' && format('refs/pull/{0}/head', github.event.pull_request.number)) || '' }}
 
       # External-review mode checks out the UPSTREAM PR's head (public read)
       # so the reviewer has the tree for context. The claude-setup provisioning
