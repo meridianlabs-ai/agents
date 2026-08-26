@@ -330,8 +330,9 @@ promotions (those are already tracked via their fork issue).
 
 ## The hourly Atlas sync
 
-A single scheduled workflow on the fork's `meridian` branch (like
-`sync-upstream.yml` — fork-specific, so no reusable+stub split), hourly cron +
+A single scheduled workflow hosted in the agents repo (migrated from the
+fork's `meridian` branch 2026-08-26 — org-wide board infrastructure;
+hosting only provides cron + script + secret visibility), hourly cron +
 `workflow_dispatch`, running as the machine account. Fully deterministic
 (`gh` + a script) — no agent invocation. Two tasks per run:
 
@@ -619,11 +620,10 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
   closes natively on merge (ts-mono PRs base on the default branch, so
   `Fixes` refs work — no chip sweep needed), but no sync pass: no stage
   cleanup on close, no stranded-stage healing, and no companion
-  reflection in the ts-mono→inspect_ai direction. Proposed fix, when a
-  native ts-mono issue actually shows up: relocate the sync to the
-  agents repo's own cron (it is org-wide board infrastructure — this doc
-  already lives here) and parameterize the anchor repo into a per-repo
-  list with per-repo rules — ts-mono anchors skip the upstream tail
+  reflection in the ts-mono→inspect_ai direction. The relocation half landed
+  2026-08-26 (the sync now runs from the agents repo's cron); remaining
+  when a native ts-mono issue shows up: parameterize the anchor repo
+  into a per-repo list with per-repo rules — ts-mono anchors skip the upstream tail
   entirely, and native closing refs leave less to reconcile.
   (Anchor-in-fork shadow issues were considered and rejected: the anchor
   should live where the work is.)

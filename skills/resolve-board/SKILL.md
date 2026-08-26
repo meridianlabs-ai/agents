@@ -17,20 +17,23 @@ AGENTS=$(dirname "$(dirname "$(realpath ~/.claude/skills/resolve-board)")")
 
 ## Step 1 — dispatch the Atlas sync and wait
 
+The sync is hosted in THIS repo (migrated from the fork 2026-08-26 — it
+is org-wide board infrastructure and every write rides the org PAT).
+
 ```sh
-gh workflow run atlas-sync.yml --repo meridianlabs-ai/inspect_ai
+gh workflow run atlas-sync.yml --repo meridianlabs-ai/agents
 sleep 10
-RID=$(gh run list --repo meridianlabs-ai/inspect_ai --workflow atlas-sync.yml \
+RID=$(gh run list --repo meridianlabs-ai/agents --workflow atlas-sync.yml \
         --limit 1 --json databaseId --jq '.[0].databaseId')
 # poll to completion (typically < 2 min; timeout-minutes is 15)
-gh run watch "$RID" --repo meridianlabs-ai/inspect_ai --exit-status || true
+gh run watch "$RID" --repo meridianlabs-ai/agents --exit-status || true
 ```
 
 Pull its summary — the actions it took (stage moves, proxies created/healed,
 skips) live in the run output:
 
 ```sh
-gh run view "$RID" --repo meridianlabs-ai/inspect_ai --log 2>/dev/null \
+gh run view "$RID" --repo meridianlabs-ai/agents --log 2>/dev/null \
   | sed -n '/=== Atlas sync summary ===/,/^$/p'
 ```
 
