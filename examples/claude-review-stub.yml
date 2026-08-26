@@ -7,10 +7,10 @@
 #
 # Caveat: auto-review-on-open (pull_request_target) fires where this file
 # exists on the PR's BASE branch. On a pristine-base mirror like the
-# inspect_ai fork, agent PRs target `meridian` (which HAS the workflows), so
-# adopting pull_request_target there would newly enable auto-review-on-open —
-# deliberate per-repo decision; the fork currently drives auto-review via the
-# dev agent posting @review on PR open instead.
+# inspect_ai fork, AGENT PRs target the upstream-mirror `main` (no meridian
+# workflows — still never fires; the dev agent posts @review on PR open
+# instead); only meridian-targeting maintenance PRs would gain
+# auto-review-on-open from adopting this stub there.
 #
 # Caveat: PRs from forks are skipped by auto-review — under
 # pull_request_target the event RUNS in base-repo context with secrets, so
@@ -36,10 +36,11 @@ on:
 jobs:
   review:
     # Run on PR events (skipping drafts — they get reviewed via
-    # ready_for_review when marked ready — and fork PRs, which get no OIDC
-    # token so the run would die at startup on id-token: write; the full_name
-    # check, not head.repo.fork, keeps same-repo PRs working on repos that are
-    # themselves forks), or on a PR comment containing @review. An explicit
+    # ready_for_review when marked ready — and fork PRs: under
+    # pull_request_target the event runs with base-repo secrets, so this
+    # same-repo check is a SECURITY boundary, not an ergonomic skip; the
+    # full_name check, not head.repo.fork, keeps same-repo PRs working on
+    # repos that are themselves forks), or on a PR comment containing @review. An explicit
     # @review still works on a draft and on a fork PR. `@review` does not
     # collide with the dev agent's `@claude` trigger.
     if: >
