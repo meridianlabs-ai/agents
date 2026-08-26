@@ -233,7 +233,8 @@ jobs:
             # pull_request_target runs with base-repo secrets and this
             # workflow checks out the PR head — NEVER for a fork head.
             if [ "$EVENT" = "pull_request_target" ] && [ "$HEAD_REPO" != "$GH_REPO" ]; then
-              echo "fork head on pull_request_target — refusing (same-repo only)"
+              # loud: this firing means a caller stub lost its same-repo gate
+              echo "::warning::fork head on pull_request_target — refusing (same-repo only); check the caller stub's gate"
             else
               ok=true
             fi
