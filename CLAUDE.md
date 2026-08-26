@@ -12,6 +12,10 @@ The shared, tool-agnostic instructions for this repo are in `AGENTS.md`
   [claude-code-action docs](https://github.com/anthropics/claude-code-action)
   and [code.claude.com/docs](https://code.claude.com/docs) rather than assuming
   — the action's surface changes over time.
+- New issues and PRs here land on the Atlas board automatically
+  (`atlas-add.yml`; anchored `claude/issue-N-*` PRs are tracked via their
+  issue instead). Stage moves come from the agent workflows; stage cleanup
+  on close is manual for now (see design/atlas-tracking.md → Deferred).
 - Useful skills when working here: `/code-review` before merging a workflow
   change; the claude-api skill for any Anthropic-API / model-id questions.
 - Per-repo distribution of these instructions to other Meridian repos is

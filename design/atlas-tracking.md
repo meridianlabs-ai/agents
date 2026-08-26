@@ -611,7 +611,10 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 
 ## Deferred
 
-- **KNOWN GAP — ts-mono-native issues get no hourly reconciliation.** The
+- **KNOWN GAP — ts-mono-native and agents-repo issues get no hourly
+  reconciliation.** (agents-repo items are auto-added to the board by that
+  repo's `atlas-add.yml` since 2026-08-26 and staged by its agent
+  workflows, but the sync's lifecycle management does not cover them.) The
   sync assumes fork-anchored work: `FORK` is
   hardcoded as the anchor repo (discovery seeds proxies there,
   `lifecycle_item()` resolves issue numbers against it, pilot scoping

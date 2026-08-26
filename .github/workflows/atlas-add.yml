@@ -1,0 +1,47 @@
+# Add this repo's new issues and PRs to the Atlas board (Ransom, 2026-08-26:
+# agents-repo work should be visible alongside the fork pipeline's).
+#
+# Anchored agent PRs (claude/issue-N-* branches) are deliberately skipped:
+# the board's data model is "track the issue, link the PR" — their issue is
+# the card, and the chip sweep links the PR to it. Standalone PRs (workflow
+# changes etc., which have no issue) get their own card.
+#
+# pull_request_target, not pull_request: board-adding needs MARVIN_TOKEN,
+# which plain pull_request runs from forks don't get. SAFE here because this
+# job never checks out or executes anything from the PR — it only reads the
+# event payload's node id. Do not add a checkout to this workflow.
+#
+# NOTE (design/atlas-tracking.md → Deferred): like ts-mono-native issues,
+# agents-repo items get NO hourly sync reconciliation — cards are added here
+# and staged by the agent workflows, but stage cleanup on close is manual
+# until the sync grows per-repo anchor support.
+
+name: Atlas add
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event_name == 'issues' ||
+      !startsWith(github.event.pull_request.head.ref, 'claude/issue-')
+    steps:
+      - name: Add to Atlas
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          NODE: ${{ github.event.issue.node_id || github.event.pull_request.node_id }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::MARVIN_TOKEN is not set"; exit 1; }
+          gh api graphql \
+            -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+            -f p="PVT_kwDOC7YMCM4BU68p" -f c="$NODE" --jq '.data.addProjectV2ItemById.item.id'
