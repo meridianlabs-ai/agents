@@ -1,8 +1,8 @@
 diff --git a/.github/workflows/claude-review.yml b/.github/workflows/claude-review.yml
-index 28e7826..ce350e5 100644
+index 28e7826..fecefc1 100644
 --- a/.github/workflows/claude-review.yml
 +++ b/.github/workflows/claude-review.yml
-@@ -208,12 +208,23 @@ jobs:
+@@ -208,26 +208,45 @@ jobs:
        # structure check rejects (a comment merely QUOTING @review; an External
        # issue with no upstream URL), and those used to reach checkout with
        # refs/pull/<issue#>/head — a ref that can't exist for a plain issue —
@@ -32,7 +32,14 @@ index 28e7826..ce350e5 100644
        - name: Check trigger (run + ack/stage gating)
          id: trig
          env:
-@@ -223,11 +234,12 @@ jobs:
+-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
++          # The JOB token, not MARVIN_TOKEN: trig's lookups gate admission
++          # fail-closed, and the job token reads both endpoints and cannot
++          # expire — an expired PAT must not disable every comment-triggered
++          # review. Ack/stage below keep MARVIN_TOKEN (they act as marvin).
++          GH_TOKEN: ${{ github.token }}
+           EVENT: ${{ github.event_name }}
+           ACTOR: ${{ github.actor }}
            GH_REPO: ${{ github.repository }}
            COMMENT: ${{ github.event.comment.body }}
            IS_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
@@ -42,11 +49,14 @@ index 28e7826..ce350e5 100644
            HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
          run: |
 -          ok=false mode=pr upstream=""
-+          ok=false mode=pr upstream="" trusted=false
++          ok=false mode=pr upstream="" trusted=false head_sha=""
++          # One retry for the gating lookups: they refuse fail-closed, so a
++          # transient API blip shouldn't block a legitimate review outright.
++          api() { gh api "$@" 2>/dev/null || { sleep 5; gh api "$@" 2>/dev/null; }; }
            if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
              # Defense in depth (stubs gate this too, but stub copies drift):
              # pull_request_target runs with base-repo secrets and this
-@@ -239,9 +251,27 @@ jobs:
+@@ -239,9 +258,37 @@ jobs:
                ok=true
              fi
            elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
@@ -57,26 +67,36 @@ index 28e7826..ce350e5 100644
 +            case "$ACTOR" in
 +              *"[bot]") ;;
 +              *)
-+                perm=$(gh api "repos/$GH_REPO/collaborators/$ACTOR/permission" \
-+                         --jq '.permission' 2>/dev/null || echo none)
++                perm=$(api "repos/$GH_REPO/collaborators/$ACTOR/permission" \
++                         --jq '.permission' || echo none)
 +                case "$perm" in admin|write|maintain) trusted=true ;; esac
 +                ;;
 +            esac
              if [ "$IS_PR" = "true" ]; then
 -              ok=true
 -            elif [ "$EXTERNAL" = "true" ]; then
-+              head_repo=$(gh api "repos/$GH_REPO/pulls/$PR_NUM" \
-+                            --jq '.head.repo.full_name // ""' 2>/dev/null || echo "")
-+              if [ "$head_repo" = "$GH_REPO" ] || [ "$trusted" = "true" ]; then
++              # One lookup pins BOTH gate inputs: the head repo (same-repo
++              # check) and the head SHA the checkout will use. Trust is
++              # decided on THIS payload, so the checkout must not re-resolve
++              # refs/pull/N/head later — a fork author could swap in a
++              # malicious head between a maintainer's @review and the
++              # checkout (TOCTOU). PR head SHAs are fetchable from the base
++              # repo. Lookup failure leaves nothing safe to check out: refuse.
++              pr_json=$(api "repos/$GH_REPO/pulls/$PR_NUM" || echo '{}')
++              head_repo=$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')
++              head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')
++              if [ -z "$head_sha" ]; then
++                echo "::warning::@review on PR #$PR_NUM — the head lookup failed, so there is no pinned SHA to check out; refusing. A collaborator can re-trigger"
++              elif [ "$head_repo" = "$GH_REPO" ] || [ "$trusted" = "true" ]; then
 +                ok=true
 +              else
-+                echo "::warning::@review by $ACTOR (no write access, or the permission/head lookup failed) on a fork-head PR — refusing (the run would check out and execute the fork head); a collaborator can re-trigger"
++                echo "::warning::@review by $ACTOR (no write access, or the permission lookup failed) on a fork-head PR — refusing (the run would check out and execute the fork head); a collaborator can re-trigger"
 +              fi
 +            elif [ "$EXTERNAL" = "true" ] && [ "$trusted" = "true" ]; then
                # External-review mode: @review on an External proxy ISSUE means
                # "review the tracked upstream PR" (see design/atlas-tracking.md
                # → External review tracking). The upstream URL comes from the
-@@ -249,6 +279,11 @@ jobs:
+@@ -249,6 +296,11 @@ jobs:
                upstream=$(printf '%s' "$IBODY" \
                  | grep -oE 'https://github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+' | head -1)
                if [ -n "$upstream" ]; then ok=true mode=external; fi
@@ -84,11 +104,11 @@ index 28e7826..ce350e5 100644
 +              # Loud refusal, parallel to the fork-head branch above: without
 +              # it a transient permission-API error or a maintainer commenting
 +              # from a non-write account would no-op with nothing in the log.
-+              echo "::warning::@review by $ACTOR (no write access) on an External issue — refusing (external mode checks out and executes the untrusted upstream head); a collaborator can re-trigger"
++              echo "::warning::@review by $ACTOR (no write access, or the permission lookup failed) on an External issue — refusing (external mode checks out and executes the untrusted upstream head); a collaborator can re-trigger"
              fi
            fi
            ack=false
-@@ -256,14 +291,7 @@ jobs:
+@@ -256,14 +308,7 @@ jobs:
              if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
                ack=true  # auto-review on open; same-repo enforced above
              else
@@ -104,7 +124,25 @@ index 28e7826..ce350e5 100644
              fi
            fi
            echo "ok=$ok  ack=$ack  mode=$mode  upstream=$upstream"
-@@ -317,9 +345,10 @@ jobs:
+@@ -271,6 +316,7 @@ jobs:
+             echo "ok=$ok"
+             echo "ack=$ack"
+             echo "mode=$mode"
++            echo "head_sha=$head_sha"
+             echo "upstream=$upstream"
+             echo "up_repo=$(printf '%s' "$upstream" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/.*#\1#')"
+             echo "up_num=$(printf '%s' "$upstream" | grep -oE '[0-9]+$')"
+@@ -312,14 +358,18 @@ jobs:
+           # pull_request_target's would be the BASE branch (the action requires
+           # not defaulting to an untrusted ref — same-repo PRs, our only
+           # auto-review population, are same-trust as comment-triggered
+-          # reviews, which also check out the head). Resolve explicitly.
+-          ref: ${{ (github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number)) || (github.event_name == 'pull_request_target' && format('refs/pull/{0}/head', github.event.pull_request.number)) || '' }}
++          # reviews, which also check out the head). Resolve explicitly. The
++          # comment path pins the SHA trig captured when it decided trust —
++          # refs/pull/N/head would re-resolve here, AFTER the gate (TOCTOU);
++          # prt keeps the ref (later pushes there are same-repo, same trust).
++          ref: ${{ (github.event_name == 'issue_comment' && steps.trig.outputs.head_sha) || (github.event_name == 'pull_request_target' && format('refs/pull/{0}/head', github.event.pull_request.number)) || '' }}
  
        # External-review mode checks out the UPSTREAM PR's head (public read)
        # so the reviewer has the tree for context. The claude-setup provisioning
@@ -118,7 +156,7 @@ index 28e7826..ce350e5 100644
        # reviewer provisions and tests INSIDE the OS-level Bash sandbox set up
        # by the next two steps. persist-credentials:false because checkout
        # otherwise writes the job token into .git/config, where sandboxed
-@@ -367,13 +396,18 @@ jobs:
+@@ -367,13 +417,18 @@ jobs:
        # existing, cache-backed CI setup; the GitHub cache is the caller's, so it
        # hits the entries normal CI populates. `./` resolves against the
        # checked-out workspace. The hashFiles guard makes this a no-op for repos
@@ -143,10 +181,10 @@ index 28e7826..ce350e5 100644
  
        # External mode keeps the caller's review_prompt (and the
 diff --git a/design/architecture.md b/design/architecture.md
-index 391ecb7..342afd7 100644
+index 391ecb7..1fdcb9f 100644
 --- a/design/architecture.md
 +++ b/design/architecture.md
-@@ -395,11 +395,16 @@ substring collision in trigger gates). Design choices:
+@@ -395,11 +395,18 @@ substring collision in trigger gates). Design choices:
    head, so the same-repo gate (enforced twice — the stub's `if:` and the
    reusable trig step's fork-head refusal) is a SECURITY boundary, not an
    ergonomic skip. Same-repo heads imply write-access authors — the same
@@ -160,11 +198,13 @@ index 391ecb7..342afd7 100644
 +  head or a commenter with write access, and external mode always requires
 +  the trusted commenter (its checkout is an untrusted upstream head; the
 +  `claude-setup` step is additionally mode-gated so an upstream tree can
-+  never supply it). No TOCTOU: a PR's head *repo* is immutable, so the
-+  payload gate cannot be raced by later pushes (those only add same-repo
-+  commits). Fork PRs get no auto-review run at all; the comment path is the
-+  explicit human-decision route, a maintainer's `@review` being the same
-+  trust decision made explicitly.
++  never supply it). No TOCTOU on either path: prt's head *repo* is
++  immutable, so its payload gate cannot be raced by later pushes (those
++  only add same-repo commits), and the comment path checks out the head
++  SHA captured at trust-check time rather than re-resolving
++  refs/pull/N/head after the gate. Fork PRs get no auto-review run at all;
++  the comment path is the explicit human-decision route, a maintainer's
++  `@review` being the same trust decision made explicitly.
  - **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
    `synchronize` fires on every push, so reviewing on it would re-review (and
    re-bill ~$0.40–1) on every fix commit, including the agent's own. On-demand
