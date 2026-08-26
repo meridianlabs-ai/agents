@@ -309,8 +309,12 @@ def board_items():
         for n in data["nodes"]:
             c = n.get("content") or {}
             up = (n.get("up") or {}).get("text", "").strip()
+            # CLOSED issues ride along so sync_item can reopen one that a
+            # Development-panel-linked companion PR (ts-mono) auto-closed on
+            # merge while the upstream PR is still open — invisible-zombie
+            # prevention (issue #251, 2026-08-26).
             if (
-                c.get("state") == "OPEN"
+                c.get("state") in ("OPEN", "CLOSED")
                 and c.get("repository", {}).get("nameWithOwner") == FORK
                 and up
             ):
@@ -332,6 +336,7 @@ def board_items():
                         "external": any(
                             lbl["name"] == "External" for lbl in c["labels"]["nodes"]
                         ),
+                        "open": c.get("state") == "OPEN",
                     }
                 )
         if not data["pageInfo"]["hasNextPage"]:
@@ -535,6 +540,26 @@ def sync_item(row) -> None:
     pr = upstream_pr(row["url"])
     owner, repo, num = pr["_ref"]
     stage, item, issue = row["stage"], row["item"], row["issue"]
+
+    if not row["open"]:
+        # A closed issue whose upstream PR is still open was closed by
+        # something other than the sync — in practice a Development-panel-
+        # linked ts-mono companion PR merging (GitHub treats every panel-
+        # linked PR as a closer). Reopen it; the panel link stays (it is the
+        # board's PR pill). A closed issue whose PR is merged/closed is in
+        # its normal terminal state — leave it alone.
+        if pr["merged"] or pr["state"] == "CLOSED":
+            return
+        gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
+        comment(
+            issue,
+            f"Reopened — upstream PR {row['url']} is still open; this issue "
+            "was closed early (most likely by a linked companion PR merging). "
+            "(Atlas sync)",
+        )
+        set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
+        actions.append(f"#{issue}: closed while upstream PR open -> reopened")
+        # fall through to normal stage sync on the now-open item
 
     if pr["merged"]:
         try:
