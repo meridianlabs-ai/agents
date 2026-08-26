@@ -1,3 +1,20 @@
+diff --git a/.github/workflows/claude-review-stub.yml b/.github/workflows/claude-review-stub.yml
+index 20118ad..f50d71f 100644
+--- a/.github/workflows/claude-review-stub.yml
++++ b/.github/workflows/claude-review-stub.yml
+@@ -26,8 +26,10 @@ jobs:
+     # skip), or on a PR comment containing
+     # @review — or an @review comment on an External-labeled proxy ISSUE, which
+     # reviews the tracked upstream PR and posts findings on the proxy (external
+-    # mode; see the reusable workflow). An explicit @review still works on a draft. `@review` does not
+-    # collide with the dev agent's `@claude` trigger.
++    # mode; see the reusable workflow). An explicit @review still works on a
++    # draft, and on a fork PR when the commenter has write access (enforced in
++    # the reusable's trig check before checkout). `@review` does not collide
++    # with the dev agent's `@claude` trigger.
+     if: >
+       (github.event_name == 'pull_request_target' &&
+        github.event.pull_request.draft != true &&
 diff --git a/.github/workflows/claude-review.yml b/.github/workflows/claude-review.yml
 index 28e7826..fecefc1 100644
 --- a/.github/workflows/claude-review.yml
@@ -181,10 +198,10 @@ index 28e7826..fecefc1 100644
  
        # External mode keeps the caller's review_prompt (and the
 diff --git a/design/architecture.md b/design/architecture.md
-index 391ecb7..1fdcb9f 100644
+index 391ecb7..f316112 100644
 --- a/design/architecture.md
 +++ b/design/architecture.md
-@@ -395,11 +395,18 @@ substring collision in trigger gates). Design choices:
+@@ -395,11 +395,22 @@ substring collision in trigger gates). Design choices:
    head, so the same-repo gate (enforced twice — the stub's `if:` and the
    reusable trig step's fork-head refusal) is a SECURITY boundary, not an
    ergonomic skip. Same-repo heads imply write-access authors — the same
@@ -202,8 +219,12 @@ index 391ecb7..1fdcb9f 100644
 +  immutable, so its payload gate cannot be raced by later pushes (those
 +  only add same-repo commits), and the comment path checks out the head
 +  SHA captured at trust-check time rather than re-resolving
-+  refs/pull/N/head after the gate. Fork PRs get no auto-review run at all;
-+  the comment path is the explicit human-decision route, a maintainer's
++  refs/pull/N/head after the gate. One caveat on the pin: it fixes what
++  the gate decided on, so a fork push landing *before* the gate's lookup —
++  in the seconds after the maintainer's `@review` — is still the head that
++  gets admitted; irreducible, since the trigger comment carries no head
++  SHA to compare against. Fork PRs get no auto-review run at all; the
++  comment path is the explicit human-decision route, a maintainer's
 +  `@review` being the same trust decision made explicitly.
  - **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
    `synchronize` fires on every push, so reviewing on it would re-review (and
