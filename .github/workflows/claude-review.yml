@@ -588,6 +588,15 @@ jobs:
             echo "::notice::no execution output — the action skipped itself (workflow-validation or equivalent pre-launch skip); nothing to verify. Reviews of workflow-editing PRs need a comment trigger, which resolves the workflow from the default branch."
             exit 0
           fi
+          # A PR merged or closed mid-review needs no review posted: the
+          # immediate-merge flow for low-blast-radius PRs (CLAUDE.md) races
+          # the auto-review by design, and the reviewer correctly posts
+          # nothing on a finished PR (observed: agents#11 drew a spurious ⚠️).
+          state=$(gh pr view "$NUM" --repo "$REPO" --json state --jq .state 2>/dev/null || echo "")
+          if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
+            echo "::notice::PR is $state — no review owed; skipping the posted-review check."
+            exit 0
+          fi
           bots='select(.user.login=="claude[bot]" or .user.login=="i-am-marvin")'
           n=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
                 --jq "[.[] | $bots] | length" 2>/dev/null || echo 0)
