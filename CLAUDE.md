@@ -22,7 +22,9 @@ The shared, tool-agnostic instructions for this repo are in `AGENTS.md`
   automated reviews caught real bugs in every round of the sync's
   evolution. The ruleset requires a PR but zero approvals, so the flow
   stays fast: branch, PR, let the reviewer run, merge. Mechanics:
-  auto-review-on-open covers ALL PRs, including reviewer-file edits —
+  auto-review-on-open covers all human-opened PRs, including
+  reviewer-file edits (bot-authored opens still self-skip via the
+  action's actor check) —
   the stub triggers on pull_request_target, so the workflow (prompt,
   permissions) resolves from main and the PR's own copy never runs; a
   top-level `@review` comment re-runs it on demand, and the `auto`

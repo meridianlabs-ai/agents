@@ -20,7 +20,10 @@ on:
 jobs:
   review:
     # Run on PR events (skipping drafts — they get reviewed via
-    # ready_for_review when marked ready), or on a PR comment containing
+    # ready_for_review when marked ready — and fork PRs: under
+    # pull_request_target the event runs with base-repo secrets, so the
+    # same-repo check below is a SECURITY boundary, not an ergonomic
+    # skip), or on a PR comment containing
     # @review — or an @review comment on an External-labeled proxy ISSUE, which
     # reviews the tracked upstream PR and posts findings on the proxy (external
     # mode; see the reusable workflow). An explicit @review still works on a draft. `@review` does not
