@@ -603,7 +603,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 3. Add the PR-event hook (`Sign-off`/`Merge`).
 4. Fork: the local promote skill (updates `Sign-off`), then the upstream `→ Done`
    sync as a backstop. **Both built**: the sync is the hourly `atlas-sync.yml`
-   on the fork's `meridian` branch; the promote skill is
+   in THIS repo (migrated from the fork 2026-08-26); the promote skill is
    [skills/promote/SKILL.md](../skills/promote/SKILL.md) (canonical here,
    symlinked into `~/.claude/skills/promote` so it loads in any local
    session). The skill is idempotent — running it on an already-promoted issue
@@ -612,7 +612,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 ## Deferred
 
 - **KNOWN GAP — ts-mono-native issues get no hourly reconciliation.** The
-  sync is hosted on the fork and assumes fork-anchored work: `FORK` is
+  sync assumes fork-anchored work: `FORK` is
   hardcoded as the anchor repo (discovery seeds proxies there,
   `lifecycle_item()` resolves issue numbers against it, pilot scoping
   checks fork assignees). A ts-mono issue on the Atlas board gets
