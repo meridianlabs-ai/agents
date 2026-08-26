@@ -1,7 +1,7 @@
 # The agents repo's OWN reviewer stub (copy of examples/claude-review-stub.yml;
 # -stub suffix because claude-review.yml is the reusable definition here).
-# Auto-reviews PRs on open (PRs here target main, which carries this file, so
-# the pull_request trigger fires — unlike the pristine-base fork; release-please
+# Auto-reviews PRs on open (pull_request_target — the workflow resolves from
+# the base branch, so even reviewer-file PRs auto-review; release-please
 # PRs are skipped, gated in the reusable workflow) and on demand via @review.
 name: Review
 
