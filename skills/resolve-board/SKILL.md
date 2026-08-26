@@ -1,6 +1,6 @@
 ---
 name: resolve-board
-description: Bring the Atlas board current in one shot — dispatch the fork's hourly Atlas sync workflow now (external-PR discovery + upstream state sync) and run the local link-upstream-chips sweep (clickable issue↔PR chips). Use when the board looks stale or after a batch of agent/upstream activity.
+description: Bring the Atlas board current in one shot — dispatch the hourly Atlas sync workflow (hosted in this agents repo) now (external-PR discovery + upstream state sync) and run the local link-upstream-chips sweep (clickable issue↔PR chips). Use when the board looks stale or after a batch of agent/upstream activity.
 ---
 
 # Resolve the Atlas board
