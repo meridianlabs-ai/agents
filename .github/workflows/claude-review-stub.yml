@@ -6,13 +6,13 @@
 name: Review
 
 on:
-  # pull_request_target, NOT pull_request: the workflow (and the agent's
-  # prompt/permissions) resolve from the BASE branch, so a PR editing the
-  # reviewer's own files still auto-reviews — the PR's copy never runs, which
-  # also satisfies the token exchange's workflow validation. Secrets come
-  # from the base repo, so the same-repo gate below is the trust boundary;
-  # fork PRs stay comment-triggered only.
-  pull_request_target:
+  # pull_request (NOT pull_request_target — attempted 2026-08-26, reverted:
+  # Anthropic's token exchange rejects prt-shaped OIDC subjects, "Invalid
+  # OIDC token"; see design/architecture.md → auto-review tradeoffs).
+  # Consequence: PRs that EDIT the reviewer's own files skip auto-review
+  # (server-side workflow validation) and need a manual top-level @review
+  # comment, which resolves the workflow from the default branch.
+  pull_request:
     types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
@@ -31,7 +31,7 @@ jobs:
     # the reusable's trig check before checkout). `@review` does not collide
     # with the dev agent's `@claude` trigger.
     if: >
-      (github.event_name == 'pull_request_target' &&
+      (github.event_name == 'pull_request' &&
        github.event.pull_request.draft != true &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event.issue.pull_request != null &&
