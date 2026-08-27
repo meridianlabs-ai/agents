@@ -462,7 +462,12 @@ stage, resolved by the hourly sync:
   board. This avoids adding event-time stage writers that race the
   existing ones. Caveat that follows: labeling a companion `auto` AFTER
   its review posted does not engage the loop (the loop keys on the
-  marker comment's creation event) — re-trigger the review to light it.
+  marker comment's creation event). To light it, post an `@auto` comment
+  asking to address the standing review — one dev-agent run that acts on
+  the findings and hands back naturally. A bare re-review trigger also
+  works but burns a full review pass re-deriving findings that already
+  exist (preference: Ransom, 2026-08-27); reserve it for when no usable
+  review posted at all.
 
 ## Stage signals (from hand-reconciling the backlog)
 
