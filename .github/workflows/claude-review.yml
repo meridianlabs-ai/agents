@@ -690,17 +690,25 @@ jobs:
             # from a write-access account, and trig's word-boundary gate
             # deliberately ignores a backticked token — bare, it would start
             # a review run on a PR that may not want one yet.
-            if { [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; } &&
-               gh api "repos/$REPO/pulls/$NUM/files" --paginate \
-                 --jq '.[].filename' 2>/dev/null | grep -q '^\.github/workflows/'; then
-              marker=''
+            # Capture-then-grep, not a pipeline: grep -q exits at first
+            # match, and under pipefail the resulting SIGPIPE to gh would
+            # flip the condition false on long output.
+            prfiles=""
+            if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
+              prfiles=$(gh api "repos/$REPO/pulls/$NUM/files" --paginate \
+                          --jq '.[].filename' 2>/dev/null || true)
+            fi
+            if printf '%s\n' "$prfiles" | grep -q '^\.github/workflows/'; then
+              marker='<!-- claude-review-nudge -->'
               # Once per PR: reopen/ready_for_review re-fires this path, and
-              # repeating the same nudge is noise.
-              if gh api "repos/$REPO/issues/$NUM/comments" --paginate \
-                   --jq '.[].body' 2>/dev/null | grep -qF "$marker"; then
+              # repeating the same nudge is noise. case, not grep: no
+              # pipeline, so no SIGPIPE interaction with pipefail at all.
+              comments=$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
+                           --jq '.[].body' 2>/dev/null || true)
+              case "$comments" in *"$marker"*)
                 echo "::notice::workflow-validation skip on PR #$NUM — nudge already posted; not repeating."
-                exit 0
-              fi
+                exit 0 ;;
+              esac
               echo "::notice::auto-review skipped by workflow validation (PR edits .github/workflows/); posting the re-trigger nudge."
               cc=""
               [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
