@@ -1,0 +1,79 @@
+# Review-round-1 comment fixes for the two .github/workflows files, which the
+# machine account cannot push (its PAT lacks the workflows permission; the
+# Actions token can never modify workflow files). To land them:
+#   git apply workflow-comments.patch && git rm workflow-comments.patch
+# then commit and push. Delete this file either way - it is a handoff
+# artifact, not part of the change.
+diff --git a/.github/workflows/claude-review-stub.yml b/.github/workflows/claude-review-stub.yml
+index 2ebdd28..5913f91 100644
+--- a/.github/workflows/claude-review-stub.yml
++++ b/.github/workflows/claude-review-stub.yml
+@@ -1,7 +1,7 @@
+ # The agents repo's OWN reviewer stub (copy of examples/claude-review-stub.yml;
+ # -stub suffix because claude-review.yml is the reusable definition here).
+-# Auto-reviews PRs on open (pull_request_target — the workflow resolves from
+-# the base branch, so even reviewer-file PRs auto-review; release-please
++# Auto-reviews PRs on open (PRs here target main, which carries this file, so
++# the pull_request trigger fires — unlike the pristine-base fork; release-please
+ # PRs are skipped, gated in the reusable workflow) and on demand via @review.
+ name: Review
+ 
+@@ -20,10 +20,10 @@ on:
+ jobs:
+   review:
+     # Run on PR events (skipping drafts — they get reviewed via
+-    # ready_for_review when marked ready — and fork PRs: under
+-    # pull_request_target the event runs with base-repo secrets, so the
+-    # same-repo check below is a SECURITY boundary, not an ergonomic
+-    # skip), or on a PR comment containing
++    # ready_for_review when marked ready — and fork PRs, which get no OIDC
++    # token so the run would die at startup on id-token: write; the
++    # same-repo check below is an ergonomic skip, not a security
++    # boundary), or on a PR comment containing
+     # @review — or an @review comment on an External-labeled proxy ISSUE, which
+     # reviews the tracked upstream PR and posts findings on the proxy (external
+     # mode; see the reusable workflow). An explicit @review still works on a
+diff --git a/.github/workflows/claude-review.yml b/.github/workflows/claude-review.yml
+index fecefc1..cca28f8 100644
+--- a/.github/workflows/claude-review.yml
++++ b/.github/workflows/claude-review.yml
+@@ -4,17 +4,20 @@ name: Claude review (reusable)
+ # Posts PR review comments but has no write access to contents — it cannot
+ # push commits or open PRs (enforced by job permissions, not just the prompt).
+ # Same WIF auth as the dev agent. Callers add a stub (see
+-# examples/claude-review-stub.yml) that triggers on pull_request_target
+-# (auto-review; the workflow — prompt, permissions — resolves from the BASE
+-# branch, so reviewer-file PRs auto-review and a PR's own copy never runs;
+-# legacy pull_request stubs keep working) and/or @review comments.
++# examples/claude-review-stub.yml) that triggers on pull_request events
++# (auto-review; a pull_request_target switch was attempted 2026-08-26 and
++# reverted — Anthropic's token exchange rejects prt-shaped OIDC subjects —
++# but this workflow keeps its dual-event handling, inert under pull_request,
++# for the day prt returns; see design/architecture.md → auto-review
++# tradeoffs) and/or @review comments.
+ #
+ # Auto-review-on-open only fires where this workflow file exists on the PR's
+-# BASE branch. On a pristine-base mirror like the inspect_ai fork, AGENT PRs
+-# target the upstream-mirror `main` (no meridian workflows — never fires;
+-# the dev agent posts @review on PR open instead); only meridian-targeting
+-# maintenance PRs would gain auto-review from adopting the prt stub. See
+-# README.
++# base branch (GitHub resolves pull_request-family workflows from the PR's
++# branches, not the default branch). On a pristine-base mirror like the
++# inspect_ai fork — whose PRs target an upstream-mirror `main` that has no
++# meridian workflows — pull_request never fires; only the @review comment
++# path (issue_comment, resolved from the default branch) works there, and
++# the dev agent posts @review on PR open instead. See README.
+ #
+ # Callers MUST grant id-token: write at the calling job level (GitHub does not
+ # pass id-token to reusable workflows implicitly).
+@@ -651,7 +654,8 @@ jobs:
+           set -uo pipefail
+           # No execution file at all = the agent never launched: a pre-launch
+           # self-skip (the action's actor check rejecting a bot-authored PR
+-          # open, or workflow-validation on legacy pull_request stubs). A
++          # open, or workflow validation on a pull_request run whose PR
++          # edits the reviewer's own files). A
+           # deliberate no-op, not a silent stall — a real stall (agent ran,
+           # posted nothing) always leaves an execution file.
+           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
