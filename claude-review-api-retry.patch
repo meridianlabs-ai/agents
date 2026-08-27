@@ -1,0 +1,25 @@
+diff --git a/.github/workflows/claude-review.yml b/.github/workflows/claude-review.yml
+index fecefc1..31dbb99 100644
+--- a/.github/workflows/claude-review.yml
++++ b/.github/workflows/claude-review.yml
+@@ -246,7 +246,19 @@ jobs:
+           ok=false mode=pr upstream="" trusted=false head_sha=""
+           # One retry for the gating lookups: they refuse fail-closed, so a
+           # transient API blip shouldn't block a legitimate review outright.
+-          api() { gh api "$@" 2>/dev/null || { sleep 5; gh api "$@" 2>/dev/null; }; }
++          # Each attempt is captured and emitted only on success: a failed
++          # `gh api` prints the HTTP error body to STDOUT (stderr carries only
++          # the `gh:` line), so piping attempts straight through would hand
++          # callers the error body plus the retry's real output — breaking the
++          # permission match and newline-poisoning head_repo/head_sha in
++          # exactly the fail-then-succeed case the retry exists for.
++          api() {
++            local out
++            if out=$(gh api "$@" 2>/dev/null); then printf '%s' "$out"; return 0; fi
++            sleep 5
++            if out=$(gh api "$@" 2>/dev/null); then printf '%s' "$out"; return 0; fi
++            return 1
++          }
+           if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
+             # Defense in depth (stubs gate this too, but stub copies drift):
+             # pull_request_target runs with base-repo secrets and this
