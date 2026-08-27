@@ -98,7 +98,8 @@ runs:
         fi
         # STANDALONE PR: no anchor issue resolvable — the PR's own card is
         # the tracked item. This convention is OPT-IN PER REPO (currently
-        # agents only, per its AGENTS.md): this action runs @main for every
+        # agents only; recorded with the join rules in
+        # design/atlas-tracking.md → set-stage): this action runs @main for every
         # caller's stage steps, and without the gate any plain human PR
         # given an @review anywhere in the fleet would mint an unassigned
         # card nothing reconciles. Anchored claude/issue-N-* PRs resolve
@@ -117,13 +118,14 @@ runs:
         else
           issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
             || warn "cannot read issue #$num in $REPO"
-          # The issues endpoint serves PRs too. A PR landing here means the
-          # pulls lookup above failed transiently (a 5xx, not the clean 404
-          # an issue number gets), so the anchor resolution never ran —
-          # staging this payload would mint the PR's own card in ANY repo,
-          # bypassing the opt-in gate. Degrade to the old skip instead.
+          # The issues endpoint serves PRs too. A PR landing here means either
+          # the pulls lookup above failed transiently (a 5xx — an issue number
+          # gets a clean 404) or a branch/Fixes anchor named a PR instead of an
+          # issue — either way no anchor issue was resolved, and staging this
+          # payload would mint the PR's own card in ANY repo, bypassing the
+          # opt-in gate. Degrade to the old skip instead.
           if jq -e '.pull_request' <<<"$issue_json" >/dev/null; then
-            warn "#$num is a PR but the pulls lookup failed; cannot resolve its stage target"
+            warn "#$num is a PR, not an issue (transient pulls-lookup failure, or a branch/Fixes ref naming a PR); cannot resolve its stage target"
           fi
         fi
         node=$(jq -r '.node_id' <<<"$issue_json")

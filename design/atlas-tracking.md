@@ -546,7 +546,15 @@ the repos). The agents stage **every** issue they touch; per-person scoping
 filters on its own side (the action's `require-assignee` input exists for
 callers that want narrower scoping, but defaults to off). PR→issue resolution
 follows the reconcile
-rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. Wired:
+rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. A
+**standalone PR** — neither anchor resolves — stages **its own board card**,
+but only in repos opted in via `STANDALONE_CARD_REPOS` inside the action
+(currently `meridianlabs-ai/agents`, where infra PRs are the unit of work and
+rarely have an anchor issue). The gate exists because the action runs `@main`
+for every caller's stage steps: fleet-wide, the fallback would mint an
+unassigned card for any plain human PR that gets an `@review`, and nothing
+reconciles those afterward (the hourly sync's lifecycle does not cover
+PR-content items — see [Deferred](#deferred)). Wired:
 `claude.yml` sets **Agent** at run start and **Review** at
 hand-back — skipped only for a *successful `@auto` run that left a PR in the
 loop* (the review loop owns the stage from there; an errored run always hands
