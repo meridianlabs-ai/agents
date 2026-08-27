@@ -664,6 +664,7 @@ jobs:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           MODE: ${{ steps.trig.outputs.mode }}
+          EVENT: ${{ github.event_name }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           SINCE: ${{ steps.trig.outputs.started }}
           MENTION: ${{ steps.who.outputs.mention }}
@@ -678,6 +679,43 @@ jobs:
           # posted nothing) always leaves an execution file.
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           if [ ! -f "$file" ]; then
+            # Distinguish the two skip causes cheaply: a pull_request-family
+            # run whose PR touches .github/workflows/ was skipped by the
+            # token exchange's workflow validation — the check goes green
+            # with nothing visible, and the mitigation (a manual top-level
+            # @review comment, resolved from the default branch) relies on a
+            # human remembering it. Nudge visibly for that case; the
+            # bot-actor skip on ordinary PRs stays a log-level notice. The
+            # nudge writes the trigger token in BACKTICKS only: it posts
+            # from a write-access account, and trig's word-boundary gate
+            # deliberately ignores a backticked token — bare, it would start
+            # a review run on a PR that may not want one yet.
+            # Capture first, then grep a here-string — no pipeline anywhere:
+            # grep -q exits at first match, and under pipefail the resulting
+            # SIGPIPE to the writer would flip the condition false on long
+            # output.
+            prfiles=""
+            if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
+              prfiles=$(gh api "repos/$REPO/pulls/$NUM/files" --paginate \
+                          --jq '.[].filename' 2>/dev/null || true)
+            fi
+            if grep -q '^\.github/workflows/' <<<"$prfiles"; then
+              marker='<!-- claude-review-nudge -->'
+              # Once per PR: reopen/ready_for_review re-fires this path, and
+              # repeating the same nudge is noise. case, not grep: no
+              # pipeline, so no SIGPIPE interaction with pipefail at all.
+              comments=$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
+                           --jq '.[].body' 2>/dev/null || true)
+              case "$comments" in *"$marker"*)
+                echo "::notice::workflow-validation skip on PR #$NUM — nudge already posted; not repeating."
+                exit 0 ;;
+              esac
+              echo "::notice::auto-review could not run from this PR event (PR edits .github/workflows/ — usually workflow validation); posting the re-trigger nudge."
+              cc=""
+              [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
+              gh issue comment "$NUM" --repo "$REPO" --body "$(printf 'ℹ️ Auto-review skipped: this PR edits `.github/workflows/` files, and the automatic review could not run from this PR event (usually server-side workflow validation). To get it reviewed, post a top-level `@review` comment — that resolves the workflow from the default branch.%s\n\n%s' "$cc" "$marker")" || true
+              exit 0
+            fi
             echo "::notice::no execution output — the action skipped itself before launching (actor check or workflow validation); nothing to verify. A comment-triggered re-review runs it as a permitted human actor."
             exit 0
           fi
