@@ -392,6 +392,11 @@ substring collision in trigger gates). Design choices:
   never been minted org-wide before). Until the console allowlists that
   shape, reviewer-file PRs skip auto-review (workflow validation) and get
   a manual top-level @review comment instead (decision: Ransom). The
+  verify step makes that skip visible (issue #27): when the no-execution-file
+  path fires on a pull_request run whose PR touches `.github/workflows/`, it
+  posts a nudge comment asking for the manual re-trigger (token backticked so
+  the nudge itself can't start a run; once per PR via a marker comment) —
+  the bot-actor skip on ordinary PRs stays a log-level notice. The
   reusable KEEPS its dual-event handling and the prt fork-head refusal —
   inert under pull_request, correct if prt ever returns. The original
   prt rationale, kept for that day: The workflow — prompt, permissions, args — resolves from the
