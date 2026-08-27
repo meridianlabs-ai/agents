@@ -1,7 +1,7 @@
 # The agents repo's OWN reviewer stub (copy of examples/claude-review-stub.yml;
 # -stub suffix because claude-review.yml is the reusable definition here).
-# Auto-reviews PRs on open (pull_request_target — the workflow resolves from
-# the base branch, so even reviewer-file PRs auto-review; release-please
+# Auto-reviews PRs on open (PRs here target main, which carries this file, so
+# the pull_request trigger fires — unlike the pristine-base fork; release-please
 # PRs are skipped, gated in the reusable workflow) and on demand via @review.
 name: Review
 
@@ -20,10 +20,10 @@ on:
 jobs:
   review:
     # Run on PR events (skipping drafts — they get reviewed via
-    # ready_for_review when marked ready — and fork PRs: under
-    # pull_request_target the event runs with base-repo secrets, so the
-    # same-repo check below is a SECURITY boundary, not an ergonomic
-    # skip), or on a PR comment containing
+    # ready_for_review when marked ready — and fork PRs, which get no OIDC
+    # token so the run would die at startup on id-token: write; the
+    # same-repo check below is an ergonomic skip, not a security
+    # boundary), or on a PR comment containing
     # @review — or an @review comment on an External-labeled proxy ISSUE, which
     # reviews the tracked upstream PR and posts findings on the proxy (external
     # mode; see the reusable workflow). An explicit @review still works on a

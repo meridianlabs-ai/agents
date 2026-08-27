@@ -4,17 +4,20 @@ name: Claude review (reusable)
 # Posts PR review comments but has no write access to contents — it cannot
 # push commits or open PRs (enforced by job permissions, not just the prompt).
 # Same WIF auth as the dev agent. Callers add a stub (see
-# examples/claude-review-stub.yml) that triggers on pull_request_target
-# (auto-review; the workflow — prompt, permissions — resolves from the BASE
-# branch, so reviewer-file PRs auto-review and a PR's own copy never runs;
-# legacy pull_request stubs keep working) and/or @review comments.
+# examples/claude-review-stub.yml) that triggers on pull_request events
+# (auto-review; a pull_request_target switch was attempted 2026-08-26 and
+# reverted — Anthropic's token exchange rejects prt-shaped OIDC subjects —
+# but this workflow keeps its dual-event handling, inert under pull_request,
+# for the day prt returns; see design/architecture.md → auto-review
+# tradeoffs) and/or @review comments.
 #
 # Auto-review-on-open only fires where this workflow file exists on the PR's
-# BASE branch. On a pristine-base mirror like the inspect_ai fork, AGENT PRs
-# target the upstream-mirror `main` (no meridian workflows — never fires;
-# the dev agent posts @review on PR open instead); only meridian-targeting
-# maintenance PRs would gain auto-review from adopting the prt stub. See
-# README.
+# base branch (GitHub resolves pull_request-family workflows from the PR's
+# branches, not the default branch). On a pristine-base mirror like the
+# inspect_ai fork — whose PRs target an upstream-mirror `main` that has no
+# meridian workflows — pull_request never fires; only the @review comment
+# path (issue_comment, resolved from the default branch) works there, and
+# the dev agent posts @review on PR open instead. See README.
 #
 # Callers MUST grant id-token: write at the calling job level (GitHub does not
 # pass id-token to reusable workflows implicitly).
@@ -651,7 +654,8 @@ jobs:
           set -uo pipefail
           # No execution file at all = the agent never launched: a pre-launch
           # self-skip (the action's actor check rejecting a bot-authored PR
-          # open, or workflow-validation on legacy pull_request stubs). A
+          # open, or workflow validation on a pull_request run whose PR
+          # edits the reviewer's own files). A
           # deliberate no-op, not a silent stall — a real stall (agent ran,
           # posted nothing) always leaves an execution file.
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
