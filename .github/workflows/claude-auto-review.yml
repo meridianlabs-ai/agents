@@ -561,17 +561,18 @@ jobs:
             # account + exact marker), so the ⚠️ is suppressed only when the
             # same signal moved the board to Review. A cancelled claude step
             # skips that detector; its empty output falls through to flagging.
-            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ] && [ "${HANDED:-}" = "true" ]; then
-              echo "::notice::unpushed local edits, but a hand-off comment posted this round explains them; not flagging."
-            fi
-            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ] && [ "${HANDED:-}" != "true" ]; then
-              # Strip the @ from trigger tokens in agent-authored text: this
-              # summary is embedded in a MARVIN-authored comment below, and a
-              # bare @review/@claude/@auto in it would trigger that workflow
-              # (marvin is a write-access human account to every gate).
-              summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
-              err="the agent finished but left edits to tracked files (or unpushed commits) that never landed on the branch — whatever its summary reports, no code change reached the PR."
-              [ -n "$summary" ] && err="$err Agent summary: $summary"
+            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
+              if [ "${HANDED:-}" = "true" ]; then
+                echo "::notice::unpushed local edits, but a hand-off comment posted this round explains them; not flagging."
+              else
+                # Strip the @ from trigger tokens in agent-authored text: this
+                # summary is embedded in a MARVIN-authored comment below, and a
+                # bare @review/@claude/@auto in it would trigger that workflow
+                # (marvin is a write-access human account to every gate).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
+                err="the agent finished but left edits to tracked files (or unpushed commits) that never landed on the branch — whatever its summary reports, no code change reached the PR."
+                [ -n "$summary" ] && err="$err Agent summary: $summary"
+              fi
             fi
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
