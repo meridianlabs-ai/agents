@@ -528,6 +528,7 @@ jobs:
           HEAD_BRANCH: ${{ steps.gate.outputs.head_branch }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
           MENTION: ${{ steps.gate.outputs.mention }}
+          SINCE: ${{ steps.base.outputs.started }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -552,7 +553,17 @@ jobs:
             # false ⚠️ from untracked leftovers on a doc-only round)
             [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ] && pending=1
             [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
+            handed=0
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
+              # A hand-off posted this round EXPLAINS unpushed local edits:
+              # the agent hit the workflow-scope push wall, said so, and
+              # delivered the change another way (observed: agents#28 got a
+              # proper hand-off plus this redundant ⚠️ 18 seconds later).
+              handed=$(gh api "repos/$REPO/issues/$NUM/comments?since=${SINCE:-}" \
+                --jq '[.[] | select(.body | contains("auto-handoff"))] | length' 2>/dev/null || echo 0)
+              [ "${handed:-0}" -gt 0 ] && echo "::notice::unpushed local edits, but a hand-off comment posted this round explains them; not flagging."
+            fi
+            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ] && [ "${handed:-0}" -eq 0 ]; then
               # Strip the @ from trigger tokens in agent-authored text: this
               # summary is embedded in a MARVIN-authored comment below, and a
               # bare @review/@claude/@auto in it would trigger that workflow
