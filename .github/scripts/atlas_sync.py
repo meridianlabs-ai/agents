@@ -630,7 +630,7 @@ def sync_item(row) -> None:
             return
         gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
         escape_hatch = (
-            "If the close was deliberate, close it again as *not planned*, or "
+            "If the close was deliberate, close it again (any reason), or "
             "clear the item's Upstream PR field — the sync respects both. "
             "(Atlas sync)"
         )
