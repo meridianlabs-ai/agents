@@ -12,7 +12,9 @@ hourly Atlas sync"):
 2. State sync: every fork issue on Atlas with a non-empty "Upstream PR"
    field — OPEN ones, plus CLOSED ones whose Stage is still set (the
    Development-panel auto-close signature; such an issue is reopened while
-   its upstream PR is open) -> read the upstream PR and advance the stage:
+   its upstream PR is open, unless a human closed it by hand — the
+   ClosedEvent's closer discriminates) -> read the upstream PR and advance
+   the stage:
      - External proxies: merged/closed -> close proxy (Done); APPROVED ->
        Merge (the merge-approved-prs queue; dismiss the approval or request
        changes to pull one back, sticky APPROVED re-queues a moved card);
@@ -430,6 +432,34 @@ def close_issue(number: int, comment: str) -> None:
     gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{number}", "-f", "state=closed")
 
 
+def auto_closed_by_pr(issue: int):
+    """Whether the issue's last close was recorded with a closer (PR/commit).
+
+    The Development-panel auto-close (a linked PR merging) records a
+    `closer` on the ClosedEvent; a human pressing the close button leaves
+    closer null — regardless of stateReason, since the default button
+    records COMPLETED, identical to the auto-close signature (issue #204
+    was reopened over a deliberate superseded-close, 2026-08-27). Returns
+    True/False, or None when the timeline can't be read.
+    """
+    owner, name = FORK.split("/")
+    try:
+        nodes = gql(
+            """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
+                 issue(number:$n){ timelineItems(itemTypes:[CLOSED_EVENT], last:1){
+                   nodes{ ... on ClosedEvent{ closer{__typename} }}}}}}""",
+            o=owner,
+            r=name,
+            n=issue,
+        )["repository"]["issue"]["timelineItems"]["nodes"]
+    except Exception as e:  # noqa: BLE001 — caller falls back to reopening
+        print(f"::warning::closed-event lookup failed for #{issue}: {e}")
+        return None
+    if not nodes:
+        return None
+    return nodes[0].get("closer") is not None
+
+
 def comment(number: int, body: str) -> None:
     gh("api", f"repos/{FORK}/issues/{number}/comments", "-f", f"body={body}")
 
@@ -582,6 +612,20 @@ def sync_item(row) -> None:
             actions.append(
                 f"#{issue}: closed as {row['state_reason'].lower().replace('_', ' ')} "
                 "with upstream PR unmerged -> left closed, Stage cleared"
+            )
+            return
+        if auto_closed_by_pr(issue) is False:
+            # No closer on the ClosedEvent: a human closed it by hand, just
+            # with the default button (COMPLETED — same stateReason the panel
+            # auto-close records, so the check above can't catch it). Respect
+            # the close like a not-planned one. On a lookup failure (None)
+            # fall through to reopening instead: a wrong reopen has the
+            # escape-hatch comment below, a wrong leave-closed strands
+            # silently.
+            clear_field(item, STAGE_FIELD)
+            actions.append(
+                f"#{issue}: closed by hand with upstream PR unmerged "
+                "-> left closed, Stage cleared"
             )
             return
         gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
