@@ -26,8 +26,10 @@ jobs:
     # skip), or on a PR comment containing
     # @review — or an @review comment on an External-labeled proxy ISSUE, which
     # reviews the tracked upstream PR and posts findings on the proxy (external
-    # mode; see the reusable workflow). An explicit @review still works on a draft. `@review` does not
-    # collide with the dev agent's `@claude` trigger.
+    # mode; see the reusable workflow). An explicit @review still works on a
+    # draft, and on a fork PR when the commenter has write access (enforced in
+    # the reusable's trig check before checkout). `@review` does not collide
+    # with the dev agent's `@claude` trigger.
     if: >
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.draft != true &&

@@ -17,7 +17,9 @@
 # the same-repo gate below is the security boundary (do not remove it: it is
 # what keeps untrusted fork heads from being checked out and exercised with
 # base credentials). A maintainer can still review a fork PR with an @review
-# comment, same trust decision made explicitly.
+# comment, same trust decision made explicitly — the reusable's trig check
+# enforces it (fork-head @review requires a commenter with write access,
+# checked before checkout).
 
 name: Review
 
@@ -41,8 +43,9 @@ jobs:
     # same-repo check is a SECURITY boundary, not an ergonomic skip; the
     # full_name check, not head.repo.fork, keeps same-repo PRs working on
     # repos that are themselves forks), or on a PR comment containing @review. An explicit
-    # @review still works on a draft and on a fork PR. `@review` does not
-    # collide with the dev agent's `@claude` trigger.
+    # @review still works on a draft, and on a fork PR when the commenter has
+    # write access (see the header). `@review` does not collide with the dev
+    # agent's `@claude` trigger.
     if: >
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.draft != true &&
