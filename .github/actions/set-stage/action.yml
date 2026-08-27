@@ -123,7 +123,8 @@ runs:
           # gets a clean 404) or a branch/Fixes anchor named a PR instead of an
           # issue — either way no anchor issue was resolved, and staging this
           # payload would mint the PR's own card in ANY repo, bypassing the
-          # opt-in gate. Degrade to the old skip instead.
+          # opt-in gate. Degrade to a no-op, but a loud one (warn, not skip):
+          # both causes are worth surfacing to whoever reads the run.
           if jq -e '.pull_request' <<<"$issue_json" >/dev/null; then
             warn "#$num is a PR, not an issue (transient pulls-lookup failure, or a branch/Fixes ref naming a PR); cannot resolve its stage target"
           fi
