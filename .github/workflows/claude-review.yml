@@ -690,15 +690,16 @@ jobs:
             # from a write-access account, and trig's word-boundary gate
             # deliberately ignores a backticked token — bare, it would start
             # a review run on a PR that may not want one yet.
-            # Capture-then-grep, not a pipeline: grep -q exits at first
-            # match, and under pipefail the resulting SIGPIPE to gh would
-            # flip the condition false on long output.
+            # Capture first, then grep a here-string — no pipeline anywhere:
+            # grep -q exits at first match, and under pipefail the resulting
+            # SIGPIPE to the writer would flip the condition false on long
+            # output.
             prfiles=""
             if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
               prfiles=$(gh api "repos/$REPO/pulls/$NUM/files" --paginate \
                           --jq '.[].filename' 2>/dev/null || true)
             fi
-            if printf '%s\n' "$prfiles" | grep -q '^\.github/workflows/'; then
+            if grep -q '^\.github/workflows/' <<<"$prfiles"; then
               marker='<!-- claude-review-nudge -->'
               # Once per PR: reopen/ready_for_review re-fires this path, and
               # repeating the same nudge is noise. case, not grep: no
@@ -709,10 +710,10 @@ jobs:
                 echo "::notice::workflow-validation skip on PR #$NUM — nudge already posted; not repeating."
                 exit 0 ;;
               esac
-              echo "::notice::auto-review skipped by workflow validation (PR edits .github/workflows/); posting the re-trigger nudge."
+              echo "::notice::auto-review could not run from this PR event (PR edits .github/workflows/ — usually workflow validation); posting the re-trigger nudge."
               cc=""
               [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
-              gh issue comment "$NUM" --repo "$REPO" --body "$(printf 'ℹ️ Auto-review skipped: this PR edits `.github/workflows/` files, so the review workflow cannot run from the PR event (server-side workflow validation). To get it reviewed, post a top-level `@review` comment — that resolves the workflow from the default branch.%s\n\n%s' "$cc" "$marker")" || true
+              gh issue comment "$NUM" --repo "$REPO" --body "$(printf 'ℹ️ Auto-review skipped: this PR edits `.github/workflows/` files, and the automatic review could not run from this PR event (usually server-side workflow validation). To get it reviewed, post a top-level `@review` comment — that resolves the workflow from the default branch.%s\n\n%s' "$cc" "$marker")" || true
               exit 0
             fi
             echo "::notice::no execution output — the action skipped itself before launching (actor check or workflow validation); nothing to verify. A comment-triggered re-review runs it as a permitted human actor."
