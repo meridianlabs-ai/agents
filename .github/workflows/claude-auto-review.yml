@@ -498,7 +498,7 @@ jobs:
         run: |
           set -euo pipefail
           n=$(gh api "repos/$REPO/issues/$PR/comments?since=$SINCE" \
-                --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|contains("<!-- auto-handoff -->")))] | length' \
+                --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|startswith("<!-- auto-handoff -->")))] | length' \
                 2>/dev/null || echo 0)
           echo "self-handoff comments since $SINCE: $n"
           echo "found=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
@@ -558,7 +558,9 @@ jobs:
             # delivered the change another way (observed: agents#28 got a
             # proper hand-off plus this redundant ⚠️ 18 seconds later).
             # HANDED is the selfhandoff detector's strict match (machine
-            # account + exact marker), so the ⚠️ is suppressed only when the
+            # account + marker as the leading line, per the documented
+            # hand-off contract — quoting it in prose, e.g. in backticks
+            # mid-comment, does not match), so the ⚠️ is suppressed only when the
             # same signal moved the board to Review. A cancelled claude step
             # skips that detector; its empty output falls through to flagging.
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then

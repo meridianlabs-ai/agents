@@ -399,18 +399,22 @@ jobs:
               # In THIS loop that should essentially never happen: the CI-fix
               # prompt's ending contract is @review-or-blocker, never a
               # hand-off, and nothing here moves the board on the marker. So
-              # match strictly (machine account + exact marker, mirroring the
-              # review loop's selfhandoff detector) — a hit means the agent
-              # improvised a hand-off, not prose mentioning the phrase. The
-              # outcome gate also mirrors that detector's success-only
-              # condition: a cancelled claude step (empty err, non-success
-              # outcome) must fall through to flagging, not suppression.
+              # match strictly (machine account + marker as the leading line,
+              # per the documented hand-off contract, mirroring the review
+              # loop's selfhandoff detector) — a hit means the agent improvised
+              # a hand-off, not prose quoting the marker. The outcome gate also
+              # mirrors that detector's success-only condition: a cancelled
+              # claude step (empty err, non-success outcome) must fall through
+              # to flagging, not suppression. Accepted trade-off: unlike the
+              # review loop, suppression here has no compensating board move or
+              # taught @-mention — the improvised hand-off comment on the PR is
+              # the only human-visible trace, hence the ::warning:: below.
               if [ -n "${NUM:-}" ] && [ "$CLAUDE_OUTCOME" = "success" ]; then
                 handed=$(gh api "repos/$REPO/issues/$NUM/comments?since=${SINCE:-}" \
-                  --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|contains("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
+                  --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
               fi
               if [ "${handed:-0}" -gt 0 ]; then
-                echo "::notice::unpushed local edits, but a hand-off comment posted this round explains them; not flagging."
+                echo "::warning::unpushed local edits, but a hand-off comment posted this round explains them; not flagging. (Off-contract for this loop — the CI-fix ending contract is @review-or-blocker, never a hand-off.)"
               else
                 # Strip the @ from trigger tokens in agent-authored text — this
                 # is embedded in a marvin-authored comment (see claude-auto-review).
