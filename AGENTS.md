@@ -25,6 +25,11 @@ take effect on every repo's next run.
 
 ## Conventions
 
+- **Make changes from a throwaway worktree, not the primary clone**
+  (Ransom, 2026-08-27): Ransom works in his checkout (IDE open,
+  in-progress state), so never branch-switch it — `git worktree add
+  <scratch>/<name> -b <branch> origin/main`, work there, push, remove
+  the worktree. Applies to every change, including quick doc PRs.
 - **This repo's work is tracked on the Atlas board** (org project 1,
   `PVT_kwDOC7YMCM4BU68p`). When you open an issue or a STANDALONE PR here,
   add it to the board in the same breath — and assign Ransom (`ransomr`):
