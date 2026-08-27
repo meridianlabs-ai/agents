@@ -26,7 +26,8 @@ inputs:
   issue:
     description: >-
       Issue OR pull-request number. A PR is resolved to its issue via the
-      claude/issue-N-* head-branch convention, then a same-repo Fixes ref in
+      claude/issue-N-* head-branch convention, then a same-repo Fixes ref
+      (a STANDALONE PR — neither — stages its own board card) in
       the PR body.
     required: false
     default: ""
@@ -76,13 +77,14 @@ runs:
         # Resolve the ISSUE number. A PR number resolves via its head branch
         # (claude/issue-N-*), then a same-repo Fixes/Closes/Resolves ref in the
         # PR body — the same join rules the tracking design records.
-        num="$NUM" pr_body=""
+        num="$NUM" pr_body="" is_pr=""
         if [ -n "$num" ]; then
           # Gate on exit code, NOT output: gh prints the JSON error body to
           # stdout on a 404, so an issue number would otherwise look like a PR.
           if pr=$(gh api "repos/$REPO/pulls/$num" 2>/dev/null); then
             BRANCH=$(jq -r '.head.ref // ""' <<<"$pr")
             pr_body=$(jq -r '.body // ""' <<<"$pr")
+            is_pr=1
             num=""
           fi
         fi
@@ -94,10 +96,19 @@ runs:
             | grep -oiE "(fix(e[sd])?|close[sd]?|resolve[sd]?)[[:space:]]+($REPO)?#[0-9]+" \
             | head -1 | grep -oE '[0-9]+$' || true)
         fi
-        [ -n "$num" ] || skip "no issue resolvable (issue='$NUM' branch='$BRANCH')"
-
-        issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
-          || warn "cannot read issue #$num in $REPO"
+        # STANDALONE PR: no anchor issue resolvable — the PR's own card is
+        # the tracked item (agents-repo convention: standalone PRs get
+        # cards; anchored claude/issue-N-* PRs are tracked via their issue,
+        # and resolve above). Stage the PR node itself.
+        if [ -z "$num" ]; then
+          [ -n "$is_pr" ] || skip "no issue resolvable (issue='$NUM' branch='$BRANCH')"
+          num="$NUM"
+          issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
+            || warn "cannot read PR #$num in $REPO"
+        else
+          issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
+            || warn "cannot read issue #$num in $REPO"
+        fi
         node=$(jq -r '.node_id' <<<"$issue_json")
         if [ -n "$REQUIRE_ASSIGNEE" ] && \
            ! jq -e --arg a "$REQUIRE_ASSIGNEE" 'any(.assignees[]; .login==$a)' <<<"$issue_json" >/dev/null; then
