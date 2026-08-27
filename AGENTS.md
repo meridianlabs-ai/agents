@@ -44,6 +44,16 @@ take effect on every repo's next run.
   their issue. Stage moves come from the agent workflows; stage cleanup on
   close is manual (see design/atlas-tracking.md → Deferred — no hourly sync
   reconciliation for this repo's items).
+- **Label PRs `auto` when opening them** (default policy: Ransom,
+  2026-08-27) — the review-fix loop then drives review rounds to
+  convergence without babysitting. Two consequences: request the review
+  (top-level `@review` comment — mandatory anyway for workflow-editing
+  PRs), and once labeled, DON'T race the loop — let it address review
+  findings rather than pushing your own fixes to the branch mid-round
+  (it is serialized per PR; a session push mid-round invalidates its
+  state). Skip the label only when deliberately keeping manual control
+  of a branch you are actively iterating on. Marvin-opened PRs from
+  `auto` issues inherit the label automatically.
 
 - **The `@main` contract is load-bearing.** Every caller repo's stub calls these
   workflows at `@main`, so a change merged here is live everywhere immediately.
