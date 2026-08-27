@@ -385,8 +385,16 @@ substring collision in trigger gates). Design choices:
   allow-listing `gh` and the inline-comment MCP so it can actually *post* the
   review — an early version produced a good review that went nowhere because no
   posting tool was allowed.
-- **Auto-review triggers on `pull_request_target`, not `pull_request`**
-  (2026-08-26). The workflow — prompt, permissions, args — resolves from the
+- **Auto-review triggers on `pull_request`; a `pull_request_target`
+  switch was attempted 2026-08-26 and REVERTED 2026-08-27**: Anthropic's
+  workload-identity token exchange rejects prt-shaped OIDC subjects
+  ("Invalid OIDC token", 2/2 on first exercise — the subject shape had
+  never been minted org-wide before). Until the console allowlists that
+  shape, reviewer-file PRs skip auto-review (workflow validation) and get
+  a manual top-level @review comment instead (decision: Ransom). The
+  reusable KEEPS its dual-event handling and the prt fork-head refusal —
+  inert under pull_request, correct if prt ever returns. The original
+  prt rationale, kept for that day: The workflow — prompt, permissions, args — resolves from the
   BASE branch, so a PR editing the reviewer's own files still auto-reviews
   and the PR's copy never runs; this also satisfies the app-token exchange's
   server-side workflow validation, which refuses OIDC tokens attesting a

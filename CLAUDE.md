@@ -22,13 +22,15 @@ The shared, tool-agnostic instructions for this repo are in `AGENTS.md`
   automated reviews caught real bugs in every round of the sync's
   evolution. The ruleset requires a PR but zero approvals, so the flow
   stays fast: branch, PR, let the reviewer run, merge. Mechanics:
-  auto-review-on-open covers all human-opened PRs, including
-  reviewer-file edits (bot-authored opens still self-skip via the
-  action's actor check) —
-  the stub triggers on pull_request_target, so the workflow (prompt,
-  permissions) resolves from main and the PR's own copy never runs; a
-  top-level `@review` comment re-runs it on demand, and the `auto`
-  label lets the loop drive fix rounds. For low-blast-radius changes
-  (skills/, design/, docs — nothing at `@main`), merging right after
-  the PR opens is fine — an in-flight review just lands harmlessly on
-  the merged PR; workflow PRs should wait for the review.
+  auto-review-on-open covers human-opened PRs EXCEPT those editing
+  `.github/workflows/` files — those skip via the token exchange's
+  workflow validation, so ALWAYS post a top-level `@review` comment on
+  workflow-editing PRs (it resolves the workflow from main). (A
+  pull_request_target switch would lift that exception but Anthropic's
+  token exchange rejects prt-shaped OIDC subjects — attempted
+  2026-08-26, reverted; decision: Ransom, 2026-08-27 — manual comments
+  instead.) The `auto` label lets the loop drive fix rounds. For
+  low-blast-radius changes (skills/, design/, docs — nothing at
+  `@main`), merging right after the PR opens is fine — an in-flight
+  review just lands harmlessly on the merged PR; workflow PRs should
+  wait for the review.

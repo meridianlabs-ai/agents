@@ -462,7 +462,12 @@ stage, resolved by the hourly sync:
   board. This avoids adding event-time stage writers that race the
   existing ones. Caveat that follows: labeling a companion `auto` AFTER
   its review posted does not engage the loop (the loop keys on the
-  marker comment's creation event) — re-trigger the review to light it.
+  marker comment's creation event). To light it, post an `@auto` comment
+  asking to address the standing review — one dev-agent run that acts on
+  the findings and hands back naturally. A bare re-review trigger also
+  works but burns a full review pass re-deriving findings that already
+  exist (preference: Ransom, 2026-08-27); reserve it for when no usable
+  review posted at all.
 
 ## Stage signals (from hand-reconciling the backlog)
 
@@ -619,7 +624,11 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 
 ## Deferred
 
-- **KNOWN GAP — ts-mono-native issues get no hourly reconciliation.** The
+- **KNOWN GAP — ts-mono-native and agents-repo issues get no hourly
+  reconciliation.** (agents-repo items are added to the board by
+  instruction — see that repo's AGENTS.md Conventions — and staged by its
+  agent workflows, but the sync's lifecycle management does not cover
+  them.) The
   sync assumes fork-anchored work: `FORK` is
   hardcoded as the anchor repo (discovery seeds proxies there,
   `lifecycle_item()` resolves issue numbers against it, pilot scoping
