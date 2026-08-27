@@ -9,8 +9,10 @@ hourly Atlas sync"):
    not already tracked -> create a proxy issue in the fork (External label,
    Stage=Review, Upstream PR field), then post @review on it so the external
    review is already running before a human opens the proxy.
-2. State sync: every OPEN fork issue on Atlas with a non-empty "Upstream PR"
-   field -> read the upstream PR and advance the stage:
+2. State sync: every fork issue on Atlas with a non-empty "Upstream PR"
+   field — OPEN ones, plus CLOSED ones whose Stage is still set (the
+   Development-panel auto-close signature; such an issue is reopened while
+   its upstream PR is open) -> read the upstream PR and advance the stage:
      - External proxies: merged/closed -> close proxy (Done); APPROVED ->
        Merge (the merge-approved-prs queue; dismiss the approval or request
        changes to pull one back, sticky APPROVED re-queues a moved card);
@@ -286,7 +288,17 @@ def discover() -> None:
 
 
 def board_items():
-    """Open fork issues on Atlas with a non-empty Upstream PR field."""
+    """Fork issues on Atlas with a non-empty Upstream PR field.
+
+    Open issues always; CLOSED issues only while their Stage field is still
+    set. Every close path the sync owns clears Stage, but the Development-
+    panel auto-close (a linked ts-mono companion PR merging; issue #251,
+    2026-08-26) does not — so a closed row with Stage set is the zombie
+    signature sync_item reopens, while legitimately-terminal items drop out
+    of the hourly scan entirely (no upstream query, no skip-log noise).
+    Status cannot discriminate: the built-in project workflow moves it to
+    Done on both paths.
+    """
     after, rows = "", []
     while True:
         data = gql(
@@ -300,7 +312,7 @@ def board_items():
                      up: fieldValueByName(name:"Upstream PR"){
                        ... on ProjectV2ItemFieldTextValue{text}}
                      content{ ... on Issue{
-                       number state repository{nameWithOwner}
+                       number state stateReason repository{nameWithOwner}
                        assignees(first:10){nodes{login}}
                        labels(first:20){nodes{name}} }}}}}}}""",
             p=PROJECT_ID,
@@ -309,12 +321,11 @@ def board_items():
         for n in data["nodes"]:
             c = n.get("content") or {}
             up = (n.get("up") or {}).get("text", "").strip()
-            # CLOSED issues ride along so sync_item can reopen one that a
-            # Development-panel-linked companion PR (ts-mono) auto-closed on
-            # merge while the upstream PR is still open — invisible-zombie
-            # prevention (issue #251, 2026-08-26).
+            stage = (n.get("stage") or {}).get("name")
+            # CLOSED issues ride along only while Stage is still set — the
+            # invisible-zombie signature (see docstring).
             if (
-                c.get("state") in ("OPEN", "CLOSED")
+                (c.get("state") == "OPEN" or (c.get("state") == "CLOSED" and stage))
                 and c.get("repository", {}).get("nameWithOwner") == FORK
                 and up
             ):
@@ -331,12 +342,13 @@ def board_items():
                     {
                         "item": n["id"],
                         "issue": c["number"],
-                        "stage": (n.get("stage") or {}).get("name"),
+                        "stage": stage,
                         "url": up,
                         "external": any(
                             lbl["name"] == "External" for lbl in c["labels"]["nodes"]
                         ),
                         "open": c.get("state") == "OPEN",
+                        "state_reason": c.get("stateReason"),
                     }
                 )
         if not data["pageInfo"]["hasNextPage"]:
@@ -546,15 +558,36 @@ def sync_item(row) -> None:
         # something other than the sync — in practice a Development-panel-
         # linked ts-mono companion PR merging (GitHub treats every panel-
         # linked PR as a closer). Reopen it; the panel link stays (it is the
-        # board's PR pill). A closed issue whose PR is merged/closed is in
-        # its normal terminal state — leave it alone.
+        # board's PR pill).
         if pr["merged"] or pr["state"] == "CLOSED":
+            # Terminal within the sync gap: the companion merge closed the
+            # issue, then the upstream PR merged/closed before this run — the
+            # normal close paths never saw it, so do their board housekeeping
+            # here. Clearing Stage also drops the row from future scans.
+            if row["stage"]:
+                clear_field(item, STAGE_FIELD)
+                set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["Done"])
+                actions.append(
+                    f"#{issue}: closed with upstream terminal -> Stage cleared (Done)"
+                )
+            return
+        if row["state_reason"] in ("NOT_PLANNED", "DUPLICATE"):
+            # A deliberate human close (the panel auto-close records
+            # COMPLETED) — respect it. Clearing Stage takes the item out of
+            # the hourly scan; reopening the issue by hand restores sync.
+            clear_field(item, STAGE_FIELD)
+            actions.append(
+                f"#{issue}: closed as {row['state_reason'].lower().replace('_', ' ')} "
+                "with upstream PR open -> left closed, Stage cleared"
+            )
             return
         gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
         comment(
             issue,
             f"Reopened — upstream PR {row['url']} is still open; this issue "
             "was closed early (most likely by a linked companion PR merging). "
+            "If the close was deliberate, close it again as *not planned*, or "
+            "clear the item's Upstream PR field — the sync respects both. "
             "(Atlas sync)",
         )
         set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
