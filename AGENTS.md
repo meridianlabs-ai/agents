@@ -37,7 +37,11 @@ take effect on every repo's next run.
   not a workflow: creators here are instruction-bound sessions or anchored
   loop PRs, and a board-add workflow would need org-PAT secrets on
   pull_request_target for near-zero marginal coverage — decision: Ransom,
-  2026-08-26.) Stage moves come from the agent workflows; stage cleanup on
+  2026-08-26.) PRs fixing a tracked issue should say `Fixes #N`: closing
+  refs are NATIVE here (PRs base on the default branch, unlike the fork),
+  so GitHub creates the Development chip and closes the issue on merge —
+  no chip sweep involved; `Refs #N` stays for PRs that must not close
+  their issue. Stage moves come from the agent workflows; stage cleanup on
   close is manual (see design/atlas-tracking.md → Deferred — no hourly sync
   reconciliation for this repo's items).
 
