@@ -6,8 +6,10 @@
 # (lower) permissions.
 #
 # Caveat: auto-review-on-open (the pull_request trigger) only fires where this
-# file exists on the PR's BASE branch — GitHub resolves pull_request-family
-# workflows from the PR's branches, not the default branch. On a pristine-base
+# file exists in the PR's merge ref (base or head branch) — GitHub resolves
+# pull_request-family workflows from the PR's branches, not the default
+# branch; a PR that adds or edits the file fires from its own copy, which the
+# token exchange's workflow validation then stops. On a pristine-base
 # mirror like the inspect_ai fork, PRs target a base that lacks this workflow,
 # so pull_request never fires; only the @review comment path works there, and
 # auto-review is instead driven by the dev agent posting @review on PR open.
