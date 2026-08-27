@@ -385,8 +385,16 @@ substring collision in trigger gates). Design choices:
   allow-listing `gh` and the inline-comment MCP so it can actually *post* the
   review — an early version produced a good review that went nowhere because no
   posting tool was allowed.
-- **Auto-review triggers on `pull_request_target`, not `pull_request`**
-  (2026-08-26). The workflow — prompt, permissions, args — resolves from the
+- **Auto-review triggers on `pull_request`; a `pull_request_target`
+  switch was attempted 2026-08-26 and REVERTED 2026-08-27**: Anthropic's
+  workload-identity token exchange rejects prt-shaped OIDC subjects
+  ("Invalid OIDC token", 2/2 on first exercise — the subject shape had
+  never been minted org-wide before). Until the console allowlists that
+  shape, reviewer-file PRs skip auto-review (workflow validation) and get
+  a manual top-level @review comment instead (decision: Ransom). The
+  reusable KEEPS its dual-event handling and the prt fork-head refusal —
+  inert under pull_request, correct if prt ever returns. The original
+  prt rationale, kept for that day: The workflow — prompt, permissions, args — resolves from the
   BASE branch, so a PR editing the reviewer's own files still auto-reviews
   and the PR's copy never runs; this also satisfies the app-token exchange's
   server-side workflow validation, which refuses OIDC tokens attesting a
@@ -395,11 +403,22 @@ substring collision in trigger gates). Design choices:
   head, so the same-repo gate (enforced twice — the stub's `if:` and the
   reusable trig step's fork-head refusal) is a SECURITY boundary, not an
   ergonomic skip. Same-repo heads imply write-access authors — the same
-  trust level as the `@review` comment path, which has always checked out
-  heads. No TOCTOU: a PR's head *repo* is immutable, so the payload gate
-  cannot be raced by later pushes (those only add same-repo commits). Fork
-  PRs get no auto-review run at all; the comment path is the explicit
-  human-decision route (its own gating gap is tracked in issue #13).
+  trust level the `@review` comment path enforces in the reusable's trig
+  check (issue #13): before checkout, the comment path requires a same-repo
+  head or a commenter with write access, and external mode always requires
+  the trusted commenter (its checkout is an untrusted upstream head; the
+  `claude-setup` step is additionally mode-gated so an upstream tree can
+  never supply it). No TOCTOU on either path: prt's head *repo* is
+  immutable, so its payload gate cannot be raced by later pushes (those
+  only add same-repo commits), and the comment path checks out the head
+  SHA captured at trust-check time rather than re-resolving
+  refs/pull/N/head after the gate. One caveat on the pin: it fixes what
+  the gate decided on, so a fork push landing *before* the gate's lookup —
+  in the seconds after the maintainer's `@review` — is still the head that
+  gets admitted; irreducible, since the trigger comment carries no head
+  SHA to compare against. Fork PRs get no auto-review run at all; the
+  comment path is the explicit human-decision route, a maintainer's
+  `@review` being the same trust decision made explicitly.
 - **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
   `synchronize` fires on every push, so reviewing on it would re-review (and
   re-bill ~$0.40–1) on every fix commit, including the agent's own. On-demand

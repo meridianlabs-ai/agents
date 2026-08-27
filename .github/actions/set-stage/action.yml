@@ -26,8 +26,9 @@ inputs:
   issue:
     description: >-
       Issue OR pull-request number. A PR is resolved to its issue via the
-      claude/issue-N-* head-branch convention, then a same-repo Fixes ref in
-      the PR body.
+      claude/issue-N-* head-branch convention, then a same-repo Fixes ref
+      in the PR body. A STANDALONE PR — neither — stages its own board
+      card, in opt-in repos only (see STANDALONE_CARD_REPOS below).
     required: false
     default: ""
   branch:
@@ -76,13 +77,14 @@ runs:
         # Resolve the ISSUE number. A PR number resolves via its head branch
         # (claude/issue-N-*), then a same-repo Fixes/Closes/Resolves ref in the
         # PR body — the same join rules the tracking design records.
-        num="$NUM" pr_body=""
+        num="$NUM" pr_body="" is_pr=""
         if [ -n "$num" ]; then
           # Gate on exit code, NOT output: gh prints the JSON error body to
           # stdout on a 404, so an issue number would otherwise look like a PR.
           if pr=$(gh api "repos/$REPO/pulls/$num" 2>/dev/null); then
             BRANCH=$(jq -r '.head.ref // ""' <<<"$pr")
             pr_body=$(jq -r '.body // ""' <<<"$pr")
+            is_pr=1
             num=""
           fi
         fi
@@ -94,10 +96,39 @@ runs:
             | grep -oiE "(fix(e[sd])?|close[sd]?|resolve[sd]?)[[:space:]]+($REPO)?#[0-9]+" \
             | head -1 | grep -oE '[0-9]+$' || true)
         fi
-        [ -n "$num" ] || skip "no issue resolvable (issue='$NUM' branch='$BRANCH')"
-
-        issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
-          || warn "cannot read issue #$num in $REPO"
+        # STANDALONE PR: no anchor issue resolvable — the PR's own card is
+        # the tracked item. This convention is OPT-IN PER REPO (currently
+        # agents only; recorded with the join rules in
+        # design/atlas-tracking.md → set-stage): this action runs @main for every
+        # caller's stage steps, and without the gate any plain human PR
+        # given an @review anywhere in the fleet would mint an unassigned
+        # card nothing reconciles. Anchored claude/issue-N-* PRs resolve
+        # above regardless of repo.
+        STANDALONE_CARD_REPOS="meridianlabs-ai/agents"
+        if [ -z "$num" ]; then
+          [ -n "$is_pr" ] || skip "no issue resolvable (issue='$NUM' branch='$BRANCH')"
+          case " $STANDALONE_CARD_REPOS " in
+            *" $REPO "*) ;;
+            *) skip "standalone PR in $REPO — cards are opt-in per repo (see set-stage)" ;;
+          esac
+          num="$NUM"
+          # the pulls lookup already returned the full PR object — node_id
+          # and assignees included — so no refetch via the issues endpoint
+          issue_json="$pr"
+        else
+          issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
+            || warn "cannot read issue #$num in $REPO"
+          # The issues endpoint serves PRs too. A PR landing here means either
+          # the pulls lookup above failed transiently (a 5xx — an issue number
+          # gets a clean 404) or a branch/Fixes anchor named a PR instead of an
+          # issue — either way no anchor issue was resolved, and staging this
+          # payload would mint the PR's own card in ANY repo, bypassing the
+          # opt-in gate. Degrade to a no-op, but a loud one (warn, not skip):
+          # both causes are worth surfacing to whoever reads the run.
+          if jq -e '.pull_request' <<<"$issue_json" >/dev/null; then
+            warn "#$num is a PR, not an issue (transient pulls-lookup failure, or a branch/Fixes ref naming a PR); cannot resolve its stage target"
+          fi
+        fi
         node=$(jq -r '.node_id' <<<"$issue_json")
         if [ -n "$REQUIRE_ASSIGNEE" ] && \
            ! jq -e --arg a "$REQUIRE_ASSIGNEE" 'any(.assignees[]; .login==$a)' <<<"$issue_json" >/dev/null; then

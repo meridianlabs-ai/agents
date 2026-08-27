@@ -25,6 +25,41 @@ take effect on every repo's next run.
 
 ## Conventions
 
+- **Make changes from a throwaway worktree, not the primary clone**
+  (Ransom, 2026-08-27): Ransom works in his checkout (IDE open,
+  in-progress state), so never branch-switch it — `git worktree add
+  <scratch>/<name> -b <branch> origin/main`, work there, push, remove
+  the worktree. Applies to every change, including quick doc PRs.
+- **This repo's work is tracked on the Atlas board** (org project 1,
+  `PVT_kwDOC7YMCM4BU68p`). When you open an issue or a STANDALONE PR here,
+  add it to the board in the same breath — and assign Ransom (`ransomr`):
+  the board's working views filter on `assignee:@me`, so an unassigned
+  item is invisible to him. Add with:
+  `gh api graphql -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' -f p=PVT_kwDOC7YMCM4BU68p -f c=<node_id>`.
+  Anchored agent PRs (`claude/issue-N-*` branches) get NO card — the board's
+  model is track-the-issue, link-the-PR; their issue is the card. If you
+  notice an untracked open item, backfill it. (Deliberately instructions,
+  not a workflow: creators here are instruction-bound sessions or anchored
+  loop PRs, and a board-add workflow would need org-PAT secrets on
+  pull_request_target for near-zero marginal coverage — decision: Ransom,
+  2026-08-26.) PRs fixing a tracked issue should say `Fixes #N`: closing
+  refs are NATIVE here (PRs base on the default branch, unlike the fork),
+  so GitHub creates the Development chip and closes the issue on merge —
+  no chip sweep involved; `Refs #N` stays for PRs that must not close
+  their issue. Stage moves come from the agent workflows; stage cleanup on
+  close is manual (see design/atlas-tracking.md → Deferred — no hourly sync
+  reconciliation for this repo's items).
+- **Label PRs `auto` when opening them** (default policy: Ransom,
+  2026-08-27) — the review-fix loop then drives review rounds to
+  convergence without babysitting. Two consequences: request the review
+  (top-level `@review` comment — mandatory anyway for workflow-editing
+  PRs), and once labeled, DON'T race the loop — let it address review
+  findings rather than pushing your own fixes to the branch mid-round
+  (it is serialized per PR; a session push mid-round invalidates its
+  state). Skip the label only when deliberately keeping manual control
+  of a branch you are actively iterating on. Marvin-opened PRs from
+  `auto` issues inherit the label automatically.
+
 - **The `@main` contract is load-bearing.** Every caller repo's stub calls these
   workflows at `@main`, so a change merged here is live everywhere immediately.
   Change deliberately; prefer backward-compatible edits to reusable-workflow

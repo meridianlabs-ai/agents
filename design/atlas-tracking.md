@@ -462,7 +462,12 @@ stage, resolved by the hourly sync:
   board. This avoids adding event-time stage writers that race the
   existing ones. Caveat that follows: labeling a companion `auto` AFTER
   its review posted does not engage the loop (the loop keys on the
-  marker comment's creation event) — re-trigger the review to light it.
+  marker comment's creation event). To light it, post an `@auto` comment
+  asking to address the standing review — one dev-agent run that acts on
+  the findings and hands back naturally. A bare re-review trigger also
+  works but burns a full review pass re-deriving findings that already
+  exist (preference: Ransom, 2026-08-27); reserve it for when no usable
+  review posted at all.
 
 ## Stage signals (from hand-reconciling the backlog)
 
@@ -546,7 +551,19 @@ the repos). The agents stage **every** issue they touch; per-person scoping
 filters on its own side (the action's `require-assignee` input exists for
 callers that want narrower scoping, but defaults to off). PR→issue resolution
 follows the reconcile
-rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. Wired:
+rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. A
+**standalone PR** — neither anchor resolves — stages **its own board card**,
+but only in repos opted in via `STANDALONE_CARD_REPOS` inside the action
+(currently `meridianlabs-ai/agents`, where infra PRs are the unit of work and
+rarely have an anchor issue). The gate exists because the action runs `@main`
+for every caller's stage steps: fleet-wide, the fallback would mint an
+unassigned card for any plain human PR that gets an `@review`, and nothing
+reconciles those afterward (the hourly sync's lifecycle does not cover
+PR-content items — see [Deferred](#deferred)). The same trap exists inside
+the opted-in repo: set-stage mints the card but assigns no one, and the
+working views filter `assignee:@me` — so the convention is that authors
+**self-assign standalone PRs**, or the card is invisible where people
+actually look. Wired:
 `claude.yml` sets **Agent** at run start and **Review** at
 hand-back — skipped only for a *successful `@auto` run that left a PR in the
 loop* (the review loop owns the stage from there; an errored run always hands
@@ -611,7 +628,13 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 
 ## Deferred
 
-- **KNOWN GAP — ts-mono-native issues get no hourly reconciliation.** The
+- **KNOWN GAP — ts-mono-native and agents-repo items get no hourly
+  reconciliation.** (agents-repo items are added to the board by
+  instruction — see that repo's AGENTS.md Conventions — or minted by
+  set-stage for standalone PRs, and staged by its agent workflows, but
+  the sync's lifecycle management does not cover them; standalone-PR
+  cards are additionally invisible to the sync's board query, which
+  reads Issue content only.) The
   sync assumes fork-anchored work: `FORK` is
   hardcoded as the anchor repo (discovery seeds proxies there,
   `lifecycle_item()` resolves issue numbers against it, pilot scoping
