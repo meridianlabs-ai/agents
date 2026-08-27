@@ -396,8 +396,14 @@ jobs:
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ] && [ -n "${NUM:-}" ]; then
               # A hand-off posted this round explains unpushed local edits —
               # the agent hit a push wall and said so (see claude-auto-review).
+              # In THIS loop that should essentially never happen: the CI-fix
+              # prompt's ending contract is @review-or-blocker, never a
+              # hand-off, and nothing here moves the board on the marker. So
+              # match strictly (machine account + exact marker, mirroring the
+              # review loop's selfhandoff detector) — a hit means the agent
+              # improvised a hand-off, not prose mentioning the phrase.
               handed=$(gh api "repos/$REPO/issues/$NUM/comments?since=${SINCE:-}" \
-                --jq '[.[] | select(.body | contains("auto-handoff"))] | length' 2>/dev/null || echo 0)
+                --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|contains("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
               [ "${handed:-0}" -gt 0 ] && echo "::notice::unpushed local edits, but a hand-off comment posted this round explains them; not flagging."
             fi
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ] && [ "${handed:-0}" -eq 0 ]; then
