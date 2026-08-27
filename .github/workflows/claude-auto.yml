@@ -368,6 +368,7 @@ jobs:
           HEAD_BRANCH: ${{ inputs.head_branch }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          SINCE: ${{ steps.base.outputs.ts }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -391,7 +392,15 @@ jobs:
             # tracked-file edits count as unlanded work (see claude-auto-review)
             [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ] && pending=1
             [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
-            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
+            handed=0
+            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ] && [ -n "${NUM:-}" ]; then
+              # A hand-off posted this round explains unpushed local edits —
+              # the agent hit a push wall and said so (see claude-auto-review).
+              handed=$(gh api "repos/$REPO/issues/$NUM/comments?since=${SINCE:-}" \
+                --jq '[.[] | select(.body | contains("auto-handoff"))] | length' 2>/dev/null || echo 0)
+              [ "${handed:-0}" -gt 0 ] && echo "::notice::unpushed local edits, but a hand-off comment posted this round explains them; not flagging."
+            fi
+            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ] && [ "${handed:-0}" -eq 0 ]; then
               # Strip the @ from trigger tokens in agent-authored text — this
               # is embedded in a marvin-authored comment (see claude-auto-review).
               summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
