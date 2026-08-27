@@ -368,6 +368,7 @@ jobs:
           HEAD_BRANCH: ${{ inputs.head_branch }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          SINCE: ${{ steps.base.outputs.ts }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -391,12 +392,36 @@ jobs:
             # tracked-file edits count as unlanded work (see claude-auto-review)
             [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ] && pending=1
             [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
+            handed=0
             if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
-              # Strip the @ from trigger tokens in agent-authored text — this
-              # is embedded in a marvin-authored comment (see claude-auto-review).
-              summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
-              err="the agent finished but left edits to tracked files (or unpushed commits) that never landed on the branch — whatever its summary reports, no code change reached CI."
-              [ -n "$summary" ] && err="$err Agent summary: $summary"
+              # A hand-off posted this round explains unpushed local edits —
+              # the agent hit a push wall and said so (see claude-auto-review).
+              # In THIS loop that should essentially never happen: the CI-fix
+              # prompt's ending contract is @review-or-blocker, never a
+              # hand-off, and nothing here moves the board on the marker. So
+              # match strictly (machine account + marker as the leading line,
+              # per the documented hand-off contract, mirroring the review
+              # loop's selfhandoff detector) — a hit means the agent improvised
+              # a hand-off, not prose quoting the marker. The outcome gate also
+              # mirrors that detector's success-only condition: a cancelled
+              # claude step (empty err, non-success outcome) must fall through
+              # to flagging, not suppression. Accepted trade-off: unlike the
+              # review loop, suppression here has no compensating board move or
+              # taught @-mention — the improvised hand-off comment on the PR is
+              # the only human-visible trace, hence the ::warning:: below.
+              if [ -n "${NUM:-}" ] && [ "$CLAUDE_OUTCOME" = "success" ]; then
+                handed=$(gh api "repos/$REPO/issues/$NUM/comments?since=${SINCE:-}" \
+                  --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
+              fi
+              if [ "${handed:-0}" -gt 0 ]; then
+                echo "::warning::unpushed local edits, but a hand-off comment posted this round explains them; not flagging. (Off-contract for this loop — the CI-fix ending contract is @review-or-blocker, never a hand-off.)"
+              else
+                # Strip the @ from trigger tokens in agent-authored text — this
+                # is embedded in a marvin-authored comment (see claude-auto-review).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
+                err="the agent finished but left edits to tracked files (or unpushed commits) that never landed on the branch — whatever its summary reports, no code change reached CI."
+                [ -n "$summary" ] && err="$err Agent summary: $summary"
+              fi
             fi
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
