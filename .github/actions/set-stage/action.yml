@@ -27,8 +27,8 @@ inputs:
     description: >-
       Issue OR pull-request number. A PR is resolved to its issue via the
       claude/issue-N-* head-branch convention, then a same-repo Fixes ref
-      (a STANDALONE PR — neither — stages its own board card) in
-      the PR body.
+      in the PR body. A STANDALONE PR — neither — stages its own board
+      card, in opt-in repos only (see STANDALONE_CARD_REPOS below).
     required: false
     default: ""
   branch:
@@ -117,6 +117,14 @@ runs:
         else
           issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
             || warn "cannot read issue #$num in $REPO"
+          # The issues endpoint serves PRs too. A PR landing here means the
+          # pulls lookup above failed transiently (a 5xx, not the clean 404
+          # an issue number gets), so the anchor resolution never ran —
+          # staging this payload would mint the PR's own card in ANY repo,
+          # bypassing the opt-in gate. Degrade to the old skip instead.
+          if jq -e '.pull_request' <<<"$issue_json" >/dev/null; then
+            warn "#$num is a PR but the pulls lookup failed; cannot resolve its stage target"
+          fi
         fi
         node=$(jq -r '.node_id' <<<"$issue_json")
         if [ -n "$REQUIRE_ASSIGNEE" ] && \
