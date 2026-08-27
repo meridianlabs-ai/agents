@@ -97,14 +97,23 @@ runs:
             | head -1 | grep -oE '[0-9]+$' || true)
         fi
         # STANDALONE PR: no anchor issue resolvable — the PR's own card is
-        # the tracked item (agents-repo convention: standalone PRs get
-        # cards; anchored claude/issue-N-* PRs are tracked via their issue,
-        # and resolve above). Stage the PR node itself.
+        # the tracked item. This convention is OPT-IN PER REPO (currently
+        # agents only, per its AGENTS.md): this action runs @main for every
+        # caller's stage steps, and without the gate any plain human PR
+        # given an @review anywhere in the fleet would mint an unassigned
+        # card nothing reconciles. Anchored claude/issue-N-* PRs resolve
+        # above regardless of repo.
+        STANDALONE_CARD_REPOS="meridianlabs-ai/agents"
         if [ -z "$num" ]; then
           [ -n "$is_pr" ] || skip "no issue resolvable (issue='$NUM' branch='$BRANCH')"
+          case " $STANDALONE_CARD_REPOS " in
+            *" $REPO "*) ;;
+            *) skip "standalone PR in $REPO — cards are opt-in per repo (see set-stage)" ;;
+          esac
           num="$NUM"
-          issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
-            || warn "cannot read PR #$num in $REPO"
+          # the pulls lookup already returned the full PR object — node_id
+          # and assignees included — so no refetch via the issues endpoint
+          issue_json="$pr"
         else
           issue_json=$(gh api "repos/$REPO/issues/$num" 2>/dev/null) \
             || warn "cannot read issue #$num in $REPO"
