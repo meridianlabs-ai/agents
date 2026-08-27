@@ -559,17 +559,20 @@ def sync_item(row) -> None:
         # linked ts-mono companion PR merging (GitHub treats every panel-
         # linked PR as a closer). Reopen it; the panel link stays (it is the
         # board's PR pill).
-        if pr["merged"] or pr["state"] == "CLOSED":
+        if pr["merged"] or (pr["state"] == "CLOSED" and row["external"]):
             # Terminal within the sync gap: the companion merge closed the
-            # issue, then the upstream PR merged/closed before this run — the
+            # issue, then the upstream PR went terminal before this run — the
             # normal close paths never saw it, so do their board housekeeping
             # here. Clearing Stage also drops the row from future scans.
-            if row["stage"]:
-                clear_field(item, STAGE_FIELD)
-                set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["Done"])
-                actions.append(
-                    f"#{issue}: closed with upstream terminal -> Stage cleared (Done)"
-                )
+            # (Closed-unmerged counts as terminal only for external proxies,
+            # whose open path closes to Done too; a non-external issue whose
+            # upstream was declined is reopened into Review below instead —
+            # it needs a human decision, not a silent Done.)
+            clear_field(item, STAGE_FIELD)
+            set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["Done"])
+            actions.append(
+                f"#{issue}: closed with upstream terminal -> Stage cleared (Done)"
+            )
             return
         if row["state_reason"] in ("NOT_PLANNED", "DUPLICATE"):
             # A deliberate human close (the panel auto-close records
@@ -578,17 +581,40 @@ def sync_item(row) -> None:
             clear_field(item, STAGE_FIELD)
             actions.append(
                 f"#{issue}: closed as {row['state_reason'].lower().replace('_', ' ')} "
-                "with upstream PR open -> left closed, Stage cleared"
+                "with upstream PR unmerged -> left closed, Stage cleared"
             )
             return
         gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
+        escape_hatch = (
+            "If the close was deliberate, close it again as *not planned*, or "
+            "clear the item's Upstream PR field — the sync respects both. "
+            "(Atlas sync)"
+        )
+        if pr["state"] == "CLOSED":
+            # Non-external with upstream closed unmerged: the same
+            # human-decision case the open path routes to Review below — the
+            # companion already landed on ts-mono main but the Python never
+            # will. Runs at most once per issue: next hour the reopened row
+            # takes the open path, whose TAIL_STAGES gate keeps Review parked.
+            comment(
+                issue,
+                f"Reopened — upstream PR {row['url']} was closed unmerged and "
+                "needs a human decision; this issue was closed early (most "
+                f"likely by a linked companion PR merging). {escape_hatch}",
+            )
+            if not set_stage(item, "Review", stage):
+                # already at Review: set_stage no-oped, but the panel
+                # auto-close forced Status to Done — restore it directly
+                set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
+            actions.append(
+                f"#{issue}: closed with upstream closed unmerged -> reopened (Review)"
+            )
+            return
         comment(
             issue,
             f"Reopened — upstream PR {row['url']} is still open; this issue "
             "was closed early (most likely by a linked companion PR merging). "
-            "If the close was deliberate, close it again as *not planned*, or "
-            "clear the item's Upstream PR field — the sync respects both. "
-            "(Atlas sync)",
+            f"{escape_hatch}",
         )
         set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
         actions.append(f"#{issue}: closed while upstream PR open -> reopened")

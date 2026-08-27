@@ -260,7 +260,7 @@ workflow (`.github/workflows/log_viewer.yml`):
    GitHub treats every panel-linked PR as a closer, so the companion's merge
    auto-closes the issue days before the inspect_ai PR lands (no closing
    keywords involved; issue #251, 2026-08-26). If
-   `gh issue view <n> --repo meridianlabs-ai/inspect_ai --json state` says
+   `gh issue view <issue> --repo meridianlabs-ai/inspect_ai --json state` says
    CLOSED, reopen it with a comment saying the companion merge closed it
    early, and restore the board `Status` field to "In progress" (Stage is
    untouched):
