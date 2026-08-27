@@ -255,6 +255,23 @@ workflow (`.github/workflows/log_viewer.yml`):
    `gh pr merge <n> --repo meridianlabs-ai/ts-mono --squash` — ts-mono main is
    squash-only, and regenerate-style companions merge without human review
    (precedent: #427, #439).
+   **Then immediately re-check the tracking issue** — companions are
+   Development-panel-linked to it (that link IS the board's PR pill), and
+   GitHub treats every panel-linked PR as a closer, so the companion's merge
+   auto-closes the issue days before the inspect_ai PR lands (no closing
+   keywords involved; issue #251, 2026-08-26). If
+   `gh issue view <issue> --repo meridianlabs-ai/inspect_ai --json state` says
+   CLOSED, reopen it with a comment saying the companion merge closed it
+   early, and restore the board `Status` field to "In progress" (Stage is
+   untouched):
+   ```bash
+   gh project item-edit --id <ITEM_ID> --project-id PVT_kwDOC7YMCM4BU68p \
+     --field-id PVTSSF_lADOC7YMCM4BU68pzhKizZM --single-select-option-id 47fc9ee4
+   ```
+   (Status field and option ids as in atlas_sync.py; fetch the item id one
+   at a time as in the cleanup section below.) The Atlas
+   sync also self-heals this on its next run, but fixing it inline keeps
+   the board honest while the queue is still working the PR.
 4. **Bump pointer + rebuild dist in one commit**: in the submodule,
    `git fetch origin main && git checkout <squash-sha>`; verify
    `types:generate` is now a no-op; `pnpm install --frozen-lockfile` and
