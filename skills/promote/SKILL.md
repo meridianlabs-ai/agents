@@ -26,7 +26,12 @@ CI) — **relay these to the user, and pause for confirmation if the verdict
 isn't `clean` or CI shows failures**; adopts the existing upstream PR via the
 issue's cross-repo chip (the REST `pulls?head=` filter silently returns
 [] for org-owned heads — observed on the org-fork pair AND same-repo on
-the fork itself — never use it anywhere) or creates it with the fully-qualified
+the fork itself — never use it anywhere) or, on the create path, first syncs
+the branch with upstream main (server-side merge via the fork-network merges
+API — org-fork heads take no maintainer edits and these branches trail the
+fork's main mirror, so a fresh promotion usually opens behind; a conflict,
+commonly CHANGELOG, aborts with exit 5 BEFORE any upstream PR is opened, for
+a human to resolve on the branch) and creates it with the fully-qualified
 `Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
 would rebind to upstream's tracker), plus a bare `Fixes #<up>` when the
 fork issue was imported from upstream (its `Upstream issue:` body line —
@@ -40,7 +45,8 @@ Exit codes: **0** ok (report the `OK …` line plus which steps were created
 vs already present); **3** no fork-PR chip — resolve inputs via the slow
 path below, then run the script anyway if a branch emerges (it only needs
 the chip for resolution); **4** branch not on the fork; **5** preflight
-hard failure.
+hard failure (includes a conflict merging upstream main into the branch —
+no upstream PR was opened; resolve the conflict on the branch and re-run).
 
 ## Slow path (no chip)
 
@@ -97,8 +103,10 @@ cannot resolve org-fork heads at all).
 
 ## Cautions
 
-- Never push to `main`/`meridian`; promotion only opens a PR from the
-  existing branch.
+- Never push to `main`/`meridian`. Promotion opens a PR from the existing
+  branch, and on the create path writes a single merge commit onto that PR
+  branch to sync it with upstream main (server-side, never a local checkout);
+  it touches no other ref.
 - Upstream is not ours: no labels and no Meridian-internal markers on the
   upstream PR beyond the `Fixes` ref. The one exception is the `dragonstyle`
   assignee + review request (explicitly requested by Ransom).

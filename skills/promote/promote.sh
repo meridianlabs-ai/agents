@@ -5,7 +5,9 @@
 #
 # Usage: promote.sh <issue-number> [--dry-run]
 # Exit codes: 0 ok; 3 no open same-repo fork PR chip (resolve inputs via the
-# skill's slow path); 4 branch not on the fork; 5 preflight hard failure.
+# skill's slow path); 4 branch not on the fork; 5 preflight hard failure
+# (includes a conflict merging upstream main into the branch — aborts before
+# any upstream PR is opened).
 set -euo pipefail
 
 FORK=meridianlabs-ai/inspect_ai
@@ -100,6 +102,40 @@ up = os.environ["UP_ISSUE"]
 if up and not re.search(r"\b(Fixes|Closes|Resolves)\s+#%s\b" % up, body):
     body = "Fixes #%s\n" % up + body
 print(body)')
+  # Sync the branch with upstream main before opening the PR. Org-fork PR
+  # heads take no maintainer edits, and these branches are cut from the fork's
+  # main mirror (which trails upstream), so a fresh promotion usually opens a
+  # few commits behind — unmergeable until updated, and CHANGELOG entries in
+  # particular almost always conflict (fork AGENTS.md → "Opening an upstream
+  # PR from an org fork" calls for exactly this pre-open sync). Merge
+  # server-side via the fork-network merges API: upstream commits are
+  # reachable from the fork by SHA, so no local checkout is touched and only
+  # the PR branch is written — never main. A conflict aborts BEFORE any
+  # upstream PR is opened, surfacing it (usually CHANGELOG) for a human.
+  UP_SHA=$(gh api "repos/$UPSTREAM/commits/main" --jq .sha)
+  if [ "$DRY" = "--dry-run" ]; then
+    echo "DRY-RUN: gh api repos/$FORK/merges -X POST -f base=$BRANCH -f head=$UP_SHA (merge upstream main into the branch)"
+  elif MERGE_OUT=$(gh api "repos/$FORK/merges" -X POST \
+        -f base="$BRANCH" -f head="$UP_SHA" \
+        -f commit_message="Merge upstream $UPSTREAM main into $BRANCH before promotion" \
+        2>/dev/null); then
+    # exit 0 → 201 (merge-commit JSON on stdout) or 204 (empty: already current)
+    if [ -n "$MERGE_OUT" ]; then
+      echo "branch: merged upstream main into $BRANCH (branch was behind; CI will re-run)"
+    else
+      echo "branch: already up to date with upstream main"
+    fi
+  else
+    # non-zero → gh prints the response body to stdout, the HTTP status to stderr
+    if grep -qi "merge conflict" <<<"$MERGE_OUT"; then
+      echo "ABORT: merging upstream main into $BRANCH conflicts (commonly CHANGELOG.md)." >&2
+      echo "Resolve on the branch and re-run promote — no upstream PR was opened." >&2
+    else
+      echo "ABORT: could not merge upstream main into $BRANCH:" >&2
+      echo "${MERGE_OUT:-(no response body)}" >&2
+    fi
+    exit 5
+  fi
   # Org forks cannot be resolved as `owner:branch` heads — PR creation needs
   # an explicit head_repo, which `gh pr create` lacks (cli/cli#6462; see the
   # fork's AGENTS.md → "Opening an upstream PR from an org fork").
