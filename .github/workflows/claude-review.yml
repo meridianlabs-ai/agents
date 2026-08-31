@@ -669,6 +669,18 @@ jobs:
                        -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g'
             printf '\n\n🤖 engine: codex\n'
           } >"$RUNNER_TEMP/codex-review-body.md"
+          # GitHub caps comment bodies at 65,536 characters and the model's
+          # review is unbounded (the prompt side is head -c-capped, the
+          # output side wasn't): over the cap the post fails and the review
+          # is lost until re-triggered. Truncate with a note instead —
+          # cutting the de-fanged body can't resurrect a trigger or marker
+          # (the seds above remove the @ / split the substrings, and
+          # truncation only drops trailing bytes).
+          if [ "$(wc -c <"$RUNNER_TEMP/codex-review-body.md")" -gt 60000 ]; then
+            head -c 60000 "$RUNNER_TEMP/codex-review-body.md" >"$RUNNER_TEMP/codex-review-body.trunc"
+            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-review-body.trunc"
+            mv "$RUNNER_TEMP/codex-review-body.trunc" "$RUNNER_TEMP/codex-review-body.md"
+          fi
           gh pr comment "$NUM" --repo "$REPO" --body-file "$RUNNER_TEMP/codex-review-body.md"
           if [ "$verdict" = "clean" ]; then
             gh pr comment "$NUM" --repo "$REPO" --body \

@@ -492,6 +492,20 @@ jobs:
             gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null \
               | jq -r 'add | .[-40:][] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' 2>/dev/null || true
           } >"$RUNNER_TEMP/codex-context.md"
+          # Unlike the dev-verb compose (where the trigger text is the
+          # primary payload and degrading to less context is right), the
+          # review feedback IS this round's task, and the verdict comment
+          # that triggered the run guarantees at least one PR comment exists
+          # — so an empty feedback section can only be a failed fetch (a
+          # transient gh/API error swallowed by the || true). Proceeding
+          # would spend the round on a feedback-less prompt and conclude the
+          # loop on missing context; fail loud instead — a codexprep failure
+          # routes into the existing error surfacing and the round refund.
+          if ! sed -n '/^RECENT PR COMMENTS/,/^INLINE REVIEW COMMENTS/p' \
+              "$RUNNER_TEMP/codex-context.md" | grep -q '^--- '; then
+            echo "::error::review-feedback fetch returned no comments (transient gh/API failure?) — failing the round rather than running codex without the feedback"
+            exit 1
+          fi
           # Cap + de-fang from the completed scratch file, NOT in one pipeline
           # with the writers above: with the group piped straight into head -c,
           # the cap being hit mid-group leaves the next writer (a plain echo)
@@ -584,6 +598,19 @@ jobs:
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
           } >"$RUNNER_TEMP/codex-comment.md"
+          # GitHub caps comment bodies at 65,536 characters and codex's final
+          # message is unbounded; here the post failing lands AFTER the push,
+          # losing the summary for work that already landed. Truncate with a
+          # note instead — the leading auto-handoff marker sits at the START
+          # of the file so a no-change round's stage move survives the cap,
+          # and cutting the de-fanged body can't resurrect a trigger or
+          # marker (the sed removed the @ / split the substrings, and
+          # truncation only drops trailing bytes).
+          if [ "$(wc -c <"$RUNNER_TEMP/codex-comment.md")" -gt 60000 ]; then
+            head -c 60000 "$RUNNER_TEMP/codex-comment.md" >"$RUNNER_TEMP/codex-comment.trunc"
+            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-comment.trunc"
+            mv "$RUNNER_TEMP/codex-comment.trunc" "$RUNNER_TEMP/codex-comment.md"
+          fi
           gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
       # ---- end Codex engine ---------------------------------------------------
 

@@ -673,6 +673,17 @@ jobs:
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
             [ -z "$pushed" ] && printf '\n\n_No code changes were made._'
           } >"$RUNNER_TEMP/codex-comment.md"
+          # GitHub caps comment bodies at 65,536 characters and codex's final
+          # message is unbounded; here the post failing lands AFTER the push,
+          # losing the summary for work that already landed. Truncate with a
+          # note instead — cutting the de-fanged body can't resurrect a
+          # trigger or marker (the sed removed the @ / split the substrings,
+          # and truncation only drops trailing bytes).
+          if [ "$(wc -c <"$RUNNER_TEMP/codex-comment.md")" -gt 60000 ]; then
+            head -c 60000 "$RUNNER_TEMP/codex-comment.md" >"$RUNNER_TEMP/codex-comment.trunc"
+            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-comment.trunc"
+            mv "$RUNNER_TEMP/codex-comment.trunc" "$RUNNER_TEMP/codex-comment.md"
+          fi
           gh api "repos/$REPO/issues/$NUM/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
           # Mirrors the Claude path's REQUEST_REVIEW prompt rule,
           # deterministically: an @auto push to an existing PR owes a
