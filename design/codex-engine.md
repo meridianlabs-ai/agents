@@ -124,13 +124,22 @@ runs, inspect_ai#389). Every codex step therefore creates a dedicated
 containment is the user boundary plus the permission-profile sandbox, the
 API key stays unreadable (codex has no sudo), and the host is never
 mutated. The setup mirrors the action's `examples/unprivileged-user.yml`
-plus two grants its demo never needs: group-write on `$RUNNER_TEMP` (755
-`runner:runner` on the hosted image, and codex — in group `runner` — must
-create the explicit `output-file` there, which the action then re-reads as
-codex), and the checkout added to the codex user's git `safe.directory`
-(the repo stays runner-owned, so git run as codex otherwise refuses with
-"dubious ownership", and no profile sandbox lets the agent add the
-exemption itself). Revisit when #160's fixes land upstream.
+plus two grants its demo never needs: a codex-owned `$RUNNER_TEMP/codex`
+dir for the explicit `output-file` (`$RUNNER_TEMP` itself is 755
+`runner:runner` on the hosted image and stays that way — group-writing the
+temp root would expose the runner's step scripts and per-step
+`GITHUB_ENV`/`GITHUB_OUTPUT` files to a sandbox-escaped codex), and the
+checkout added to the codex user's git `safe.directory` (the repo stays
+runner-owned, so git run as codex otherwise refuses with "dubious
+ownership", and no profile sandbox lets the agent add the exemption
+itself). Two deliberate divergences from a four-way copy: the reviewer's
+step drops the example's workspace-write grants (its profile is
+`:read-only`, and the recursive sweep is pure latency on a full-history
+checkout), and the write-path land steps start with `chown -R runner` on
+`.git` (object fan-out dirs codex creates are codex-owned, and the
+runner's codex-group membership never takes effect within the job, so
+runner-side object writes would otherwise fail intermittently). Revisit
+when #160's fixes land upstream.
 
 ## v1 limitations (deliberate)
 

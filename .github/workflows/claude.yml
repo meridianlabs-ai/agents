@@ -600,14 +600,17 @@ jobs:
       # the chown/g+rwX is what lets codex (primary group codex) write the
       # runner-owned workspace — plus two grants the example never needs (it
       # passes no explicit output-file and its demo prompt never runs git):
-      # RUNNER_TEMP group-write and git safe.directory, commented inline.
+      # a codex-owned output dir under RUNNER_TEMP and git safe.directory,
+      # commented inline.
       # NB the runner->codex group grant is inert for this job:
       # supplementary groups are fixed at process start, and every step is
       # spawned from a Runner.Worker that predates the usermod. Landing
-      # codex's edits works anyway — runner still owns the workspace
-      # directories, and codex's files are world-readable under its umask
-      # (kept as a faithful copy of the example; if codex ever drops a 600
-      # file, the land step needs a chmod -R a+rX sweep, not this group).
+      # codex's edits works anyway — runner still owns the pre-existing
+      # workspace directories, codex's files are world-readable under its
+      # umask, and the land step reclaims .git — the one place codex-owned
+      # dirs (objects/ fan-out) would block runner's writes. (Group kept as
+      # a faithful copy of the example; if codex ever drops a 600 file, the
+      # land step needs a chmod -R a+rX sweep, not this group.)
       - name: Create codex user
         if: steps.engine.outputs.engine == 'codex'
         run: |
@@ -620,9 +623,13 @@ jobs:
           sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
           # codex itself (via sudo -u) writes the explicit output-file and
           # the action re-reads it as codex, but RUNNER_TEMP is 755
-          # runner:runner on the hosted image — grant its group (runner,
-          # which codex joined above) write.
-          sudo chmod g+w "$RUNNER_TEMP"
+          # runner:runner on the hosted image. Not g+w on the temp root:
+          # codex's runner-group membership IS effective (its processes
+          # start post-usermod), so that would hand it rename/delete over
+          # the runner's step scripts and the per-step GITHUB_ENV/OUTPUT/
+          # PATH files. A codex-owned subdir grants only the output-file
+          # write; 755 keeps $OUT readable for the runner-side land step.
+          sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
           # The checkout stays runner-owned, so git commands running as
           # codex hit the dubious-ownership refusal, and no profile sandbox
           # lets the agent add the exemption itself.
@@ -649,7 +656,7 @@ jobs:
           # never pass steps.trig, so none reach this step — matching the
           # Claude path, which sets no allowed_bots on this verb either.
           prompt-file: .codex-prompt.md
-          output-file: ${{ runner.temp }}/codex-final.md
+          output-file: ${{ runner.temp }}/codex/codex-final.md
 
       # Land the codex work: commit + push (as the machine account, so the
       # push triggers CI), expose branch_name so the Open-or-adopt step below
@@ -667,10 +674,16 @@ jobs:
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BRANCH: ${{ steps.codexprep.outputs.branch }}
           START_SHA: ${{ steps.codexprep.outputs.sha }}
-          OUT: ${{ runner.temp }}/codex-final.md
+          OUT: ${{ runner.temp }}/codex/codex-final.md
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
         run: |
           set -euo pipefail
+          # Reclaim .git before writing objects as runner: any objects/XX
+          # fan-out dir codex created (any object-writing git command) is
+          # codex-owned, and runner's codex-group membership is inert this
+          # job — the commit below would intermittently fail with
+          # "insufficient permission for adding an object".
+          sudo chown -R runner "$GITHUB_WORKSPACE/.git"
           # Untracked files count: new source files are legitimate codex
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).
