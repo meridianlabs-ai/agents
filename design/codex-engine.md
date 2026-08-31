@@ -50,6 +50,24 @@ hand-back become guaranteed instead of prompt-enforced, and the
 landed-work-guard class of failures (work stranded on the runner)
 cannot happen — the workflow either lands the edits or fails loudly.
 
+### Landing semantics
+
+The land steps commit a dirty tree, then treat **HEAD having moved past
+the run's start SHA** — not just a dirty tree — as landable work: the
+prompts call local commits unnecessary but they are possible, and a
+status-only check would silently discard them with the runner. The push
+always uses an explicit refspec (`HEAD:refs/heads/<branch>`), so the
+intended branch is updated even if codex left HEAD on some other local
+ref; a diverted HEAD that isn't genuinely new work fails the push
+non-fast-forward — loud, not lossy. Failure parity mirrors the Claude
+path throughout: a failed codex step *or* its context-prep step
+surfaces a visible error comment and, in the loops, refunds the review
+round / CI-fix attempt (infra failures — e.g. a missing
+`OPENAI_API_KEY` — must not march a PR toward spurious escalation);
+the loops' hand-back backstop keys on the codex *run* step, so a push
+that landed before the comment post died still gets its owed
+`@review`.
+
 ### Marker/author contract
 
 Codex output is posted **by the machine account** (MARVIN_TOKEN) so the
@@ -90,7 +108,14 @@ misattribute output).
 - **Codex reviews are static**: the `:read-only` profile means codex
   cannot install dependencies or execute tests to verify findings the
   way the Claude reviewer does — its review is analysis of the checkout
-  only.
+  only. The prompt says so explicitly (so codex doesn't fight the
+  sandbox), and the reviewer's claude-setup provisioning step is
+  skipped on codex reviews — nothing could use it.
+- **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
+  back to `github.token` where the secret is absent, and those pushes
+  do not trigger CI (the Claude path pushes via the app token, which
+  does). Repos without the machine account can't run the loops anyway,
+  so the gap is dev-verb runs only.
 - **No inline review comments** from codex reviews: one summary comment
   with file:line references in the body.
 - **No fork-head PRs on codex dev runs**: the landing step pushes to

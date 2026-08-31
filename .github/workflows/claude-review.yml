@@ -433,47 +433,13 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # Provision the project environment so the agent's allow-listed
-      # pytest/ruff/mypy can actually run, instead of falling back to py_compile
-      # and reasoning. Convention-based opt-in: a caller repo adds a
-      # `.github/actions/claude-setup` composite action that delegates to its
-      # existing, cache-backed CI setup; the GitHub cache is the caller's, so it
-      # hits the entries normal CI populates. `./` resolves against the
-      # checked-out workspace. The hashFiles guard makes this a no-op for repos
-      # that don't define it. Fatal on failure. NEVER in external mode: the
-      # workspace there is an untrusted upstream head, which could supply its
-      # own action — external provisioning happens inside the sandbox instead.
-      # NOTE: the reviewer checks out the PR head (above), so on the
-      # inspect_ai fork — whose PR branches are cut from pristine main and
-      # carry no meridian files — the action is absent and this is skipped;
-      # see design/architecture.md.
-      - name: Provision project environment
-        id: setup
-        if: >-
-          steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external' &&
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
-        uses: ./.github/actions/claude-setup
-
-      # External mode keeps the caller's review_prompt (and the
-      # append_system_prompt guidance, which flows in via claude_args as
-      # always) — Meridian maintains the upstream repo, so its review
-      # standards apply there too. One carve-out, neutralized in the override
-      # below: author-facing mechanics like the fork's "reply with a top-level
-      # @claude comment" tip are wrong on an upstream PR (no agent integration
-      # there, and the maintainer relays anyway); the never-write-the-trigger-
-      # token rule stays live because the findings land on the proxy issue. Only the MECHANICS are overridden, appended
-      # after the prompt so they win: review the upstream diff; post the
-      # ENTIRE review as ONE comment on the PROXY issue — never anything on
-      # the contributor's upstream PR (the maintainer decides what to relay),
-      # no inline comments, no claude-review-summary marker (this output is
-      # for the human, not the @auto loop), and test runs happen INSIDE the
-      # sandbox installed above (self-provisioned venv; static fallback when
-      # the sandbox blocks something).
       # Engine selection (design/codex-engine.md): an engine:codex label on
       # the PR routes this review to Codex. Read via the API at gate time —
       # comment-trigger payloads carry stale label lists. External proxy
       # reviews stay on Claude in v1 (their sandbox overlay is
       # Claude-specific). Best-effort: an unreadable label list means Claude.
+      # Sits BEFORE provisioning so that step can skip on codex reviews,
+      # whose :read-only sandbox cannot use a provisioned environment.
       - name: Detect engine
         id: engine
         if: steps.trig.outputs.ok == 'true'
@@ -492,6 +458,48 @@ jobs:
           echo "engine: $engine"
           echo "engine=$engine" >>"$GITHUB_OUTPUT"
 
+      # Provision the project environment so the agent's allow-listed
+      # pytest/ruff/mypy can actually run, instead of falling back to py_compile
+      # and reasoning. Convention-based opt-in: a caller repo adds a
+      # `.github/actions/claude-setup` composite action that delegates to its
+      # existing, cache-backed CI setup; the GitHub cache is the caller's, so it
+      # hits the entries normal CI populates. `./` resolves against the
+      # checked-out workspace. The hashFiles guard makes this a no-op for repos
+      # that don't define it. Fatal on failure. NEVER in external mode: the
+      # workspace there is an untrusted upstream head, which could supply its
+      # own action — external provisioning happens inside the sandbox instead.
+      # NOTE: the reviewer checks out the PR head (above), so on the
+      # inspect_ai fork — whose PR branches are cut from pristine main and
+      # carry no meridian files — the action is absent and this is skipped;
+      # see design/architecture.md.
+      # Skipped on codex reviews: the :read-only profile can neither install
+      # into nor execute from a provisioned environment (static review), so
+      # provisioning would only burn minutes and add a failure surface.
+      - name: Provision project environment
+        id: setup
+        if: >-
+          steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external' &&
+          steps.engine.outputs.engine != 'codex' &&
+          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        uses: ./.github/actions/claude-setup
+
+      # External mode keeps the caller's review_prompt (and the
+      # append_system_prompt guidance, which flows in via claude_args as
+      # always) — Meridian maintains the upstream repo, so its review
+      # standards apply there too. One carve-out, neutralized in the override
+      # below: author-facing mechanics like the fork's "reply with a top-level
+      # @claude comment" tip are wrong on an upstream PR (no agent integration
+      # there, and the maintainer relays anyway); the never-write-the-trigger-
+      # token rule stays live because the findings land on the proxy issue. Only the MECHANICS are overridden, appended
+      # after the prompt so they win: review the upstream diff; post the
+      # ENTIRE review as ONE comment on the PROXY issue — never anything on
+      # the contributor's upstream PR (the maintainer decides what to relay),
+      # no inline comments, no claude-review-summary marker (this output is
+      # for the human, not the @auto loop), and test runs happen INSIDE the
+      # sandbox installed above (self-provisioned venv; static fallback when
+      # the sandbox blocks something).
+      # (Engine selection moved above provisioning — see the Detect engine
+      # step there.)
       - name: Compose review prompt
         if: steps.trig.outputs.ok == 'true'
         id: reviewprompt
@@ -610,7 +618,12 @@ jobs:
             CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction
             above: you have NO network access and NO GitHub credentials, so
             you cannot post comments or run gh, and must not try — a
-            deterministic workflow step posts your review for you. Read the
+            deterministic workflow step posts your review for you. Your
+            sandbox is READ-ONLY and no environment is provisioned: you
+            cannot write files, install dependencies, or run tests/linters —
+            any instruction above about running pytest/ruff/mypy or creating
+            a venv does not apply; verify findings by reading the code
+            (static review). Read the
             change from the local checkout (git log/diff against the base
             branch; full history is available). Produce your ENTIRE review as
             your final message conforming to the output schema. Verdict

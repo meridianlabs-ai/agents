@@ -494,6 +494,10 @@ jobs:
           fi
           echo "prepared branch: $branch"
           echo "branch=$branch" >>"$GITHUB_OUTPUT"
+          # Start marker for the landing step: HEAD moved past this = work to
+          # land, even if codex committed locally instead of leaving a dirty
+          # tree.
+          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
 
       # The prompt travels as a git-excluded workspace file (prompt-file must
       # be inside the repo root). The ending contract makes codex's final
@@ -519,7 +523,7 @@ jobs:
             else
               echo "Context: issue #$NUM — your edits will be pushed to a new branch and opened as a PR fixing it."
             fi
-            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Make your changes in the working tree only (committing locally is unnecessary); a deterministic workflow step commits, pushes, and posts for you. Verify your work with the locally provisioned tools (pytest/ruff/mypy) where relevant."
+            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Make your changes in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts for you. Verify your work with the locally provisioned tools (pytest/ruff/mypy) where relevant."
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the change (it becomes the commit subject), then a blank line, then a body explaining what you did and why (it is posted as a comment on #$NUM). If you cannot or should not make a change, leave the tree untouched and explain why in the final message."
             [ -n "$EXTRA" ] && printf 'REPO GUIDANCE: %s\n' "$EXTRA"
             echo "TASK:"
@@ -577,11 +581,11 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BRANCH: ${{ steps.codexprep.outputs.branch }}
+          START_SHA: ${{ steps.codexprep.outputs.sha }}
           OUT: ${{ runner.temp }}/codex-final.md
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
         run: |
           set -euo pipefail
-          pushed=""
           # Untracked files count: new source files are legitimate codex
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).
@@ -590,6 +594,16 @@ jobs:
             [ -n "$subject" ] || subject="codex: automated change for #$NUM"
             git add -A
             git commit --quiet -m "$subject" -m "Co-Authored-By: Codex <noreply@openai.com>"
+          fi
+          # Landable work = HEAD moved since prep, not just a dirty tree:
+          # the prompt calls local commits unnecessary but they are possible,
+          # and a status-only check would silently discard them with the
+          # runner. The refspec already pins the target branch, so a HEAD
+          # codex left elsewhere still lands on $BRANCH; a diverted HEAD
+          # that isn't genuinely new work fails the push non-fast-forward —
+          # loud, not lossy.
+          pushed=""
+          if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
             git push --quiet "https://x-access-token:${MARVIN:-$GH_TOKEN}@github.com/$REPO.git" "HEAD:refs/heads/$BRANCH"
             pushed=1
             echo "pushed $(git rev-parse --short HEAD) to $BRANCH"

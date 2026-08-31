@@ -458,6 +458,7 @@ jobs:
       # stages. Review-thread resolution needs gh and is a v1 non-goal — the
       # handoff notes threads are left for the human.
       - name: Prepare codex fix context
+        id: codexprep
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
@@ -471,7 +472,7 @@ jobs:
           git config user.email "i-am-marvin@users.noreply.github.com"
           {
             echo "You are auto, addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP), running on the Codex engine in a local checkout of the PR's head branch."
-            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Edit the working tree only; a deterministic workflow step commits, pushes, and posts the re-review request for you. Verify your changes with the local tools (pytest/ruff/mypy) where relevant."
+            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Edit the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts the re-review request for you. Verify your changes with the local tools (pytest/ruff/mypy) where relevant."
             echo "Address the feedback thoroughly — including minor and explicitly non-blocking suggestions. Leave unaddressed only what you genuinely disagree with or is out of scope, and say why in your final message."
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for your changes (it becomes the commit subject), then a blank line, then a body listing what you addressed and anything you deliberately declined with rationale (it is posted as a comment). If nothing needs changing, leave the tree untouched and explain why."
             echo ""
@@ -481,14 +482,20 @@ jobs:
             echo "INLINE REVIEW COMMENTS (path:line):"
             gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp \
               --jq 'add | .[] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' 2>/dev/null || true
-          } | head -c 120000 \
+          } >"$RUNNER_TEMP/codex-context.md"
+          # Cap + de-fang from the completed scratch file, NOT in one pipeline
+          # with the writers above: with the group piped straight into head -c,
+          # the cap being hit mid-group leaves the next writer (a plain echo)
+          # facing a closed pipe — SIGPIPE kills the group subshell (or, with
+          # SIGPIPE ignored, set -e catches the write error) and pipefail fails
+          # the step, data-dependently. Reading a file, no writer ever sees a
+          # closed pipe. (The sed is belt-and-braces with the landing step's
+          # output de-fang: the embedded comments include the reviewer's
+          # verdict comments, and a marker substring codex never sees is one
+          # it cannot echo; the substitutions are length-neutral.)
+          head -c 120000 "$RUNNER_TEMP/codex-context.md" \
             | sed -E -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
                      -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >.codex-prompt.md
-          # (The sed is belt-and-braces with the landing step's output
-          # de-fang: the embedded comments include the reviewer's verdict
-          # comments, and a marker substring codex never sees is one it
-          # cannot echo. head runs before sed so a truncation SIGPIPE can't
-          # fail the pipeline; the substitutions are length-neutral.)
           #
           # The landing step stages with a blanket `git add -A`, so exclude
           # the prompt file and the scratch codex's verification runs leave
@@ -518,17 +525,28 @@ jobs:
           ROUND: ${{ steps.gate.outputs.round }}
           MENTION: ${{ steps.gate.outputs.mention }}
           OUT: ${{ runner.temp }}/codex-final.md
+          START_SHA: ${{ steps.base.outputs.sha }}
+          HEAD_BRANCH: ${{ steps.gate.outputs.head_branch }}
         run: |
           set -euo pipefail
-          pushed=""
           if [ -n "$(git status --porcelain)" ]; then
             subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120)
             [ -n "$subject" ] || subject="codex: address review feedback on PR #$PR"
             git add -A
             git commit --quiet -m "$subject" -m "Co-Authored-By: Codex <noreply@openai.com>"
-            git push --quiet origin HEAD
+          fi
+          # Landable work = HEAD moved since round start, not just a dirty
+          # tree: the prompt calls local commits unnecessary but they are
+          # possible, and a status-only check would silently discard them
+          # with the runner. Explicit refspec so the PR head branch is what
+          # gets updated even if codex left HEAD on some other local branch;
+          # a diverted HEAD that isn't genuinely new work fails the push
+          # non-fast-forward — loud, not lossy.
+          pushed=""
+          if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
+            git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
             pushed=1
-            echo "pushed $(git rev-parse --short HEAD)"
+            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH"
           fi
           # One comment either way, de-fanged (posts from a write-access
           # account; the gate and the hand-back backstop match the loop's
@@ -565,10 +583,13 @@ jobs:
       # neither hand-back was posted, post the re-review request as the
       # machine account — a redundant review round is the safe completion
       # (word-boundary gate + newest-wins concurrency make duplicates cheap).
+      # Codex gate is codexfix, not codexland: a landing that pushed and then
+      # died posting its comment still owes the @review — this step detects
+      # the push itself, so gating on the earlier step closes that gap.
       - name: Ensure hand-back after push
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
-          (steps.claude.outcome == 'success' || steps.codexland.outcome == 'success')
+          (steps.claude.outcome == 'success' || steps.codexfix.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -652,6 +673,7 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           MENTION: ${{ steps.gate.outputs.mention }}
           HANDED: ${{ steps.selfhandoff.outputs.found }}
+          CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
@@ -659,6 +681,9 @@ jobs:
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
           [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
+            err="the codex context-preparation step failed before the agent started — no fix was attempted this round (see the job logs)."
+          fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
           fi
@@ -723,15 +748,18 @@ jobs:
       # attempt refund): a step that died with NO execution output attempted
       # nothing. A failed codex step is the same class — its landing step
       # never ran, so nothing reached the PR (persistently missing
-      # OPENAI_API_KEY must not march a PR to spurious escalation); the
-      # exec-file guard below is Claude-only and no execution file ever
-      # exists on the codex path, so the refund proceeds. Rebuild the sticky
-      # counter body including the head marker the next gate's no-progress
-      # check reads. Per-PR concurrency serializes us.
+      # OPENAI_API_KEY must not march a PR to spurious escalation) — and so
+      # is a failed codex PREP step, which dies before the agent starts and
+      # skips codexfix outright; the exec-file guard below is Claude-only and
+      # no execution file ever exists on the codex path, so the refund
+      # proceeds. Rebuild the sticky counter body including the head marker
+      # the next gate's no-progress check reads. Per-PR concurrency
+      # serializes us.
       - name: Refund infra-crashed round
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
-          (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure')
+          (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure' ||
+           steps.codexprep.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
