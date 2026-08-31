@@ -30,15 +30,26 @@ jobs:
     # draft, and on a fork PR when the commenter has write access (enforced in
     # the reusable's trig check before checkout). `@review` does not collide
     # with the dev agent's `@claude` trigger.
+    # The two comment gates exclude the reviewer's own summary comments
+    # (the claude-review-summary marker): a summary whose prose mentions the
+    # trigger token — even backticked — passes this cheap substring gate and
+    # spawns a Review run whose newest-wins concurrency CANCELS the very run
+    # that posted the summary, before it posts the verdict marker; the loop
+    # then never engages (observed: agents#36 round 2, 2026-08-31; same
+    # shape as agents#20's marker-less round). The spawned run would no-op
+    # at the word-boundary trig gate anyway — the exclusion stops it from
+    # starting at all.
     if: >
       (github.event_name == 'pull_request' &&
        github.event.pull_request.draft != true &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@review')) ||
+       contains(github.event.comment.body, '@review') &&
+       !contains(github.event.comment.body, '<!-- claude-review-summary -->')) ||
       (github.event.issue.pull_request == null &&
        contains(github.event.issue.labels.*.name, 'External') &&
-       contains(github.event.comment.body, '@review'))
+       contains(github.event.comment.body, '@review') &&
+       !contains(github.event.comment.body, '<!-- claude-review-summary -->'))
     uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
     # Machine-account PAT for the deterministic ack/stage steps only (eyes
     # reaction + board stage); never handed to the review agent, which stays
