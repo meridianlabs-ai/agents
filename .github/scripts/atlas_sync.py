@@ -28,8 +28,10 @@ hourly Atlas sync"):
 
 Deterministic; runs as the machine account (GH_TOKEN=MARVIN_TOKEN). Per-item
 failures warn and continue. Every write is idempotent except the @review
-trigger comment, which is at-most-once: only the create path posts it (dedup
-skips tracked proxies, and heal never re-requests), so a failure there is
+trigger comment, which is at-most-once PER STATE CHANGE: the create path
+posts it for the first review, and the Contributor -> Review transition posts
+it for each new contributor round (dedup skips tracked proxies, and heal
+never re-requests), so a failure there is
 surfaced as a "review request FAILED" action + warning rather than retried —
 the manual re-run path is commenting @review on the proxy.
 """
@@ -745,6 +747,30 @@ def sync_item(row) -> None:
             if (author_ts and author_ts > reviewer_ts) or rerequested_to_me:
                 if set_stage(item, "Review", stage):
                     actions.append(f"#{issue}: contributor responded -> Review")
+                    # The stage move alone leaves the reviewer ignorant: the
+                    # creation-path @review is at-most-once, so without this
+                    # the new contributor round never gets an automated
+                    # review (observed: #360, 2026-08-31). Posting inside the
+                    # set_stage(...) success branch keeps the same
+                    # once-per-state-change property — the transition fires
+                    # once per contributor round, not hourly. Best-effort,
+                    # like the creation path: a failure is surfaced, and the
+                    # manual fallback is commenting the trigger by hand.
+                    try:
+                        comment(
+                            issue,
+                            "@review — the contributor has responded on the "
+                            "upstream PR since the last review; re-review "
+                            "the current head. (Atlas sync)",
+                        )
+                        actions.append(f"#{issue}: re-review requested")
+                    except Exception as e:  # noqa: BLE001
+                        print(
+                            f"::warning::re-review request failed on proxy #{issue}: {e}"
+                        )
+                        actions.append(
+                            f"#{issue}: re-review request FAILED — trigger @review manually"
+                        )
         return
 
     # The one transition allowed OUT of Review: the driver re-requested
