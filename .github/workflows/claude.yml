@@ -667,15 +667,18 @@ jobs:
             echo "@auto run; labeling $pr_url with '$AUTO_LABEL'."
             gh pr edit "$pr_url" --add-label "$AUTO_LABEL" || true
           fi
-          # Propagate the engine label too (design/codex-engine.md): every
+          # Propagate any engine:* label too (design/codex-engine.md): every
           # PR-scoped run — reviewer, both loop rounds — reads the PR's own
           # labels, so without this an issue-selected engine would silently
-          # revert to Claude the moment the PR opens. Runs before the
-          # @review below, so the reviewer already sees the label.
-          if grep -qx "engine:codex" <<<"$issue_labels"; then
-            echo "propagating engine:codex to $pr_url."
-            gh pr edit "$pr_url" --add-label "engine:codex" || true
-          fi
+          # revert to Claude the moment the PR opens. Copies the whole
+          # engine: namespace (not just engine:codex) so future engines need
+          # no change here. Runs before the @review below, so the first
+          # review already sees the label.
+          while IFS= read -r lbl; do
+            [ -n "$lbl" ] || continue
+            echo "propagating $lbl to $pr_url."
+            gh pr edit "$pr_url" --add-label "$lbl" || true
+          done <<<"$(grep '^engine:' <<<"$issue_labels" || true)"
           # Start the reviewer — but only AFTER the label above, so the review-fix
           # loop sees an authorized (labeled) PR when the reviewer's summary lands.
           # Only where the caller opts in (the fork, where PR-open auto-review
