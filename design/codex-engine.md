@@ -45,6 +45,12 @@ therefore moves into deterministic workflow steps:
 | hand-back @review | agent posts (+ backstop)     | the existing backstop posts it (always owed)    |
 | task context (CI logs, review findings) | agent fetches via gh | workflow pre-fetches into the prompt/workspace |
 
+Pre-fetching covers the dev verb's PR runs too: the prompt-compose step
+embeds the PR title/body and bounded newest-last comment slices (last
+12 discussion + 40 inline, the review-fix prep's bounds), so a trigger
+like "address the feedback above" carries its referent — codex cannot
+read the thread at runtime the way the Claude path does.
+
 This is a feature as much as a constraint: the verdict marker and the
 hand-back become guaranteed instead of prompt-enforced, and the
 landed-work-guard class of failures (work stranded on the runner)

@@ -506,6 +506,7 @@ jobs:
         id: codexcompose
         if: steps.engine.outputs.engine == 'codex'
         env:
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
@@ -535,10 +536,42 @@ jobs:
             else
               printf '%s\n\n%s\n' "$ITITLE" "$IBODY"
             fi
-            if [ "$IS_PR" != "true" ] && [ -n "$COMMENT" ]; then
+            if [ "$IS_PR" = "true" ]; then
+              # Codex cannot read the PR thread the way the Claude path does
+              # (gh at runtime), so embed it: title/body plus bounded
+              # newest-last slices, mirroring the review-fix prep — a trigger
+              # like "address the feedback above" needs its referent in the
+              # prompt. Sliced at the source so the head cap below cannot
+              # truncate away the newest comments on comment-heavy PRs.
+              echo ""
+              echo "PR TITLE AND BODY:"
+              gh pr view "$NUM" --repo "$REPO" --json title,body \
+                --jq '"\(.title)\n\n\(.body // "")"' 2>/dev/null || true
+              echo ""
+              # --slurp is incompatible with gh's own --jq (gh rejects the
+              # combination), so pipe to standalone jq instead.
+              echo "RECENT PR COMMENTS (newest last):"
+              gh api "repos/$REPO/issues/$NUM/comments" --paginate --slurp 2>/dev/null \
+                | jq -r 'add | .[-12:][] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' 2>/dev/null || true
+              echo "RECENT INLINE REVIEW COMMENTS (path:line; newest last):"
+              gh api "repos/$REPO/pulls/$NUM/comments" --paginate --slurp 2>/dev/null \
+                | jq -r 'add | .[-40:][] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' 2>/dev/null || true
+            elif [ -n "$COMMENT" ]; then
               printf '\nFor context, the issue title/body:\n%s\n\n%s\n' "$ITITLE" "$IBODY"
             fi
-          } >.codex-prompt.md
+          } >"$RUNNER_TEMP/codex-context.md"
+          # Cap + de-fang from the completed scratch file, NOT in one
+          # pipeline with the writers above (SIGPIPE discipline — see the
+          # loops' prep steps). The instruction header and TASK sit before
+          # the embedded thread, so the cap can never trim the trigger; the
+          # source-bounded slices keep it headroom, not the working bound.
+          # The sed is belt-and-braces with the landing step's output
+          # de-fang: the embedded comments can include reviewer verdict
+          # comments, and a marker substring codex never sees is one it
+          # cannot echo (length-neutral substitutions).
+          head -c 120000 "$RUNNER_TEMP/codex-context.md" \
+            | sed -E -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >.codex-prompt.md
           # The landing step stages with a blanket `git add -A` (new source
           # files are legitimate output), so exclude the prompt file and the
           # scratch that codex's verification runs leave behind on repos
@@ -609,7 +642,17 @@ jobs:
           # loud, not lossy.
           pushed=""
           if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
-            git push --quiet "https://x-access-token:${MARVIN:-$GH_TOKEN}@github.com/$REPO.git" "HEAD:refs/heads/$BRANCH"
+            # -c http...extraheader=: this job's checkout persisted
+            # github.token as an http.<origin>.extraheader authorization
+            # header, which git attaches to every request here and which
+            # preempts the URL credential (URL creds are only offered on a
+            # 401 challenge, and the header means none comes) — without the
+            # override the push silently runs as github-actions[bot] and
+            # triggers nothing. An empty value resets the header list for
+            # this one command, so the machine-account credential in the
+            # URL is the one that authenticates. (The loop workflows don't
+            # need this: their checkout persists MARVIN_TOKEN itself.)
+            git -c http.https://github.com/.extraheader= push --quiet "https://x-access-token:${MARVIN:-$GH_TOKEN}@github.com/$REPO.git" "HEAD:refs/heads/$BRANCH"
             pushed=1
             echo "pushed $(git rev-parse --short HEAD) to $BRANCH"
             [ "$IS_PR" != "true" ] && echo "branch_name=$BRANCH" >>"$GITHUB_OUTPUT"
