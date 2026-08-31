@@ -27,8 +27,10 @@ inputs:
     description: >-
       Issue OR pull-request number. A PR is resolved to its issue via the
       claude/issue-N-* head-branch convention, then a same-repo Fixes ref
-      in the PR body. A STANDALONE PR — neither — stages its own board
-      card, in opt-in repos only (see STANDALONE_CARD_REPOS below).
+      in the PR body, then a same-repo Development-panel link (GraphQL
+      closingIssuesReferences). A STANDALONE PR — none of the three —
+      stages its own board card, in opt-in repos only (see
+      STANDALONE_CARD_REPOS below).
     required: false
     default: ""
   branch:
@@ -95,6 +97,21 @@ runs:
           num=$(printf '%s' "$pr_body" \
             | grep -oiE "(fix(e[sd])?|close[sd]?|resolve[sd]?)[[:space:]]+($REPO)?#[0-9]+" \
             | head -1 | grep -oE '[0-9]+$' || true)
+        fi
+        if [ -z "$num" ] && [ -n "$is_pr" ]; then
+          # Third join rule: a same-repo Development-panel link. Human-opened
+          # PRs often link their issue via the panel instead of a body
+          # keyword (fork PR #76 converged with its issue parked at Agent —
+          # every stage move silently skipped). closingIssuesReferences
+          # returns keyword refs AND manual panel links; filter same-repo so
+          # a cross-repo link can't stage a foreign board item. Best-effort:
+          # any failure leaves num empty and falls through as before.
+          num=$(gh api graphql \
+            -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}}}}' \
+            -f o="${REPO%/*}" -f r="${REPO#*/}" -F n="$NUM" 2>/dev/null \
+            | jq -r --arg repo "$REPO" \
+                '[.data.repository.pullRequest.closingIssuesReferences.nodes[]? | select(.repository.nameWithOwner==$repo) | .number][0] // empty' \
+                2>/dev/null || true)
         fi
         # STANDALONE PR: no anchor issue resolvable — the PR's own card is
         # the tracked item. This convention is OPT-IN PER REPO (currently

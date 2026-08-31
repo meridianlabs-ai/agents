@@ -551,8 +551,11 @@ the repos). The agents stage **every** issue they touch; per-person scoping
 filters on its own side (the action's `require-assignee` input exists for
 callers that want narrower scoping, but defaults to off). PR→issue resolution
 follows the reconcile
-rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref. A
-**standalone PR** — neither anchor resolves — stages **its own board card**,
+rules: `claude/issue-N-*` head branch, then a same-repo `Fixes` ref in the
+body, then a same-repo Development-panel link (`closingIssuesReferences`,
+which also covers panel links made by hand — added after fork PR #76
+converged with its panel-linked issue parked at Agent, 2026-08-31). A
+**standalone PR** — no anchor resolves — stages **its own board card**,
 but only in repos opted in via `STANDALONE_CARD_REPOS` inside the action
 (currently `meridianlabs-ai/agents`, where infra PRs are the unit of work and
 rarely have an anchor issue). The gate exists because the action runs `@main`
