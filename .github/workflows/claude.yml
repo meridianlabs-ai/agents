@@ -60,6 +60,14 @@ on:
         required: false
         type: string
         default: "default"
+      codex_model:
+        description: >-
+          Model for the codex engine (design/codex-engine.md). Defaults to the
+          strongest OpenAI tier (gpt-5.6-sol; decision: Ransom, 2026-08-31).
+          Empty falls back to the codex CLI default.
+        required: false
+        type: string
+        default: "gpt-5.6-sol"
       settings:
         description: >-
           Claude Code settings JSON (inline). Owns the permission allow-list:
@@ -586,6 +594,7 @@ jobs:
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ inputs.codex_model }}
           permission-profile: ":workspace"
           # Authorization: codex-action's own built-in write-access check on
           # the triggering actor is the real gate here — steps.trig

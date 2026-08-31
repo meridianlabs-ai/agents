@@ -58,6 +58,14 @@ on:
         required: false
         type: string
         default: "default"
+      codex_model:
+        description: >-
+          Model for the codex engine (design/codex-engine.md). Defaults to the
+          strongest OpenAI tier (gpt-5.6-sol; decision: Ransom, 2026-08-31).
+          Empty falls back to the codex CLI default.
+        required: false
+        type: string
+        default: "gpt-5.6-sol"
       append_system_prompt:
         description: >-
           Repo-specific guidance (e.g. the fork's branch/CHANGELOG rules), same
@@ -355,6 +363,7 @@ jobs:
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ inputs.codex_model }}
           permission-profile: ":workspace"
           # workflow_run's actor is the CI run's actor: normally the machine
           # account (a User with write — passes the action's built-in check),
