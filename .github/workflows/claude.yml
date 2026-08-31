@@ -256,6 +256,14 @@ jobs:
       # Engine selection (design/codex-engine.md): an engine:codex label on
       # the triggering issue/PR routes this run to Codex. API read at gate
       # time — event payloads carry stale label lists on comment triggers.
+      # Population note: riding steps.trig means bot actors never reach
+      # engine detection, so on an engine:codex item a bot-authored trigger
+      # falls through to the claude step — where claude-code-action's own
+      # actor guard declines it (no allowed_bots on this verb), so the result
+      # is the pre-existing no-op, not a silent Claude run. Residual gap: a
+      # bare @claude posted by MARVIN (a User the action accepts) would run
+      # the Claude path on a codex item — but marvin-authored text is
+      # de-fanged everywhere by design, so such a comment shouldn't exist.
       - name: Detect engine
         id: engine
         if: steps.trig.outputs.ok == 'true'
@@ -467,7 +475,16 @@ jobs:
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
           if [ "$IS_PR" = "true" ]; then
-            branch=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq .headRefName)
+            prj=$(gh pr view "$NUM" --repo "$REPO" --json headRefName,isCrossRepository)
+            # Fork PRs are out: the head branch is not on origin (this fetch
+            # would die opaquely) and the landing step could not push to the
+            # fork anyway. Fail here with a clear cause — the Surface step
+            # turns it into a visible comment (design/codex-engine.md).
+            if [ "$(jq -r '.isCrossRepository' <<<"$prj")" = "true" ]; then
+              echo "::error::PR #$NUM has a fork head — the codex engine cannot push to fork branches; remove the engine:codex label to use the Claude path."
+              exit 1
+            fi
+            branch=$(jq -r '.headRefName' <<<"$prj")
             git fetch --quiet origin "$branch"
             git checkout --quiet "$branch"
           else
@@ -517,7 +534,13 @@ jobs:
               printf '\nFor context, the issue title/body:\n%s\n\n%s\n' "$ITITLE" "$IBODY"
             fi
           } >.codex-prompt.md
-          echo ".codex-prompt.md" >>.git/info/exclude
+          # The landing step stages with a blanket `git add -A` (new source
+          # files are legitimate output), so exclude the prompt file and the
+          # scratch that codex's verification runs leave behind on repos
+          # whose .gitignore doesn't already cover it (caches, venvs).
+          printf '%s\n' .codex-prompt.md .venv/ venv/ __pycache__/ \
+            .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
+            >>.git/info/exclude
 
       - name: Run Codex
         id: codexrun
@@ -526,10 +549,16 @@ jobs:
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           permission-profile: ":workspace"
-          # Our trig gate did the real authorization; this lifts the action's
-          # own actor guard for the reviewer-bot triggers the Claude path
-          # already accepts (e.g. escalation hand-offs).
-          allow-bot-users: "claude"
+          # Authorization: codex-action's own built-in write-access check on
+          # the triggering actor is the real gate here — steps.trig
+          # deliberately checks trigger shape, not permissions (see its
+          # Known-divergence note), mirroring the Claude path where
+          # claude-code-action's internal check authorizes. Consequence on
+          # public repos: an outsider's trigger on an engine:codex item FAILS
+          # this step (the Surface step's error text names that cause) where
+          # the Claude path declines silently. No allow-bot-users: bot actors
+          # never pass steps.trig, so none reach this step — matching the
+          # Claude path, which sets no allowed_bots on this verb either.
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex-final.md
 
@@ -554,7 +583,8 @@ jobs:
           set -euo pipefail
           pushed=""
           # Untracked files count: new source files are legitimate codex
-          # output (.codex-prompt.md is kept out via .git/info/exclude).
+          # output (the prompt file and common test/venv scratch are kept
+          # out via .git/info/exclude, written by the compose step).
           if [ -n "$(git status --porcelain)" ]; then
             subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120)
             [ -n "$subject" ] || subject="codex: automated change for #$NUM"
@@ -568,10 +598,17 @@ jobs:
             echo "codex made no changes; nothing to push."
           fi
           # Post the final message (de-fanged: it posts from a write-access
-          # account, so bare trigger tokens would fire workflows).
+          # account, so bare trigger tokens would fire workflows, and the
+          # @auto loops match their verdict/handoff markers with plain
+          # substring contains() — codex QUOTING a marker would forge a
+          # verdict or suppress an owed hand-back, so break those substrings
+          # too).
           {
             printf '🤖 codex (dev agent):\n\n'
-            sed -E 's/@(review|claude|auto)/`\1`/g' "$OUT" 2>/dev/null || echo "(codex produced no final message)"
+            sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+                   "$OUT" 2>/dev/null || echo "(codex produced no final message)"
             [ -z "$pushed" ] && printf '\n\n_No code changes were made._'
           } >"$RUNNER_TEMP/codex-comment.md"
           gh api "repos/$REPO/issues/$NUM/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
@@ -799,6 +836,7 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
+          CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEX_OUTCOME: ${{ steps.codexrun.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
@@ -817,8 +855,11 @@ jobs:
           fi
           # Codex engine: no execution file exists; step outcomes are the
           # signal (landing is deterministic, so green steps cannot strand).
+          if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
+            err="the codex workspace prep failed before the agent started — a fork-head PR (the codex engine cannot push to fork branches; remove the engine:codex label), or a branch fetch error (see the job logs)."
+          fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
-            err="the codex step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
+            err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
             err="codex finished but its landing step failed — the work may not have reached the branch (see the job logs)."

@@ -481,8 +481,21 @@ jobs:
             echo "INLINE REVIEW COMMENTS (path:line):"
             gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp \
               --jq 'add | .[] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' 2>/dev/null || true
-          } | head -c 120000 >.codex-prompt.md
-          echo ".codex-prompt.md" >>.git/info/exclude
+          } | head -c 120000 \
+            | sed -E -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >.codex-prompt.md
+          # (The sed is belt-and-braces with the landing step's output
+          # de-fang: the embedded comments include the reviewer's verdict
+          # comments, and a marker substring codex never sees is one it
+          # cannot echo. head runs before sed so a truncation SIGPIPE can't
+          # fail the pipeline; the substitutions are length-neutral.)
+          #
+          # The landing step stages with a blanket `git add -A`, so exclude
+          # the prompt file and the scratch codex's verification runs leave
+          # behind on repos whose .gitignore doesn't cover it (caches, venvs).
+          printf '%s\n' .codex-prompt.md .venv/ venv/ __pycache__/ \
+            .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
+            >>.git/info/exclude
 
       - name: Run Codex fix
         id: codexfix
@@ -518,9 +531,15 @@ jobs:
             echo "pushed $(git rev-parse --short HEAD)"
           fi
           # One comment either way, de-fanged (posts from a write-access
-          # account). Pushed: a plain summary — "Ensure hand-back" below owes
-          # the @review. No changes: the round is concluded — lead with the
-          # auto-handoff marker so the selfhandoff detector moves the board.
+          # account; the gate and the hand-back backstop match the loop's
+          # verdict/handoff markers with plain substring contains(), so codex
+          # QUOTING one — likely, its prompt embeds the reviewer's verdict
+          # comments verbatim — would forge a verdict or suppress an owed
+          # hand-back: break those substrings too, in codex's text only, not
+          # the deliberate leading marker below). Pushed: a plain summary —
+          # "Ensure hand-back" below owes the @review. No changes: the round
+          # is concluded — lead with the auto-handoff marker so the
+          # selfhandoff detector moves the board.
           {
             if [ -z "$pushed" ]; then
               echo "<!-- auto-handoff -->"
@@ -529,7 +548,10 @@ jobs:
             else
               printf '🤖 auto (codex, round %s): changes pushed — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
             fi
-            sed -E 's/@(review|claude|auto)/`\1`/g' "$OUT" 2>/dev/null || echo "(codex produced no final message)"
+            sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+                   "$OUT" 2>/dev/null || echo "(codex produced no final message)"
           } >"$RUNNER_TEMP/codex-comment.md"
           gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
       # ---- end Codex engine ---------------------------------------------------
@@ -699,10 +721,17 @@ jobs:
 
       # Infra crashes must not burn review rounds (mirror of claude-auto.yml's
       # attempt refund): a step that died with NO execution output attempted
-      # nothing. Rebuild the sticky counter body including the head marker the
-      # next gate's no-progress check reads. Per-PR concurrency serializes us.
+      # nothing. A failed codex step is the same class — its landing step
+      # never ran, so nothing reached the PR (persistently missing
+      # OPENAI_API_KEY must not march a PR to spurious escalation); the
+      # exec-file guard below is Claude-only and no execution file ever
+      # exists on the codex path, so the refund proceeds. Rebuild the sticky
+      # counter body including the head marker the next gate's no-progress
+      # check reads. Per-PR concurrency serializes us.
       - name: Refund infra-crashed round
-        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'failure'
+        if: >-
+          always() && steps.gate.outputs.act == 'fix' &&
+          (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}

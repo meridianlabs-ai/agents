@@ -59,8 +59,15 @@ therefore accepts verdict-marked comments from `i-am-marvin` in
 addition to `reviewer_login`; everything downstream keys on the same
 `<!-- claude-review-summary -->` / `<!-- claude-review-verdict:* -->`
 markers regardless of engine. All codex text posted to GitHub is
-de-fanged first (`@review`/`@claude`/`@auto` → backticked) since it
-posts from a write-access account.
+de-fanged first, since it posts from a write-access account:
+`@review`/`@claude`/`@auto` are backticked, and the loop's marker
+substrings (`claude-review-summary`/`-verdict`, plus the `auto-handoff`
+/ `auto-review-rounds` / `auto-review-head` / `auto-fix-attempts`
+family) are broken — the gates match them with plain substring
+`contains`, so codex merely *quoting* a marker (its prompts embed
+verdict-bearing comments) would otherwise forge a verdict or suppress
+an owed hand-back. The deterministic workflow-posted comments are the
+only marker-bearing ones.
 
 ## Auth — the accepted policy exception
 
@@ -80,8 +87,15 @@ misattribute output).
 
 - **External proxy reviews stay on Claude** — their contributor-code
   sandbox overlay is Claude-settings-specific.
+- **Codex reviews are static**: the `:read-only` profile means codex
+  cannot install dependencies or execute tests to verify findings the
+  way the Claude reviewer does — its review is analysis of the checkout
+  only.
 - **No inline review comments** from codex reviews: one summary comment
   with file:line references in the body.
+- **No fork-head PRs on codex dev runs**: the landing step pushes to
+  origin, where a fork's branch doesn't exist — the prep step declines
+  fork PRs loudly rather than failing mid-run.
 - **No review-thread resolution** in codex fix rounds (needs gh); the
   handoff notes it so humans resolve threads at sign-off.
 - **No branch sync on dev runs**: codex can't fetch; conflicts surface

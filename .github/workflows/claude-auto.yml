@@ -341,7 +341,12 @@ jobs:
             echo "FAILING CI LOG (run $CI_RUN_ID, failed jobs, tail):"
             gh run view "$CI_RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 100000 || echo "(log unavailable)"
           } >.codex-prompt.md
-          echo ".codex-prompt.md" >>.git/info/exclude
+          # The landing step stages with a blanket `git add -A`, so exclude
+          # the prompt file and the scratch codex's verification runs leave
+          # behind on repos whose .gitignore doesn't cover it (caches, venvs).
+          printf '%s\n' .codex-prompt.md .venv/ venv/ __pycache__/ \
+            .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
+            >>.git/info/exclude
 
       - name: Run Codex CI fix
         id: codexfix
@@ -350,7 +355,12 @@ jobs:
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           permission-profile: ":workspace"
-          allow-bots: true
+          # workflow_run's actor is the CI run's actor: normally the machine
+          # account (a User with write — passes the action's built-in check),
+          # but a branch the Claude App pushed (mixed-engine PR relabeled
+          # mid-loop) makes it the claude bot — allow that one, matching the
+          # other codex steps.
+          allow-bot-users: "claude"
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex-final.md
 
@@ -377,7 +387,10 @@ jobs:
           fi
           # Post the summary either way (a no-change round IS the blocker
           # comment the ending contract calls for), de-fanged: it posts from
-          # a write-access account. On a push, the backstop below posts the
+          # a write-access account, and the loops match their verdict/handoff
+          # markers with plain substring contains() — codex QUOTING a marker
+          # would forge a verdict or suppress an owed hand-back, so break
+          # those substrings too. On a push, the backstop below posts the
           # owed @review.
           {
             if [ -n "$pushed" ]; then
@@ -385,7 +398,10 @@ jobs:
             else
               printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"
             fi
-            sed -E 's/@(review|claude|auto)/`\1`/g' "$OUT" 2>/dev/null || echo "(codex produced no final message)"
+            sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+                   "$OUT" 2>/dev/null || echo "(codex produced no final message)"
           } >"$RUNNER_TEMP/codex-comment.md"
           gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
       # ---- end Codex engine ---------------------------------------------------
@@ -567,9 +583,15 @@ jobs:
       # observed: "socket hang up" before the agent started) attempted no fix,
       # and two such blips nearly escalated a PR spuriously. Roll the sticky
       # counter back one; any run that produced execution output still counts.
+      # A failed codex step is the same class — its landing step never ran,
+      # so no fix reached the branch (a persistently missing OPENAI_API_KEY
+      # must not burn attempts toward spurious escalation); no execution file
+      # ever exists on the codex path, so the guard below refunds it.
       # Safe from races: the job's per-PR concurrency group serializes us.
       - name: Refund infra-crashed attempt
-        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'failure'
+        if: >-
+          always() && steps.gate.outputs.act == 'fix' &&
+          (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}

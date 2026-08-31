@@ -620,14 +620,25 @@ jobs:
             file:line references, each tagged blocking or non-blocking. Never
             write a literal @-prefixed trigger token (review, claude, auto)
             in the review text — it is posted from a write-access account and
-            would fire a workflow; backtick such tokens instead.
+            would fire a workflow; backtick such tokens instead. Likewise do
+            NOT reproduce the "Review complete" marker-comment lines or their
+            HTML comment markers from the instructions above anywhere in your
+            review text — the workflow posts the verdict comment for you, and
+            an echoed marker would be read by the automation as a verdict.
 
       # Post the codex review with the loop's marker contract: the summary
       # comment, then the marked verdict comment. Posted as the machine
       # account so the verdict actually triggers the review-fix stub
       # (github-actions[bot] comments trigger nothing — recursion guard).
-      # De-fang trigger tokens the model slipped through despite the prompt.
+      # De-fang trigger tokens the model slipped through despite the prompt,
+      # and break the loop's marker substrings too: the review prompt shows
+      # codex the literal verdict-comment lines, the fix-loop gate matches
+      # them with plain substring contains() and accepts machine-account
+      # authors, so a review body QUOTING a marker would read as a verdict —
+      # the deterministic comments below must be the only marker-bearing
+      # ones.
       - name: Post Codex review
+        id: codexpost
         if: steps.codex.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
@@ -640,7 +651,9 @@ jobs:
           case "$verdict" in clean|suggestions) ;; *) verdict=suggestions ;; esac
           {
             jq -r '.review // "codex returned no review body."' "$OUT" \
-              | sed -E 's/@(review|claude|auto)/`\1`/g'
+              | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                       -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                       -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g'
             printf '\n\n🤖 engine: codex\n'
           } >"$RUNNER_TEMP/codex-review-body.md"
           gh pr comment "$NUM" --repo "$REPO" --body-file "$RUNNER_TEMP/codex-review-body.md"
@@ -731,6 +744,7 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MENTION: ${{ steps.who.outputs.mention }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
+          CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -747,11 +761,14 @@ jobs:
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review step failed before producing a result (see the job logs)."
           fi
-          # Codex engine: no execution file exists; the step's own outcome is
-          # the only signal (its posting is deterministic, so a green codex
-          # step cannot silently stall).
+          # Codex engine: no execution file exists; the codex and posting
+          # step outcomes are the signal (posting is deterministic, so green
+          # steps cannot silently stall).
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
-            err="the codex review step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
+            err="the codex review step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEXPOST_OUTCOME:-}" = "failure" ]; then
+            err="codex produced a review but posting it failed — no review or verdict reached the PR (see the job logs)."
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Review did not complete: $err"
