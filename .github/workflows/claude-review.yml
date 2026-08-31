@@ -90,6 +90,15 @@ on:
           event. Keep the visible text neutral — do NOT mention @auto, so it
           doesn't read as if @auto is acting on PRs that aren't `auto`-labeled.)
           For a normal PR this is just a short "review complete" note.
+          In EVERY comment you post, never write the literal review trigger
+          token (@review) bare — if you must mention it, wrap it in backticks,
+          including inside quoted or excerpted lines. And end every top-level
+          comment you post EXCEPT that final marker comment (whose body must
+          stay exactly as specified above) with `<!-- claude-review-comment -->`.
+          Both rules guard the same failure: the caller stubs skip comments
+          that carry that marker or only backtick the token, but a bare
+          mention in a marker-less comment spawns a fresh review run whose
+          newest-wins concurrency cancels THIS run before your verdict posts.
       model:
         description: Preferred model (--model). Empty = Claude Code default.
         required: false
