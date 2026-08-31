@@ -113,6 +113,18 @@ the secret: codex-labeled runs fail at the codex step with a clear
 error rather than silently falling back (a silent Claude fallback would
 misattribute output).
 
+## Safety strategy: unprivileged-user, not drop-sudo
+
+codex-action's default `drop-sudo` chmods root-owned service sockets under
+`/run`, which breaks D-Bus, crashes systemd-resolved, and kills DNS — the
+hosted runner then dies with "lost communication" 52–65 minutes into the
+job (openai/codex-action#160; hit twice at ~62 min on the first codex
+runs, inspect_ai#389). Every codex step therefore creates a dedicated
+`codex` system user and runs with `safety-strategy: unprivileged-user`:
+containment is the user boundary plus the permission-profile sandbox, the
+API key stays unreadable (codex has no sudo), and the host is never
+mutated. Revisit when #160's fixes land upstream.
+
 ## v1 limitations (deliberate)
 
 - **External proxy reviews stay on Claude** — their contributor-code

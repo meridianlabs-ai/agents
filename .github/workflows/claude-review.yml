@@ -622,12 +622,35 @@ jobs:
       # Our trig gate did the real authorization; allow-bot-users lifts the
       # action's own actor guard for the reviewer-bot trigger the Claude
       # path already accepts (the dev agent's @review hand-back).
+      # codex-action's default safety-strategy (drop-sudo) chmods root-owned
+      # service sockets under /run, breaking D-Bus -> systemd-resolved -> DNS;
+      # the hosted runner then dies with "lost communication" 52-65 minutes
+      # into the job (openai/codex-action#160; observed twice at ~62 min on
+      # inspect_ai#389, 2026-08-31). Until fixed upstream, run codex as a
+      # dedicated unprivileged user — the README's other blessed strategy for
+      # permission profiles: containment is the user boundary plus the
+      # profile sandbox, and the API key stays out of reach (codex has no
+      # sudo). Setup mirrors the action's examples/unprivileged-user.yml;
+      # the group plumbing lets the runner user land codex's edits afterward.
+      - name: Create codex user
+        if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
+        run: |
+          set -euo pipefail
+          sudo adduser --system --home /home/codex --shell /bin/bash --group codex
+          sudo usermod -a -G codex runner
+          sudo usermod -a -G runner codex
+          sudo chown -R runner:codex "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
+          sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
+
       - name: Run Codex review
         id: codex
         if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: codex
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: ":read-only"
