@@ -63,7 +63,7 @@ on:
       codex_model:
         description: >-
           Model for the codex engine (design/codex-engine.md). Defaults to the
-          strongest OpenAI tier (gpt-5.6-sol; decision: Ransom, 2026-09-01).
+          strongest OpenAI tier (gpt-5.6-sol; decision: Ransom, 2026-08-31).
           Empty falls back to the codex CLI default.
         required: false
         type: string

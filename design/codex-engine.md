@@ -142,7 +142,7 @@ misattribute output).
   OpenAI tier; the `gpt-5.6` alias routes there). Reviews additionally pin
   `codex_effort: xhigh` — correctness over turnaround; implementation runs
   (dev agent, both loops) keep the codex default reasoning effort
-  (decision: Ransom, 2026-09-01).
+  (decision: Ransom, 2026-08-31).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
 
