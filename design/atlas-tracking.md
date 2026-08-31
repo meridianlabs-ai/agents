@@ -268,14 +268,19 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
 - **New proxies auto-request their review**: discovery posts `@review` on each
   proxy it creates (marvin's comment fires external mode), so the automated
   findings are already on the proxy when the maintainer first looks.
-  Creation-time only; a manual `@review` is the re-run path.
+  The Contributor → Review transition posts a fresh `@review` too — once per
+  contributor round, inside the stage move's success branch, so a new round
+  gets an automated re-review without any hourly re-posting (added after
+  #360's contributor update went back to Review unreviewed, 2026-08-31). A
+  manual `@review` remains the anytime re-run path.
 - **Stage lifecycle** (decided when the hourly sync was specced): a new proxy
   starts in **Review** — a review request means the ball is with *you*.
   After you review, *you* move it to **Contributor** (waiting on them
   to address feedback). The sync flips it back to **Review** when the
   contributor responds — deterministically approximated as *any contributor
   activity (comment or re-review request) newer than your last activity on the
-  PR* (no intent-parsing of comment text). Merged/closed upstream → proxy
+  PR* (no intent-parsing of comment text) — and requests the automated
+  re-review in the same breath (above). Merged/closed upstream → proxy
   closes → **Done**.
 - **Approval queues at Merge**: upstream `reviewDecision == APPROVED` moves
   the proxy to **Merge**, the same queue the merge-approved-prs skill drains
