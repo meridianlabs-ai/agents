@@ -503,6 +503,7 @@ jobs:
       # be inside the repo root). The ending contract makes codex's final
       # message double as the commit subject + the posted comment.
       - name: Compose codex prompt
+        id: codexcompose
         if: steps.engine.outputs.engine == 'codex'
         env:
           REPO: ${{ github.repository }}
@@ -590,7 +591,11 @@ jobs:
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).
           if [ -n "$(git status --porcelain)" ]; then
-            subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120)
+            # || true inside the substitution: without it a missing/unreadable
+            # $OUT fails the pipeline and set -e kills the step before the
+            # fallback is reached — the fallback would only ever cover an
+            # empty first line.
+            subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120 || true)
             [ -n "$subject" ] || subject="codex: automated change for #$NUM"
             git add -A
             git commit --quiet -m "$subject" -m "Co-Authored-By: Codex <noreply@openai.com>"
@@ -851,6 +856,7 @@ jobs:
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
+          CODEXCOMPOSE_OUTCOME: ${{ steps.codexcompose.outcome }}
           CODEX_OUTCOME: ${{ steps.codexrun.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
@@ -871,6 +877,9 @@ jobs:
           # signal (landing is deterministic, so green steps cannot strand).
           if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
             err="the codex workspace prep failed before the agent started — a fork-head PR (the codex engine cannot push to fork branches; remove the engine:codex label), or a branch fetch error (see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEXCOMPOSE_OUTCOME:-}" = "failure" ]; then
+            err="composing the codex prompt failed before the agent started (see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."

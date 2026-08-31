@@ -297,7 +297,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
         run: |
           # Single line: the prompt is spliced as one arg downstream.
-          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop." >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment — they are matched by plain substring, so quoting one (e.g. when citing a reviewer comment) would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary')." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
@@ -379,7 +379,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$(git status --porcelain)" ]; then
-            subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120)
+            # || true inside the substitution: without it a missing/unreadable
+            # $OUT fails the pipeline and set -e kills the step before the
+            # fallback is reached — the fallback would only ever cover an
+            # empty first line.
+            subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120 || true)
             [ -n "$subject" ] || subject="codex: fix failing CI on PR #$PR"
             git add -A
             git commit --quiet -m "$subject" -m "Co-Authored-By: Codex <noreply@openai.com>"

@@ -60,7 +60,8 @@ always uses an explicit refspec (`HEAD:refs/heads/<branch>`), so the
 intended branch is updated even if codex left HEAD on some other local
 ref; a diverted HEAD that isn't genuinely new work fails the push
 non-fast-forward — loud, not lossy. Failure parity mirrors the Claude
-path throughout: a failed codex step *or* its context-prep step
+path throughout: a failed codex step *or* any of its prep steps
+(workspace/context prep, and the dev verb's separate prompt-compose)
 surfaces a visible error comment and, in the loops, refunds the review
 round / CI-fix attempt (infra failures — e.g. a missing
 `OPENAI_API_KEY` — must not march a PR toward spurious escalation);
@@ -85,7 +86,12 @@ family) are broken — the gates match them with plain substring
 `contains`, so codex merely *quoting* a marker (its prompts embed
 verdict-bearing comments) would otherwise forge a verdict or suppress
 an owed hand-back. The deterministic workflow-posted comments are the
-only marker-bearing ones.
+only marker-bearing ones. Because the widened gate accepts
+machine-account verdict comments on Claude-engine loops too, the Claude
+fix prompts carry the same rule prompt-side: never emit the marker
+substrings verbatim in a comment (the `auto-handoff` first line of the
+handoff comment is the one sanctioned use) — the codex paths enforce
+this with sed, the Claude path by instruction.
 
 ## Auth — the accepted policy exception
 
