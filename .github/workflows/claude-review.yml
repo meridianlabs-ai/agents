@@ -619,9 +619,7 @@ jobs:
       # SAME markers the @auto loop consumes. The verdict is thereby
       # deterministic rather than prompt-enforced. Inline comments are a v1
       # non-goal; findings carry file:line references in the body instead.
-      # Our trig gate did the real authorization; allow-bot-users lifts the
-      # action's own actor guard for the reviewer-bot trigger the Claude
-      # path already accepts (the dev agent's @review hand-back).
+      #
       # codex-action's default safety-strategy (drop-sudo) chmods root-owned
       # service sockets under /run, breaking D-Bus -> systemd-resolved -> DNS;
       # the hosted runner then dies with "lost communication" 52-65 minutes
@@ -630,8 +628,18 @@ jobs:
       # dedicated unprivileged user — the README's other blessed strategy for
       # permission profiles: containment is the user boundary plus the
       # profile sandbox, and the API key stays out of reach (codex has no
-      # sudo). Setup mirrors the action's examples/unprivileged-user.yml;
-      # the group plumbing lets the runner user land codex's edits afterward.
+      # sudo). Setup mirrors the action's examples/unprivileged-user.yml —
+      # the chown/g+rwX is what lets codex (primary group codex) write the
+      # runner-owned workspace — plus two grants the example never needs (it
+      # passes no explicit output-file and its demo prompt never runs git):
+      # RUNNER_TEMP group-write and git safe.directory, commented inline.
+      # NB the runner->codex group grant is inert for this job:
+      # supplementary groups are fixed at process start, and every step is
+      # spawned from a Runner.Worker that predates the usermod. Landing
+      # codex's edits works anyway — runner still owns the workspace
+      # directories, and codex's files are world-readable under its umask
+      # (kept as a faithful copy of the example; if codex ever drops a 600
+      # file, the land step needs a chmod -R a+rX sweep, not this group).
       - name: Create codex user
         if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
         run: |
@@ -642,7 +650,19 @@ jobs:
           sudo chown -R runner:codex "$GITHUB_WORKSPACE"
           sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
           sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
+          # codex itself (via sudo -u) writes the explicit output-file and
+          # the action re-reads it as codex, but RUNNER_TEMP is 755
+          # runner:runner on the hosted image — grant its group (runner,
+          # which codex joined above) write.
+          sudo chmod g+w "$RUNNER_TEMP"
+          # The checkout stays runner-owned, so git commands running as
+          # codex hit the dubious-ownership refusal, and no profile sandbox
+          # lets the agent add the exemption itself.
+          sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # Our trig gate did the real authorization; allow-bot-users lifts the
+      # action's own actor guard for the reviewer-bot trigger the Claude
+      # path already accepts (the dev agent's @review hand-back).
       - name: Run Codex review
         id: codex
         if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'

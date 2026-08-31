@@ -123,7 +123,14 @@ runs, inspect_ai#389). Every codex step therefore creates a dedicated
 `codex` system user and runs with `safety-strategy: unprivileged-user`:
 containment is the user boundary plus the permission-profile sandbox, the
 API key stays unreadable (codex has no sudo), and the host is never
-mutated. Revisit when #160's fixes land upstream.
+mutated. The setup mirrors the action's `examples/unprivileged-user.yml`
+plus two grants its demo never needs: group-write on `$RUNNER_TEMP` (755
+`runner:runner` on the hosted image, and codex — in group `runner` — must
+create the explicit `output-file` there, which the action then re-reads as
+codex), and the checkout added to the codex user's git `safe.directory`
+(the repo stays runner-owned, so git run as codex otherwise refuses with
+"dubious ownership", and no profile sandbox lets the agent add the
+exemption itself). Revisit when #160's fixes land upstream.
 
 ## v1 limitations (deliberate)
 
