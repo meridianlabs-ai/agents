@@ -166,6 +166,14 @@ on:
           token + contents:read). Optional: absent, those steps no-op and the
           reviewer behaves exactly as before.
         required: false
+      OPENAI_API_KEY:
+        description: >-
+          OpenAI API key for the codex engine (design/codex-engine.md).
+          Consumed ONLY by the openai/codex-action step, which runs on PRs
+          labeled engine:codex. Optional: absent, codex-labeled reviews fail
+          loudly at that step (never a silent Claude fallback, which would
+          misattribute output).
+        required: false
 
 jobs:
   review:
@@ -461,6 +469,29 @@ jobs:
       # for the human, not the @auto loop), and test runs happen INSIDE the
       # sandbox installed above (self-provisioned venv; static fallback when
       # the sandbox blocks something).
+      # Engine selection (design/codex-engine.md): an engine:codex label on
+      # the PR routes this review to Codex. Read via the API at gate time —
+      # comment-trigger payloads carry stale label lists. External proxy
+      # reviews stay on Claude in v1 (their sandbox overlay is
+      # Claude-specific). Best-effort: an unreadable label list means Claude.
+      - name: Detect engine
+        id: engine
+        if: steps.trig.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          MODE: ${{ steps.trig.outputs.mode }}
+        run: |
+          engine=claude
+          if [ "$MODE" != "external" ] && [ -n "${NUM:-}" ]; then
+            labels=$(gh api "repos/$REPO/issues/$NUM/labels" --paginate \
+                       --jq '.[].name' 2>/dev/null || true)
+            grep -qx 'engine:codex' <<<"$labels" && engine=codex
+          fi
+          echo "engine: $engine"
+          echo "engine=$engine" >>"$GITHUB_OUTPUT"
+
       - name: Compose review prompt
         if: steps.trig.outputs.ok == 'true'
         id: reviewprompt
@@ -532,7 +563,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
-        if: steps.trig.outputs.ok == 'true'
+        if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine != 'codex'
         id: claude
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
@@ -547,6 +578,79 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
             ${{ inputs.claude_args }}
+
+      # Codex engine (design/codex-engine.md): the sandbox has no network and
+      # no GitHub credentials, so the agent cannot post — it emits a
+      # structured review (schema below) and the next step posts it with the
+      # SAME markers the @auto loop consumes. The verdict is thereby
+      # deterministic rather than prompt-enforced. Inline comments are a v1
+      # non-goal; findings carry file:line references in the body instead.
+      # Our trig gate did the real authorization; allow-bot-users lifts the
+      # action's own actor guard for the reviewer-bot trigger the Claude
+      # path already accepts (the dev agent's @review hand-back).
+      - name: Run Codex review
+        id: codex
+        if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          allow-bot-users: "claude"
+          output-file: ${{ runner.temp }}/codex-review.json
+          output-schema: |
+            {"type": "object", "additionalProperties": false,
+             "required": ["verdict", "review"],
+             "properties": {
+               "verdict": {"type": "string", "enum": ["clean", "suggestions"],
+                 "description": "clean = nothing actionable remains; suggestions = at least one actionable finding"},
+               "review": {"type": "string",
+                 "description": "the full review as GitHub markdown, findings with file:line references"}}}
+          prompt: >-
+            ${{ steps.reviewprompt.outputs.value }}
+            CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction
+            above: you have NO network access and NO GitHub credentials, so
+            you cannot post comments or run gh, and must not try — a
+            deterministic workflow step posts your review for you. Read the
+            change from the local checkout (git log/diff against the base
+            branch; full history is available). Produce your ENTIRE review as
+            your final message conforming to the output schema. Verdict
+            'clean' ONLY when nothing actionable remains (regression-accepted
+            notes are informational and do not flip it); 'suggestions'
+            otherwise. Include every finding in the review body with
+            file:line references, each tagged blocking or non-blocking. Never
+            write a literal @-prefixed trigger token (review, claude, auto)
+            in the review text — it is posted from a write-access account and
+            would fire a workflow; backtick such tokens instead.
+
+      # Post the codex review with the loop's marker contract: the summary
+      # comment, then the marked verdict comment. Posted as the machine
+      # account so the verdict actually triggers the review-fix stub
+      # (github-actions[bot] comments trigger nothing — recursion guard).
+      # De-fang trigger tokens the model slipped through despite the prompt.
+      - name: Post Codex review
+        if: steps.codex.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          OUT: ${{ runner.temp }}/codex-review.json
+        run: |
+          set -euo pipefail
+          verdict=$(jq -r '.verdict // empty' "$OUT" 2>/dev/null || true)
+          case "$verdict" in clean|suggestions) ;; *) verdict=suggestions ;; esac
+          {
+            jq -r '.review // "codex returned no review body."' "$OUT" \
+              | sed -E 's/@(review|claude|auto)/`\1`/g'
+            printf '\n\n🤖 engine: codex\n'
+          } >"$RUNNER_TEMP/codex-review-body.md"
+          gh pr comment "$NUM" --repo "$REPO" --body-file "$RUNNER_TEMP/codex-review-body.md"
+          if [ "$verdict" = "clean" ]; then
+            gh pr comment "$NUM" --repo "$REPO" --body \
+              '🔎 Review complete — no outstanding suggestions. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->'
+          else
+            gh pr comment "$NUM" --repo "$REPO" --body \
+              '🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->'
+          fi
 
       # External review finished: the findings sit on the proxy issue awaiting
       # the maintainer's judgment — hand the stage back (mirrors the dev
@@ -626,6 +730,7 @@ jobs:
           SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MENTION: ${{ steps.who.outputs.mention }}
+          CODEX_OUTCOME: ${{ steps.codex.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -641,6 +746,12 @@ jobs:
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review step failed before producing a result (see the job logs)."
+          fi
+          # Codex engine: no execution file exists; the step's own outcome is
+          # the only signal (its posting is deterministic, so a green codex
+          # step cannot silently stall).
+          if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
+            err="the codex review step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Review did not complete: $err"

@@ -100,6 +100,9 @@ jobs:
     # secrets.MARVIN_TOKEN and design/auto-agent.md).
     secrets:
       MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      # codex engine (design/codex-engine.md in the agents repo):
+      # consumed only on items labeled engine:codex; optional.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     permissions:
       contents: write
       pull-requests: write
@@ -170,6 +173,9 @@ jobs:
     uses: meridianlabs-ai/agents/.github/workflows/claude.yml@main
     secrets:
       MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      # codex engine (design/codex-engine.md in the agents repo):
+      # consumed only on items labeled engine:codex; optional.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     permissions:
       contents: write
       pull-requests: write
