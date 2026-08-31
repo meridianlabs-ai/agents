@@ -138,7 +138,11 @@ misattribute output).
 - **No branch sync on dev runs**: codex can't fetch; conflicts surface
   in CI/review as before. (A deterministic pre-merge step is the
   obvious v2 if this bites.)
-- **Model**: codex CLI default (no per-repo model input yet).
+- **Model**: `codex_model` input, default `gpt-5.6-sol` (the strongest
+  OpenAI tier; the `gpt-5.6` alias routes there). Reviews additionally pin
+  `codex_effort: xhigh` — correctness over turnaround; implementation runs
+  (dev agent, both loops) keep the codex default reasoning effort
+  (decision: Ransom, 2026-09-01).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
 

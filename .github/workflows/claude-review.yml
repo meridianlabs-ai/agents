@@ -109,6 +109,23 @@ on:
         required: false
         type: string
         default: "default"
+      codex_model:
+        description: >-
+          Model for the codex engine (design/codex-engine.md). Defaults to the
+          strongest OpenAI tier (gpt-5.6-sol; decision: Ransom, 2026-09-01).
+          Empty falls back to the codex CLI default.
+        required: false
+        type: string
+        default: "gpt-5.6-sol"
+      codex_effort:
+        description: >-
+          Reasoning effort for codex reviews (minimal|low|medium|high|xhigh).
+          Reviews run at xhigh — correctness over turnaround (decision:
+          Ransom, 2026-09-01); implementation runs elsewhere keep the codex
+          default. Empty falls back to the codex CLI default.
+        required: false
+        type: string
+        default: "xhigh"
       settings:
         description: >-
           Claude Code settings JSON (inline). Allows the verify loop (tests +
@@ -611,6 +628,8 @@ jobs:
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ inputs.codex_model }}
+          effort: ${{ inputs.codex_effort }}
           permission-profile: ":read-only"
           allow-bot-users: "claude"
           output-file: ${{ runner.temp }}/codex-review.json
