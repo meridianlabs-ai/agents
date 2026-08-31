@@ -759,7 +759,7 @@ def sync_item(row) -> None:
                     try:
                         comment(
                             issue,
-                            "@review — the contributor has updated the "
+                            "@review — the contributor has responded on the "
                             "upstream PR since the last review; re-review "
                             "the current head. (Atlas sync)",
                         )
