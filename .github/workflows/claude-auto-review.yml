@@ -100,6 +100,11 @@ on:
     secrets:
       MARVIN_TOKEN:
         required: false
+      OPENAI_API_KEY:
+        description: >-
+          OpenAI API key for the codex engine (design/codex-engine.md); used
+          only by fix rounds on PRs labeled engine:codex.
+        required: false
 
 jobs:
   auto-review-fix:
@@ -159,8 +164,12 @@ jobs:
             echo "No MARVIN_TOKEN; the review loop can't push/re-request as a real identity. Skipping."
             act skip; exit 0
           fi
-          if [ "$AUTHOR" != "$REVIEWER" ]; then
-            echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER'; ignoring."
+          # Codex-engine reviews post their verdict via the machine account
+          # (design/codex-engine.md — github-actions[bot] comments trigger no
+          # stubs), so marker comments from it carry the same authority as
+          # the reviewer bot's.
+          if [ "$AUTHOR" != "$REVIEWER" ] && [ "$AUTHOR" != "i-am-marvin" ]; then
+            echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
           pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
@@ -173,6 +182,9 @@ jobs:
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
           fi
           echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
+          # Engine selection (design/codex-engine.md): fix rounds follow the
+          # PR's engine:codex label; relabeling switches later rounds.
+          echo "engine=$(jq -r 'if any(.labels[]; .name=="engine:codex") then "codex" else "claude" end' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
 
           # Human to @-mention on handoff/escalation: the author of the issue this
           # PR closes (Fixes/Closes/Resolves #N), unless overridden. Bots are
@@ -415,10 +427,10 @@ jobs:
           ROUND: ${{ steps.gate.outputs.round }}
           CAP: ${{ inputs.review_round_cap }}
         run: |
-          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, reply to that specific comment with a brief rationale instead of changing code. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, commit and push to the current branch as the machine account (this re-runs CI), then post a single top-level comment of exactly \`@review\` to request re-review. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you pushed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT post the re-review request — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. ENDING CONTRACT (mandatory): a run that pushed ANY commit must end with exactly ONE of the two hand-backs — the \`@review\` re-review comment, or the doc-only exception's handoff comment. Pushing and posting neither is never permitted: it strands the board at Agent with nothing running, because the loop's only stage transitions come from reviewer verdicts and handoff markers. After pushing, resolve the inline review threads you fully addressed in code, so settled feedback is visibly closed: list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\`, \`isResolved\`, and its \`comments\`), then for each thread you resolved in code run the \`resolveReviewThread\` mutation, e.g. \`gh api graphql -f query='mutation(\$id:ID!){resolveReviewThread(input:{threadId:\$id}){thread{isResolved}}}' -F id=<threadId>\`. Leave UNRESOLVED any thread you deliberately declined (the one you replied to with a rationale) so a human can adjudicate it, and never resolve a thread you did not actually address. Hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a posted rationale, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then post ONE comment whose FIRST line is exactly \`<!-- auto-handoff -->\` (the workflow moves the board stage on that marker), followed by a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status, and @-mention the PR's originating human (the author of the issue referenced by \"Fixes #<n>\" in the PR body, if any). Do NOT merge — auto hands the final step to a human. In any comment you post here, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. The same discipline applies to the review trigger: the ONLY place you may write that token bare is the single exact re-review request comment described above — anywhere else in comment prose, backtick it (\`@review\`), because your comments post as a write-access account and a bare token anywhere in the body starts a review run. Skip posting if an equivalent handoff comment already exists." >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, reply to that specific comment with a brief rationale instead of changing code. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, commit and push to the current branch as the machine account (this re-runs CI), then post a single top-level comment of exactly \`@review\` to request re-review. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you pushed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT post the re-review request — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. ENDING CONTRACT (mandatory): a run that pushed ANY commit must end with exactly ONE of the two hand-backs — the \`@review\` re-review comment, or the doc-only exception's handoff comment. Pushing and posting neither is never permitted: it strands the board at Agent with nothing running, because the loop's only stage transitions come from reviewer verdicts and handoff markers. After pushing, resolve the inline review threads you fully addressed in code, so settled feedback is visibly closed: list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\`, \`isResolved\`, and its \`comments\`), then for each thread you resolved in code run the \`resolveReviewThread\` mutation, e.g. \`gh api graphql -f query='mutation(\$id:ID!){resolveReviewThread(input:{threadId:\$id}){thread{isResolved}}}' -F id=<threadId>\`. Leave UNRESOLVED any thread you deliberately declined (the one you replied to with a rationale) so a human can adjudicate it, and never resolve a thread you did not actually address. Hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a posted rationale, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then post ONE comment whose FIRST line is exactly \`<!-- auto-handoff -->\` (the workflow moves the board stage on that marker), followed by a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status, and @-mention the PR's originating human (the author of the issue referenced by \"Fixes #<n>\" in the PR body, if any). Do NOT merge — auto hands the final step to a human. In any comment you post here, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. The same discipline applies to the review trigger: the ONLY place you may write that token bare is the single exact re-review request comment described above — anywhere else in comment prose, backtick it (\`@review\`), because your comments post as a write-access account and a bare token anywhere in the body starts a review run. The loop's marker substrings get the same discipline: never write claude-review-summary, claude-review-verdict, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment you post — the loop matches them by plain substring, so quoting a reviewer verdict comment verbatim would forge a verdict; when referencing one, break it (e.g. 'claude-review summary'). The auto-handoff marker is legitimate ONLY as the first line of the single handoff comment described above; never quote it elsewhere. Skip posting if an equivalent handoff comment already exists." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
-        if: steps.gate.outputs.act == 'fix'
+        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
         id: claude
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
@@ -437,6 +449,171 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
 
+      # ---- Codex engine fix round (design/codex-engine.md) -------------------
+      # No network/credentials in the codex sandbox, so the review feedback is
+      # pre-fetched into the prompt file and the landing (commit/push/post) is
+      # deterministic. The existing backstops then close the loop: a push with
+      # no hand-back gets the @review from "Ensure hand-back after push"; a
+      # no-change round posts the auto-handoff marker the selfhandoff detector
+      # stages. Review-thread resolution needs gh and is a v1 non-goal — the
+      # handoff notes threads are left for the human.
+      - name: Prepare codex fix context
+        id: codexprep
+        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          ROUND: ${{ steps.gate.outputs.round }}
+          CAP: ${{ inputs.review_round_cap }}
+        run: |
+          set -euo pipefail
+          git config user.name "i-am-marvin"
+          git config user.email "i-am-marvin@users.noreply.github.com"
+          {
+            echo "You are auto, addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP), running on the Codex engine in a local checkout of the PR's head branch."
+            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Edit the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts the re-review request for you. Verify your changes with the local tools (pytest/ruff/mypy) where relevant."
+            echo "Address the feedback thoroughly — including minor and explicitly non-blocking suggestions. Leave unaddressed only what you genuinely disagree with or is out of scope, and say why in your final message."
+            echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for your changes (it becomes the commit subject), then a blank line, then a body listing what you addressed and anything you deliberately declined with rationale (it is posted as a comment). If nothing needs changing, leave the tree untouched and explain why."
+            echo ""
+            # --slurp is incompatible with gh's own --jq (gh rejects the
+            # combination outright), so pipe to standalone jq — with gh's
+            # --jq these fetches died to the 2>/dev/null and the context
+            # sections came out silently empty.
+            echo "RECENT PR COMMENTS (newest last; the review feedback is here):"
+            gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null \
+              | jq -r 'add | .[-12:][] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' 2>/dev/null || true
+            # Bounded like the issue-comment slice above: the head -c cap
+            # below keeps the START of the file, so an unbounded inline
+            # section (every thread the PR ever had, oldest first) would
+            # crowd out the NEWEST feedback — the findings this round is
+            # meant to address — on long-lived comment-heavy PRs.
+            echo "INLINE REVIEW COMMENTS (path:line; newest last):"
+            gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null \
+              | jq -r 'add | .[-40:][] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' 2>/dev/null || true
+          } >"$RUNNER_TEMP/codex-context.md"
+          # Unlike the dev-verb compose (where the trigger text is the
+          # primary payload and degrading to less context is right), the
+          # review feedback IS this round's task, and the verdict comment
+          # that triggered the run guarantees at least one PR comment exists
+          # — so an empty feedback section can only be a failed fetch (a
+          # transient gh/API error swallowed by the || true). Proceeding
+          # would spend the round on a feedback-less prompt and conclude the
+          # loop on missing context; fail loud instead — a codexprep failure
+          # routes into the existing error surfacing and the round refund.
+          if ! sed -n '/^RECENT PR COMMENTS/,/^INLINE REVIEW COMMENTS/p' \
+              "$RUNNER_TEMP/codex-context.md" | grep -q '^--- '; then
+            echo "::error::review-feedback fetch returned no comments (transient gh/API failure?) — failing the round rather than running codex without the feedback"
+            exit 1
+          fi
+          # Cap + de-fang from the completed scratch file, NOT in one pipeline
+          # with the writers above: with the group piped straight into head -c,
+          # the cap being hit mid-group leaves the next writer (a plain echo)
+          # facing a closed pipe — SIGPIPE kills the group subshell (or, with
+          # SIGPIPE ignored, set -e catches the write error) and pipefail fails
+          # the step, data-dependently. Reading a file, no writer ever sees a
+          # closed pipe. (The sed is belt-and-braces with the landing step's
+          # output de-fang: the embedded comments include the reviewer's
+          # verdict comments, and a marker substring codex never sees is one
+          # it cannot echo; the substitutions are length-neutral.)
+          head -c 120000 "$RUNNER_TEMP/codex-context.md" \
+            | sed -E -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >.codex-prompt.md
+          #
+          # The landing step stages with a blanket `git add -A`, so exclude
+          # the prompt file and the scratch codex's verification runs leave
+          # behind on repos whose .gitignore doesn't cover it (caches, venvs).
+          printf '%s\n' .codex-prompt.md .venv/ venv/ __pycache__/ \
+            .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
+            >>.git/info/exclude
+
+      - name: Run Codex fix
+        id: codexfix
+        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":workspace"
+          allow-bot-users: "claude"
+          prompt-file: .codex-prompt.md
+          output-file: ${{ runner.temp }}/codex-final.md
+
+      - name: Land codex fix
+        id: codexland
+        if: steps.codexfix.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          ROUND: ${{ steps.gate.outputs.round }}
+          MENTION: ${{ steps.gate.outputs.mention }}
+          OUT: ${{ runner.temp }}/codex-final.md
+          START_SHA: ${{ steps.base.outputs.sha }}
+          HEAD_BRANCH: ${{ steps.gate.outputs.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            # || true inside the substitution: without it a missing/unreadable
+            # $OUT fails the pipeline and set -e kills the step before the
+            # fallback is reached — the fallback would only ever cover an
+            # empty first line.
+            subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120 || true)
+            [ -n "$subject" ] || subject="codex: address review feedback on PR #$PR"
+            git add -A
+            git commit --quiet -m "$subject" -m "Co-Authored-By: Codex <noreply@openai.com>"
+          fi
+          # Landable work = HEAD moved since round start, not just a dirty
+          # tree: the prompt calls local commits unnecessary but they are
+          # possible, and a status-only check would silently discard them
+          # with the runner. Explicit refspec so the PR head branch is what
+          # gets updated even if codex left HEAD on some other local branch;
+          # a diverted HEAD that isn't genuinely new work fails the push
+          # non-fast-forward — loud, not lossy.
+          pushed=""
+          if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
+            git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
+            pushed=1
+            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH"
+          fi
+          # One comment either way, de-fanged (posts from a write-access
+          # account; the gate and the hand-back backstop match the loop's
+          # verdict/handoff markers with plain substring contains(), so codex
+          # QUOTING one — likely, its prompt embeds the reviewer's verdict
+          # comments verbatim — would forge a verdict or suppress an owed
+          # hand-back: break those substrings too, in codex's text only, not
+          # the deliberate leading marker below). Pushed: a plain summary —
+          # "Ensure hand-back" below owes the @review. No changes: the round
+          # is concluded — lead with the auto-handoff marker so the
+          # selfhandoff detector moves the board.
+          {
+            if [ -z "$pushed" ]; then
+              echo "<!-- auto-handoff -->"
+              ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
+              printf '%sauto (codex, round %s): no code changes this round — summary below. Inline review threads are not auto-resolved on the codex engine; please resolve any settled ones.\n\n' "$ping" "$ROUND"
+            else
+              printf '🤖 auto (codex, round %s): changes pushed — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
+            fi
+            sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+                   "$OUT" 2>/dev/null || echo "(codex produced no final message)"
+          } >"$RUNNER_TEMP/codex-comment.md"
+          # GitHub caps comment bodies at 65,536 characters and codex's final
+          # message is unbounded; here the post failing lands AFTER the push,
+          # losing the summary for work that already landed. Truncate with a
+          # note instead — the leading auto-handoff marker sits at the START
+          # of the file so a no-change round's stage move survives the cap,
+          # and cutting the de-fanged body can't resurrect a trigger or
+          # marker (the sed removed the @ / split the substrings, and
+          # truncation only drops trailing bytes).
+          if [ "$(wc -c <"$RUNNER_TEMP/codex-comment.md")" -gt 60000 ]; then
+            head -c 60000 "$RUNNER_TEMP/codex-comment.md" >"$RUNNER_TEMP/codex-comment.trunc"
+            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-comment.trunc"
+            mv "$RUNNER_TEMP/codex-comment.trunc" "$RUNNER_TEMP/codex-comment.md"
+          fi
+          gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
+      # ---- end Codex engine ---------------------------------------------------
+
       # The agent may end the loop itself instead of posting @review — a
       # documentation-only nit round, or all remaining feedback declined with
       # Backstop for the ending contract: a fix round that pushed commits must
@@ -446,8 +623,13 @@ jobs:
       # neither hand-back was posted, post the re-review request as the
       # machine account — a redundant review round is the safe completion
       # (word-boundary gate + newest-wins concurrency make duplicates cheap).
+      # Codex gate is codexfix, not codexland: a landing that pushed and then
+      # died posting its comment still owes the @review — this step detects
+      # the push itself, so gating on the earlier step closes that gap.
       - name: Ensure hand-back after push
-        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'success'
+        if: >-
+          always() && steps.gate.outputs.act == 'fix' &&
+          (steps.claude.outcome == 'success' || steps.codexfix.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -489,7 +671,9 @@ jobs:
       # deterministic converged/escalate paths only fire on reviewer verdicts.
       - name: Detect agent self-handoff
         id: selfhandoff
-        if: steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'success'
+        if: >-
+          steps.gate.outputs.act == 'fix' &&
+          (steps.claude.outcome == 'success' || steps.codexland.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -529,11 +713,23 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           MENTION: ${{ steps.gate.outputs.mention }}
           HANDED: ${{ steps.selfhandoff.outputs.found }}
+          CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
+          CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
+          CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
           [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
+            err="the codex context-preparation step failed before the agent started — no fix was attempted this round (see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
+            err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
+            err="codex finished but its landing step failed — the fix may not have reached the branch (see the job logs)."
+          fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review-fix step failed before producing a result (see the job logs)."
           fi
@@ -590,10 +786,20 @@ jobs:
 
       # Infra crashes must not burn review rounds (mirror of claude-auto.yml's
       # attempt refund): a step that died with NO execution output attempted
-      # nothing. Rebuild the sticky counter body including the head marker the
-      # next gate's no-progress check reads. Per-PR concurrency serializes us.
+      # nothing. A failed codex step is the same class — its landing step
+      # never ran, so nothing reached the PR (persistently missing
+      # OPENAI_API_KEY must not march a PR to spurious escalation) — and so
+      # is a failed codex PREP step, which dies before the agent starts and
+      # skips codexfix outright; the exec-file guard below is Claude-only and
+      # no execution file ever exists on the codex path, so the refund
+      # proceeds. Rebuild the sticky counter body including the head marker
+      # the next gate's no-progress check reads. Per-PR concurrency
+      # serializes us.
       - name: Refund infra-crashed round
-        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'failure'
+        if: >-
+          always() && steps.gate.outputs.act == 'fix' &&
+          (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure' ||
+           steps.codexprep.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}

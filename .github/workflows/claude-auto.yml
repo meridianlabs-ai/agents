@@ -98,6 +98,11 @@ on:
           GITHUB_TOKEN push wouldn't — recursion guard), and the same identity
           drove the PR. Without it the loop can't function, so the job no-ops.
         required: false
+      OPENAI_API_KEY:
+        description: >-
+          OpenAI API key for the codex engine (design/codex-engine.md); used
+          only by CI-fix rounds on PRs labeled engine:codex.
+        required: false
 
 jobs:
   auto-ci-fix:
@@ -172,6 +177,9 @@ jobs:
           fi
           number=$(jq -r '.number' <<<"$pr")
           echo "pr=$number" >>"$GITHUB_OUTPUT"
+          # Engine selection (design/codex-engine.md): the PR's engine:codex
+          # label routes fix rounds to Codex.
+          echo "engine=$(jq -r 'if any(.labels[]; .name=="engine:codex") then "codex" else "claude" end' <<<"$pr")" >>"$GITHUB_OUTPUT"
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr")" != "true" ]; then
             echo "PR #$number is not @auto-labeled; skipping."; act skip; exit 0
           fi
@@ -289,10 +297,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
         run: |
           # Single line: the prompt is spliced as one arg downstream.
-          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop." >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment — they are matched by plain substring, so quoting one (e.g. when citing a reviewer comment) would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary')." >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
-        if: steps.gate.outputs.act == 'fix'
+        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
         id: claude
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
@@ -307,6 +315,124 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
 
+      # ---- Codex engine CI-fix round (design/codex-engine.md) ----------------
+      # The codex sandbox has no network, so the failing CI logs are
+      # pre-fetched into the prompt file; commit/push/post are deterministic.
+      # A push then owes the @review hand-back, which the backstop below posts.
+      - name: Prepare codex CI-fix context
+        id: codexprep
+        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          HEAD: ${{ inputs.head_branch }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+        run: |
+          set -euo pipefail
+          git config user.name "i-am-marvin"
+          git config user.email "i-am-marvin@users.noreply.github.com"
+          {
+            echo "You are auto, fixing failing CI on PR #$PR in $REPO (branch $HEAD, fix attempt $ATTEMPT of $CAP), running on the Codex engine in a local checkout of the branch."
+            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes (which re-runs CI), and posts for you. Verify locally (pytest/ruff/mypy) where relevant."
+            echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the fix (it becomes the commit subject), then a blank line, then a body explaining the root cause and the fix (posted as a comment). If you cannot fix it, leave the tree untouched and explain what is blocking."
+            echo ""
+            echo "FAILING CI LOG (run $CI_RUN_ID, failed jobs, tail):"
+            gh run view "$CI_RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 100000 || echo "(log unavailable)"
+          } >.codex-prompt.md
+          # The landing step stages with a blanket `git add -A`, so exclude
+          # the prompt file and the scratch codex's verification runs leave
+          # behind on repos whose .gitignore doesn't cover it (caches, venvs).
+          printf '%s\n' .codex-prompt.md .venv/ venv/ __pycache__/ \
+            .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
+            >>.git/info/exclude
+
+      - name: Run Codex CI fix
+        id: codexfix
+        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":workspace"
+          # workflow_run's actor is the CI run's actor: normally the machine
+          # account (a User with write — passes the action's built-in check),
+          # but a branch the Claude App pushed (mixed-engine PR relabeled
+          # mid-loop) makes it the claude bot — allow that one, matching the
+          # other codex steps.
+          allow-bot-users: "claude"
+          prompt-file: .codex-prompt.md
+          output-file: ${{ runner.temp }}/codex-final.md
+
+      - name: Land codex fix
+        id: codexland
+        if: steps.codexfix.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          OUT: ${{ runner.temp }}/codex-final.md
+          START_SHA: ${{ steps.base.outputs.sha }}
+          HEAD_BRANCH: ${{ inputs.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            # || true inside the substitution: without it a missing/unreadable
+            # $OUT fails the pipeline and set -e kills the step before the
+            # fallback is reached — the fallback would only ever cover an
+            # empty first line.
+            subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120 || true)
+            [ -n "$subject" ] || subject="codex: fix failing CI on PR #$PR"
+            git add -A
+            git commit --quiet -m "$subject" -m "Co-Authored-By: Codex <noreply@openai.com>"
+          fi
+          # Landable work = HEAD moved since the run started, not just a
+          # dirty tree: the prompt calls local commits unnecessary but they
+          # are possible, and a status-only check would silently discard
+          # them with the runner. Explicit refspec so the PR head branch is
+          # what gets updated even if codex left HEAD on some other local
+          # branch; a diverted HEAD that isn't genuinely new work fails the
+          # push non-fast-forward — loud, not lossy.
+          pushed=""
+          if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
+            git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
+            pushed=1
+            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH"
+          fi
+          # Post the summary either way (a no-change round IS the blocker
+          # comment the ending contract calls for), de-fanged: it posts from
+          # a write-access account, and the loops match their verdict/handoff
+          # markers with plain substring contains() — codex QUOTING a marker
+          # would forge a verdict or suppress an owed hand-back, so break
+          # those substrings too. On a push, the backstop below posts the
+          # owed @review.
+          {
+            if [ -n "$pushed" ]; then
+              printf '🤖 auto (codex, CI-fix attempt %s): fix pushed — summary below.\n\n' "$ATTEMPT"
+            else
+              printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"
+            fi
+            sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+                   "$OUT" 2>/dev/null || echo "(codex produced no final message)"
+          } >"$RUNNER_TEMP/codex-comment.md"
+          # GitHub caps comment bodies at 65,536 characters and codex's final
+          # message is unbounded; here the post failing lands AFTER the push,
+          # losing the summary for work that already landed. Truncate with a
+          # note instead — cutting the de-fanged body can't resurrect a
+          # trigger or marker (the sed removed the @ / split the substrings,
+          # and truncation only drops trailing bytes).
+          if [ "$(wc -c <"$RUNNER_TEMP/codex-comment.md")" -gt 60000 ]; then
+            head -c 60000 "$RUNNER_TEMP/codex-comment.md" >"$RUNNER_TEMP/codex-comment.trunc"
+            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-comment.trunc"
+            mv "$RUNNER_TEMP/codex-comment.trunc" "$RUNNER_TEMP/codex-comment.md"
+          fi
+          gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
+      # ---- end Codex engine ---------------------------------------------------
+
       # Backstop for the ending contract above: a fix round that pushed ANY
       # commit must re-request review — the push invalidates the standing
       # verdict, and without the @review comment (the loop's only hand-back
@@ -317,8 +443,13 @@ jobs:
       # re-review request as the machine account (whose comments trigger the
       # reviewer). Exact-body comment; the reviewer's word-boundary gate and
       # per-PR newest-wins concurrency make a duplicate harmless.
+      # Codex gate is codexfix, not codexland: a landing that pushed and then
+      # died posting its comment still owes the @review — this step detects
+      # the push itself, so gating on the earlier step closes that gap.
       - name: Ensure hand-back after push
-        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'success'
+        if: >-
+          always() && steps.gate.outputs.act == 'fix' &&
+          (steps.claude.outcome == 'success' || steps.codexfix.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -369,11 +500,23 @@ jobs:
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
           SINCE: ${{ steps.base.outputs.ts }}
+          CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
+          CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
+          CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
           [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
+            err="the codex context-preparation step failed before the agent started — no fix was attempted (see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
+            err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
+            err="codex finished but its landing step failed — the fix may not have reached the branch (see the job logs)."
+          fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the CI-fix step failed before producing a result (see the job logs)."
           fi
@@ -474,9 +617,18 @@ jobs:
       # observed: "socket hang up" before the agent started) attempted no fix,
       # and two such blips nearly escalated a PR spuriously. Roll the sticky
       # counter back one; any run that produced execution output still counts.
+      # A failed codex step is the same class — its landing step never ran,
+      # so no fix reached the branch (a persistently missing OPENAI_API_KEY
+      # must not burn attempts toward spurious escalation) — and so is a
+      # failed codex PREP step, which dies before the agent starts and skips
+      # codexfix outright; no execution file ever exists on the codex path,
+      # so the guard below refunds it.
       # Safe from races: the job's per-PR concurrency group serializes us.
       - name: Refund infra-crashed attempt
-        if: always() && steps.gate.outputs.act == 'fix' && steps.claude.outcome == 'failure'
+        if: >-
+          always() && steps.gate.outputs.act == 'fix' &&
+          (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure' ||
+           steps.codexprep.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}

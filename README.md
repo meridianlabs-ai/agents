@@ -101,6 +101,20 @@ handoff from reviewer to dev agent (the reviewer's comments don't contain
 This keeps your judgment in the loop on which findings matter. See the design
 doc for why we avoid a fully automatic reviewer→fixer loop.
 
+## Choosing the engine (`engine:codex`)
+
+The verbs above default to Claude Code. Labeling an issue or PR
+**`engine:codex`** routes its runs — dev agent, reviewer, and both @auto
+loops — to OpenAI Codex instead; removing the label switches back on the
+next run. Same triggers, same markers, same board tracking. Requirements:
+the repo needs the `OPENAI_API_KEY` org secret and the `engine:codex`
+label created (`gh label create engine:codex -c 8250DF -d "route agent
+runs to Codex"`). Codex v1 differences: review findings arrive as one
+summary comment (no inline comments, no thread auto-resolution), codex
+reviews are static (unlike the Claude reviewer, codex cannot run tests
+to verify findings), and external proxy reviews always use Claude.
+Details: [design/codex-engine.md](design/codex-engine.md).
+
 ## The inspect_ai fork
 
 [meridianlabs-ai/inspect_ai](https://github.com/meridianlabs-ai/inspect_ai) is
