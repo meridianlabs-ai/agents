@@ -661,11 +661,20 @@ jobs:
           # unlabeled PR, so the review-fix loop never engaged (inspect_ai#71/#74).
           # Idempotent, and independent of who opened the PR — must run on the
           # adopt path too, or fork/agent-opened PRs never get labeled.
+          issue_labels=$(gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || true)
           if [ "$TRIGGER_PHRASE" = "@auto" ] \
-             || gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null \
-                  | grep -qx "$AUTO_LABEL"; then
+             || grep -qx "$AUTO_LABEL" <<<"$issue_labels"; then
             echo "@auto run; labeling $pr_url with '$AUTO_LABEL'."
             gh pr edit "$pr_url" --add-label "$AUTO_LABEL" || true
+          fi
+          # Propagate the engine label too (design/codex-engine.md): every
+          # PR-scoped run — reviewer, both loop rounds — reads the PR's own
+          # labels, so without this an issue-selected engine would silently
+          # revert to Claude the moment the PR opens. Runs before the
+          # @review below, so the reviewer already sees the label.
+          if grep -qx "engine:codex" <<<"$issue_labels"; then
+            echo "propagating engine:codex to $pr_url."
+            gh pr edit "$pr_url" --add-label "engine:codex" || true
           fi
           # Start the reviewer — but only AFTER the label above, so the review-fix
           # loop sees an authorized (labeled) PR when the reviewer's summary lands.
