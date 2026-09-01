@@ -421,7 +421,8 @@ jobs:
           set -euo pipefail
           # ISO-8601 UTC timestamps compare correctly as strings; an empty
           # $since (open PR) makes every marker comment count, as before.
-          # `--paginate` emits one JSON array per page; -s slurps them so
+          # `--paginate` output is one merged array on current gh, one array
+          # per page on older releases; -s plus `.[][]` flattens either so
           # the check yields a single true/false. An API failure yields ""
           # and falls through to posting — same as before.
           since=""
@@ -434,7 +435,7 @@ jobs:
           fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
           if [ "${CONTINUATION:-}" = "true" ]; then
-            ci="this PR is closed, so the checks shown here are the frozen pre-close runs — CI for the live branch tip runs on the upstream PR (or as push-triggered checks on the branch)."
+            ci="this PR is closed, so the checks shown here are the frozen pre-close runs — CI for the live branch tip runs as push-triggered checks on the branch (and, on repos with a promotion flow, on the upstream PR)."
           else
             ci="see the checks above for CI status."
           fi
