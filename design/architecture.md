@@ -436,7 +436,12 @@ non-fast-forward push — the next round re-merges on top of the new tip. In
 re-review request on a successful `@auto` run: the Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a
 merge-only round would otherwise move the head with nobody owing the hand-back
-(the loop workflows already cover this with "Ensure hand-back after push"). A
+(the loop workflows already cover this with "Ensure hand-back after push"). One
+consequence in the CI-fix loop: when the agent gives up on a failure on a
+*behind* branch, the merge-only push re-runs CI, which fails the same way and
+spends exactly one more `fix_attempt_cap` attempt — that next attempt finds the
+branch up to date, sets no `merge_sha`, pushes nothing, and stops. That is the
+intended cost of restoring a computable merge ref, not a loop bug. A
 merge that reports "Already up to date" sets no `merge_sha` at all, so neither
 the backstop nor the "review the runner's merge" note fires on a branch that
 already contains its base.

@@ -433,7 +433,9 @@ jobs:
       # workflow runs the action in agent mode (bare `prompt:`, no
       # track_progress), which does NOT run setupBranch, so the action would
       # tolerate an in-progress merge here. The split is mirrored anyway: one
-      # mental model and one branch_sync_prompt across all three workflows.
+      # mental model and one merge instruction across all three workflows (here
+      # the inline merge_note in "Compose review-fix prompt"; claude.yml's is
+      # its branch_sync_prompt input).
       - name: Sync branch with base
         id: sync
         if: steps.gate.outputs.act == 'fix'
