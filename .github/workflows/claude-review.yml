@@ -528,7 +528,11 @@ jobs:
       # optional-dependencies at all), where the extras warning would mean
       # a green step with a toolless venv — so when that table exists,
       # `--group dev` is added; unlike an unknown extra, an absent group
-      # ERRORS, which is the loud failure this step wants. Parity gap,
+      # ERRORS, which is the loud failure this step wants. The table is
+      # detected with tomllib (runner python3 is ≥3.11), not grep: TOML
+      # allows whitespace in/before the header, and a formatting variant
+      # silently taking the extras-only branch is the exact toolless-venv
+      # outcome the group branch exists to prevent. Parity gap,
       # accepted: claude-setup pins `--python
       # 3.11` to the fork's CI, while bare `uv venv` resolves the runner's
       # default (3.12 today, drifting with the image) — a generic fallback
@@ -557,7 +561,7 @@ jobs:
           done
           export PATH="$HOME/.local/bin:$PATH"
           uv venv
-          if grep -q '^\[dependency-groups\]' pyproject.toml; then
+          if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
             uv pip install -e ".[dev]" --group dev
           else
             uv pip install -e ".[dev]"
