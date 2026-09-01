@@ -379,7 +379,13 @@ stale code.
 
 So the merge is now a **deterministic `Sync branch with base` step** in all
 three workflows, running before either engine starts, on PR-context runs only.
-Four details are load-bearing:
+The step body lives once, in the `.github/actions/sync-branch` composite
+(referenced `@main` like `set-stage`); the two enforcement pieces below are
+composites too — `unresolved-merge-guard` and `push-base-merge` — so the three
+workflows differ only in their inputs (`claude.yml` passes `checkout: true`
+because its checkout is not on the PR head, and a `push-token` because its
+checkout persisted `github.token`), never in the logic. Four details are
+load-bearing:
 
 - **The pre-merge tip is what gets stamped.** The landing steps treat "HEAD
   moved past the recorded SHA" as landable work. Stamped *after* the merge, a
@@ -418,9 +424,11 @@ Four details are load-bearing:
   unless it is `OPEN`.
 - **The landing step is the enforcement point.** `git add -A` would happily
   stage conflict markers and `git commit` would produce a valid merge commit
-  containing them, so codex's landing refuses to push when
-  `git ls-files --unmerged` is non-empty or a `<<<<<<< `/`>>>>>>> ` marker
-  survives in one of the reported files. `=======` is deliberately not matched:
+  containing them, so an `unresolved-merge-guard` step immediately before
+  codex's landing refuses to proceed when `git ls-files --unmerged` is
+  non-empty or a `<<<<<<< `/`>>>>>>> ` marker survives in one of the reported
+  files (a failed guard skips the landing step; the "Surface agent errors"
+  steps read the guard's outcome and post the cause). `=======` is deliberately not matched:
   a bare seven-equals line is a legitimate rST/Markdown heading underline, and
   a repo-wide grep for it would fail honest docs changes.
 

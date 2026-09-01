@@ -184,8 +184,9 @@ workaround when #103's does).
   the runner for BOTH engines, before either agent starts. Codex still
   can't fetch — it never does the merge itself; it is handed the *result*.
   On a conflict the merge is left IN PROGRESS and the conflict list is
-  spliced into the codex prompt as a first-class task; the landing step
-  then refuses to push while `git ls-files --unmerged` is non-empty or a
+  spliced into the codex prompt as a first-class task; the
+  `unresolved-merge-guard` step ahead of the landing step then refuses to
+  land while `git ls-files --unmerged` is non-empty or a
   `<<<<<<< `/`>>>>>>> ` marker survives in one of those files. (`=======`
   is deliberately not matched — it is a legitimate rST/Markdown heading
   underline.) The Claude path in `claude.yml` cannot receive an in-progress

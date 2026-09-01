@@ -19,6 +19,13 @@ take effect on every repo's next run.
   agents run here too. `-stub` suffix because the canonical stub filenames are
   taken by the reusable definitions; keep them in sync with `examples/`. No CI
   here, so the @auto stub omits the CI-fix half.
+- `.github/actions/*` — composite actions holding step logic shared across the
+  reusable workflows (`set-stage`, `sync-branch`, `unresolved-merge-guard`,
+  `push-base-merge`). Referenced fully-qualified
+  (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
+  regardless of what the job checked out; put step bodies that would otherwise
+  be copied between `claude.yml`, `claude-auto.yml` and `claude-auto-review.yml`
+  here rather than letting the copies drift.
 - `examples/` — stubs copied into caller repos by `scripts/enable-claude.sh`.
 - `design/` — rationale and history; read [design/architecture.md](design/architecture.md)
   before changing how the agents work.
