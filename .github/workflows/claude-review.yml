@@ -519,9 +519,22 @@ jobs:
       # retries internally. Both bin dirs go on GITHUB_PATH so pytest/ruff/
       # mypy resolve for either engine. Fatal on failure, exactly like
       # claude-setup: a repo whose pyproject exists but cannot dev-install
-      # is a loud signal, not a silent static review.
+      # is a loud signal, not a silent static review. No plain `-e .`
+      # fallback: uv (verified on 0.9.4), like pip, only WARNS on an
+      # unknown extra, so the `[dev]` install already succeeds on repos
+      # without one — a fallback could only mask real failures as a silent
+      # static degrade. Parity gap, accepted: claude-setup pins `--python
+      # 3.11` to the fork's CI, while bare `uv venv` resolves the runner's
+      # default (3.12 today, drifting with the image) — a generic fallback
+      # can't hardcode any one minor; repos that care can ship a
+      # `.python-version`, which uv honors.
       - name: Provision project environment (fallback)
         id: setupfb
+        # Same hazard class as the sandbox-install hang above: uv bootstrap
+        # plus a full dependency resolution, no other timeout before GitHub's
+        # 6h ceiling. On expiry SETUPFB_OUTCOME=failure feeds the Surface
+        # step's ⚠️ + re-trigger message.
+        timeout-minutes: 10
         if: >-
           steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
@@ -538,7 +551,7 @@ jobs:
           done
           export PATH="$HOME/.local/bin:$PATH"
           uv venv
-          uv pip install -e ".[dev]" 2>/dev/null || uv pip install -e .
+          uv pip install -e ".[dev]"
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
           echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
 
