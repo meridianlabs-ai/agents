@@ -70,6 +70,11 @@ Notes:
   branch. On a **PR**, it pushes to the existing PR branch. Drive iterative
   work (review fixes, follow-ups) from the PR, not the issue, or you'll spawn a
   parallel branch.
+- PR follow-ups first merge the base branch into the PR branch on the runner,
+  and push that merge even if nothing else lands — so a behind branch may gain
+  a merge commit from the machine account after any `@claude` request (pull
+  before pushing local work). That merge is what lets GitHub compute a merge
+  ref again, so CI can run.
 - The agent runs the project's tests/lint to verify its work before opening a
   PR (per each repo's CLAUDE.md conventions).
 

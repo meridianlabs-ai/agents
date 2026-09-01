@@ -635,7 +635,12 @@ jobs:
       # guard, push). No push-token: this job's checkout persisted
       # MARVIN_TOKEN, so a plain push already authenticates as the machine
       # account and re-triggers CI.
+      # The id is for "Surface agent errors": without it a failed push here is
+      # misdiagnosed — the runner's merge sits in rev-list BASE_SHA..HEAD while
+      # origin still equals BASE_SHA, so the unlanded-work check would blame
+      # the agent for edits it never made.
       - name: Push base merge if unpushed
+        id: backstop
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
           steps.gate.outputs.engine != 'codex' && steps.sync.outputs.merge_sha != ''
@@ -892,10 +897,13 @@ jobs:
             git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
             pushed=1
             # HEAD still exactly the runner's clean base merge: codex changed
-            # nothing (any commit above would have moved it), so say so
-            # rather than announcing "changes pushed" over a summary that
-            # says nothing needed changing. Still a push, so "Ensure
-            # hand-back" owes the @review — the re-run is what gets real CI.
+            # nothing (any commit above would have moved it). The push itself
+            # is what restores CI (a computable merge ref); a re-review would
+            # only re-read the same code codex just declined to change, so
+            # this round is treated like a no-change round below and
+            # concludes with the hand-off. That also keeps the gate's
+            # no-progress escalation honest: a re-review here would let the
+            # moved tip read as progress on every round the base moves.
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
             echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
           fi
@@ -905,17 +913,16 @@ jobs:
           # QUOTING one — likely, its prompt embeds the reviewer's verdict
           # comments verbatim — would forge a verdict or suppress an owed
           # hand-back: break those substrings too, in codex's text only, not
-          # the deliberate leading marker below). Pushed: a plain summary —
-          # "Ensure hand-back" below owes the @review. No changes: the round
-          # is concluded — lead with the auto-handoff marker so the
-          # selfhandoff detector moves the board.
+          # the deliberate leading marker below). Pushed with codex changes:
+          # a plain summary — "Ensure hand-back" below owes the @review. No
+          # changes, or the base merge alone: the round is concluded — lead
+          # with the auto-handoff marker so the selfhandoff detector moves
+          # the board and "Ensure hand-back" sees the hand-off already posted.
           {
-            if [ -z "$pushed" ]; then
+            if [ -z "$pushed" ] || [ -n "$merge_only" ]; then
               echo "<!-- auto-handoff -->"
               ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
-              printf '%sauto (codex, round %s): no code changes this round — summary below. Inline review threads are not auto-resolved on the codex engine; please resolve any settled ones.\n\n' "$ping" "$ROUND"
-            elif [ -n "$merge_only" ]; then
-              printf '🤖 auto (codex, round %s): base merge pushed; no code changes this round — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
+              printf '%sauto (codex, round %s): no code changes this round%s — summary below. Inline review threads are not auto-resolved on the codex engine; please resolve any settled ones.\n\n' "$ping" "$ROUND" "${merge_only:+ (the base-branch merge from the workflow was pushed)}"
             else
               printf '🤖 auto (codex, round %s): changes pushed — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
             fi
@@ -968,8 +975,12 @@ jobs:
           git fetch --quiet origin "$HEAD_BRANCH" 2>/dev/null || true
           tip=$(git rev-parse "origin/$HEAD_BRANCH" 2>/dev/null || echo "$BASE_SHA")
           [ "$tip" = "$BASE_SHA" ] && { echo "No push this round; no hand-back owed."; exit 0; }
+          # Hand-off marker matched as the leading line (same shape as the
+          # selfhandoff detector), not as a substring: the action's tracking
+          # comment is rewritten with the agent's summary, which may mention
+          # the marker in prose without being a hand-off.
           posted=$(gh api "repos/$REPO/issues/$PR/comments?since=$SINCE" \
-            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | contains("auto-handoff")))] | length' 2>/dev/null || echo 0)
+            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
           if [ "${posted:-0}" -gt 0 ]; then
             echo "Hand-back already posted this round."
           else
@@ -1040,6 +1051,7 @@ jobs:
           MENTION: ${{ steps.gate.outputs.mention }}
           HANDED: ${{ steps.selfhandoff.outputs.found }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
@@ -1079,6 +1091,26 @@ jobs:
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review-fix step failed before producing a result (see the job logs)."
+          fi
+          # The base-merge backstop's push failed after a healthy agent run
+          # (token scope, transient network). Checked BEFORE the unlanded-work
+          # check below: the runner's merge commit is in rev-list
+          # BASE_SHA..HEAD while origin still equals BASE_SHA, so without this
+          # clause that check would report agent edits that never landed —
+          # the wrong diagnosis for a round where the agent changed nothing.
+          # "Changed nothing" means COMMITTED nothing, though: the agent can
+          # still have left uncommitted edits to tracked files (edited, then
+          # ran out of turns or hit a tool denial before committing), and
+          # this clause preempts the check that would have reported them —
+          # so say so here when the tree is dirty instead of asserting that
+          # nothing was lost.
+          if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
+            err="the agent finished, but pushing the runner's base-branch merge failed (see the job logs) — the PR branch is still behind its base."
+            if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ]; then
+              err="$err The agent also left uncommitted edits to tracked files that never reached the branch."
+            else
+              err="$err No fix was lost: the agent made no changes this round."
+            fi
           fi
           # Completed-but-blocked: the action reports success, but the agent did
           # work that never reached the branch — uncommitted edits or local

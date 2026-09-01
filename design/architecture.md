@@ -457,16 +457,40 @@ Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a
 merge-only round would otherwise move the head with nobody owing the hand-back
 (the loop workflows already cover this with "Ensure hand-back after push"). The
-post is its own step, gated on the composite's `pushed` output; it retries with
-backoff like the loops' step, and both outcomes are read by "Surface agent
-errors": a failed push or hand-back is commented on the PR and fails the job,
-which is what lets "Stage - Review (hand-back)" move the board instead of
-treating the run as a successful autonomous PR round. One
-consequence in the CI-fix loop: when the agent gives up on a failure on a
-*behind* branch, the merge-only push re-runs CI, which fails the same way and
-spends exactly one more `fix_attempt_cap` attempt — that next attempt finds the
-branch up to date, sets no `merge_sha`, pushes nothing, and stops. That is the
-intended cost of restoring a computable merge ref, not a loop bug. A
+post is its own step, gated on the composite's `pushed` output; like the loops'
+step it first checks for a hand-back already posted since the run started (the
+agent posting `@review` anyway, or a human requesting a review mid-run) so it
+never double-posts, and it retries with backoff. That check matches the hand-off
+marker only as a comment's leading line, the same shape as the loops' selfhandoff
+detector — claude-code-action's tracking comment is rewritten with the agent's
+summary, which on a run editing these workflows may well mention the marker in
+prose, and a substring match would read that as a posted hand-back and skip the
+one owed. In all three workflows the
+backstop's outcome is read by "Surface agent errors": a failed push (or, in
+`claude.yml`, hand-back) is commented on the PR and fails the job. In
+`claude.yml` that is what lets "Stage - Review (hand-back)" move the board
+instead of treating the run as a successful autonomous PR round; in the loops
+it keeps the unlanded-work check from misreading the runner's own merge commit
+(in `rev-list BASE_SHA..HEAD` with origin still at `BASE_SHA`) as agent edits
+that never landed — while still reporting uncommitted tracked-file edits the
+agent did leave behind, since that clause preempts the check that would
+otherwise have flagged them. One consequence in the CI-fix loop: when the agent gives up
+on a failure on a *behind* branch, the merge-only push re-runs CI, which fails
+the same way and spends another `fix_attempt_cap` attempt. On a static base
+that is exactly one: the next attempt finds the branch up to date, sets no
+`merge_sha`, pushes nothing, and stops. On a base that keeps moving (the
+fork's `main` is re-synced from upstream hourly, comparable to the length of a
+CI-fix cycle) each attempt can merge again, give up again, and push another
+merge-only commit, so the bound is `fix_attempt_cap` attempts (default 3), one
+per base move. That is the intended cost of restoring a computable merge ref,
+not a loop bug. The review loop does not have the analogous leak: its
+no-progress escalation compares the tip against the one recorded at the start
+of the previous round, which a merge-only push would defeat while the base
+moves, so a round whose only product is the runner's merge concludes with the
+hand-off rather than a re-review on both engines — the Claude path's prompt
+tells a no-change round to post the hand-off (which "Ensure hand-back after
+push" honors), and the codex landing step posts it itself when HEAD is still
+exactly the runner's merge. A
 merge that reports "Already up to date" sets no `merge_sha` at all, so neither
 the backstop nor the "review the runner's merge" note fires on a branch that
 already contains its base.
@@ -477,7 +501,10 @@ downstream step rather than failing them, so the "Surface agent errors" steps
 read the sync step's outcome explicitly and post the failure to the PR. In
 the loop workflows the round/attempt is recorded *after* the sync, so nothing
 is burned; without the surfacing, though, the board would sit at Agent with
-the label on and nothing running.
+the label on and nothing running. The sync's API surface is one PR read,
+shared by all three callers inside the composite, and it is retried (three
+attempts with backoff) — so a single transient API error is not a new way to
+lose a round.
 
 ### Two prompt-injection sources, one flag
 
