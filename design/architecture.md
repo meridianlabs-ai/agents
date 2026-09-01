@@ -261,11 +261,18 @@ out different things on the inspect_ai fork:
   installed env matches the `main`-cut branch the agent then edits.
 - The **reviewer** deliberately checks out `refs/pull/{N}/head` (so it reviews
   exactly the upstream-bound diff). That branch is cut from pristine `main` and
-  carries no meridian files, so the shim is absent and setup is skipped — the
-  reviewer stays on static checks there. Giving it a real env would require an
-  extra checkout of `meridian`'s `.github/actions` into a fixed subdir; not done,
-  since the fork's diffs are validated by upstream's own CI. For normal
-  (non-fork) repos both agents provision identically.
+  carries no meridian files, so the shim is absent — and the reviewer used to
+  stay on static checks there. A **fallback provisioning step** now covers this
+  case (decision: Ransom, 2026-09-01): when the shim is absent but the checkout
+  has a root `pyproject.toml` (and the trigger passed the same gate that guards
+  the shim — never in external mode), the workflow step itself bootstraps uv
+  and dev-installs the project, mirroring the fork's claude-setup recipe. The
+  earlier alternative — an extra checkout of `meridian`'s `.github/actions`
+  into a fixed subdir — remains not done; the generic fallback needed no
+  fork-specific wiring. Like the shim, the fallback is fatal on failure, with
+  its own clause in the error-surfacing step. Non-Python repos (no
+  `pyproject.toml`) still degrade to static review. For normal (non-fork)
+  repos with claude-setup, both agents provision identically as before.
 
 ### External reviews: sandboxed execution of untrusted code
 
