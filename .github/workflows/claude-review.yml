@@ -624,14 +624,17 @@ jobs:
           CONTINUATION: ${{ steps.trig.outputs.continuation }}
         run: |
           if [ "$MODE" != "external" ]; then
-            # Promotion continuation (see trig): the closed PR's diff view is
-            # frozen, so point the reviewer at the checked-out tree instead.
-            # Keyed on the pin having actually happened — a closed PR whose
-            # branch is gone (or whose head is a fork) checks out the frozen
-            # head, where this note's claims would be false.
+            # Live-branch continuation (see trig): the closed PR's diff view
+            # is frozen, so point the reviewer at the checked-out tree
+            # instead. Keyed on the pin having actually happened — a closed
+            # PR whose branch is gone (or whose head is a fork) checks out
+            # the frozen head, where this note's claims would be false. The
+            # pin fires for ANY closed same-repo PR with a live branch, so
+            # the note states promotion as the promotion-flow reading, not
+            # as fact.
             closed_note=""
             if [ "${CONTINUATION:-}" = "true" ]; then
-              closed_note=" NOTE: PR #$THIS_PR is CLOSED — it was promoted upstream and its branch is the live continuation (pushes here update the upstream PR's diff). The checkout is the branch TIP, which may be AHEAD of the closed PR's frozen diff view: review the checked-out tree against the base branch, NOT the PR page's stale diff, and still post everything to PR #$THIS_PR."
+              closed_note=" NOTE: PR #$THIS_PR is CLOSED but its branch is still live (on repos with a promotion flow this means it was promoted upstream and pushes here update the upstream PR's diff). The checkout is the branch TIP, which may be AHEAD of the closed PR's frozen diff view: review the checked-out tree against the base branch, NOT the PR page's stale diff, and still post everything to PR #$THIS_PR. Inline comments anchor to the frozen diff, so they may fail (422) on lines only the tip touches — fold any finding that will not anchor into the summary comment instead."
             fi
             # Pin the target: with several hot sibling PRs, an agent that
             # orients from ambient repo state (gh pr list, the checkout's
