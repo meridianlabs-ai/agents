@@ -362,7 +362,6 @@ jobs:
           pr: ${{ github.event.issue.number || github.event.pull_request.number }}
           engine: ${{ steps.engine.outputs.engine }}
           token: ${{ github.token }}
-          repo: ${{ github.repository }}
           checkout: "true"
 
       # Provision the project environment so the agent's allow-listed
@@ -563,7 +562,6 @@ jobs:
           branch: ${{ steps.sync.outputs.branch }}
           merge_sha: ${{ steps.sync.outputs.merge_sha }}
           push-token: ${{ secrets.MARVIN_TOKEN || github.token }}
-          repo: ${{ github.repository }}
 
       # merge_sha is only set on PR-context runs, so this IS a PR: an @auto
       # push to an existing PR owes a re-review (the reviewer does not run on
@@ -827,11 +825,6 @@ jobs:
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
-      # Land the codex work: commit + push (as the machine account, so the
-      # push triggers CI), expose branch_name so the Open-or-adopt step below
-      # opens/labels the PR on issue runs, post the final message, and on
-      # @auto PR runs post the re-review hand-back the push now owes. This
-      # step failing fails the run loudly — codex work cannot strand silently.
       # Unresolved-merge guard (shared composite): the landing step's `git add
       # -A` would happily stage conflict markers and `git commit` would then
       # produce a valid merge commit containing them, so this check is the
@@ -845,6 +838,11 @@ jobs:
         with:
           conflicts: ${{ steps.sync.outputs.conflicts }}
 
+      # Land the codex work: commit + push (as the machine account, so the
+      # push triggers CI), expose branch_name so the Open-or-adopt step below
+      # opens/labels the PR on issue runs, post the final message, and on
+      # @auto PR runs post the re-review hand-back the push now owes. This
+      # step failing fails the run loudly — codex work cannot strand silently.
       - name: Land codex work
         id: codexland
         if: steps.codexguard.outcome == 'success'

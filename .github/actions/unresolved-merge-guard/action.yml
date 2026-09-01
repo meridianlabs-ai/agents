@@ -36,8 +36,20 @@ runs:
         # file: it is the only check that catches binary and modify/delete
         # conflicts, which have no markers to scan for — a blanket add would
         # silently "resolve" those to whatever sits in the working tree.
-        if [ -n "$(git ls-files --unmerged)" ]; then
-          echo "::error::codex left paths unmerged in the index after the base merge (resolved files must be staged with git add): $(git -c core.quotePath=false diff --name-only --diff-filter=U | tr '\n' ' ')— resolve and stage them manually, or drop the engine:codex label to use the Claude path."
+        # Assigned first, not tested inside the substitution: `[ -n "$(git
+        # ...)" ]` would lose git's exit status, so an unreadable index or a
+        # dubious-ownership refusal (this runs while codex-created files under
+        # .git are still codex-owned) would print nothing and PASS the guard.
+        # Fail closed instead.
+        unmerged=$(git -c core.quotePath=false ls-files --unmerged) || {
+          echo "::error::git ls-files failed while checking for an unresolved merge — refusing to land."
+          exit 1
+        }
+        if [ -n "$unmerged" ]; then
+          # ls-files --unmerged prints "<mode> <object> <stage>\t<path>", one
+          # line per stage, so the path list is the tab-separated tail, deduped.
+          paths=$(cut -f2- <<<"$unmerged" | sort -u | tr '\n' ' ')
+          echo "::error::codex left paths unmerged in the index after the base merge (resolved files must be staged with git add): ${paths}— resolve and stage them manually, or drop the engine:codex label to use the Claude path."
           exit 1
         fi
         # Only the files the sync step reported are scanned, and `=======` is

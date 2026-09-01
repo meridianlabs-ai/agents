@@ -537,7 +537,6 @@ jobs:
           pr: ${{ inputs.pr_number }}
           engine: ${{ steps.gate.outputs.engine }}
           token: ${{ secrets.MARVIN_TOKEN || github.token }}
-          repo: ${{ github.repository }}
 
       - name: Record round
         if: steps.gate.outputs.act == 'fix'

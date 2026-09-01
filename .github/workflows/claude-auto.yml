@@ -322,7 +322,6 @@ jobs:
           pr: ${{ steps.gate.outputs.pr }}
           engine: ${{ steps.gate.outputs.engine }}
           token: ${{ secrets.MARVIN_TOKEN || github.token }}
-          repo: ${{ github.repository }}
 
       # Record the attempt (idempotent sticky comment) before invoking the
       # agent — but AFTER the sync step, matching the review loop's ordering:
