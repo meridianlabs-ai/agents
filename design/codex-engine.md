@@ -158,8 +158,12 @@ workaround when #103's does).
   has no landing step, no push credentials, and no network, so stray
   writes die with the runner (decided after inspect_ai#392's review
   produced four static "blocking" findings of uncertain reality). No
-  network still means no installs: unprovisioned repos degrade to
-  static review.
+  network still means no installs by the AGENT — but the reviewer
+  workflow provisions a fallback venv (uv dev-install, as the runner,
+  which has network) when claude-setup is absent and a pyproject.toml
+  exists, so fork PR heads cut from pristine main get test-verified
+  reviews too. Only repos that are not Python projects (or whose
+  dev-install fails, loudly) degrade to static review.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which

@@ -112,8 +112,10 @@ label created (`gh label create engine:codex -c 8250DF -d "route agent
 runs to Codex"`). Codex v1 differences: review findings arrive as one
 summary comment (no inline comments, no thread auto-resolution), and
 external proxy reviews always use Claude. Codex reviews run tests to
-verify findings where the repo provisions claude-setup, like the
-Claude reviewer (repos without it degrade to static review).
+verify findings like the Claude reviewer — via the repo's claude-setup
+action, or a fallback uv dev-install when the checkout has a
+pyproject.toml but no claude-setup (fork PR branches); non-Python
+repos degrade to static review.
 Details: [design/codex-engine.md](design/codex-engine.md).
 
 ## The inspect_ai fork
