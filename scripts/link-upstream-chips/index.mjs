@@ -49,6 +49,13 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
+// Match-and-EXTRACT the canonical PR URL — never pass field text through raw.
+// Every downstream check is exact-string against canonical API URLs, so a value
+// that merely contains a URL (`…/pull/N/files`, a trailing #fragment, prose
+// around it) would produce a row that can never verify and re-enqueues every
+// sweep; a hand-typed "n/a" would fail as `No result matching #undefined`.
+const PR_URL = /https:\/\/github\.com\/\S+\/pull\/\d+/;
+
 const gh = (args) => execFileSync('gh', args, { encoding: 'utf8' });
 const graphql = (query, fields = []) =>
   JSON.parse(gh(['api', 'graphql', '-f', `query=${query}`, ...fields]));
@@ -75,9 +82,11 @@ function pendingProxies() {
   for (const n of out.data.repository.issues.nodes) {
     if (n.closedByPullRequestsReferences.nodes.length) continue; // chip exists
     const item = n.projectItems.nodes.find((i) => i.project?.number === PROJECT_NUMBER);
-    const pr =
-      item?.fieldValueByName?.text?.trim() ||
-      n.body.match(/https:\/\/github\.com\/\S+\/pull\/\d+/)?.[0];
+    const field = item?.fieldValueByName?.text?.trim();
+    const fromField = field?.match(PR_URL)?.[0];
+    if (field && !fromField)
+      console.warn(`#${n.number}: "Upstream PR" field is not a PR URL (${JSON.stringify(field)}); ignoring it`);
+    const pr = fromField || n.body.match(PR_URL)?.[0];
     if (pr) rows.push({ issue: n.number, issueUrl: n.url, pr });
     else console.warn(`#${n.number}: no upstream PR URL in field or body; skipping`);
   }
@@ -166,6 +175,71 @@ function pendingCompanionPairs() {
   return rows;
 }
 
+function pendingPromotions() {
+  // Promotions: fork issues whose Atlas "Upstream PR" field is set (the
+  // promote skill's bookkeeping) but whose Development panel lacks the
+  // UPSTREAM link itself. Invisible to pendingProxies (no External label)
+  // and to pendingAgentPairs (the fork review PR is closed as superseded
+  // by the promotion) — observed: #96 parked at Sign-off, panel carrying
+  // only the superseded fork PR link, so an any-link-exists check would
+  // wrongly skip it: verify the SPECIFIC upstream URL like the agent-pair
+  // path does. Discovery is the board, via a paginated three-field
+  // GraphQL query — `gh project item-list` pulls every field of every
+  // item, which both trips the secondary rate limit and overflows
+  // execFileSync's 1MB buffer (a swallowed overflow reads as "nothing
+  // pending"). Open issues only, filtered on the issue's own state —
+  // a closed issue's missing chip no longer matters. (Stage would only
+  // proxy this: Todo items also carry an empty Stage, and stage cleanup
+  // on close is partly manual.)
+  const rows = [];
+  let after = '';
+  for (;;) {
+    const q = `query($org:String!,$num:Int!,$after:String){
+      organization(login:$org){ projectV2(number:$num){
+        items(first:100, after:$after){
+          pageInfo{hasNextPage endCursor}
+          nodes{
+            up: fieldValueByName(name:"Upstream PR"){
+              ... on ProjectV2ItemFieldTextValue{text}}
+            content{ ... on Issue{number state repository{nameWithOwner}
+              closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{url}}}}
+          }}}}}`;
+    let out;
+    try {
+      // -f (raw string) for org and the opaque cursor: -F magic-types
+      // digits-only / true / false / null values, which the String
+      // variables would then reject. Only num is genuinely an Int.
+      out = graphql(q, ['-f', `org=${OWNER}`, '-F', `num=${PROJECT_NUMBER}`,
+                        ...(after ? ['-f', `after=${after}`] : [])]);
+    } catch (e) {
+      console.warn(`promotion discovery failed (board unreadable): ${e.message ?? e}`);
+      return rows; // partial results beat silence; re-swept next run
+    }
+    const page = out.data.organization.projectV2.items;
+    for (const n of page.nodes) {
+      const raw = (n.up?.text ?? '').trim();
+      if (!raw) continue;
+      const issue = n.content?.number;
+      if (!issue || n.content?.repository?.nameWithOwner !== REPO) continue;
+      if (n.content.state !== 'OPEN') continue; // closed — chip no longer matters
+      const pr = raw.match(PR_URL)?.[0];
+      if (!pr) {
+        console.warn(`#${issue}: "Upstream PR" field is not a PR URL (${JSON.stringify(raw)}); skipping`);
+        continue;
+      }
+      // Chip check rides the board query itself (no per-candidate API call —
+      // the first live run hit the secondary rate limit); linkOne re-reads
+      // fresh at click time, so staleness here costs nothing.
+      if (n.content.closedByPullRequestsReferences.nodes.some((x) => x.url === pr))
+        continue; // upstream chip exists
+      rows.push({ issue, issueUrl: `https://github.com/${REPO}/issues/${issue}`, pr });
+    }
+    if (!page.pageInfo.hasNextPage) break;
+    after = page.pageInfo.endCursor;
+  }
+  return rows;
+}
+
 async function loggedInUser(page) {
   return page
     .evaluate(() => document.querySelector('meta[name="user-login"]')?.content ?? '')
@@ -217,9 +291,13 @@ async function firstVisible(locators) {
   return null;
 }
 
+// Returns 'linked' after a verified UI round, 'skipped' when the chip already
+// existed and no UI round ran — the caller logs them distinctly.
 async function linkOne(page, { issue, issueUrl, pr }) {
   const prNumber = pr.match(/\/pull\/(\d+)/)?.[1];
   const preexisting = linkedUrls(issue); // baseline for wrong-link detection
+  if (preexisting.includes(pr)) return 'skipped'; // already linked — replaying the
+  // UI flow would find the option SELECTED and clicking it would toggle it OFF
   await page.goto(issueUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500); // let the React sidebar hydrate
 
@@ -261,7 +339,31 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   if (!result) throw new Error(`No result matching #${prNumber} for ${pr} — not clicking anything`);
   const label = (await result.textContent())?.trim() ?? '';
   if (!numRe.test(label)) throw new Error(`Result label ${JSON.stringify(label)} does not match #${prNumber}`);
-  await result.click();
+  // numRe matches by number alone, and promotion panels pin the already-linked
+  // (superseded fork) PR above the results. We returned early above if OUR pr
+  // is already linked, so a selected match here is a DIFFERENT PR sharing the
+  // number — clicking would toggle that correct link off, not add ours.
+  if ((await result.getAttribute('aria-selected').catch(() => null)) === 'true')
+    throw new Error(
+      `Matched option for #${prNumber} is already selected — a different PR shares this number; not clicking`,
+    );
+  try {
+    await result.click({ timeout: 10000 });
+  } catch {
+    // Primer SelectPanel virtualizes the option list; when the panel
+    // already carries a link (pinned above the results — promotions keep
+    // their superseded fork-PR link), the matching row can sit outside the
+    // overlay's scroll area, where Playwright's auto-scroll gives up
+    // ("element is outside of the viewport"; observed on #96). The label
+    // was strictly verified above and the API poll below is the ground
+    // truth — wrong links are detected, never assumed — so a forced click
+    // is safe here.
+    await result.scrollIntoViewIfNeeded().catch(() => {});
+    // force still computes mouse coordinates, so an off-viewport row fails
+    // identically; dispatch the DOM event instead — no viewport involved,
+    // and the API poll below still decides success.
+    await result.dispatchEvent('click');
+  }
 
   // Persist: some variants have an explicit button, others save on close.
   const apply = await firstVisible([
@@ -271,19 +373,39 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   else await page.keyboard.press('Escape');
 
   // Ground truth: poll the API for the link — and detect a WRONG link (some
-  // other URL newly appearing), which must be reported, not just retried.
+  // other URL newly appearing) or a REMOVED one (a same-numbered selected
+  // option toggled off), which must be reported, not just retried.
   const before = new Set(preexisting);
   for (let i = 0; i < 6; i++) {
     await page.waitForTimeout(2500);
     const now = linkedUrls(issue);
-    if (now.includes(pr)) return;
+    if (now.includes(pr)) return 'linked';
     const wrong = now.filter((u) => !before.has(u));
     if (wrong.length)
       throw new Error(
         `WRONG LINK on #${issue}: got ${wrong.join(', ')} instead of ${pr} — unlink it manually in the Development panel`,
       );
+    const removed = preexisting.filter((u) => !now.includes(u));
+    if (removed.length)
+      throw new Error(
+        `LINK REMOVED on #${issue}: ${removed.join(', ')} disappeared instead of ${pr} appearing — re-link it manually in the Development panel`,
+      );
   }
   throw new Error(`UI flow completed but the link never appeared for #${issue}`);
+}
+
+function dedupe(rows) {
+  // The populations overlap: a pending External proxy with the "Upstream PR"
+  // field set is found by BOTH pendingProxies and pendingPromotions. One row
+  // per issue+pr pair — a second linkOne pass on the same pair is at best a
+  // wasted UI round and at worst toggles the fresh link back off.
+  const seen = new Set();
+  return rows.filter((r) => {
+    const key = `${r.issue} ${r.pr}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 const rows = LOGIN_ONLY
@@ -296,7 +418,7 @@ const rows = LOGIN_ONLY
         }
         return true;
       })
-    : [...pendingProxies(), ...pendingAgentPairs(), ...pendingCompanionPairs()];
+    : dedupe([...pendingProxies(), ...pendingAgentPairs(), ...pendingCompanionPairs(), ...pendingPromotions()]);
 if (!LOGIN_ONLY && rows.length === 0) {
   console.log('Nothing pending — every target already has its chip.');
   process.exit(0);
@@ -313,8 +435,9 @@ try {
   let failures = 0;
   for (const row of rows) {
     try {
-      await linkOne(page, row);
-      console.log(`linked  #${row.issue} -> ${row.pr}`);
+      if ((await linkOne(page, row)) === 'skipped')
+        console.log(`skip    #${row.issue} (already linked to ${row.pr})`);
+      else console.log(`linked  #${row.issue} -> ${row.pr}`);
     } catch (err) {
       failures++;
       console.error(`FAILED  #${row.issue}: ${err.message}`);
