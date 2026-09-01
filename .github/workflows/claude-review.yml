@@ -732,6 +732,21 @@ jobs:
           # step's output-schema-file input instead — that branch creates
           # no temp dir and is excluded from the action's cleanup. 644
           # under the 755 temp root stays codex-readable.
+          # codex runs via sudo -u, whose env_reset/secure_path discards this
+          # step's PATH (including the provisioning's GITHUB_PATH additions)
+          # and -H swaps HOME away from ~/.local/bin — so bare `pytest` is
+          # "command not found" inside codex even though the venv is right
+          # there (observed: inspect_ai#392's review reported pytest/ruff/
+          # mypy unavailable and degraded to static). Discover the ABSOLUTE
+          # paths here, where PATH is intact, and hand them to the prompt;
+          # group perms from the workspace grants above make them runnable.
+          tools=""
+          for t in pytest ruff mypy python3; do
+            path=$(command -v "$t" 2>/dev/null || true)
+            [ -n "$path" ] && tools="$tools$t=$path "
+          done
+          echo "discovered tools: ${tools:-none}"
+          echo "tools=$tools" >>"$GITHUB_OUTPUT"
           cat >"$RUNNER_TEMP/codex-schema.json" <<'SCHEMA'
           {"type": "object", "additionalProperties": false,
            "required": ["verdict", "review"],
@@ -768,11 +783,14 @@ jobs:
             above: you have NO network access and NO GitHub credentials, so
             you cannot post comments or run gh, and must not try — a
             deterministic workflow step posts your review for you. You MAY
-            run the provisioned tools (pytest/ruff/mypy) to verify findings
-            when the environment is provisioned — but you have no network,
-            so you cannot install anything; if a tool or dependency is
-            missing, fall back to static review of that point rather than
-            fighting the environment. Do NOT modify the checked-out code:
+            run the provisioned tools to verify findings — but your process
+            runs under sudo with a reset PATH, so bare command names will
+            NOT resolve: invoke them by the ABSOLUTE paths discovered at
+            setup: ${{ steps.codexuser.outputs.tools || 'none — the
+            environment is unprovisioned' }}. You have no network, so you
+            cannot install anything; if a tool you need is not in that list,
+            fall back to static review of that point rather than fighting
+            the environment. Do NOT modify the checked-out code:
             scratch/cache writes from running tests are fine, but the review
             is read-only — never edit, commit, or revert project files. Read
             the
