@@ -358,8 +358,9 @@ apply the population-specific mapping:
 |---|---|---|
 | `APPROVED` | — | → Merge |
 | `CHANGES_REQUESTED` | — | → Review |
-| approval dismissed (review required again) | — | Merge → Sign-off only |
-| review re-requested after changes (sticky `CHANGES_REQUESTED` + pending request) | — | Review → Sign-off (the ONE transition out of Review — it's the driver's "handed back upstream" act; a fresh promotion parked in Review stays parked) |
+| approval dismissed (review required again) | — | Merge → Sign-off only (the dismissed review — and its inline comments, e.g. an approve-with-nits — doesn't count as reviewer activity, so the item rests there) |
+| review re-requested after changes (sticky `CHANGES_REQUESTED` + pending request) | — | Review → Sign-off (the ONE transition out of Review — it's the driver's "handed back upstream" act; a fresh promotion parked in Review stays parked). Gated on the same ball-possession predicate as the row below, so a reviewer reply after the re-request holds the item in Review (logged as a holding action) instead of flipping it hourly |
+| reviewer responds at Sign-off with no verdict (comment, comment-only review, thread reply) | — | Sign-off → Review — the ball is back with us. Predicate: outside-HUMAN activity newer than our side's latest comment/review AND our side's latest review request; bot activity and dismissed reviews (incl. their inline comments) are excluded |
 | contributor activity newer than reviewer's last | Contributor → Review | — |
 | merged | close, clear Stage → Done | close w/ comment, clear Stage → Done |
 | closed unmerged | close w/ comment → Done | → Review w/ comment |
@@ -367,7 +368,12 @@ apply the population-specific mapping:
 Rules: never touch stages a human parked outside the mapping's domain (e.g. a
 promotion sitting in Review stays there on `REVIEW_REQUIRED`); per-item
 failures warn and continue; every write is idempotent (skip when already at the
-target).
+target). One deliberate limit on parking (2026-09-01, the Sign-off yank): with
+an unanswered reviewer response outstanding, Sign-off is no longer sticky —
+re-parking a yanked card there without responding upstream gets re-yanked the
+next hour (analogous to sticky-APPROVED re-queueing a card moved out of Merge).
+The rest paths are replying upstream or re-requesting review; both advance our
+side's timestamp.
 
 **Preflight:** the job's first step verifies `MARVIN_TOKEN` carries the
 `project` scope (read the `X-OAuth-Scopes` header) and fails with a clear
