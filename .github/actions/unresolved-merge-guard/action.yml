@@ -1,0 +1,68 @@
+name: unresolved-merge-guard
+description: >-
+  Refuse to land a half-resolved base merge (design/architecture.md → "The
+  landing step is the enforcement point"). Runs between the codex step and
+  the codex landing step in claude.yml, claude-auto.yml and
+  claude-auto-review.yml: `git add -A` would happily stage conflict markers
+  and `git commit` would then produce a perfectly valid merge commit
+  containing them, so this check is the only thing between a half-resolved
+  merge and the PR branch. Two distinct failures: an unmerged index (codex
+  never staged a resolution) and staged-but-unresolved text (it staged the
+  markers). Read-only — it inspects the index and the reported files, so it
+  can run before the landing step reclaims .git from the codex user.
+  Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/unresolved-merge-guard@main); NO
+  post step (local composite actions with post steps break teardown on the
+  fork).
+
+inputs:
+  conflicts:
+    description: >-
+      Newline-separated paths the sync-branch action reported as conflicted
+      (its `conflicts` output). Only these are scanned for markers.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CONFLICTS: ${{ inputs.conflicts }}
+      run: |
+        set -euo pipefail
+        # The index check runs BEFORE the landing step's `git add -A` on
+        # purpose, and the prompt requires codex to `git add` each resolved
+        # file: it is the only check that catches binary and modify/delete
+        # conflicts, which have no markers to scan for — a blanket add would
+        # silently "resolve" those to whatever sits in the working tree.
+        # Assigned first, not tested inside the substitution: `[ -n "$(git
+        # ...)" ]` would lose git's exit status, so an unreadable index or a
+        # dubious-ownership refusal (this runs while codex-created files under
+        # .git are still codex-owned) would print nothing and PASS the guard.
+        # Fail closed instead.
+        unmerged=$(git -c core.quotePath=false ls-files --unmerged) || {
+          echo "::error::git ls-files failed while checking for an unresolved merge — refusing to land."
+          exit 1
+        }
+        if [ -n "$unmerged" ]; then
+          # ls-files --unmerged prints "<mode> <object> <stage>\t<path>", one
+          # line per stage, so the path list is the tab-separated tail, deduped.
+          paths=$(cut -f2- <<<"$unmerged" | sort -u | tr '\n' ' ')
+          echo "::error::codex left paths unmerged in the index after the base merge (resolved files must be staged with git add): ${paths}— resolve and stage them manually, or drop the engine:codex label to use the Claude path."
+          exit 1
+        fi
+        # Only the files the sync step reported are scanned, and `=======` is
+        # deliberately NOT matched: a bare seven-equals line is a legitimate
+        # reStructuredText/Markdown heading underline, so a repo-wide grep
+        # for it would fail honest docs changes.
+        if [ -n "${CONFLICTS:-}" ]; then
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] || continue
+            if grep -qE '^(<<<<<<<|>>>>>>>) ' -- "$f"; then
+              echo "::error::conflict markers remain in $f — refusing to push a half-resolved merge."
+              exit 1
+            fi
+          done <<<"$CONFLICTS"
+        fi
+        echo "no unresolved merge state."

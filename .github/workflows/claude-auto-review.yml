@@ -203,7 +203,7 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
-          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,closedAt,headRefName,headRefOid,isCrossRepository,labels,baseRefName 2>/dev/null) || {
+          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,closedAt,headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
             echo "#$PR is not a pull request (or the API is persistently unavailable); skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
@@ -261,9 +261,6 @@ jobs:
           echo "continuation=$continuation" >>"$GITHUB_OUTPUT"
           echo "closed_at=$closed_at" >>"$GITHUB_OUTPUT"
           echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
-          # Base branch for "Sync branch with base": read here, through the
-          # retry, rather than by a second un-retried gh call in that step.
-          echo "base_branch=$(jq -r '.baseRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
           # Engine selection (design/codex-engine.md): fix rounds follow the
           # PR's engine:codex label; relabeling switches later rounds.
           echo "engine=$(jq -r 'if any(.labels[]; .name=="engine:codex") then "codex" else "claude" end' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
@@ -524,71 +521,22 @@ jobs:
       # mental model and one merge instruction across all three workflows (here
       # the inline merge_note in "Compose review-fix prompt"; claude.yml's is
       # its branch_sync_prompt input).
+      #
+      # The step body is the shared sync-branch composite (one copy for all
+      # three workflows). checkout stays false: this job's actions/checkout
+      # already put the PR head branch in the workspace (the gate handled fork
+      # PRs, and a CLOSED PR with a live branch is a continuation the loop
+      # deliberately syncs), and "Record base SHA" above stamped its PRE-merge
+      # tip — which is what makes a round whose only product is the base
+      # merge still count as landable work and push.
       - name: Sync branch with base
         id: sync
         if: steps.gate.outputs.act == 'fix'
-        env:
-          # From the gate's retried PR fetch — no second, un-retried gh call
-          # here, where under set -e one transient API error would fail the
-          # round before the agent starts.
-          BASE: ${{ steps.gate.outputs.base_branch }}
-          ENGINE: ${{ steps.gate.outputs.engine }}
-        run: |
-          set -euo pipefail
-          git config user.name "i-am-marvin"
-          git config user.email "i-am-marvin@users.noreply.github.com"
-          base="$BASE"
-          git fetch --quiet origin "$base"
-          echo "base=$base" >>"$GITHUB_OUTPUT"
-          # No checkout here: this job's actions/checkout already put the PR
-          # head branch in the workspace, and "Record base SHA" above stamped
-          # its PRE-merge tip — which is what makes a round whose only product
-          # is the base merge still count as landable work and push.
-          before=$(git rev-parse HEAD)
-          conflicts=""
-          if git merge --no-edit "origin/$base"; then
-            # "Already up to date" also exits 0 without moving HEAD. Only a
-            # merge that actually happened gets a merge_sha: it gates the
-            # "review the runner's merge" note (which would otherwise point
-            # the agent at a merge that never happened on every round where
-            # the caller sets branch_sync_append) and the backstop push.
-            if [ "$(git rev-parse HEAD)" = "$before" ]; then
-              echo "already up to date with origin/$base"
-            else
-              echo "merged origin/$base cleanly"
-              echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
-            fi
-          else
-            # quotePath off: C-quoted (non-ASCII) paths would garble the codex
-            # prompt's file list and dodge the landing guard's [ -f ] check,
-            # silently skipping the marker scan for exactly those files.
-            conflicts=$(git -c core.quotePath=false diff --name-only --diff-filter=U)
-            # A merge that fails WITHOUT content conflicts must not fall
-            # through: the codex path would proceed silently against the stale
-            # base (no MERGE_HEAD, empty conflict list), and the Claude path
-            # would fail only by accident (merge --abort with no merge in
-            # progress). Loud on both engines instead.
-            if [ -z "$conflicts" ]; then
-              echo "::error::merge of origin/$base failed without content conflicts — see the merge output above."
-              exit 1
-            fi
-            echo "::warning::merge of origin/$base conflicts in: $(tr '\n' ' ' <<<"$conflicts")"
-            if [ "$ENGINE" != "codex" ]; then
-              git merge --abort
-              echo "aborted: the Claude path needs a clean index; the agent re-merges."
-              echo "agent_merge=1" >>"$GITHUB_OUTPUT"
-              conflicts=""
-            fi
-          fi
-          # Unique delimiter: the block carries repo file paths, and a path
-          # equal to a fixed delimiter would terminate it early and inject
-          # the remaining lines as step outputs.
-          eof="SYNC_CONFLICTS_$(date +%s)_$RANDOM"
-          {
-            echo "conflicts<<$eof"
-            echo "$conflicts"
-            echo "$eof"
-          } >>"$GITHUB_OUTPUT"
+        uses: meridianlabs-ai/agents/.github/actions/sync-branch@main
+        with:
+          pr: ${{ inputs.pr_number }}
+          engine: ${{ steps.gate.outputs.engine }}
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
 
       - name: Record round
         if: steps.gate.outputs.act == 'fix'
@@ -682,42 +630,19 @@ jobs:
       # compute a merge ref again, which is what lets CI run at all. Gated on
       # HEAD being EXACTLY that merge commit, so an agent that committed on top
       # — pushed, or deliberately not — is never second-guessed. always(), so a
-      # failed or cancelled agent still leaves the branch current. The id is
-      # for "Surface agent errors": without it a failed push here is
-      # misdiagnosed — the runner's merge sits in rev-list BASE_SHA..HEAD while
-      # origin still equals BASE_SHA, so the unlanded-work check would blame
-      # the agent for edits it never made.
+      # failed or cancelled agent still leaves the branch current.
+      # Shared push-base-merge composite (exact-SHA gate, non-fast-forward
+      # guard, push). No push-token: this job's checkout persisted
+      # MARVIN_TOKEN, so a plain push already authenticates as the machine
+      # account and re-triggers CI.
       - name: Push base merge if unpushed
-        id: backstop
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
           steps.gate.outputs.engine != 'codex' && steps.sync.outputs.merge_sha != ''
-        env:
-          BRANCH: ${{ steps.gate.outputs.head_branch }}
-          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
-        run: |
-          set -euo pipefail
-          if [ "$(git rev-parse HEAD)" != "$MERGE_SHA" ]; then
-            echo "agent commits sit on top of the base merge — leaving the push to it."
-            exit 0
-          fi
-          git fetch --quiet origin "$BRANCH"
-          if [ "$(git rev-parse FETCH_HEAD)" = "$MERGE_SHA" ]; then
-            echo "base merge is already on origin/$BRANCH."
-            exit 0
-          fi
-          # Non-fast-forward guard: the remote may have moved during the run
-          # while HEAD stayed at the merge — the agent landed its change
-          # server-side via the API, or a human pushed mid-round. Skip rather
-          # than fail red; the next round re-merges on top of the new tip.
-          if ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
-            echo "origin/$BRANCH moved past the runner's merge during the run — leaving it; the next round re-merges."
-            exit 0
-          fi
-          # This job's checkout persisted MARVIN_TOKEN, so a plain push already
-          # authenticates as the machine account and re-triggers CI.
-          git push --quiet origin "HEAD:refs/heads/$BRANCH"
-          echo "pushed base merge $(git rev-parse --short HEAD) to $BRANCH"
+        uses: meridianlabs-ai/agents/.github/actions/push-base-merge@main
+        with:
+          branch: ${{ steps.gate.outputs.head_branch }}
+          merge_sha: ${{ steps.sync.outputs.merge_sha }}
 
       # ---- Codex engine fix round (design/codex-engine.md) -------------------
       # No network/credentials in the codex sandbox, so the review feedback is
@@ -905,9 +830,22 @@ jobs:
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
+      # Unresolved-merge guard (shared composite): the landing step's `git add
+      # -A` would happily stage conflict markers and `git commit` would then
+      # produce a valid merge commit containing them, so this check is the
+      # only thing between a half-resolved merge and the PR branch. A separate
+      # step so the landing step below is skipped, not entered, on failure;
+      # the Surface step reads this step's outcome.
+      - name: Guard against an unresolved merge (codex)
+        id: codexguard
+        if: steps.codexfix.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/unresolved-merge-guard@main
+        with:
+          conflicts: ${{ steps.sync.outputs.conflicts }}
+
       - name: Land codex fix
         id: codexland
-        if: steps.codexfix.outcome == 'success'
+        if: steps.codexguard.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -917,7 +855,6 @@ jobs:
           OUT: ${{ runner.temp }}/codex/codex-final.md
           START_SHA: ${{ steps.base.outputs.sha }}
           HEAD_BRANCH: ${{ steps.gate.outputs.head_branch }}
-          CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
         run: |
           set -euo pipefail
@@ -928,36 +865,6 @@ jobs:
           # would intermittently fail with "insufficient permission for
           # adding an object".
           sudo chown -R runner "$GITHUB_WORKSPACE/.git"
-          # Unresolved-merge guard. `git add -A` would happily stage conflict
-          # markers and `git commit` would then produce a perfectly valid merge
-          # commit containing them, so this check is the only thing between a
-          # half-resolved merge and the PR branch. Two distinct failures: an
-          # unmerged index (codex never staged a resolution) and staged-but-
-          # unresolved text (it staged the markers).
-          #
-          # The index check runs BEFORE `git add -A` on purpose, and the prompt
-          # requires codex to `git add` each resolved file: it is the only
-          # check that catches binary and modify/delete conflicts, which have
-          # no markers to scan for — a blanket add would silently "resolve"
-          # those to whatever sits in the working tree.
-          #
-          # Only the files the sync step reported are scanned, and `=======` is
-          # deliberately NOT matched: a bare seven-equals line is a legitimate
-          # reStructuredText/Markdown heading underline, so a repo-wide grep for
-          # it would fail honest docs changes.
-          if [ -n "$(git ls-files --unmerged)" ]; then
-            echo "::error::codex left paths unmerged in the index after the base merge (resolved files must be staged with git add): $(git -c core.quotePath=false diff --name-only --diff-filter=U | tr '\n' ' ')— resolve and stage them manually, or drop the engine:codex label to use the Claude path."
-            exit 1
-          fi
-          if [ -n "${CONFLICTS:-}" ]; then
-            while IFS= read -r f; do
-              [ -n "$f" ] && [ -f "$f" ] || continue
-              if grep -qE '^(<<<<<<<|>>>>>>>) ' -- "$f"; then
-                echo "::error::conflict markers remain in $f — refusing to push a half-resolved merge."
-                exit 1
-              fi
-            done <<<"$CONFLICTS"
-          fi
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge
           # is still in progress — commit anyway so the merge completes,
@@ -985,13 +892,10 @@ jobs:
             git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
             pushed=1
             # HEAD still exactly the runner's clean base merge: codex changed
-            # nothing (any commit above would have moved it). The push itself
-            # is what restores CI (a computable merge ref); a re-review would
-            # only re-read the same code codex just declined to change, so
-            # this round is treated like a no-change round below and
-            # concludes with the hand-off. That also keeps the gate's
-            # no-progress escalation honest: a re-review here would let the
-            # moved tip read as progress on every round the base moves.
+            # nothing (any commit above would have moved it), so say so
+            # rather than announcing "changes pushed" over a summary that
+            # says nothing needed changing. Still a push, so "Ensure
+            # hand-back" owes the @review — the re-run is what gets real CI.
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
             echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
           fi
@@ -1001,16 +905,17 @@ jobs:
           # QUOTING one — likely, its prompt embeds the reviewer's verdict
           # comments verbatim — would forge a verdict or suppress an owed
           # hand-back: break those substrings too, in codex's text only, not
-          # the deliberate leading marker below). Pushed with codex changes:
-          # a plain summary — "Ensure hand-back" below owes the @review. No
-          # changes, or the base merge alone: the round is concluded — lead
-          # with the auto-handoff marker so the selfhandoff detector moves
-          # the board and "Ensure hand-back" sees the hand-off already posted.
+          # the deliberate leading marker below). Pushed: a plain summary —
+          # "Ensure hand-back" below owes the @review. No changes: the round
+          # is concluded — lead with the auto-handoff marker so the
+          # selfhandoff detector moves the board.
           {
-            if [ -z "$pushed" ] || [ -n "$merge_only" ]; then
+            if [ -z "$pushed" ]; then
               echo "<!-- auto-handoff -->"
               ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
-              printf '%sauto (codex, round %s): no code changes this round%s — summary below. Inline review threads are not auto-resolved on the codex engine; please resolve any settled ones.\n\n' "$ping" "$ROUND" "${merge_only:+ (the base-branch merge from the workflow was pushed)}"
+              printf '%sauto (codex, round %s): no code changes this round — summary below. Inline review threads are not auto-resolved on the codex engine; please resolve any settled ones.\n\n' "$ping" "$ROUND"
+            elif [ -n "$merge_only" ]; then
+              printf '🤖 auto (codex, round %s): base merge pushed; no code changes this round — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
             else
               printf '🤖 auto (codex, round %s): changes pushed — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
             fi
@@ -1135,10 +1040,10 @@ jobs:
           MENTION: ${{ steps.gate.outputs.mention }}
           HANDED: ${{ steps.selfhandoff.outputs.found }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
-          BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
+          CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
           set -uo pipefail
@@ -1165,20 +1070,15 @@ jobs:
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
           fi
+          # A failed guard SKIPS the landing step, so it needs its own check.
+          if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then
+            err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was pushed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
+          fi
           if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
             err="codex finished but its landing step failed — the fix may not have reached the branch (see the job logs)."
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review-fix step failed before producing a result (see the job logs)."
-          fi
-          # The base-merge backstop's push failed after a healthy agent run
-          # (token scope, transient network). Checked BEFORE the unlanded-work
-          # check below: the runner's merge commit is in rev-list
-          # BASE_SHA..HEAD while origin still equals BASE_SHA, so without this
-          # clause that check would report agent edits that never landed —
-          # the wrong diagnosis for a round where the agent changed nothing.
-          if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
-            err="the agent finished, but pushing the runner's base-branch merge failed (see the job logs) — the PR branch is still behind its base; no fix was lost."
           fi
           # Completed-but-blocked: the action reports success, but the agent did
           # work that never reached the branch — uncommitted edits or local

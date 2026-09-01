@@ -379,7 +379,14 @@ stale code.
 
 So the merge is now a **deterministic `Sync branch with base` step** in all
 three workflows, running before either engine starts, on PR-context runs only.
-Four details are load-bearing:
+The step body lives once, in the `.github/actions/sync-branch` composite
+(referenced `@main` like `set-stage`); the two enforcement pieces below are
+composites too — `unresolved-merge-guard` and `push-base-merge` — so the three
+workflows differ only in their inputs (`claude.yml` passes `checkout: true`
+because its checkout is not on the PR head, a `push-token` because its
+checkout persisted `github.token`, and a `require-file` fence because its
+backstop runs `always()` — see below), never in the logic. Four details are
+load-bearing:
 
 - **The pre-merge tip is what gets stamped.** The landing steps treat "HEAD
   moved past the recorded SHA" as landable work. Stamped *after* the merge, a
@@ -418,9 +425,11 @@ Four details are load-bearing:
   unless it is `OPEN`.
 - **The landing step is the enforcement point.** `git add -A` would happily
   stage conflict markers and `git commit` would produce a valid merge commit
-  containing them, so codex's landing refuses to push when
-  `git ls-files --unmerged` is non-empty or a `<<<<<<< `/`>>>>>>> ` marker
-  survives in one of the reported files. `=======` is deliberately not matched:
+  containing them, so an `unresolved-merge-guard` step immediately before
+  codex's landing refuses to proceed when `git ls-files --unmerged` is
+  non-empty or a `<<<<<<< `/`>>>>>>> ` marker survives in one of the reported
+  files (a failed guard skips the landing step; the "Surface agent errors"
+  steps read the guard's outcome and post the cause). `=======` is deliberately not matched:
   a bare seven-equals line is a legitimate rST/Markdown heading underline, and
   a repo-wide grep for it would fail honest docs changes.
 
@@ -433,7 +442,9 @@ at the merge (the agent landed its change server-side via the API, or a human
 pushed mid-round), the backstop skips instead of failing red on a
 non-fast-forward push — the next round re-merges on top of the new tip. In
 `claude.yml` the backstop is additionally fenced on the agent having actually
-*started* — the execution file exists only once Claude ran. The workflow's own
+*started* — the composite's `require-file` input names the execution file,
+which exists only once Claude ran (the loops leave the input empty: their gate
+authorized the actor before checkout). The workflow's own
 trigger check deliberately does not mirror claude-code-action's write-access
 check on the commenter (the action is the authorizer, and it fails its step
 for an outsider), so an unfenced `always()` would have let a non-collaborator's
@@ -445,33 +456,17 @@ also posts the `@review` re-review request on a successful `@auto` run: the
 Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a
 merge-only round would otherwise move the head with nobody owing the hand-back
-(the loop workflows already cover this with "Ensure hand-back after push"). Like
-that step, it first checks for a hand-back already posted since the run started
-(the agent posting `@review` anyway, or a human requesting a review mid-run) so
-it never double-posts, and the post retries with backoff. In all three
-workflows the backstop's outcome is read by "Surface agent errors": a failed
-push (or, in `claude.yml`, hand-back) is commented on the PR and fails the job.
-In `claude.yml` that is what lets "Stage - Review (hand-back)" move the board
-instead of treating the run as a successful autonomous PR round; in the loops
-it keeps the unlanded-work check from misreading the runner's own merge commit
-(in `rev-list BASE_SHA..HEAD` with origin still at `BASE_SHA`) as agent edits
-that never landed. One consequence in the CI-fix loop: when the agent gives up
-on a failure on a *behind* branch, the merge-only push re-runs CI, which fails
-the same way and spends another `fix_attempt_cap` attempt. On a static base
-that is exactly one: the next attempt finds the branch up to date, sets no
-`merge_sha`, pushes nothing, and stops. On a base that keeps moving (the
-fork's `main` is re-synced from upstream hourly, comparable to the length of a
-CI-fix cycle) each attempt can merge again, give up again, and push another
-merge-only commit, so the bound is `fix_attempt_cap` attempts (default 3), one
-per base move. That is the intended cost of restoring a computable merge ref,
-not a loop bug. The review loop does not have the analogous leak: its
-no-progress escalation compares the tip against the one recorded at the start
-of the previous round, which a merge-only push would defeat while the base
-moves, so a round whose only product is the runner's merge concludes with the
-hand-off rather than a re-review on both engines — the Claude path's prompt
-tells a no-change round to post the hand-off (which "Ensure hand-back after
-push" honors), and the codex landing step posts it itself when HEAD is still
-exactly the runner's merge. A
+(the loop workflows already cover this with "Ensure hand-back after push"). The
+post is its own step, gated on the composite's `pushed` output; it retries with
+backoff like the loops' step, and both outcomes are read by "Surface agent
+errors": a failed push or hand-back is commented on the PR and fails the job,
+which is what lets "Stage - Review (hand-back)" move the board instead of
+treating the run as a successful autonomous PR round. One
+consequence in the CI-fix loop: when the agent gives up on a failure on a
+*behind* branch, the merge-only push re-runs CI, which fails the same way and
+spends exactly one more `fix_attempt_cap` attempt — that next attempt finds the
+branch up to date, sets no `merge_sha`, pushes nothing, and stops. That is the
+intended cost of restoring a computable merge ref, not a loop bug. A
 merge that reports "Already up to date" sets no `merge_sha` at all, so neither
 the backstop nor the "review the runner's merge" note fires on a branch that
 already contains its base.
@@ -482,11 +477,7 @@ downstream step rather than failing them, so the "Surface agent errors" steps
 read the sync step's outcome explicitly and post the failure to the PR. In
 the loop workflows the round/attempt is recorded *after* the sync, so nothing
 is burned; without the surfacing, though, the board would sit at Agent with
-the label on and nothing running. The step's own API surface is kept small
-for the same reason: the loops take the base branch from their gate's already
-retried PR fetch (a `base_branch` output) instead of a second, un-retried `gh
-pr view`, and `claude.yml`, which has no gate, retries its one PR read
-inline — so a single transient API error is not a new way to lose a round.
+the label on and nothing running.
 
 ### Two prompt-injection sources, one flag
 

@@ -1,0 +1,185 @@
+name: sync-branch
+description: >-
+  Deterministic base-branch sync (design/architecture.md → "The merge moved to
+  the runner"): merge a PR's base into its head branch ON THE RUNNER, for both
+  engines, before either agent starts. Shared by claude.yml, claude-auto.yml
+  and claude-auto-review.yml — one copy, so the per-engine conflict split and
+  the output contract cannot drift. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/sync-branch@main) so it works
+  regardless of what the job checked out; NO post step (local composite
+  actions with post steps break teardown on the fork).
+
+  A CONFLICTED merge is handed on differently per engine, and the split is
+  forced rather than stylistic. claude-code-action's setupBranch runs
+  `git checkout <branch> --`, which aborts with "you need to resolve your
+  current index first" whenever the index holds unmerged entries — so the
+  Claude path must be handed a CLEAN index (the merge is aborted and
+  `agent_merge=1` tells the caller to splice the merge instruction into the
+  prompt; the agent has network and the git allow-list). Codex cannot fetch,
+  so it is handed the merge still IN PROGRESS and resolves the markers in the
+  working tree; the unresolved-merge-guard action refuses to land while any
+  survive.
+
+inputs:
+  pr:
+    description: Pull-request number to sync.
+    required: true
+  engine:
+    description: >-
+      Agent engine the merge result is handed to: `claude` (a conflicted merge
+      is aborted; agent_merge=1) or `codex` (left in progress; conflicts
+      lists the files).
+    required: true
+  token:
+    description: Token for the `gh pr view` lookup (read access is enough).
+    required: true
+  repo:
+    description: owner/name the PR lives in.
+    required: false
+    default: ${{ github.repository }}
+  checkout:
+    description: >-
+      `true` when the head branch is NOT yet checked out (claude.yml, whose
+      actions/checkout lands on the event's default ref): the action then
+      resolves the head, skips closed/merged PRs (claude-code-action cuts a
+      fresh branch off base there, and the old head may be deleted) and fork
+      heads (not on origin; agent_merge=1 so the Claude path keeps its
+      prompted merge), fetches the head branch and checks it out. `false`
+      (the loops) trusts the caller's checkout — the workspace already holds
+      the PR head, and the caller's own gate handled closed and fork PRs —
+      and only fetches the base before merging.
+    required: false
+    default: "false"
+
+outputs:
+  base:
+    description: The PR's base branch name (empty when the sync was skipped).
+    value: ${{ steps.sync.outputs.base }}
+  branch:
+    description: The PR's head branch name (empty when the sync was skipped).
+    value: ${{ steps.sync.outputs.branch }}
+  start_sha:
+    description: >-
+      The head's PRE-merge tip. Landing steps treat "HEAD moved past this" as
+      landable work, so stamping it before the merge is what makes a
+      merge-only round push.
+    value: ${{ steps.sync.outputs.start_sha }}
+  merge_sha:
+    description: >-
+      The merge commit, ONLY when a merge actually happened cleanly ("Already
+      up to date" leaves it empty). Gates the "review the runner's merge"
+      prompt note and the push-base-merge backstop.
+    value: ${{ steps.sync.outputs.merge_sha }}
+  agent_merge:
+    description: >-
+      `1` when the merge was handed back to the agent (Claude-path conflict, or
+      a fork head under checkout=true); callers splice the merge instruction
+      into the prompt only then.
+    value: ${{ steps.sync.outputs.agent_merge }}
+  conflicts:
+    description: >-
+      Newline-separated conflicted paths left IN PROGRESS for codex (empty on
+      the Claude path, whose conflicted merge is aborted).
+    value: ${{ steps.sync.outputs.conflicts }}
+
+runs:
+  using: composite
+  steps:
+    - id: sync
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        NUM: ${{ inputs.pr }}
+        ENGINE: ${{ inputs.engine }}
+        CHECKOUT: ${{ inputs.checkout }}
+      run: |
+        set -euo pipefail
+        git config user.name "i-am-marvin"
+        git config user.email "i-am-marvin@users.noreply.github.com"
+        prj=$(gh pr view "$NUM" --repo "$REPO" \
+                --json headRefName,baseRefName,isCrossRepository,state)
+        branch=$(jq -r '.headRefName' <<<"$prj")
+        base=$(jq -r '.baseRefName' <<<"$prj")
+        if [ "$CHECKOUT" = "true" ]; then
+          # Closed/merged PRs: claude-code-action's setupBranch does not
+          # continue the old head there — it cuts a fresh branch off base — so
+          # there is nothing to sync, and the head ref may already be deleted
+          # (an unconditional fetch would die on it and kill a previously
+          # working "@claude do X" follow-up on a merged PR). No agent-merge
+          # flag either: the agent is not on the old branch.
+          state=$(jq -r '.state' <<<"$prj")
+          if [ "$state" != "OPEN" ]; then
+            echo "PR #$NUM is $state — nothing to sync; the action branches off $base."
+            exit 0
+          fi
+          # Fork heads: the branch is not on origin and neither engine can push
+          # there. Leave the workspace untouched and let the engine paths apply
+          # their own fork handling (codexprep declines loudly; the Claude path
+          # fetches the pull ref itself). The agent-merge flag is still set so
+          # the Claude path keeps today's prompted-merge behavior there.
+          if [ "$(jq -r '.isCrossRepository' <<<"$prj")" = "true" ]; then
+            echo "PR #$NUM has a fork head — skipping the runner-side base sync."
+            echo "agent_merge=1" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --quiet origin "$branch" "$base"
+          git checkout --quiet "$branch"
+        else
+          # The caller's actions/checkout already put the PR head branch in
+          # the workspace; only the base needs fetching.
+          git fetch --quiet origin "$base"
+        fi
+        echo "branch=$branch" >>"$GITHUB_OUTPUT"
+        echo "base=$base" >>"$GITHUB_OUTPUT"
+        # Pre-merge tip. The landing steps treat "HEAD moved past this" as
+        # landable work, so stamping it BEFORE the merge is what makes a
+        # merge-only round push. Stamped after, a clean merge with no agent
+        # edits would read as "nothing to push" and die with the runner —
+        # exactly the drift this step exists to end.
+        start_sha=$(git rev-parse HEAD)
+        echo "start_sha=$start_sha" >>"$GITHUB_OUTPUT"
+        conflicts=""
+        if git merge --no-edit "origin/$base"; then
+          # "Already up to date" also exits 0 without moving HEAD. Only a
+          # merge that actually happened gets a merge_sha: it gates the
+          # "review the runner's merge" note (which would otherwise point
+          # the agent at a merge that never happened on every round where
+          # the caller sets branch_sync_append) and the backstop push.
+          if [ "$(git rev-parse HEAD)" = "$start_sha" ]; then
+            echo "already up to date with origin/$base"
+          else
+            echo "merged origin/$base cleanly"
+            echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          fi
+        else
+          # quotePath off: C-quoted (non-ASCII) paths would garble the codex
+          # prompt's file list and dodge the landing guard's [ -f ] check,
+          # silently skipping the marker scan for exactly those files.
+          conflicts=$(git -c core.quotePath=false diff --name-only --diff-filter=U)
+          # A merge that fails WITHOUT content conflicts must not fall
+          # through: the codex path would proceed silently against the stale
+          # base (no MERGE_HEAD, empty conflict list), and the Claude path
+          # would fail only by accident (merge --abort with no merge in
+          # progress). Loud on both engines instead.
+          if [ -z "$conflicts" ]; then
+            echo "::error::merge of origin/$base failed without content conflicts — see the merge output above."
+            exit 1
+          fi
+          echo "::warning::merge of origin/$base conflicts in: $(tr '\n' ' ' <<<"$conflicts")"
+          if [ "$ENGINE" != "codex" ]; then
+            git merge --abort
+            echo "aborted: the Claude path needs a clean index; the agent re-merges."
+            echo "agent_merge=1" >>"$GITHUB_OUTPUT"
+            conflicts=""
+          fi
+        fi
+        # Unique delimiter: the block carries repo file paths, and a path
+        # equal to a fixed delimiter would terminate it early and inject
+        # the remaining lines as step outputs.
+        eof="SYNC_CONFLICTS_$(date +%s)_$RANDOM"
+        {
+          echo "conflicts<<$eof"
+          echo "$conflicts"
+          echo "$eof"
+        } >>"$GITHUB_OUTPUT"

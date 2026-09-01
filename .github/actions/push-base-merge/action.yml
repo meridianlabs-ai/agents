@@ -1,0 +1,107 @@
+name: push-base-merge
+description: >-
+  Backstop for the Claude path of the runner-side base sync
+  (design/architecture.md → "The merge moved to the runner"): if HEAD is
+  still EXACTLY the sync-branch action's merge commit when the agent
+  finishes, nothing else will push it, so this does. Gated on that exact SHA,
+  so an agent that committed on top — pushed, or deliberately not — is never
+  second-guessed. Shared by claude.yml, claude-auto.yml and
+  claude-auto-review.yml, which differ only in how the push authenticates
+  (see push-token). Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/push-base-merge@main); NO post
+  step (local composite actions with post steps break teardown on the fork).
+
+inputs:
+  branch:
+    description: The PR head branch to push to (refs/heads/<branch>).
+    required: true
+  merge_sha:
+    description: The sync-branch action's merge_sha output.
+    required: true
+  push-token:
+    description: >-
+      Empty (the loops): a plain `git push origin`, relying on the credential
+      the job's actions/checkout persisted (MARVIN_TOKEN there, so the push
+      already runs as the machine account and re-triggers CI). Set
+      (claude.yml): push over an explicit URL credential with the persisted
+      http.<origin>.extraheader cleared — that checkout persisted
+      github.token, which preempts the URL credential, so without the reset
+      the push would run as github-actions[bot] and trigger nothing.
+    required: false
+    default: ""
+  repo:
+    description: owner/name to push to (only used with push-token).
+    required: false
+    default: ${{ github.repository }}
+  require-file:
+    description: >-
+      Evidence the agent actually ran: a path that must exist and be non-empty
+      for the push to proceed; empty disables the check. claude.yml passes
+      claude-code-action's execution file, because the action — not the
+      workflow's own trigger check — is what authorizes the commenter (it
+      fails its step for an actor without write access) and the caller runs
+      this backstop under always(): unfenced, an outsider's @claude on a
+      public repo's behind PR would produce a machine-account push and a CI
+      re-run — a write reachable without write access. The action writes the
+      file only after the Claude session (or on an SDK error mid-run), never
+      when it declines the actor or dies before starting Claude (verified in
+      its src/entrypoints/run.ts and base-action/src/execution-file.ts). The
+      loops leave it empty: their own gate already authorized the actor
+      before checkout.
+    required: false
+    default: ""
+
+outputs:
+  pushed:
+    description: "`1` when this action pushed the merge; empty otherwise."
+    value: ${{ steps.push.outputs.pushed }}
+
+runs:
+  using: composite
+  steps:
+    - id: push
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        MERGE_SHA: ${{ inputs.merge_sha }}
+        PUSH_TOKEN: ${{ inputs.push-token }}
+        REPO: ${{ inputs.repo }}
+        REQUIRE_FILE: ${{ inputs.require-file }}
+      run: |
+        set -euo pipefail
+        # Fence first: a run whose agent never started leaves the merge on the
+        # runner; the next authorized run re-merges. No push here also means
+        # no hand-back owed by the caller (pushed stays empty).
+        if [ -n "$REQUIRE_FILE" ] && [ ! -s "$REQUIRE_FILE" ]; then
+          echo "the agent never ran ($REQUIRE_FILE is missing or empty: claude-code-action declined the actor, or failed before starting Claude) — leaving the runner's base merge unpushed."
+          exit 0
+        fi
+        if [ "$(git rev-parse HEAD)" != "$MERGE_SHA" ]; then
+          echo "agent commits sit on top of the base merge — leaving the push to it."
+          exit 0
+        fi
+        git fetch --quiet origin "$BRANCH"
+        if [ "$(git rev-parse FETCH_HEAD)" = "$MERGE_SHA" ]; then
+          echo "base merge is already on origin/$BRANCH."
+          exit 0
+        fi
+        # Non-fast-forward guard: the remote may have moved during the run
+        # while HEAD stayed at the merge — the agent landed its change
+        # server-side via the API, or a human pushed to the PR branch while
+        # this run went on (ordinary on the one-shot dev agent). Skip rather
+        # than fail red; the next run re-merges on top of the new tip. No
+        # push here also means no hand-back owed by the caller (pushed stays
+        # empty).
+        if ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
+          echo "origin/$BRANCH moved past the runner's merge during the run — leaving it; the next run re-merges."
+          exit 0
+        fi
+        if [ -n "$PUSH_TOKEN" ]; then
+          git -c http.https://github.com/.extraheader= push --quiet \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/$REPO.git" \
+            "HEAD:refs/heads/$BRANCH"
+        else
+          git push --quiet origin "HEAD:refs/heads/$BRANCH"
+        fi
+        echo "pushed=1" >>"$GITHUB_OUTPUT"
+        echo "pushed base merge $(git rev-parse --short HEAD) to $BRANCH"
