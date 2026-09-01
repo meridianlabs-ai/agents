@@ -141,13 +141,17 @@ on:
           so a local merge works without extra fetching depth.
       branch_sync_append:
         description: >-
-          Caller-specific guidance appended to branch_sync_prompt (not
-          replacing it), so a repo can add to the shared base-sync instruction
-          without copying it. Same gating as branch_sync_prompt on the Claude
-          path, and additionally spliced into the codex conflict-resolution
-          prompt — repo-specific merge rules matter most exactly when there is a
-          conflict to resolve. Empty by default; e.g. the inspect_ai fork adds
-          its CHANGELOG-merge check here.
+          Caller-specific guidance about the base merge, reaching the agent
+          whenever a merge happened this run — on BOTH engines. When "Sync
+          branch with base" hands the merge to the agent (conflict / fork
+          head) it is appended to branch_sync_prompt; when the runner merged
+          cleanly it is spliced on its own, behind a one-line lead-in saying a
+          workflow step already merged and the agent should review the result.
+          Clean merges are the case that motivated it: git can auto-merge a
+          CHANGELOG without conflict and still land an entry under the wrong
+          heading, which is exactly what the inspect_ai fork's append checks
+          for. Empty by default. Keep it a single line — the composed prompt
+          travels as one output line, so newlines are flattened.
         required: false
         type: string
         default: ""
@@ -368,9 +372,20 @@ jobs:
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
           prj=$(gh pr view "$NUM" --repo "$REPO" \
-                  --json headRefName,baseRefName,isCrossRepository)
+                  --json headRefName,baseRefName,isCrossRepository,state)
           branch=$(jq -r '.headRefName' <<<"$prj")
           base=$(jq -r '.baseRefName' <<<"$prj")
+          # Closed/merged PRs: claude-code-action's setupBranch does not
+          # continue the old head there — it cuts a fresh branch off base — so
+          # there is nothing to sync, and the head ref may already be deleted
+          # (an unconditional fetch would die on it and kill a previously
+          # working "@claude do X" follow-up on a merged PR). No agent-merge
+          # flag either: the agent is not on the old branch.
+          state=$(jq -r '.state' <<<"$prj")
+          if [ "$state" != "OPEN" ]; then
+            echo "PR #$NUM is $state — nothing to sync; the action branches off $base."
+            exit 0
+          fi
           # Fork heads: the branch is not on origin and neither engine can push
           # there. Leave the workspace untouched and let the engine paths apply
           # their own fork handling (codexprep declines loudly; the Claude path
@@ -446,13 +461,16 @@ jobs:
       # Compose the appended-system-prompt sources into ONE value, so we emit a
       # single --append-system-prompt flag. Multiple flags would force a bet on
       # undocumented CLI behavior (accumulate vs. last-one-wins), and the sources
-      # co-occur on PR follow-ups (branch_sync_prompt + review_etiquette fire
-      # there, and append_system_prompt fires on every run). The PR-gated sources
-      # (branch_sync_prompt, review_etiquette) are on for any PR-context event
-      # (issue comment on a PR, or a review/review-comment event); fresh issue
-      # runs branch off the synced base and skip them. Joined on one line so the
-      # toJSON splice below stays a clean single-quoted arg (a newline would
-      # survive toJSON as a literal \n in the shell-parsed args).
+      # co-occur on PR follow-ups (review_etiquette and the branch-sync sources
+      # fire there, and append_system_prompt fires on every run). PR context =
+      # an issue comment on a PR, or a review/review-comment event; fresh issue
+      # runs branch off the synced base and skip all of them. Within PR context
+      # the branch-sync sources are gated on what "Sync branch with base" did:
+      # branch_sync_prompt only when it handed the merge to the agent,
+      # branch_sync_append whenever a merge happened at all (see BRANCH_SYNC_
+      # APPEND below). Joined on one line so the toJSON splice below stays a
+      # clean single-quoted arg (a newline would survive toJSON as a literal \n
+      # in the shell-parsed args).
       #
       # REVIEW_ETIQUETTE mirrors the @auto review-fix loop's thread-resolution
       # rule (claude-auto-review.yml): the dev agent is regularly invoked to
@@ -488,13 +506,33 @@ jobs:
           # path the branch is ALREADY current when the agent starts, and
           # telling it to merge again is noise that invites a redundant push.
           BRANCH_SYNC: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_prompt || '' }}
-          BRANCH_SYNC_APPEND: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_append || '' }}
+          # branch_sync_append is NOT gated the same way: it must reach the
+          # agent whenever a merge happened this run, clean or delegated. The
+          # fork's append exists for a NON-conflicting mis-merge (git
+          # auto-merges CHANGELOG.md cleanly and lands the entry under the
+          # wrong heading), so on the clean path it rides behind a lead-in
+          # saying the runner already merged and the agent should review the
+          # result; on the delegated path it simply follows branch_sync_prompt.
+          AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          SYNC_BASE: ${{ steps.sync.outputs.base }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
           REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address.' || '' }}"
           REQUEST_REVIEW: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.trigger_phrase == '@auto' && 'This is an autonomous run on an existing pull request. If your work pushed any new commit to the PR, finish by posting a top-level comment of exactly @review so the automated reviewer re-runs — it does not run automatically on push. Do not post it if you made no code changes. That exact standalone comment is the ONLY place to write the token bare: in any other comment text, backtick it (`@review`) — a bare token anywhere in a comment body starts a review run.' || '' }}"
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
+          # Flattened: a newline in the append would corrupt the value= output
+          # line below (and survive toJSON as a literal \n).
+          append=""
+          if [ -n "${SYNC_APPEND:-}" ]; then
+            if [ "${AGENT_MERGE:-}" = "1" ]; then
+              append=$(tr '\n' ' ' <<<"$SYNC_APPEND")
+            elif [ -n "${MERGE_SHA:-}" ]; then
+              append="A workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts); review that merge result against the following before making other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
+            fi
+          fi
           combined=""
-          for part in "$LANDING" "$BRANCH_SYNC" "$BRANCH_SYNC_APPEND" "$REVIEW_ETIQUETTE" "$REQUEST_REVIEW" "$EXTRA"; do
+          for part in "$LANDING" "$BRANCH_SYNC" "$append" "$REVIEW_ETIQUETTE" "$REQUEST_REVIEW" "$EXTRA"; do
             [ -n "$part" ] && combined="${combined:+$combined }$part"
           done
           echo "value=$combined" >> "$GITHUB_OUTPUT"
@@ -674,6 +712,7 @@ jobs:
           BRANCH: ${{ steps.codexprep.outputs.branch }}
           BASE: ${{ steps.sync.outputs.base }}
           CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SYNC_APPEND: ${{ inputs.branch_sync_append }}
           COMMENT: ${{ github.event.comment.body }}
           REVIEW: ${{ github.event.review.body }}
@@ -717,7 +756,12 @@ jobs:
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
               [ -n "${SYNC_APPEND:-}" ] && echo "$SYNC_APPEND"
-              echo "Resolve every conflict by editing those files, preserving BOTH sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale. Local git is available and useful here (git status, git diff, git log, git add <file>); the network-dependent commands in the CONSTRAINTS above are still off, and you must NOT run git merge, git rebase or git checkout of any ref — that would strand the in-progress merge. Every conflict marker must be gone when you finish. A deterministic workflow step commits the merge for you and FAILS the run if any marker or unmerged path remains, so leaving them is strictly worse than resolving them. Once resolved, treat the MERGED tree as the code you are working on: re-read what you changed and re-run the relevant tests against it, not against the pre-merge state."
+              echo "Resolve every conflict by editing those files, preserving BOTH sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale. Local git is available and useful here (git status, git diff, git log, git add <file>); the network-dependent commands in the CONSTRAINTS above are still off, and you must NOT run git merge, git rebase or git checkout of any ref — that would strand the in-progress merge. After resolving each file you MUST stage it with git add <file>: the landing step FAILS the run on any path still unmerged in the index (that index check is what catches binary and modify/delete conflicts, which have no markers), and on any surviving conflict marker — so leaving either is strictly worse than resolving and staging. Once resolved, treat the MERGED tree as the code you are working on: re-read what you changed and re-run the relevant tests against it, not against the pre-merge state."
+            elif [ -n "${MERGE_SHA:-}" ] && [ -n "${SYNC_APPEND:-}" ]; then
+              # Clean merge: the repo-specific merge rule still applies (the
+              # fork's is about a NON-conflicting CHANGELOG mis-merge).
+              echo "BASE MERGE NOTE: a workflow step already merged origin/$BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before the task below, and fix it in the working tree if it is off:"
+              echo "$SYNC_APPEND"
             fi
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the change (it becomes the commit subject), then a blank line, then a body explaining what you did and why (it is posted as a comment on #$NUM). If you cannot or should not make a change, leave the tree untouched and explain why in the final message."
             [ -n "$EXTRA" ] && printf 'REPO GUIDANCE: %s\n' "$EXTRA"
@@ -881,12 +925,18 @@ jobs:
           # failures: an unmerged index (codex never staged a resolution) and
           # staged-but-unresolved text (it staged the markers).
           #
+          # The index check runs BEFORE `git add -A` on purpose, and the prompt
+          # requires codex to `git add` each resolved file: it is the only
+          # check that catches binary and modify/delete conflicts, which have
+          # no markers to scan for — a blanket add would silently "resolve"
+          # those to whatever sits in the working tree.
+          #
           # Only the files the sync step reported are scanned, and `=======` is
           # deliberately NOT matched: a bare seven-equals line is a legitimate
           # reStructuredText/Markdown heading underline, so a repo-wide grep
           # for it would fail honest docs changes.
           if [ -n "$(git ls-files --unmerged)" ]; then
-            echo "::error::codex left unmerged paths after the base merge: $(git diff --name-only --diff-filter=U | tr '\n' ' ')— resolve them manually, or drop the engine:codex label to use the Claude path."
+            echo "::error::codex left paths unmerged in the index after the base merge (resolved files must be staged with git add): $(git -c core.quotePath=false diff --name-only --diff-filter=U | tr '\n' ' ')— resolve and stage them manually, or drop the engine:codex label to use the Claude path."
             exit 1
           fi
           if [ -n "${CONFLICTS:-}" ]; then
@@ -1187,6 +1237,7 @@ jobs:
           REPO: ${{ github.repository }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
@@ -1200,10 +1251,18 @@ jobs:
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
+          # The base-branch sync died before the agent started (a transient
+          # gh/fetch error, or its own loud non-conflict merge failure). Every
+          # downstream step is SKIPPED, not failed, so no other branch below
+          # fires — without this the person who typed the trigger gets the
+          # eyes reaction and then silence.
+          if [ "${SYNC_OUTCOME:-}" = "failure" ]; then
+            err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); re-trigger to retry."
+          fi
           # Provisioning died before the agent started (observed: a transient
           # curl failure downloading uv) — without this, the issue gets no
           # comment at all because the agent step was skipped, not failed.
-          if [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+          if [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             err="environment provisioning (claude-setup) failed before the agent started — usually a transient dependency-download/network error; re-trigger to retry."
           fi
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)

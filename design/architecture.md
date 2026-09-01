@@ -353,14 +353,16 @@ privilege boundary and the fork's branch protection still blocks force-push to
 `main`/`meridian`, so the scoping is about injection blast-radius, not the git
 plumbing itself.
 
-The merge instruction is **gated to follow-up runs only** — runs that continue
-an existing branch, where the branch can have drifted from base. That's exactly
-the PR-context triggers: an `@claude` comment on a PR
+The merge instruction was originally **gated to follow-up runs only** — runs
+that continue an existing branch, where the branch can have drifted from base.
+That's exactly the PR-context triggers: an `@claude` comment on a PR
 (`github.event.issue.pull_request` is set) or the review / review-comment events
 (`github.event.pull_request` is set). A fresh `@claude` from an issue (or a
 plain issue comment) has neither, and the action branches off the base —  which
 the hourly sync keeps current — so injecting "merge base in" there is pointless
-noise.
+noise. *Since 2026-09-01 the gate is narrower still* (next subsection): the
+merge itself happens on the runner, and the prompt is spliced only when the
+runner had to hand the merge back to the agent (a conflict, or a fork head).
 
 #### The merge moved to the runner (2026-09-01)
 
@@ -392,11 +394,22 @@ Three details are load-bearing:
   `branch_sync_prompt` (now spliced *only* in that case — on the clean path the
   branch is already current and re-merging is noise). Codex, which cannot
   fetch, is handed the merge still in progress and resolves the markers in the
-  working tree. Caller-specific merge rules ride along via a
-  `branch_sync_append` input on all three workflows, spliced into both
-  engines' conflict instructions — repo-specific rules (e.g. the fork's
-  CHANGELOG-merge check) matter most exactly when there is a conflict to
-  resolve.
+  working tree — and must `git add` each resolved file, because the landing
+  step's unmerged-index check is the only thing that catches binary and
+  modify/delete conflicts, which have no markers. Caller-specific merge rules
+  ride along via a `branch_sync_append` input on all three workflows, and
+  reach the agent on both engines **whenever a merge happened this run** —
+  not only on a conflict. The fork's append is about a *non-conflicting*
+  mis-merge (git auto-merges `CHANGELOG.md` cleanly and lands the entry under
+  the wrong heading), so on a clean runner merge it is spliced behind a
+  "a workflow step already merged; review the result" lead-in, and on the
+  delegated path it follows the merge instruction.
+- **Closed and merged PRs are skipped.** claude-code-action's `setupBranch`
+  does not continue the old head there — it cuts a fresh branch off base — so
+  there is nothing to sync, and the head ref may already be deleted (an
+  unconditional fetch would have killed a previously working "`@claude` do X"
+  follow-up on a merged PR). The step checks the PR `state` and exits early
+  unless it is `OPEN`.
 - **The landing step is the enforcement point.** `git add -A` would happily
   stage conflict markers and `git commit` would produce a valid merge commit
   containing them, so codex's landing refuses to push when
@@ -411,15 +424,25 @@ finishes, nothing else will push it, so the workflow does. Gating on that exact
 SHA means an agent that committed on top — pushed or deliberately not — is
 never second-guessed.
 
+A failed sync step (a transient `gh`/fetch error, or the deliberate loud
+failure when `git merge` dies without content conflicts) skips every
+downstream step rather than failing them, so the "Surface agent errors" steps
+read the sync step's outcome explicitly and post the failure to the PR. In
+the loop workflows the round/attempt is recorded *after* the sync, so nothing
+is burned; without the surfacing, though, the board would sit at Agent with
+the label on and nothing running.
+
 ### Two prompt-injection sources, one flag
 
 There are two appended-system-prompt sources: `branch_sync_prompt` (the gated
-merge instruction above) and `append_system_prompt` (always-on, empty by
-default — the channel for **caller-specific** guidance a shared default can't
-carry, e.g. the inspect_ai fork's stub setting CHANGELOG.md rules; see
+merge instruction above, plus its `branch_sync_append` companion) and
+`append_system_prompt` (always-on, empty by default — the channel for
+**caller-specific** guidance a shared default can't carry, e.g. the inspect_ai
+fork's stub setting CHANGELOG.md rules; see
 [shared-instructions.md](shared-instructions.md) for why the fork can't ship a
-`CLAUDE.md`). Both feed `--append-system-prompt`, and on a PR follow-up both are
-non-empty at once.
+`CLAUDE.md`). Both feed `--append-system-prompt`, and on a PR follow-up where
+the runner handed the merge to the agent (or merged cleanly with an append
+configured) both are non-empty at once.
 
 A "Compose appended system prompt" step joins them into **one** value (space-
 separated, on one line) so we emit a *single* `--append-system-prompt` flag.
