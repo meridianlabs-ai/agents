@@ -49,6 +49,11 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
+// A row's pr must be a real PR URL: linkOne derives prNumber from /pull/<n>,
+// and a hand-typed field value like "n/a" would otherwise become a row that
+// fails every sweep (`No result matching #undefined`) until the field is fixed.
+const PR_URL = /\/pull\/\d+/;
+
 const gh = (args) => execFileSync('gh', args, { encoding: 'utf8' });
 const graphql = (query, fields = []) =>
   JSON.parse(gh(['api', 'graphql', '-f', `query=${query}`, ...fields]));
@@ -75,8 +80,11 @@ function pendingProxies() {
   for (const n of out.data.repository.issues.nodes) {
     if (n.closedByPullRequestsReferences.nodes.length) continue; // chip exists
     const item = n.projectItems.nodes.find((i) => i.project?.number === PROJECT_NUMBER);
+    const field = item?.fieldValueByName?.text?.trim();
+    if (field && !PR_URL.test(field))
+      console.warn(`#${n.number}: "Upstream PR" field is not a PR URL (${JSON.stringify(field)}); ignoring it`);
     const pr =
-      item?.fieldValueByName?.text?.trim() ||
+      (field && PR_URL.test(field) ? field : undefined) ||
       n.body.match(/https:\/\/github\.com\/\S+\/pull\/\d+/)?.[0];
     if (pr) rows.push({ issue: n.number, issueUrl: n.url, pr });
     else console.warn(`#${n.number}: no upstream PR URL in field or body; skipping`);
@@ -212,6 +220,10 @@ function pendingPromotions() {
       if (!pr || !n.stage?.name) continue;
       const issue = n.content?.number;
       if (!issue || n.content?.repository?.nameWithOwner !== REPO) continue;
+      if (!PR_URL.test(pr)) {
+        console.warn(`#${issue}: "Upstream PR" field is not a PR URL (${JSON.stringify(pr)}); skipping`);
+        continue;
+      }
       try {
         if (linkedUrls(issue).includes(pr)) continue; // upstream chip exists
       } catch {
