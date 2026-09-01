@@ -334,6 +334,14 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   if (!result) throw new Error(`No result matching #${prNumber} for ${pr} — not clicking anything`);
   const label = (await result.textContent())?.trim() ?? '';
   if (!numRe.test(label)) throw new Error(`Result label ${JSON.stringify(label)} does not match #${prNumber}`);
+  // numRe matches by number alone, and promotion panels pin the already-linked
+  // (superseded fork) PR above the results. We returned early above if OUR pr
+  // is already linked, so a selected match here is a DIFFERENT PR sharing the
+  // number — clicking would toggle that correct link off, not add ours.
+  if ((await result.getAttribute('aria-selected').catch(() => null)) === 'true')
+    throw new Error(
+      `Matched option for #${prNumber} is already selected — a different PR shares this number; not clicking`,
+    );
   try {
     await result.click({ timeout: 10000 });
   } catch {
@@ -360,7 +368,8 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   else await page.keyboard.press('Escape');
 
   // Ground truth: poll the API for the link — and detect a WRONG link (some
-  // other URL newly appearing), which must be reported, not just retried.
+  // other URL newly appearing) or a REMOVED one (a same-numbered selected
+  // option toggled off), which must be reported, not just retried.
   const before = new Set(preexisting);
   for (let i = 0; i < 6; i++) {
     await page.waitForTimeout(2500);
@@ -370,6 +379,11 @@ async function linkOne(page, { issue, issueUrl, pr }) {
     if (wrong.length)
       throw new Error(
         `WRONG LINK on #${issue}: got ${wrong.join(', ')} instead of ${pr} — unlink it manually in the Development panel`,
+      );
+    const removed = preexisting.filter((u) => !now.includes(u));
+    if (removed.length)
+      throw new Error(
+        `LINK REMOVED on #${issue}: ${removed.join(', ')} disappeared instead of ${pr} appearing — re-link it manually in the Development panel`,
       );
   }
   throw new Error(`UI flow completed but the link never appeared for #${issue}`);
