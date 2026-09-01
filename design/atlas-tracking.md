@@ -335,6 +335,21 @@ promotions (those are already tracked via their fork issue).
 
 ## The hourly Atlas sync
 
+**Design rule — every stored fact needs a staleness rule.** The sync acts
+hourly on records that were written once: the `Upstream PR` field, a
+CLOSED state, a parked stage. Each is a point-in-time claim, and every
+incident in this system's history has been the sync enforcing one after
+the world moved on: re-closing an issue a human deliberately closed
+(reopen guard, #15/#31 — a close is only the panel-auto-close signature
+until the ClosedEvent's `closer` says otherwise), leaving a Sign-off item
+parked after the upstream reviewer responded (#43 — "awaiting approval"
+expires the moment the other side acts), and re-closing a reopened issue
+because the field still named a PR merged weeks earlier (#46 — the field
+is *generational*: it describes one promotion, and a reopen after that
+PR's terminal state starts a new generation the field no longer
+represents). When adding a sync behavior keyed on stored state, name the
+event that invalidates that state and check for it before acting.
+
 A single scheduled workflow hosted in the agents repo (migrated from the
 fork's `meridian` branch 2026-08-26 — org-wide board infrastructure;
 hosting only provides cron + script + secret visibility), hourly cron +
