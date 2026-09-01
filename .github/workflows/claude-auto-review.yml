@@ -180,7 +180,7 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
-          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
+          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
             echo "#$PR is not a pull request (or the API is persistently unavailable); skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
@@ -188,6 +188,27 @@ jobs:
           fi
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr_json")" != "true" ]; then
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
+          fi
+          # Closed PR, still auto-labeled: on the fork that is a deliberate
+          # continuation surface, not garbage — promotion opens the upstream
+          # PR from the SAME branch (upstream runs no agents), so
+          # post-promotion feedback is fixed by looping HERE, and every push
+          # lands on the upstream PR's diff. But a closed PR's recorded
+          # headRefOid is FROZEN at close: steering by it makes reviews
+          # re-read old code and the no-progress check compare frozen
+          # against frozen — observed on fork PR #351 (2026-09-01), which
+          # escalated "pushed no new changes" while its fix rounds' pushes
+          # were landing on the upstream diff. Steer by the LIVE branch tip
+          # instead; a deleted branch means a genuinely dead PR — skip.
+          pr_state=$(jq -r '.state' <<<"$pr_json")
+          live_tip=""
+          if [ "$pr_state" != "OPEN" ]; then
+            live_tip=$(ghr gh api "repos/$REPO/branches/$(jq -r '.headRefName' <<<"$pr_json")" --jq '.commit.sha' 2>/dev/null || true)
+            if [ -z "$live_tip" ]; then
+              echo "PR #$PR is $pr_state and its branch is gone; nothing to continue. Skipping."
+              act skip; exit 0
+            fi
+            echo "PR #$PR is $pr_state but auto-labeled with a live branch (promotion continuation); steering by branch tip $live_tip."
           fi
           echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
           # Engine selection (design/codex-engine.md): fix rounds follow the
@@ -273,6 +294,9 @@ jobs:
           fi
           next=$((prev + 1))
           head=$(jq -r '.headRefOid' <<<"$pr_json")
+          # Closed-PR continuation: the frozen headRefOid lies; the live tip
+          # is what fix rounds push to and what progress is measured by.
+          [ -n "$live_tip" ] && head="$live_tip"
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
           echo "round=$next" >>"$GITHUB_OUTPUT"
           echo "head=$head" >>"$GITHUB_OUTPUT"
