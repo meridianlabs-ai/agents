@@ -33,7 +33,10 @@ JSON=$(gh api graphql \
 
 TITLE=$(jq -r '.data.repository.issue.title' <<<"$JSON")
 OPEN=$(jq -c '[.data.repository.issue.closedByPullRequestsReferences.nodes[] | select(.state=="OPEN")]' <<<"$JSON")
-PICK=$(jq -c --arg repo "$REPO" '[.[] | select(.repository.nameWithOwner==$repo)][0] // empty' <<<"$OPEN")
+# max_by(.number), not [0]: with two OPEN same-repo chips (an old
+# generation not yet closed plus its replacement) the API's list order is
+# not defined as newest — highest PR number is.
+PICK=$(jq -c --arg repo "$REPO" '[.[] | select(.repository.nameWithOwner==$repo)] | max_by(.number) // empty' <<<"$OPEN")
 CROSS=""
 if [ -z "$PICK" ]; then
   # No same-repo chip: accept a SINGLE open cross-repo chip (ambiguity goes
