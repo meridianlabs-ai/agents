@@ -353,24 +353,143 @@ privilege boundary and the fork's branch protection still blocks force-push to
 `main`/`meridian`, so the scoping is about injection blast-radius, not the git
 plumbing itself.
 
-The merge instruction is **gated to follow-up runs only** — runs that continue
-an existing branch, where the branch can have drifted from base. That's exactly
-the PR-context triggers: an `@claude` comment on a PR
+The merge instruction was originally **gated to follow-up runs only** — runs
+that continue an existing branch, where the branch can have drifted from base.
+That's exactly the PR-context triggers: an `@claude` comment on a PR
 (`github.event.issue.pull_request` is set) or the review / review-comment events
 (`github.event.pull_request` is set). A fresh `@claude` from an issue (or a
 plain issue comment) has neither, and the action branches off the base —  which
 the hourly sync keeps current — so injecting "merge base in" there is pointless
-noise.
+noise. *Since 2026-09-01 the gate is narrower still* (next subsection): the
+merge itself happens on the runner, and the prompt is spliced only when the
+runner had to hand the merge back to the agent (a conflict, or a fork head).
+
+#### The merge moved to the runner (2026-09-01)
+
+A prompted merge is **advisory**, and the loop workflows never carried the
+prompt at all — `claude-auto.yml` and `claude-auto-review.yml` call
+claude-code-action directly rather than through `claude.yml`, so
+`branch_sync_prompt` never reached a fix round. The codex engine could not
+comply even in principle: its sandbox has no network, and its prompt tells it
+so. inspect_ai#392 is what this cost — 20 commits over ~15 hours on a branch
+11 commits behind `main`, with a one-line `CHANGELOG.md` conflict nothing in
+the pipeline could resolve. Because GitHub cannot compute a merge ref for a
+conflicted PR, real CI never ran on any of it, and every review round read
+stale code.
+
+So the merge is now a **deterministic `Sync branch with base` step** in all
+three workflows, running before either engine starts, on PR-context runs only.
+The step body lives once, in the `.github/actions/sync-branch` composite
+(referenced `@main` like `set-stage`); the two enforcement pieces below are
+composites too — `unresolved-merge-guard` and `push-base-merge` — so the three
+workflows differ only in their inputs (`claude.yml` passes `checkout: true`
+because its checkout is not on the PR head, a `push-token` because its
+checkout persisted `github.token`, and a `require-file` fence because its
+backstop runs `always()` — see below), never in the logic. Four details are
+load-bearing:
+
+- **The pre-merge tip is what gets stamped.** The landing steps treat "HEAD
+  moved past the recorded SHA" as landable work. Stamped *after* the merge, a
+  clean merge with no agent edits reads as "nothing to push" and dies with the
+  runner — recreating the drift. Stamped before, a merge-only round pushes,
+  which is exactly what restores CI.
+- **A conflict is handed on differently per engine, and the split is forced.**
+  claude-code-action's `setupBranch` runs `git checkout <branch> --`, which
+  aborts with "you need to resolve your current index first" whenever the index
+  holds unmerged entries. The Claude path therefore must be handed a clean
+  index: its conflicted merge is aborted and delegated back to the agent via
+  `branch_sync_prompt` (now spliced *only* in that case — on the clean path the
+  branch is already current and re-merging is noise). Strictly, the action
+  forces this only in `claude.yml`, which runs it in tag mode; the loop
+  workflows run it in agent mode (bare `prompt:`, no `track_progress`), whose
+  prepare path does not call `setupBranch` (verified in the action's
+  `src/modes/agent/index.ts` vs `src/modes/tag/index.ts`). The loops mirror
+  the split anyway — one mental model and one prompt across all three
+  workflows. Codex, which cannot
+  fetch, is handed the merge still in progress and resolves the markers in the
+  working tree — and must `git add` each resolved file, because the landing
+  step's unmerged-index check is the only thing that catches binary and
+  modify/delete conflicts, which have no markers. Caller-specific merge rules
+  ride along via a `branch_sync_append` input on all three workflows, and
+  reach the agent on both engines **whenever a merge happened this run** —
+  not only on a conflict. The fork's append is about a *non-conflicting*
+  mis-merge (git auto-merges `CHANGELOG.md` cleanly and lands the entry under
+  the wrong heading), so on a clean runner merge it is spliced behind a
+  "a workflow step already merged; review the result" lead-in, and on the
+  delegated path it follows the merge instruction.
+- **Closed and merged PRs are skipped.** claude-code-action's `setupBranch`
+  does not continue the old head there — it cuts a fresh branch off base — so
+  there is nothing to sync, and the head ref may already be deleted (an
+  unconditional fetch would have killed a previously working "`@claude` do X"
+  follow-up on a merged PR). The step checks the PR `state` and exits early
+  unless it is `OPEN`.
+- **The landing step is the enforcement point.** `git add -A` would happily
+  stage conflict markers and `git commit` would produce a valid merge commit
+  containing them, so an `unresolved-merge-guard` step immediately before
+  codex's landing refuses to proceed when `git ls-files --unmerged` is
+  non-empty or a `<<<<<<< `/`>>>>>>> ` marker survives in one of the reported
+  files (a failed guard skips the landing step; the "Surface agent errors"
+  steps read the guard's outcome and post the cause). `=======` is deliberately not matched:
+  a bare seven-equals line is a legitimate rST/Markdown heading underline, and
+  a repo-wide grep for it would fail honest docs changes.
+
+A `Push base merge if unpushed` backstop covers the Claude path's remaining
+hole: if HEAD is still *exactly* the runner's merge commit when the agent
+finishes, nothing else will push it, so the workflow does. Gating on that exact
+SHA means an agent that committed on top — pushed or deliberately not — is
+never second-guessed. If the remote tip moved during the run while HEAD stayed
+at the merge (the agent landed its change server-side via the API, or a human
+pushed mid-round), the backstop skips instead of failing red on a
+non-fast-forward push — the next round re-merges on top of the new tip. In
+`claude.yml` the backstop is additionally fenced on the agent having actually
+*started* — the composite's `require-file` input names the execution file,
+which exists only once Claude ran (the loops leave the input empty: their gate
+authorized the actor before checkout). The workflow's own
+trigger check deliberately does not mirror claude-code-action's write-access
+check on the commenter (the action is the authorizer, and it fails its step
+for an outsider), so an unfenced `always()` would have let a non-collaborator's
+`@claude` on a public repo's behind PR produce a machine-account merge push
+and a CI re-run: a deterministic, low-harm payload, but a write reachable
+without write access that did not exist before. A declined or never-started
+agent leaves the merge on the runner for the next authorized run. That push
+also posts the `@review` re-review request on a successful `@auto` run: the
+Claude path's prompt tells
+the agent not to request re-review when it made no code changes, so a
+merge-only round would otherwise move the head with nobody owing the hand-back
+(the loop workflows already cover this with "Ensure hand-back after push"). The
+post is its own step, gated on the composite's `pushed` output; it retries with
+backoff like the loops' step, and both outcomes are read by "Surface agent
+errors": a failed push or hand-back is commented on the PR and fails the job,
+which is what lets "Stage - Review (hand-back)" move the board instead of
+treating the run as a successful autonomous PR round. One
+consequence in the CI-fix loop: when the agent gives up on a failure on a
+*behind* branch, the merge-only push re-runs CI, which fails the same way and
+spends exactly one more `fix_attempt_cap` attempt — that next attempt finds the
+branch up to date, sets no `merge_sha`, pushes nothing, and stops. That is the
+intended cost of restoring a computable merge ref, not a loop bug. A
+merge that reports "Already up to date" sets no `merge_sha` at all, so neither
+the backstop nor the "review the runner's merge" note fires on a branch that
+already contains its base.
+
+A failed sync step (a transient `gh`/fetch error, or the deliberate loud
+failure when `git merge` dies without content conflicts) skips every
+downstream step rather than failing them, so the "Surface agent errors" steps
+read the sync step's outcome explicitly and post the failure to the PR. In
+the loop workflows the round/attempt is recorded *after* the sync, so nothing
+is burned; without the surfacing, though, the board would sit at Agent with
+the label on and nothing running.
 
 ### Two prompt-injection sources, one flag
 
 There are two appended-system-prompt sources: `branch_sync_prompt` (the gated
-merge instruction above) and `append_system_prompt` (always-on, empty by
-default — the channel for **caller-specific** guidance a shared default can't
-carry, e.g. the inspect_ai fork's stub setting CHANGELOG.md rules; see
+merge instruction above, plus its `branch_sync_append` companion) and
+`append_system_prompt` (always-on, empty by default — the channel for
+**caller-specific** guidance a shared default can't carry, e.g. the inspect_ai
+fork's stub setting CHANGELOG.md rules; see
 [shared-instructions.md](shared-instructions.md) for why the fork can't ship a
-`CLAUDE.md`). Both feed `--append-system-prompt`, and on a PR follow-up both are
-non-empty at once.
+`CLAUDE.md`). Both feed `--append-system-prompt`, and on a PR follow-up where
+the runner handed the merge to the agent (or merged cleanly with an append
+configured) both are non-empty at once.
 
 A "Compose appended system prompt" step joins them into **one** value (space-
 separated, on one line) so we emit a *single* `--append-system-prompt` flag.

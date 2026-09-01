@@ -177,9 +177,25 @@ workaround when #103's does).
   fork PRs loudly rather than failing mid-run.
 - **No review-thread resolution** in codex fix rounds (needs gh); the
   handoff notes it so humans resolve threads at sign-off.
-- **No branch sync on dev runs**: codex can't fetch; conflicts surface
-  in CI/review as before. (A deterministic pre-merge step is the
-  obvious v2 if this bites.)
+- **Branch sync is deterministic, not prompted** (was a limitation; fixed
+  2026-09-01 after inspect_ai#392 sat 11 commits behind `main` across 20
+  commits, with CI never running because GitHub cannot compute a merge ref
+  for a conflicted PR). A `Sync branch with base` step merges the base on
+  the runner for BOTH engines, before either agent starts. Codex still
+  can't fetch — it never does the merge itself; it is handed the *result*.
+  On a conflict the merge is left IN PROGRESS and the conflict list is
+  spliced into the codex prompt as a first-class task; the
+  `unresolved-merge-guard` step ahead of the landing step then refuses to
+  land while `git ls-files --unmerged` is non-empty or a
+  `<<<<<<< `/`>>>>>>> ` marker survives in one of those files. (`=======`
+  is deliberately not matched — it is a legitimate rST/Markdown heading
+  underline.) The Claude path in `claude.yml` cannot receive an in-progress
+  merge: tag mode's `setupBranch` runs `git checkout <branch> --`, which
+  aborts with "you need to resolve your current index first" on an unmerged
+  index, so a conflicted merge is aborted there and handed back to the
+  agent via `branch_sync_prompt`. The loop workflows run the action in
+  agent mode, which does not call `setupBranch`, and mirror the split for
+  one mental model. Same behavior, different mechanism.
 - **Model**: `codex_model` input, default `gpt-5.6-sol` (the strongest
   OpenAI tier; the `gpt-5.6` alias routes there). Reviews additionally pin
   `codex_effort: xhigh` — correctness over turnaround; implementation runs

@@ -73,6 +73,21 @@ on:
         required: false
         type: string
         default: ""
+      branch_sync_append:
+        description: >-
+          Caller-specific merge guidance, same channel as claude.yml's input of
+          the same name: reaches the agent on BOTH engines whenever "Sync
+          branch with base" merged this run — appended to the conflict note
+          when the merge is handed to the agent, and spliced behind a "a
+          workflow step already merged; review the result" lead-in when the
+          runner merged cleanly. Clean merges are the case that motivated it
+          (git auto-merges a CHANGELOG without conflict and lands the entry
+          under the wrong heading — the fork's append checks for that). Empty
+          by default. Keep it a single line — the Claude-path prompt travels
+          as one output line, so newlines are flattened.
+        required: false
+        type: string
+        default: ""
       anchor_repo:
         description: >-
           Repo whose issues this repo's claude/issue-N-* branch numbers
@@ -263,7 +278,56 @@ jobs:
             "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again."
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
 
-      # Record the attempt (idempotent sticky comment) before invoking the agent.
+      # Capture the branch tip and a timestamp before the agent runs so later
+      # steps can tell whether the agent's fix landed and what it posted.
+      - name: Record base SHA
+        if: steps.gate.outputs.act == 'fix'
+        id: base
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          echo "ts=$(date -u +%FT%TZ)" >>"$GITHUB_OUTPUT"
+
+      # ---- Deterministic base-branch sync (design/architecture.md) ---------
+      # The base merge happens HERE, on the runner, for BOTH engines — not in a
+      # prompt. The codex sandbox has no network and cannot merge at all, and a
+      # prompted merge is advisory, so branches drifted anyway: inspect_ai#392
+      # sat 11 commits behind main across 20 commits, and because GitHub cannot
+      # compute a merge ref for a conflicted PR, CI never ran and every fix
+      # round was written against stale code.
+      #
+      # A CONFLICTED merge is handed on differently per engine: the Claude path
+      # gets a CLEAN index and re-merges inside the agent (it has network and
+      # the git allow-list); codex gets the merge still IN PROGRESS and resolves
+      # the markers in the tree, and its landing step refuses to push while any
+      # survive. In claude.yml the split is forced — tag mode's setupBranch runs
+      # `git checkout <branch> --`, which aborts on an unmerged index. This
+      # workflow runs the action in agent mode (bare `prompt:`, no
+      # track_progress), which does NOT run setupBranch, so the action would
+      # tolerate an in-progress merge here. The split is mirrored anyway: one
+      # mental model and one merge instruction across all three workflows (here
+      # the inline merge_note in "Compose fix prompt"; claude.yml's is its
+      # branch_sync_prompt input).
+      #
+      # The step body is the shared sync-branch composite (one copy for all
+      # three workflows). checkout stays false: this job's actions/checkout
+      # already put the PR head branch in the workspace (the gate handled
+      # closed and fork PRs), and "Record base SHA" above stamped its
+      # PRE-merge tip — which is what makes a round whose only product is the
+      # base merge still count as landable work and push.
+      - name: Sync branch with base
+        id: sync
+        if: steps.gate.outputs.act == 'fix'
+        uses: meridianlabs-ai/agents/.github/actions/sync-branch@main
+        with:
+          pr: ${{ steps.gate.outputs.pr }}
+          engine: ${{ steps.gate.outputs.engine }}
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+
+      # Record the attempt (idempotent sticky comment) before invoking the
+      # agent — but AFTER the sync step, matching the review loop's ordering:
+      # a sync failure (transient gh/fetch error) skips the agent steps rather
+      # than failing them, so the refund step would never fire, and an attempt
+      # recorded up front would stay burned with no fix ever tried.
       - name: Record attempt
         if: steps.gate.outputs.act == 'fix'
         env:
@@ -284,15 +348,6 @@ jobs:
             gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
           fi
 
-      # Capture the branch tip and a timestamp before the agent runs so later
-      # steps can tell whether the agent's fix landed and what it posted.
-      - name: Record base SHA
-        if: steps.gate.outputs.act == 'fix'
-        id: base
-        run: |
-          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
-          echo "ts=$(date -u +%FT%TZ)" >>"$GITHUB_OUTPUT"
-
       - name: Compose fix prompt
         if: steps.gate.outputs.act == 'fix'
         id: prompt
@@ -303,9 +358,28 @@ jobs:
           ATTEMPT: ${{ steps.gate.outputs.attempt }}
           CAP: ${{ inputs.fix_attempt_cap }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
+          AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          SYNC_BASE: ${{ steps.sync.outputs.base }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
         run: |
           # Single line: the prompt is spliced as one arg downstream.
-          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment — they are matched by plain substring, so quoting one (e.g. when citing a reviewer comment) would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary')." >>"$GITHUB_OUTPUT"
+          # The merge instruction is spliced only when "Sync branch with base"
+          # could not land the merge itself — it aborts a conflicted merge to
+          # hand the Claude path a clean index (see that step's comment), so
+          # on that path the agent does the merge. The caller's
+          # branch_sync_append reaches the agent on
+          # EITHER path: the fork's is about a non-conflicting CHANGELOG
+          # mis-merge, so a clean runner merge is exactly when it applies.
+          merge_note=""
+          if [ "${AGENT_MERGE:-}" = "1" ]; then
+            merge_note=" FIRST TASK, before any of the above: this branch conflicts with its base branch $SYNC_BASE, and a workflow step could not merge it for you. Merge origin/$SYNC_BASE into this branch and resolve every conflict, preserving both sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale — then include that merge when you push. Until that lands GitHub cannot compute a merge ref for this PR, so CI does not run and the failing job you are asked to fix cannot even be re-evaluated."
+            # Flattened: a newline would corrupt the value= output line below.
+            [ -n "${SYNC_APPEND:-}" ] && merge_note="$merge_note $(tr '\n' ' ' <<<"$SYNC_APPEND")"
+          elif [ -n "${MERGE_SHA:-}" ] && [ -n "${SYNC_APPEND:-}" ]; then
+            merge_note=" NOTE: a workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before your other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
+          fi
+          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment — they are matched by plain substring, so quoting one (e.g. when citing a reviewer comment) would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary').${merge_note}" >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
@@ -323,6 +397,26 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
 
+      # If the runner's base merge is STILL the branch tip, the agent finished
+      # without committing anything of its own and nothing else will push it.
+      # Land it anyway: restoring the PR to mergeable is what lets GitHub
+      # compute a merge ref again, which is what lets CI run at all. Gated on
+      # HEAD being EXACTLY that merge commit, so an agent that committed on top
+      # — pushed, or deliberately not — is never second-guessed. always(), so a
+      # failed or cancelled agent still leaves the branch current.
+      # Shared push-base-merge composite (exact-SHA gate, non-fast-forward
+      # guard, push). No push-token: this job's checkout persisted
+      # MARVIN_TOKEN, so a plain push already authenticates as the machine
+      # account and re-triggers CI.
+      - name: Push base merge if unpushed
+        if: >-
+          always() && steps.gate.outputs.act == 'fix' &&
+          steps.gate.outputs.engine != 'codex' && steps.sync.outputs.merge_sha != ''
+        uses: meridianlabs-ai/agents/.github/actions/push-base-merge@main
+        with:
+          branch: ${{ inputs.head_branch }}
+          merge_sha: ${{ steps.sync.outputs.merge_sha }}
+
       # ---- Codex engine CI-fix round (design/codex-engine.md) ----------------
       # The codex sandbox has no network, so the failing CI logs are
       # pre-fetched into the prompt file; commit/push/post are deterministic.
@@ -337,6 +431,10 @@ jobs:
           HEAD: ${{ inputs.head_branch }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
           ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          SYNC_BASE: ${{ steps.sync.outputs.base }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
           CAP: ${{ inputs.fix_attempt_cap }}
         run: |
           set -euo pipefail
@@ -368,6 +466,17 @@ jobs:
           {
             echo "You are auto, fixing failing CI on PR #$PR in $REPO (branch $HEAD, fix attempt $ATTEMPT of $CAP), running on the Codex engine in a local checkout of the branch."
             echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes (which re-runs CI), and posts for you. Verify locally (pytest/ruff/mypy) where relevant."
+            if [ -n "${CONFLICTS:-}" ]; then
+              echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
+              sed 's/^/  /' <<<"$CONFLICTS"
+              [ -n "${SYNC_APPEND:-}" ] && echo "$SYNC_APPEND"
+              echo "Resolve every conflict by editing those files, preserving BOTH sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale. Local git is available and useful here (git status, git diff, git log, git add <file>); the network-dependent commands in the CONSTRAINTS above are still off, and you must NOT run git merge, git rebase or git checkout of any ref — that would strand the in-progress merge. After resolving each file you MUST stage it with git add <file>: the landing step FAILS the run on any path still unmerged in the index (that index check is what catches binary and modify/delete conflicts, which have no markers), and on any surviving conflict marker — so leaving either is strictly worse than resolving and staging. Once resolved, treat the MERGED tree as the code you are working on: re-run the relevant tests against it, not against the pre-merge state."
+            elif [ -n "${MERGE_SHA:-}" ] && [ -n "${SYNC_APPEND:-}" ]; then
+              # Clean merge: the repo-specific merge rule still applies (the
+              # fork's is about a NON-conflicting CHANGELOG mis-merge).
+              echo "BASE MERGE NOTE: a workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before the task below, and fix it in the working tree if it is off:"
+              echo "$SYNC_APPEND"
+            fi
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the fix (it becomes the commit subject), then a blank line, then a body explaining the root cause and the fix (posted as a comment). If you cannot fix it, leave the tree untouched and explain what is blocking."
             echo ""
             echo "FAILING CI LOG (run $CI_RUN_ID, failed jobs, tail):"
@@ -448,9 +557,22 @@ jobs:
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
+      # Unresolved-merge guard (shared composite): the landing step's `git add
+      # -A` would happily stage conflict markers and `git commit` would then
+      # produce a valid merge commit containing them, so this check is the
+      # only thing between a half-resolved merge and the PR branch. A separate
+      # step so the landing step below is skipped, not entered, on failure;
+      # the Surface step reads this step's outcome.
+      - name: Guard against an unresolved merge (codex)
+        id: codexguard
+        if: steps.codexfix.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/unresolved-merge-guard@main
+        with:
+          conflicts: ${{ steps.sync.outputs.conflicts }}
+
       - name: Land codex fix
         id: codexland
-        if: steps.codexfix.outcome == 'success'
+        if: steps.codexguard.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -459,6 +581,7 @@ jobs:
           OUT: ${{ runner.temp }}/codex/codex-final.md
           START_SHA: ${{ steps.base.outputs.sha }}
           HEAD_BRANCH: ${{ inputs.head_branch }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
         run: |
           set -euo pipefail
           # Reclaim .git before writing objects as runner: any objects/XX
@@ -468,7 +591,11 @@ jobs:
           # would intermittently fail with "insufficient permission for
           # adding an object".
           sudo chown -R runner "$GITHUB_WORKSPACE/.git"
-          if [ -n "$(git status --porcelain)" ]; then
+          # MERGE_HEAD too: a conflict resolution staged byte-identical to
+          # HEAD ("ours" on every hunk) leaves status clean while the merge
+          # is still in progress — commit anyway so the merge completes,
+          # HEAD moves past START_SHA, and the push gate lands it.
+          if [ -n "$(git status --porcelain)" ] || git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             # || true inside the substitution: without it a missing/unreadable
             # $OUT fails the pipeline and set -e kills the step before the
             # fallback is reached — the fallback would only ever cover an
@@ -486,10 +613,17 @@ jobs:
           # branch; a diverted HEAD that isn't genuinely new work fails the
           # push non-fast-forward — loud, not lossy.
           pushed=""
+          merge_only=""
           if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
             git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
             pushed=1
-            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH"
+            # HEAD still exactly the runner's clean base merge: codex changed
+            # nothing (any commit above would have moved it), so say so
+            # rather than announcing "fix pushed" over a summary that says
+            # nothing needed changing. Still a push, so the backstop below
+            # owes the @review — the re-run is what gets real CI.
+            [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
+            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
           fi
           # Post the summary either way (a no-change round IS the blocker
           # comment the ending contract calls for), de-fanged: it posts from
@@ -499,7 +633,9 @@ jobs:
           # those substrings too. On a push, the backstop below posts the
           # owed @review.
           {
-            if [ -n "$pushed" ]; then
+            if [ -n "$merge_only" ]; then
+              printf '🤖 auto (codex, CI-fix attempt %s): base merge pushed; no fix this attempt — details below.\n\n' "$ATTEMPT"
+            elif [ -n "$pushed" ]; then
               printf '🤖 auto (codex, CI-fix attempt %s): fix pushed — summary below.\n\n' "$ATTEMPT"
             else
               printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"
@@ -590,15 +726,26 @@ jobs:
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
           SINCE: ${{ steps.base.outputs.ts }}
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
+          CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
-          [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          # The base-branch sync died before the agent started (a transient
+          # gh/fetch error, or its own loud non-conflict merge failure). Every
+          # downstream step is SKIPPED, not failed, so no other branch below
+          # fires; the attempt was deliberately not recorded (Record attempt
+          # runs after the sync), so the refund path does not apply either —
+          # without this the failure is a silent stall with the board at Agent.
+          if [ "${SYNC_OUTCOME:-}" = "failure" ]; then
+            err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); no fix was attempted. Re-trigger to retry."
+          fi
+          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
             err="the codex context-preparation step failed before the agent started — no fix was attempted (see the job logs)."
           fi
@@ -609,6 +756,10 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
+          fi
+          # A failed guard SKIPS the landing step, so it needs its own check.
+          if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then
+            err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was pushed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
           fi
           if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
             err="codex finished but its landing step failed — the fix may not have reached the branch (see the job logs)."
