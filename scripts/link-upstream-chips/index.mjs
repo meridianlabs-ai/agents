@@ -166,6 +166,62 @@ function pendingCompanionPairs() {
   return rows;
 }
 
+function pendingPromotions() {
+  // Promotions: fork issues whose Atlas "Upstream PR" field is set (the
+  // promote skill's bookkeeping) but whose Development panel lacks the
+  // UPSTREAM link itself. Invisible to pendingProxies (no External label)
+  // and to pendingAgentPairs (the fork review PR is closed as superseded
+  // by the promotion) — observed: #96 parked at Sign-off, panel carrying
+  // only the superseded fork PR link, so an any-link-exists check would
+  // wrongly skip it: verify the SPECIFIC upstream URL like the agent-pair
+  // path does. Discovery is the board, via a paginated three-field
+  // GraphQL query — `gh project item-list` pulls every field of every
+  // item, which both trips the secondary rate limit and overflows
+  // execFileSync's 1MB buffer (a swallowed overflow reads as "nothing
+  // pending"). Live items only: the sync clears Stage on every close
+  // path, so a null Stage means Done/closed, where a missing chip no
+  // longer matters.
+  const rows = [];
+  let after = '';
+  for (;;) {
+    const q = `query($org:String!,$num:Int!,$after:String){
+      organization(login:$org){ projectV2(number:$num){
+        items(first:100, after:$after){
+          pageInfo{hasNextPage endCursor}
+          nodes{
+            up: fieldValueByName(name:"Upstream PR"){
+              ... on ProjectV2ItemFieldTextValue{text}}
+            stage: fieldValueByName(name:"Stage"){
+              ... on ProjectV2ItemFieldSingleSelectValue{name}}
+            content{ ... on Issue{number repository{nameWithOwner}}}
+          }}}}}`;
+    let out;
+    try {
+      out = graphql(q, ['-F', `org=${OWNER}`, '-F', `num=${PROJECT_NUMBER}`,
+                        ...(after ? ['-F', `after=${after}`] : [])]);
+    } catch (e) {
+      console.warn(`promotion discovery failed (board unreadable): ${e.message ?? e}`);
+      return rows; // partial results beat silence; re-swept next run
+    }
+    const page = out.data.organization.projectV2.items;
+    for (const n of page.nodes) {
+      const pr = (n.up?.text ?? '').trim();
+      if (!pr || !n.stage?.name) continue;
+      const issue = n.content?.number;
+      if (!issue || n.content?.repository?.nameWithOwner !== REPO) continue;
+      try {
+        if (linkedUrls(issue).includes(pr)) continue; // upstream chip exists
+      } catch {
+        continue; // issue unreadable — skip rather than guess
+      }
+      rows.push({ issue, issueUrl: `https://github.com/${REPO}/issues/${issue}`, pr });
+    }
+    if (!page.pageInfo.hasNextPage) break;
+    after = page.pageInfo.endCursor;
+  }
+  return rows;
+}
+
 async function loggedInUser(page) {
   return page
     .evaluate(() => document.querySelector('meta[name="user-login"]')?.content ?? '')
@@ -296,7 +352,7 @@ const rows = LOGIN_ONLY
         }
         return true;
       })
-    : [...pendingProxies(), ...pendingAgentPairs(), ...pendingCompanionPairs()];
+    : [...pendingProxies(), ...pendingAgentPairs(), ...pendingCompanionPairs(), ...pendingPromotions()];
 if (!LOGIN_ONLY && rows.length === 0) {
   console.log('Nothing pending — every target already has its chip.');
   process.exit(0);
