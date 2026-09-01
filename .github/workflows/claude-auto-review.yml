@@ -559,6 +559,7 @@ jobs:
       # a faithful copy of the example; if codex ever drops a 600 file, the
       # land step needs a chmod -R a+rX sweep, not this group.)
       - name: Create codex user
+        id: codexuser
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
         run: |
           set -euo pipefail
@@ -779,6 +780,7 @@ jobs:
           MENTION: ${{ steps.gate.outputs.mention }}
           HANDED: ${{ steps.selfhandoff.outputs.found }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
+          CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
@@ -788,6 +790,11 @@ jobs:
           [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
             err="the codex context-preparation step failed before the agent started — no fix was attempted this round (see the job logs)."
+          fi
+          # A failed codex-user setup SKIPS the codex step, so it needs its
+          # own check or the failure is a silent red job.
+          if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
+            err="the codex user setup failed before the agent started — no fix was attempted this round (a runner-image change breaking adduser/usermod? — see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
@@ -854,17 +861,17 @@ jobs:
       # nothing. A failed codex step is the same class — its landing step
       # never ran, so nothing reached the PR (persistently missing
       # OPENAI_API_KEY must not march a PR to spurious escalation) — and so
-      # is a failed codex PREP step, which dies before the agent starts and
-      # skips codexfix outright; the exec-file guard below is Claude-only and
-      # no execution file ever exists on the codex path, so the refund
-      # proceeds. Rebuild the sticky counter body including the head marker
-      # the next gate's no-progress check reads. Per-PR concurrency
-      # serializes us.
+      # are a failed codex PREP or user-setup step, which die before the
+      # agent starts and skip codexfix outright; the exec-file guard below is
+      # Claude-only and no execution file ever exists on the codex path, so
+      # the refund proceeds. Rebuild the sticky counter body including the
+      # head marker the next gate's no-progress check reads. Per-PR
+      # concurrency serializes us.
       - name: Refund infra-crashed round
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
           (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure' ||
-           steps.codexprep.outcome == 'failure')
+           steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}

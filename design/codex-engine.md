@@ -138,8 +138,15 @@ step drops the example's workspace-write grants (its profile is
 checkout), and the write-path land steps start with `chown -R runner` on
 `.git` (object fan-out dirs codex creates are codex-owned, and the
 runner's codex-group membership never takes effect within the job, so
-runner-side object writes would otherwise fail intermittently). Revisit
-when #160's fixes land upstream.
+runner-side object writes would otherwise fail intermittently). One more
+unprivileged-user consequence, reviewer-only: the action's inline
+`output-schema` input is broken under this strategy at `@v1`
+(openai/codex-action#103 — the schema temp dir is mktemp'd as codex, mode
+700, then written as the runner, EACCES; fix #147 unmerged), so the setup
+step writes the review schema to a runner-owned file and the codex step
+passes `output-schema-file` instead — the explicit-path branch creates no
+temp dir. Revisit when #160's fixes land upstream (and drop the schema
+workaround when #103's does).
 
 ## v1 limitations (deliberate)
 

@@ -612,6 +612,7 @@ jobs:
       # a faithful copy of the example; if codex ever drops a 600 file, the
       # land step needs a chmod -R a+rX sweep, not this group.)
       - name: Create codex user
+        id: codexuser
         if: steps.engine.outputs.engine == 'codex'
         run: |
           set -euo pipefail
@@ -975,6 +976,7 @@ jobs:
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXCOMPOSE_OUTCOME: ${{ steps.codexcompose.outcome }}
+          CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexrun.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
@@ -998,6 +1000,11 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEXCOMPOSE_OUTCOME:-}" = "failure" ]; then
             err="composing the codex prompt failed before the agent started (see the job logs)."
+          fi
+          # A failed codex-user setup SKIPS the codex step, so it needs its
+          # own check or the failure is a silent red job.
+          if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
+            err="the codex user setup failed before the agent started (a runner-image change breaking adduser/usermod? — see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
