@@ -1,0 +1,107 @@
+name: model-provenance
+description: >-
+  Report which Claude model actually served an agent run, and say so on the
+  PR/issue when it was not the one requested (the --fallback-model fired) or
+  when the run ended in what looks like a classifier refusal. The init line
+  of claude-execution-output.json echoes the REQUESTED model even when the
+  fallback fires — only `modelUsage` in the final result shows what ran
+  (design/architecture.md → Model selection), and until this step the only
+  way to know was downloading the artifact. Best-effort by design: every
+  path exits 0 — provenance must never fail the agent's real work. Referenced
+  fully-qualified (meridianlabs-ai/agents/.github/actions/model-provenance@main)
+  so it works regardless of what the job checked out; NO post step (local
+  composite actions with post steps break teardown on the fork).
+
+inputs:
+  exec-file:
+    description: >-
+      Path to claude-execution-output.json (claude-code-action's
+      execution_file output). Empty/missing file = the agent never launched
+      (a pre-launch skip, or the codex engine) — nothing to report.
+    required: false
+    default: ""
+  requested:
+    description: The model the workflow asked for (its `model` input, alias or ID).
+    required: false
+    default: ""
+  token:
+    description: >-
+      Token for the provenance comment (MARVIN_TOKEN so it posts as the
+      machine account, like the other deterministic posts). Empty skips the
+      comment; the job summary and log lines still happen.
+    required: false
+    default: ""
+  repo:
+    description: owner/name to comment in.
+    required: false
+    default: ${{ github.repository }}
+  number:
+    description: Issue or PR number to comment on. Empty skips the comment.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        EXEC: ${{ inputs.exec-file }}
+        REQUESTED: ${{ inputs.requested }}
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        NUM: ${{ inputs.number }}
+      run: |
+        set -uo pipefail
+        file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+        [ -f "$file" ] || { echo "model-provenance: no execution file; nothing to report."; exit 0; }
+        msgs='(if type=="array" then . else .messages end)'
+        # The init line's model is the alias RESOLVED (e.g. fable ->
+        # claude-fable-5-1) but still the requested one, not what ran.
+        init=$(jq -r "$msgs"' | map(select(.type=="system")) | .[0].model // empty' "$file" 2>/dev/null || true)
+        usage=$(jq -c "$msgs"' | map(select(.type=="result")) | last | .modelUsage // {}' "$file" 2>/dev/null || echo '{}')
+        [ "$usage" != "{}" ] || { echo "model-provenance: no modelUsage in the result (agent produced no result); nothing to report."; exit 0; }
+        table=$(jq -r 'to_entries | map("| `\(.key)` | \(.value.inputTokens // 0) | \(.value.outputTokens // 0) |") | join("\n")' <<<"$usage")
+        echo "model-provenance: requested='${REQUESTED:-<default>}' init='$init'"
+        echo "$table" | sed 's/^/model-provenance: /'
+        {
+          echo "### Model provenance"
+          echo ""
+          echo "Requested: \`${REQUESTED:-<Claude Code default>}\` (init line: \`${init:-?}\`)"
+          echo ""
+          echo "| served by | input tokens | output tokens |"
+          echo "|---|---:|---:|"
+          echo "$table"
+        } >>"$GITHUB_STEP_SUMMARY"
+        # Fallback detection. Haiku is Claude Code's own subagent/summarization
+        # traffic on every run, not a fallback; anything else that served
+        # OUTPUT tokens without being the init model is the fallback (a
+        # served set lacking the init model entirely is the clearest case).
+        others=$(jq -r --arg init "$init" 'to_entries
+          | map(select(.key != $init and (.key | test("haiku") | not) and ((.value.outputTokens // 0) > 0)))
+          | map("\(.key) (\(.value.outputTokens) output tokens)") | join(", ")' <<<"$usage")
+        has_init=$(jq -r --arg init "$init" 'has($init)' <<<"$usage")
+        # Refusal heuristic: the final result errored and its text reads like
+        # a classifier/policy refusal. The execution log carries no per-message
+        # stop_reason, so the result text is the only signal.
+        refusal=$(jq -r "$msgs"' | map(select(.type=="result")) | last
+          | if (.is_error == true) and ((.result // "") | test("refus|classif|safety|policy|cannot help|can'"'"'t help"; "i")) then (.result | .[0:300]) else empty end' "$file" 2>/dev/null || true)
+        note=""
+        if [ -n "$others" ] || [ "$has_init" != "true" ]; then
+          note="ℹ️ **Model fallback fired** on this run: requested \`${REQUESTED:-default}\` (\`${init:-?}\`), but tokens were served by ${others:-a different model}. The run's work is still valid; read it knowing the primary model was unavailable, overloaded, or declined."
+          echo "::warning::model fallback: requested $init, served by ${others:-other}"
+        fi
+        if [ -n "$refusal" ]; then
+          # De-fang: agent/API text posts from a write-access account.
+          snippet=$(printf '%s' "$refusal" | tr '\n' ' ' | sed -E 's/@(review|claude|auto)/\1/g; s/claude-review-(summary|verdict|comment)/claude-review \1/g; s/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g')
+          line="⚠️ **Possible classifier refusal**: the run ended in an error whose text reads like a safety/policy refusal: \`$snippet\`"
+          if [ -n "$note" ]; then note=$(printf '%s\n\n%s' "$note" "$line"); else note="$line"; fi
+          echo "::warning::possible classifier refusal in the final result"
+        fi
+        [ -n "$note" ] || { echo "model-provenance: served by the requested model; no fallback, no refusal."; exit 0; }
+        printf '%s\n' "$note" >>"$GITHUB_STEP_SUMMARY"
+        if [ -n "$GH_TOKEN" ] && [ -n "$NUM" ]; then
+          gh api "repos/$REPO/issues/$NUM/comments" -f body="$note" --silent \
+            && echo "model-provenance: posted the note on #$NUM" \
+            || echo "::warning::model-provenance: could not post the note on #$NUM"
+        fi
+        exit 0
