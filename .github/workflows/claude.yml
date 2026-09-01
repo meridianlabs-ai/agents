@@ -618,9 +618,18 @@ jobs:
           # the hand-back exists — posting again would start a second review
           # run (the older one cancelled by newest-wins), or re-review a PR
           # the agent just handed to a human. An API failure reads as 0 and
-          # falls through to posting — the safe completion.
-          posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=${SINCE:-}" \
-            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | contains("auto-handoff")))] | length' 2>/dev/null || echo 0)
+          # falls through to posting — the safe completion. An empty SINCE
+          # gets the same treatment: GitHub ignores an empty `since=` rather
+          # than rejecting it, so the unguarded call would match every old
+          # hand-back on the PR and silently skip the one owed now. The
+          # composite stamps `started` first, so this only bites when the
+          # workflow and sync-branch@main skew (a branch-tested claude.yml
+          # against an older composite).
+          posted=0
+          if [ -n "${SINCE:-}" ]; then
+            posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
+              --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | contains("auto-handoff")))] | length' 2>/dev/null || echo 0)
+          fi
           if [ "${posted:-0}" -gt 0 ]; then
             echo "Hand-back already posted this run; not posting another."
             exit 0
