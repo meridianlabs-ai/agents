@@ -396,16 +396,22 @@ def upstream_pr(url: str):
     return d
 
 
-def latest_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
-    """(latest author-activity ts, latest reviewer-activity ts) on the PR."""
-    author_ts, reviewer_ts = "", ""
+def _pr_events(owner: str, repo: str, num: int):
+    """PR author login + flat (author, ts) event list for a PR.
+
+    Event sources: issue comments, submitted reviews, and review-thread
+    comments. The truncation windows (last:50 / last:20) drop only old
+    events — safe for the latest-timestamp computations built on this.
+    Author nodes carry login and __typename so callers can classify
+    humans vs bots.
+    """
     d = gql(
         """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
              pullRequest(number:$n){
                author{login}
-               comments(last:50){nodes{author{login} createdAt}}
-               reviews(last:50){nodes{author{login} submittedAt}}
-               reviewThreads(last:50){nodes{comments(last:20){nodes{author{login} createdAt}}}}
+               comments(last:50){nodes{author{login __typename} createdAt}}
+               reviews(last:50){nodes{author{login __typename} submittedAt}}
+               reviewThreads(last:50){nodes{comments(last:20){nodes{author{login __typename} createdAt}}}}
              }}}""",
         o=owner,
         r=repo,
@@ -421,6 +427,13 @@ def latest_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
     ]
     for t in d["reviewThreads"]["nodes"]:
         events += [(c["author"], c["createdAt"]) for c in t["comments"]["nodes"]]
+    return pr_author, events
+
+
+def latest_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
+    """(latest author-activity ts, latest reviewer-activity ts) on the PR."""
+    author_ts, reviewer_ts = "", ""
+    pr_author, events = _pr_events(owner, repo, num)
     for who, ts in events:
         login = (who or {}).get("login", "")
         if login == pr_author and ts > author_ts:
@@ -428,6 +441,31 @@ def latest_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
         if login == REVIEWER and ts > reviewer_ts:
             reviewer_ts = ts
     return author_ts, reviewer_ts
+
+
+def upstream_reviewer_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
+    """(latest outside-human ts, latest our-side ts) on a promotion PR.
+
+    Our side is the PR author, REVIEWER, and the machine account; outside
+    is any other human. Non-User actors are excluded entirely — CI chatter
+    must not yank Sign-off items back hourly. The check is on __typename,
+    not a "[bot]" login suffix: that suffix is a REST-API rendering, and
+    GraphQL bot logins carry no suffix (e.g. github-actions).
+    """
+    ours = ""
+    others = ""
+    pr_author, events = _pr_events(owner, repo, num)
+    for who, ts in events:
+        who = who or {}
+        login = who.get("login", "")
+        if not login or who.get("__typename") != "User":
+            continue
+        if login in (pr_author, REVIEWER, "i-am-marvin"):
+            if ts > ours:
+                ours = ts
+        elif ts > others:
+            others = ts
+    return others, ours
 
 
 def close_issue(number: int, comment: str) -> None:
@@ -818,61 +856,20 @@ def sync_item(row) -> None:
             # (author/driver/machine) flips Sign-off -> Review; responding
             # upstream advances our timestamp, so the hourly scan doesn't
             # re-yank, and Review is outside TAIL_STAGES so the moved item
-            # rests until a human (or a re-request) acts.
+            # rests until a human (or a re-request) acts. A re-review
+            # request counts as ours (_req_ts): the driver handing back
+            # with commits + a re-request but no comment leaves the
+            # reviewer's changes-requested review as the newest textual
+            # event, and without this the item would oscillate hourly with
+            # the Review -> Sign-off promotion above.
             try:
                 others_ts, ours_ts = upstream_reviewer_activity(owner, repo, num)
             except Exception as e:  # noqa: BLE001 — detection is best-effort
                 print(f"::warning::reviewer-activity check failed for #{issue}: {e}")
                 return
-            if others_ts and others_ts > ours_ts:
+            if others_ts and others_ts > max(ours_ts, pr["_req_ts"]):
                 if set_stage(item, "Review", stage):
-                    actions.append(
-                        f"#{issue}: upstream reviewer responded -> Review"
-                    )
-
-
-def upstream_reviewer_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
-    """(latest outside-human ts, latest our-side ts) on a promotion PR.
-
-    Our side is the PR author, REVIEWER, and the machine account; outside
-    is any other human. Bot logins are excluded entirely — CI chatter must
-    not yank Sign-off items back hourly. Same event sources as
-    latest_activity: issue comments, reviews, and review-thread comments.
-    """
-    ours = ""
-    others = ""
-    d = gql(
-        """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
-             pullRequest(number:$n){
-               author{login}
-               comments(last:50){nodes{author{login} createdAt}}
-               reviews(last:50){nodes{author{login} submittedAt}}
-               reviewThreads(last:50){nodes{comments(last:20){nodes{author{login} createdAt}}}}
-             }}}""",
-        o=owner,
-        r=repo,
-        n=num,
-    )["repository"]["pullRequest"]
-    pr_author = (d.get("author") or {}).get("login", "")
-    events = []
-    events += [(c["author"], c["createdAt"]) for c in d["comments"]["nodes"]]
-    events += [
-        (r["author"], r["submittedAt"])
-        for r in d["reviews"]["nodes"]
-        if r.get("submittedAt")
-    ]
-    for t in d["reviewThreads"]["nodes"]:
-        events += [(c["author"], c["createdAt"]) for c in t["comments"]["nodes"]]
-    for who, ts in events:
-        login = (who or {}).get("login", "")
-        if not login or login.endswith("[bot]"):
-            continue
-        if login in (pr_author, REVIEWER, "i-am-marvin"):
-            if ts > ours:
-                ours = ts
-        elif ts > others:
-            others = ts
-    return others, ours
+                    actions.append(f"#{issue}: upstream reviewer responded -> Review")
 
 
 def lifecycle_item(issue: int):
