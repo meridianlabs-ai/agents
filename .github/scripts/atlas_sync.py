@@ -370,7 +370,7 @@ def upstream_pr(url: str):
     d = gql(
         """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
              pullRequest(number:$n){
-               state merged reviewDecision headRefName author{login}
+               state merged mergedAt closedAt reviewDecision headRefName author{login}
                reviewRequests(first:20){nodes{requestedReviewer{... on User{login}}}}
                requestEvents: timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT], last:20){
                  nodes{... on ReviewRequestedEvent{createdAt actor{login}}}}
@@ -668,6 +668,50 @@ def companion_blocks_merge(issue: int, pr) -> bool:
     return True
 
 
+def field_is_stale(issue: int, pr) -> bool:
+    """True when the issue was reopened AFTER its upstream PR went terminal.
+
+    The Upstream PR field is generational: it describes ONE promotion. Once
+    that PR merges (or dies) and a human/automation reopens the issue, new
+    work is in flight that the field no longer represents — and without
+    this check the hourly scan re-closes the reopened issue forever
+    (observed: #232, re-closed on 2026-08-18 and again on 2026-09-01 over
+    an in-flight @auto branch, because the field still pointed at a PR
+    merged two weeks prior). Detection is the last ReopenedEvent vs the
+    PR's terminal timestamp. Best-effort: unreadable timeline -> not stale
+    (the old behavior).
+    """
+    terminal_ts = pr.get("mergedAt") or pr.get("closedAt") or ""
+    if not terminal_ts:
+        return False
+    try:
+        nodes = gql(
+            """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
+                 issue(number:$n){ timelineItems(itemTypes:[REOPENED_EVENT], last:1){
+                   nodes{ ... on ReopenedEvent{ createdAt }}}}}}""",
+            o=FORK.split("/")[0],
+            r=FORK.split("/")[1],
+            n=issue,
+        )["repository"]["issue"]["timelineItems"]["nodes"]
+    except Exception as e:  # noqa: BLE001
+        print(f"::warning::reopen-timeline check failed for #{issue}: {e}")
+        return False
+    reopened_ts = nodes[0]["createdAt"] if nodes else ""
+    return bool(reopened_ts and reopened_ts > terminal_ts)
+
+
+def retire_stale_field(issue: int, item, url: str) -> None:
+    """Clear the generational Upstream PR field and say so on the issue."""
+    clear_field(item, UPSTREAM_PR_FIELD)
+    comment(
+        issue,
+        f"Upstream PR field cleared: {url} reached its terminal state before "
+        "this issue was reopened, so it no longer represents the work here — "
+        "the next promotion will set the field afresh. (Atlas sync)",
+    )
+    actions.append(f"#{issue}: reopened after upstream terminal -> field cleared")
+
+
 def companion_leftover_warning(issue: int, pr) -> None:
     """Warn about a companion left open after the upstream merge.
 
@@ -769,6 +813,9 @@ def sync_item(row) -> None:
         # fall through to normal stage sync on the now-open item
 
     if pr["merged"]:
+        if field_is_stale(issue, pr):
+            retire_stale_field(issue, item, row["url"])
+            return
         try:
             companion_leftover_warning(issue, pr)
         except Exception as e:  # noqa: BLE001 — warn-only, never blocks Done
@@ -782,6 +829,9 @@ def sync_item(row) -> None:
         return
 
     if pr["state"] == "CLOSED":  # closed without merge
+        if field_is_stale(issue, pr):
+            retire_stale_field(issue, item, row["url"])
+            return
         if row["external"]:
             close_issue(
                 issue,
