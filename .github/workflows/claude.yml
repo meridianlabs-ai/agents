@@ -44,12 +44,15 @@ on:
       model:
         description: >-
           Preferred model, passed to Claude Code as --model (empty = Claude
-          Code's own default). Defaults to the Fable alias for all meridian
-          repos. claude-code-action@v1 has no first-class model input, so this
-          is spliced into claude_args.
+          Code's own default). Defaults to the pinned Claude Fable 5.1 ID for
+          all meridian repos (decision: Ransom, 2026-09-01 — the `fable`
+          alias lagged behind the 5.1 release, so a pin is what actually
+          selects the newest tier; bump it deliberately on the next release).
+          claude-code-action@v1 has no first-class model input, so this is
+          spliced into claude_args.
         required: false
         type: string
-        default: "fable"
+        default: "claude-fable-5-1"
       fallback_model:
         description: >-
           Model used when the preferred model is overloaded or unavailable

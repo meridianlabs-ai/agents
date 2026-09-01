@@ -140,13 +140,14 @@ comment + fails the run — because claude-code-action otherwise exits 0 on a
 model-API error, leaving a misleading green run with no result (and a stale
 "I'll get back to you" comment).
 
-## Model selection: prefer Fable, fall back gracefully
+## Model selection: prefer Fable 5.1, fall back gracefully
 
-Default is the `fable` alias with `--fallback-model default`. Claude Code's
-`--fallback-model` fires not just on overload but on an **unavailable/retired**
-primary, and `default` expands to the account default. So `--model fable
---fallback-model default` means "prefer Fable, degrade to the default if it's
-gone" in one invocation, with no pre-flight availability probe.
+Default is the pinned `claude-fable-5-1` with `--fallback-model default`.
+Claude Code's `--fallback-model` fires not just on overload but on an
+**unavailable/retired** primary, and `default` expands to the account
+default. So `--model claude-fable-5-1 --fallback-model default` means
+"prefer Fable 5.1, degrade to the default if it's gone" in one invocation,
+with no pre-flight availability probe.
 
 This was verified the hard way: when Fable became unavailable, a run's init
 line still reported `claude-fable-5`, but `modelUsage` in the execution-log
@@ -154,8 +155,14 @@ artifact showed every token served by `claude-opus-4-8` — the fallback fired
 correctly, and **the init line echoes the *requested* model, not the one that
 ran.** Always read `modelUsage` to know what actually executed.
 
-The `fable` alias (not a pinned `claude-fable-5[1m]`) is used so the model
-auto-updates if Fable returns under a new version.
+**Pinned ID, not the `fable` alias (decision: Ransom, 2026-09-01).** The
+alias was originally chosen so the model would auto-update across Fable
+versions — but in practice it lagged: with Fable 5.1 released, `fable`
+still resolved to Fable 5, so every agent run was on the older tier without
+anyone choosing that. A pin selects exactly the intended model; the cost is
+a deliberate one-line bump here on each Fable release (the fallback still
+covers retirement in between). The model itself carries the 1M context, so
+no `[1m]` suffix is needed.
 
 ## Permissions: settings.json, allow-list, layered separation
 

@@ -103,7 +103,7 @@ on:
         description: Preferred model (--model). Empty = Claude Code default.
         required: false
         type: string
-        default: "fable"
+        default: "claude-fable-5-1"
       fallback_model:
         description: Fallback when the preferred model is unavailable.
         required: false
