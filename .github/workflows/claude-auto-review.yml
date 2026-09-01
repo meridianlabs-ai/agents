@@ -492,7 +492,10 @@ jobs:
             until gh "$@" >"$out"; do
               n=$((n+1))
               if [ "$n" -ge 3 ]; then
-                echo "::error::context fetch failed after 3 attempts: gh $*"
+                # >&2: call sites sit inside a stdout-redirected group, so a
+                # plain echo would land in the abandoned scratch file; the
+                # runner parses workflow commands on stderr too.
+                echo "::error::context fetch failed after 3 attempts: gh $*" >&2
                 return 1
               fi
               sleep $((n * 5))
@@ -520,13 +523,12 @@ jobs:
             fetch "$RUNNER_TEMP/codex-inline.json" api "repos/$REPO/pulls/$PR/comments" --paginate --slurp
             jq -r '(add // []) | .[-40:][] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' "$RUNNER_TEMP/codex-inline.json"
           } >"$RUNNER_TEMP/codex-context.md"
-          # Unlike the dev-verb compose (where the trigger text is the
-          # primary payload and degrading to less context is right), the
-          # review feedback IS this round's task, and the verdict comment
-          # that triggered the run guarantees at least one PR comment exists
-          # — so an empty feedback section can only be a fetch that returned
-          # wrong data while exiting 0 (the outright-failure case now fails
-          # the fetch itself, with the real error in the log). Proceeding
+          # The review feedback IS this round's task, and the verdict
+          # comment that triggered the run guarantees at least one PR
+          # comment exists — so with outright fetch failures failing the
+          # step with the real error in the log (here and in the dev-verb
+          # compose alike), an empty feedback section can only be a fetch
+          # that returned wrong data while exiting 0. Proceeding
           # would spend the round on a feedback-less prompt and conclude the
           # loop on missing context; fail loud instead — a codexprep failure
           # routes into the existing error surfacing and the round refund.

@@ -540,7 +540,10 @@ jobs:
             until gh "$@" >"$out"; do
               n=$((n+1))
               if [ "$n" -ge 3 ]; then
-                echo "::error::context fetch failed after 3 attempts: gh $*"
+                # >&2: call sites sit inside a stdout-redirected group, so a
+                # plain echo would land in the abandoned scratch file; the
+                # runner parses workflow commands on stderr too.
+                echo "::error::context fetch failed after 3 attempts: gh $*" >&2
                 return 1
               fi
               sleep $((n * 5))
@@ -573,8 +576,11 @@ jobs:
               # truncate away the newest comments on comment-heavy PRs.
               echo ""
               echo "PR TITLE AND BODY:"
-              gh pr view "$NUM" --repo "$REPO" --json title,body \
-                --jq '"\(.title)\n\n\(.body // "")"' 2>/dev/null || true
+              # No --slurp here, so gh's own --jq is fine; fetch to a file
+              # and cat it, same retry-then-fail as the comment fetches.
+              fetch "$RUNNER_TEMP/codex-prtb.txt" pr view "$NUM" --repo "$REPO" \
+                --json title,body --jq '"\(.title)\n\n\(.body // "")"'
+              cat "$RUNNER_TEMP/codex-prtb.txt"
               echo ""
               # --slurp is incompatible with gh's own --jq (gh rejects the
               # combination), so pipe to standalone jq instead.

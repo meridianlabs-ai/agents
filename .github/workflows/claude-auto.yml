@@ -354,7 +354,10 @@ jobs:
             until gh "$@" >"$out"; do
               n=$((n+1))
               if [ "$n" -ge 3 ]; then
-                echo "::error::context fetch failed after 3 attempts: gh $*"
+                # >&2: call sites sit inside a stdout-redirected group, so a
+                # plain echo would land in the abandoned scratch file; the
+                # runner parses workflow commands on stderr too.
+                echo "::error::context fetch failed after 3 attempts: gh $*" >&2
                 return 1
               fi
               sleep $((n * 5))
