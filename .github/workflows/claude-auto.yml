@@ -73,6 +73,18 @@ on:
         required: false
         type: string
         default: ""
+      branch_sync_append:
+        description: >-
+          Caller-specific merge guidance, same channel as claude.yml's input of
+          the same name: spliced into the codex conflict-resolution block and
+          the Claude path's conflict note when "Sync branch with base" hands
+          the merge to the agent. Repo-specific merge rules (e.g. the fork's
+          CHANGELOG-merge check) matter most exactly when there is a conflict
+          to resolve. Empty by default. Keep it a single line — the Claude-path
+          prompt travels as one output line, so newlines are flattened.
+        required: false
+        type: string
+        default: ""
       anchor_repo:
         description: >-
           Repo whose issues this repo's claude/issue-N-* branch numbers
@@ -263,27 +275,6 @@ jobs:
             "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again."
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
 
-      # Record the attempt (idempotent sticky comment) before invoking the agent.
-      - name: Record attempt
-        if: steps.gate.outputs.act == 'fix'
-        env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ steps.gate.outputs.pr }}
-          CID: ${{ steps.gate.outputs.cid }}
-          ATTEMPT: ${{ steps.gate.outputs.attempt }}
-          CAP: ${{ inputs.fix_attempt_cap }}
-          MARKER: "<!-- auto-fix-attempts -->"
-        run: |
-          set -euo pipefail
-          body="$MARKER
-          🤖 auto CI-fix attempts: $ATTEMPT (cap $CAP)."
-          if [ -n "$CID" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent
-          else
-            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
-          fi
-
       # Capture the branch tip and a timestamp before the agent runs so later
       # steps can tell whether the agent's fix landed and what it posted.
       - name: Record base SHA
@@ -332,7 +323,19 @@ jobs:
             echo "merged origin/$base cleanly"
             echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
           else
-            conflicts=$(git diff --name-only --diff-filter=U)
+            # quotePath off: C-quoted (non-ASCII) paths would garble the codex
+            # prompt's file list and dodge the landing guard's [ -f ] check,
+            # silently skipping the marker scan for exactly those files.
+            conflicts=$(git -c core.quotePath=false diff --name-only --diff-filter=U)
+            # A merge that fails WITHOUT content conflicts must not fall
+            # through: the codex path would proceed silently against the stale
+            # base (no MERGE_HEAD, empty conflict list), and the Claude path
+            # would fail only by accident (merge --abort with no merge in
+            # progress). Loud on both engines instead.
+            if [ -z "$conflicts" ]; then
+              echo "::error::merge of origin/$base failed without content conflicts — see the merge output above."
+              exit 1
+            fi
             echo "::warning::merge of origin/$base conflicts in: $(tr '\n' ' ' <<<"$conflicts")"
             if [ "$ENGINE" != "codex" ]; then
               git merge --abort
@@ -351,6 +354,31 @@ jobs:
             echo "$eof"
           } >>"$GITHUB_OUTPUT"
 
+      # Record the attempt (idempotent sticky comment) before invoking the
+      # agent — but AFTER the sync step, matching the review loop's ordering:
+      # a sync failure (transient gh/fetch error) skips the agent steps rather
+      # than failing them, so the refund step would never fire, and an attempt
+      # recorded up front would stay burned with no fix ever tried.
+      - name: Record attempt
+        if: steps.gate.outputs.act == 'fix'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          CID: ${{ steps.gate.outputs.cid }}
+          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+          MARKER: "<!-- auto-fix-attempts -->"
+        run: |
+          set -euo pipefail
+          body="$MARKER
+          🤖 auto CI-fix attempts: $ATTEMPT (cap $CAP)."
+          if [ -n "$CID" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
+          fi
+
       - name: Compose fix prompt
         if: steps.gate.outputs.act == 'fix'
         id: prompt
@@ -363,6 +391,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
           AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
           SYNC_BASE: ${{ steps.sync.outputs.base }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
         run: |
           # Single line: the prompt is spliced as one arg downstream.
           # Spliced only when "Sync branch with base" could not land the merge
@@ -371,6 +400,8 @@ jobs:
           merge_note=""
           if [ "${AGENT_MERGE:-}" = "1" ]; then
             merge_note=" FIRST TASK, before any of the above: this branch conflicts with its base branch $SYNC_BASE, and a workflow step could not merge it for you. Merge origin/$SYNC_BASE into this branch and resolve every conflict, preserving both sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale — then include that merge when you push. Until that lands GitHub cannot compute a merge ref for this PR, so CI does not run and the failing job you are asked to fix cannot even be re-evaluated."
+            # Flattened: a newline would corrupt the value= output line below.
+            [ -n "${SYNC_APPEND:-}" ] && merge_note="$merge_note $(tr '\n' ' ' <<<"$SYNC_APPEND")"
           fi
           printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment — they are matched by plain substring, so quoting one (e.g. when citing a reviewer comment) would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary').${merge_note}" >>"$GITHUB_OUTPUT"
 
@@ -436,6 +467,7 @@ jobs:
           ATTEMPT: ${{ steps.gate.outputs.attempt }}
           CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           SYNC_BASE: ${{ steps.sync.outputs.base }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
           CAP: ${{ inputs.fix_attempt_cap }}
         run: |
           set -euo pipefail
@@ -470,6 +502,7 @@ jobs:
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
+              [ -n "${SYNC_APPEND:-}" ] && echo "$SYNC_APPEND"
               echo "Resolve every conflict by editing those files, preserving BOTH sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale. Local git is available and useful here (git status, git diff, git log, git add <file>); the network-dependent commands in the CONSTRAINTS above are still off, and you must NOT run git merge, git rebase or git checkout of any ref — that would strand the in-progress merge. Every conflict marker must be gone when you finish. A deterministic workflow step commits the merge for you and FAILS the run if any marker or unmerged path remains, so leaving them is strictly worse than resolving them. Once resolved, treat the MERGED tree as the code you are working on: re-run the relevant tests against it, not against the pre-merge state."
             fi
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the fix (it becomes the commit subject), then a blank line, then a body explaining the root cause and the fix (posted as a comment). If you cannot fix it, leave the tree untouched and explain what is blocking."

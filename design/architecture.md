@@ -392,7 +392,11 @@ Three details are load-bearing:
   `branch_sync_prompt` (now spliced *only* in that case — on the clean path the
   branch is already current and re-merging is noise). Codex, which cannot
   fetch, is handed the merge still in progress and resolves the markers in the
-  working tree.
+  working tree. Caller-specific merge rules ride along via a
+  `branch_sync_append` input on all three workflows, spliced into both
+  engines' conflict instructions — repo-specific rules (e.g. the fork's
+  CHANGELOG-merge check) matter most exactly when there is a conflict to
+  resolve.
 - **The landing step is the enforcement point.** `git add -A` would happily
   stage conflict markers and `git commit` would produce a valid merge commit
   containing them, so codex's landing refuses to push when

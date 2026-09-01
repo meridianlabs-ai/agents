@@ -125,7 +125,11 @@ on:
           and only hands the job back here when it could not — a conflict (the
           index must be clean before claude-code-action's setupBranch runs) or a
           fork head. Fresh runs from an issue branch off the (hourly-synced)
-          base, so no merge is needed and this is skipped. Pass "" to disable.
+          base, so no merge is needed and this is skipped. NB an empty value is
+          NOT a sync off-switch: the runner-side merge always runs on
+          PR-context runs; empty only suppresses this agent-side instruction,
+          leaving the agent uninstructed on the conflict/fork paths — so keep
+          it non-empty unless the caller handles those cases itself.
         required: false
         type: string
         default: >-
@@ -392,7 +396,19 @@ jobs:
             echo "merged origin/$base cleanly"
             echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
           else
-            conflicts=$(git diff --name-only --diff-filter=U)
+            # quotePath off: C-quoted (non-ASCII) paths would garble the codex
+            # prompt's file list and dodge the landing guard's [ -f ] check,
+            # silently skipping the marker scan for exactly those files.
+            conflicts=$(git -c core.quotePath=false diff --name-only --diff-filter=U)
+            # A merge that fails WITHOUT content conflicts must not fall
+            # through: the codex path would proceed silently against the stale
+            # base (no MERGE_HEAD, empty conflict list), and the Claude path
+            # would fail only by accident (merge --abort with no merge in
+            # progress). Loud on both engines instead.
+            if [ -z "$conflicts" ]; then
+              echo "::error::merge of origin/$base failed without content conflicts — see the merge output above."
+              exit 1
+            fi
             echo "::warning::merge of origin/$base conflicts in: $(tr '\n' ' ' <<<"$conflicts")"
             if [ "$ENGINE" != "codex" ]; then
               git merge --abort
