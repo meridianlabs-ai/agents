@@ -423,7 +423,6 @@ jobs:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
-          BRANCH: ${{ steps.gate.outputs.head_branch }}
           ENGINE: ${{ steps.gate.outputs.engine }}
         run: |
           set -euo pipefail
@@ -450,10 +449,14 @@ jobs:
               conflicts=""
             fi
           fi
+          # Unique delimiter: the block carries repo file paths, and a path
+          # equal to a fixed delimiter would terminate it early and inject
+          # the remaining lines as step outputs.
+          eof="SYNC_CONFLICTS_$(date +%s)_$RANDOM"
           {
-            echo "conflicts<<SYNC_CONFLICTS_EOF"
+            echo "conflicts<<$eof"
             echo "$conflicts"
-            echo "SYNC_CONFLICTS_EOF"
+            echo "$eof"
           } >>"$GITHUB_OUTPUT"
 
       - name: Record round
@@ -767,7 +770,11 @@ jobs:
               fi
             done <<<"$CONFLICTS"
           fi
-          if [ -n "$(git status --porcelain)" ]; then
+          # MERGE_HEAD too: a conflict resolution staged byte-identical to
+          # HEAD ("ours" on every hunk) leaves status clean while the merge
+          # is still in progress — commit anyway so the merge completes,
+          # HEAD moves past START_SHA, and the push gate lands it.
+          if [ -n "$(git status --porcelain)" ] || git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             # || true inside the substitution: without it a missing/unreadable
             # $OUT fails the pipeline and set -e kills the step before the
             # fallback is reached — the fallback would only ever cover an
