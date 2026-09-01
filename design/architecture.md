@@ -158,7 +158,11 @@ writes the served-model token table to the job summary, and posts a note on
 the issue/PR (as the machine account, first line `<!-- model-provenance -->`)
 when a non-requested model served output tokens — haiku excluded, it is Claude
 Code's own subagent/summarization traffic on every run — or when the result
-errored with text that reads like a classifier refusal. It only judges the
+errored with text that reads like a classifier refusal. The note calls it a
+fallback outright only when the requested model served nothing; when both
+served output it hedges, because a subagent launched on an explicit model
+(the Agent tool's `model` override) is indistinguishable from a per-request
+fallback in `modelUsage`. It only judges the
 fallback when the log has an init line to compare against; without one it
 reports the table and says so. Best-effort: every path exits 0.
 
