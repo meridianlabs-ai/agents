@@ -23,8 +23,9 @@ hourly Atlas sync"):
        re-review request) -> Review.
      - Promotions: APPROVED -> Merge (gated on any ts-mono companion
        being merged or approved); CHANGES_REQUESTED -> Review;
-       approval dismissed -> Merge->Sign-off only; merged ->
-       close (Done); closed unmerged -> Review + comment.
+       approval dismissed -> Merge->Sign-off only; reviewer
+       comment/question while at Sign-off (no verdict) -> Review;
+       merged -> close (Done); closed unmerged -> Review + comment.
 
 Deterministic; runs as the machine account (GH_TOKEN=MARVIN_TOKEN). Per-item
 failures warn and continue. Every write is idempotent except the @review
@@ -803,9 +804,75 @@ def sync_item(row) -> None:
     elif decision == "CHANGES_REQUESTED":
         if set_stage(item, "Review", stage):
             actions.append(f"#{issue}: upstream changes requested -> Review")
-    else:  # REVIEW_REQUIRED / None: only undo a stale Merge
+    else:  # REVIEW_REQUIRED / None
         if stage == "Merge" and set_stage(item, "Sign-off", stage):
             actions.append(f"#{issue}: approval dismissed -> Sign-off")
+            return
+        if stage == "Sign-off":
+            # A reviewer response that is neither approval nor a formal
+            # changes-request — a question, a comment-only review, an inline
+            # thread — still puts the ball back with us; parked at Sign-off
+            # it sat invisible until someone happened to look (observed:
+            # upstream #5096, an approver comment awaited unnoticed,
+            # 2026-09-01). Outside-human activity newer than OUR latest
+            # (author/driver/machine) flips Sign-off -> Review; responding
+            # upstream advances our timestamp, so the hourly scan doesn't
+            # re-yank, and Review is outside TAIL_STAGES so the moved item
+            # rests until a human (or a re-request) acts.
+            try:
+                others_ts, ours_ts = upstream_reviewer_activity(owner, repo, num)
+            except Exception as e:  # noqa: BLE001 — detection is best-effort
+                print(f"::warning::reviewer-activity check failed for #{issue}: {e}")
+                return
+            if others_ts and others_ts > ours_ts:
+                if set_stage(item, "Review", stage):
+                    actions.append(
+                        f"#{issue}: upstream reviewer responded -> Review"
+                    )
+
+
+def upstream_reviewer_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
+    """(latest outside-human ts, latest our-side ts) on a promotion PR.
+
+    Our side is the PR author, REVIEWER, and the machine account; outside
+    is any other human. Bot logins are excluded entirely — CI chatter must
+    not yank Sign-off items back hourly. Same event sources as
+    latest_activity: issue comments, reviews, and review-thread comments.
+    """
+    ours = ""
+    others = ""
+    d = gql(
+        """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
+             pullRequest(number:$n){
+               author{login}
+               comments(last:50){nodes{author{login} createdAt}}
+               reviews(last:50){nodes{author{login} submittedAt}}
+               reviewThreads(last:50){nodes{comments(last:20){nodes{author{login} createdAt}}}}
+             }}}""",
+        o=owner,
+        r=repo,
+        n=num,
+    )["repository"]["pullRequest"]
+    pr_author = (d.get("author") or {}).get("login", "")
+    events = []
+    events += [(c["author"], c["createdAt"]) for c in d["comments"]["nodes"]]
+    events += [
+        (r["author"], r["submittedAt"])
+        for r in d["reviews"]["nodes"]
+        if r.get("submittedAt")
+    ]
+    for t in d["reviewThreads"]["nodes"]:
+        events += [(c["author"], c["createdAt"]) for c in t["comments"]["nodes"]]
+    for who, ts in events:
+        login = (who or {}).get("login", "")
+        if not login or login.endswith("[bot]"):
+            continue
+        if login in (pr_author, REVIEWER, "i-am-marvin"):
+            if ts > ours:
+                ours = ts
+        elif ts > others:
+            others = ts
+    return others, ours
 
 
 def lifecycle_item(issue: int):
