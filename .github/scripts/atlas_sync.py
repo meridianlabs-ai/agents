@@ -372,7 +372,7 @@ def upstream_pr(url: str):
                state merged reviewDecision headRefName author{login}
                reviewRequests(first:20){nodes{requestedReviewer{... on User{login}}}}
                requestEvents: timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT], last:20){
-                 nodes{... on ReviewRequestedEvent{createdAt}}}
+                 nodes{... on ReviewRequestedEvent{createdAt actor{login}}}}
                changesReviews: reviews(states:[CHANGES_REQUESTED], last:10){
                  nodes{submittedAt}}
              }}}""",
@@ -390,6 +390,21 @@ def upstream_pr(url: str):
     d["_req_ts"] = max(
         (n["createdAt"] for n in d["requestEvents"]["nodes"]), default=""
     )
+    # Our-side-only variant for the Sign-off ball-possession checks: a
+    # request event only counts as "the driver handing the ball upstream"
+    # when OUR side performed it — the outside reviewer requesting a
+    # colleague's review must not mask their own newer question.
+    # (_req_ts stays by-anyone: the Contributor path and `rerequested`
+    # deliberately count outside-initiated requests.)
+    _ours = {(d.get("author") or {}).get("login", ""), REVIEWER, "i-am-marvin"}
+    d["_our_req_ts"] = max(
+        (
+            n["createdAt"]
+            for n in d["requestEvents"]["nodes"]
+            if (n.get("actor") or {}).get("login") in _ours
+        ),
+        default="",
+    )
     d["_changes_ts"] = max(
         (n["submittedAt"] for n in d["changesReviews"]["nodes"]), default=""
     )
@@ -397,20 +412,23 @@ def upstream_pr(url: str):
 
 
 def _pr_events(owner: str, repo: str, num: int):
-    """PR author login + flat (author, ts) event list for a PR.
+    """PR author login + flat (author, ts, review_state) event list for a PR.
 
     Event sources: issue comments, submitted reviews, and review-thread
-    comments. The truncation windows (last:50 / last:20) drop only old
-    events — safe for the latest-timestamp computations built on this.
-    Author nodes carry login and __typename so callers can classify
-    humans vs bots.
+    comments. The truncation windows (last:50 / last:20) drop old events,
+    with one caveat: reviewThreads is ordered by THREAD creation, so on a
+    PR with more than 50 threads a fresh reply inside an old thread is
+    missed entirely — accepted as rare for the latest-timestamp
+    computations built on this. Author nodes carry login and __typename so
+    callers can classify humans vs bots; review_state is the review's
+    state (e.g. DISMISSED) and None for comment events.
     """
     d = gql(
         """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
              pullRequest(number:$n){
                author{login}
                comments(last:50){nodes{author{login __typename} createdAt}}
-               reviews(last:50){nodes{author{login __typename} submittedAt}}
+               reviews(last:50){nodes{author{login __typename} submittedAt state}}
                reviewThreads(last:50){nodes{comments(last:20){nodes{author{login __typename} createdAt}}}}
              }}}""",
         o=owner,
@@ -419,14 +437,16 @@ def _pr_events(owner: str, repo: str, num: int):
     )["repository"]["pullRequest"]
     pr_author = (d.get("author") or {}).get("login", "")
     events = []
-    events += [(c["author"], c["createdAt"]) for c in d["comments"]["nodes"]]
+    events += [(c["author"], c["createdAt"], None) for c in d["comments"]["nodes"]]
     events += [
-        (r["author"], r["submittedAt"])
+        (r["author"], r["submittedAt"], r.get("state"))
         for r in d["reviews"]["nodes"]
         if r.get("submittedAt")
     ]
     for t in d["reviewThreads"]["nodes"]:
-        events += [(c["author"], c["createdAt"]) for c in t["comments"]["nodes"]]
+        events += [
+            (c["author"], c["createdAt"], None) for c in t["comments"]["nodes"]
+        ]
     return pr_author, events
 
 
@@ -434,7 +454,7 @@ def latest_activity(owner: str, repo: str, num: int) -> tuple[str, str]:
     """(latest author-activity ts, latest reviewer-activity ts) on the PR."""
     author_ts, reviewer_ts = "", ""
     pr_author, events = _pr_events(owner, repo, num)
-    for who, ts in events:
+    for who, ts, _state in events:
         login = (who or {}).get("login", "")
         if login == pr_author and ts > author_ts:
             author_ts = ts
@@ -450,15 +470,20 @@ def upstream_reviewer_activity(owner: str, repo: str, num: int) -> tuple[str, st
     is any other human. Non-User actors are excluded entirely — CI chatter
     must not yank Sign-off items back hourly. The check is on __typename,
     not a "[bot]" login suffix: that suffix is a REST-API rendering, and
-    GraphQL bot logins carry no suffix (e.g. github-actions).
+    GraphQL bot logins carry no suffix (e.g. github-actions). DISMISSED
+    reviews are excluded too: a dismissed approval keeps its original
+    submittedAt, and counting it would move a freshly-dismissed item past
+    its documented Sign-off resting place — dismissal (manual or the
+    stale-review auto-dismiss on push) retracts the verdict, it is not a
+    reviewer response.
     """
     ours = ""
     others = ""
     pr_author, events = _pr_events(owner, repo, num)
-    for who, ts in events:
+    for who, ts, state in events:
         who = who or {}
         login = who.get("login", "")
-        if not login or who.get("__typename") != "User":
+        if not login or who.get("__typename") != "User" or state == "DISMISSED":
             continue
         if login in (pr_author, REVIEWER, "i-am-marvin"):
             if ts > ours:
@@ -819,6 +844,21 @@ def sync_item(row) -> None:
     # a fresh promotion parked in Review (decision REVIEW_REQUIRED)
     # stays parked.
     if stage == "Review" and decision == "CHANGES_REQUESTED" and rerequested:
+        # ...unless the reviewer has already responded since the re-request.
+        # A plain comment or inline question consumes neither the pending
+        # request nor the sticky decision, so this condition would otherwise
+        # stay true while the Sign-off branch below yanks the item back —
+        # the two transitions flipping it every run. Gate on the same
+        # predicate the yank uses, so both agree on who holds the ball; on
+        # lookup failure hold the stage (best-effort, like the yank — the
+        # promotion just waits a run).
+        try:
+            others_ts, ours_ts = upstream_reviewer_activity(owner, repo, num)
+        except Exception as e:  # noqa: BLE001 — detection is best-effort
+            print(f"::warning::reviewer-activity check failed for #{issue}: {e}")
+            return
+        if others_ts and others_ts > max(ours_ts, pr["_our_req_ts"]):
+            return
         if set_stage(item, "Sign-off", stage):
             actions.append(f"#{issue}: review re-requested upstream -> Sign-off")
         return
@@ -855,19 +895,21 @@ def sync_item(row) -> None:
             # 2026-09-01). Outside-human activity newer than OUR latest
             # (author/driver/machine) flips Sign-off -> Review; responding
             # upstream advances our timestamp, so the hourly scan doesn't
-            # re-yank, and Review is outside TAIL_STAGES so the moved item
-            # rests until a human (or a re-request) acts. A re-review
-            # request counts as ours (_req_ts): the driver handing back
-            # with commits + a re-request but no comment leaves the
-            # reviewer's changes-requested review as the newest textual
-            # event, and without this the item would oscillate hourly with
-            # the Review -> Sign-off promotion above.
+            # re-yank, and the Review -> Sign-off promotion above is gated
+            # on this same predicate, so the moved item rests until our
+            # side responds. A review request BY OUR SIDE counts as ours
+            # (_our_req_ts): the driver handing back with commits + a
+            # re-request but no comment leaves the reviewer's
+            # changes-requested review as the newest textual event, and
+            # without this the item would oscillate hourly with the
+            # promotion above. (The reviewer requesting a colleague's
+            # review is not ours — their own newer question still flips.)
             try:
                 others_ts, ours_ts = upstream_reviewer_activity(owner, repo, num)
             except Exception as e:  # noqa: BLE001 — detection is best-effort
                 print(f"::warning::reviewer-activity check failed for #{issue}: {e}")
                 return
-            if others_ts and others_ts > max(ours_ts, pr["_req_ts"]):
+            if others_ts and others_ts > max(ours_ts, pr["_our_req_ts"]):
                 if set_stage(item, "Review", stage):
                     actions.append(f"#{issue}: upstream reviewer responded -> Review")
 
