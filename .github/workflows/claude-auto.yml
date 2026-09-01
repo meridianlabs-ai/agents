@@ -295,13 +295,16 @@ jobs:
       # compute a merge ref for a conflicted PR, CI never ran and every fix
       # round was written against stale code.
       #
-      # A CONFLICTED merge is handed on differently per engine, and the split is
-      # forced rather than stylistic: claude-code-action's setupBranch runs
-      # `git checkout <branch> --`, which aborts with "you need to resolve your
-      # current index first" on an unmerged index, so the Claude path must get a
-      # CLEAN index and re-merge inside the agent (it has network and the git
-      # allow-list). Codex gets the merge still IN PROGRESS and resolves the
-      # markers in the tree; the landing step refuses to push while any survive.
+      # A CONFLICTED merge is handed on differently per engine: the Claude path
+      # gets a CLEAN index and re-merges inside the agent (it has network and
+      # the git allow-list); codex gets the merge still IN PROGRESS and resolves
+      # the markers in the tree, and its landing step refuses to push while any
+      # survive. In claude.yml the split is forced — tag mode's setupBranch runs
+      # `git checkout <branch> --`, which aborts on an unmerged index. This
+      # workflow runs the action in agent mode (bare `prompt:`, no
+      # track_progress), which does NOT run setupBranch, so the action would
+      # tolerate an in-progress merge here. The split is mirrored anyway: one
+      # mental model and one branch_sync_prompt across all three workflows.
       - name: Sync branch with base
         id: sync
         if: steps.gate.outputs.act == 'fix'
@@ -409,9 +412,10 @@ jobs:
         run: |
           # Single line: the prompt is spliced as one arg downstream.
           # The merge instruction is spliced only when "Sync branch with base"
-          # could not land the merge itself — it must abort a conflicted merge
-          # to leave setupBranch a clean index, so on that path the agent does
-          # the merge. The caller's branch_sync_append reaches the agent on
+          # could not land the merge itself — it aborts a conflicted merge to
+          # hand the Claude path a clean index (see that step's comment), so
+          # on that path the agent does the merge. The caller's
+          # branch_sync_append reaches the agent on
           # EITHER path: the fork's is about a non-conflicting CHANGELOG
           # mis-merge, so a clean runner merge is exactly when it applies.
           merge_note=""
@@ -463,6 +467,14 @@ jobs:
           git fetch --quiet origin "$BRANCH"
           if [ "$(git rev-parse FETCH_HEAD)" = "$MERGE_SHA" ]; then
             echo "base merge is already on origin/$BRANCH."
+            exit 0
+          fi
+          # Non-fast-forward guard: the remote may have moved during the run
+          # while HEAD stayed at the merge — the agent landed its change
+          # server-side via the API, or a human pushed mid-round. Skip rather
+          # than fail red; the next round re-merges on top of the new tip.
+          if ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "origin/$BRANCH moved past the runner's merge during the run — leaving it; the next round re-merges."
             exit 0
           fi
           # This job's checkout persisted MARVIN_TOKEN, so a plain push already
@@ -622,6 +634,7 @@ jobs:
           START_SHA: ${{ steps.base.outputs.sha }}
           HEAD_BRANCH: ${{ inputs.head_branch }}
           CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
         run: |
           set -euo pipefail
           # Reclaim .git before writing objects as runner: any objects/XX
@@ -683,10 +696,17 @@ jobs:
           # branch; a diverted HEAD that isn't genuinely new work fails the
           # push non-fast-forward — loud, not lossy.
           pushed=""
+          merge_only=""
           if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
             git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
             pushed=1
-            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH"
+            # HEAD still exactly the runner's clean base merge: codex changed
+            # nothing (any commit above would have moved it), so say so
+            # rather than announcing "fix pushed" over a summary that says
+            # nothing needed changing. Still a push, so the backstop below
+            # owes the @review — the re-run is what gets real CI.
+            [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
+            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
           fi
           # Post the summary either way (a no-change round IS the blocker
           # comment the ending contract calls for), de-fanged: it posts from
@@ -696,7 +716,9 @@ jobs:
           # those substrings too. On a push, the backstop below posts the
           # owed @review.
           {
-            if [ -n "$pushed" ]; then
+            if [ -n "$merge_only" ]; then
+              printf '🤖 auto (codex, CI-fix attempt %s): base merge pushed; no fix this attempt — details below.\n\n' "$ATTEMPT"
+            elif [ -n "$pushed" ]; then
               printf '🤖 auto (codex, CI-fix attempt %s): fix pushed — summary below.\n\n' "$ATTEMPT"
             else
               printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"

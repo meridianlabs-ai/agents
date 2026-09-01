@@ -392,7 +392,13 @@ Four details are load-bearing:
   holds unmerged entries. The Claude path therefore must be handed a clean
   index: its conflicted merge is aborted and delegated back to the agent via
   `branch_sync_prompt` (now spliced *only* in that case — on the clean path the
-  branch is already current and re-merging is noise). Codex, which cannot
+  branch is already current and re-merging is noise). Strictly, the action
+  forces this only in `claude.yml`, which runs it in tag mode; the loop
+  workflows run it in agent mode (bare `prompt:`, no `track_progress`), whose
+  prepare path does not call `setupBranch` (verified in the action's
+  `src/modes/agent/index.ts` vs `src/modes/tag/index.ts`). The loops mirror
+  the split anyway — one mental model and one prompt across all three
+  workflows. Codex, which cannot
   fetch, is handed the merge still in progress and resolves the markers in the
   working tree — and must `git add` each resolved file, because the landing
   step's unmerged-index check is the only thing that catches binary and
@@ -422,7 +428,11 @@ A `Push base merge if unpushed` backstop covers the Claude path's remaining
 hole: if HEAD is still *exactly* the runner's merge commit when the agent
 finishes, nothing else will push it, so the workflow does. Gating on that exact
 SHA means an agent that committed on top — pushed or deliberately not — is
-never second-guessed. In `claude.yml` that push also posts the `@review`
+never second-guessed. If the remote tip moved during the run while HEAD stayed
+at the merge (the agent landed its change server-side via the API, or a human
+pushed mid-round), the backstop skips instead of failing red on a
+non-fast-forward push — the next round re-merges on top of the new tip. In
+`claude.yml` that push also posts the `@review`
 re-review request on a successful `@auto` run: the Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a
 merge-only round would otherwise move the head with nobody owing the hand-back

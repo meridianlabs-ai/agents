@@ -188,12 +188,13 @@ workaround when #103's does).
   then refuses to push while `git ls-files --unmerged` is non-empty or a
   `<<<<<<< `/`>>>>>>> ` marker survives in one of those files. (`=======`
   is deliberately not matched — it is a legitimate rST/Markdown heading
-  underline.) The Claude path cannot receive an in-progress merge:
-  claude-code-action's `setupBranch` runs `git checkout <branch> --`, which
+  underline.) The Claude path in `claude.yml` cannot receive an in-progress
+  merge: tag mode's `setupBranch` runs `git checkout <branch> --`, which
   aborts with "you need to resolve your current index first" on an unmerged
   index, so a conflicted merge is aborted there and handed back to the
-  agent via `branch_sync_prompt`. Same behavior, different mechanism,
-  forced by the action.
+  agent via `branch_sync_prompt`. The loop workflows run the action in
+  agent mode, which does not call `setupBranch`, and mirror the split for
+  one mental model. Same behavior, different mechanism.
 - **Model**: `codex_model` input, default `gpt-5.6-sol` (the strongest
   OpenAI tier; the `gpt-5.6` alias routes there). Reviews additionally pin
   `codex_effort: xhigh` — correctness over turnaround; implementation runs

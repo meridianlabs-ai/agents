@@ -657,6 +657,17 @@ jobs:
             echo "base merge is already on origin/$BRANCH."
             exit 0
           fi
+          # Non-fast-forward guard: the remote may have moved during the run
+          # while HEAD stayed at the merge — the agent landed its change
+          # server-side via the API, or a human pushed to the PR branch while
+          # this follow-up ran (ordinary on the one-shot dev agent). Skip
+          # rather than fail red; the next run re-merges on top of the new
+          # tip. Skipping also skips the re-review post below, correctly: no
+          # push here means no hand-back owed by this step.
+          if ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "origin/$BRANCH moved past the runner's merge during the run — leaving it; the next run re-merges."
+            exit 0
+          fi
           # Same extraheader override as the codex landing step: this job's
           # checkout persisted github.token as an http.<origin>.extraheader,
           # which preempts the URL credential, so without the reset the push
@@ -939,6 +950,7 @@ jobs:
           OUT: ${{ runner.temp }}/codex/codex-final.md
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
         run: |
           set -euo pipefail
           # Reclaim .git before writing objects as runner: any objects/XX
@@ -1002,6 +1014,7 @@ jobs:
           # that isn't genuinely new work fails the push non-fast-forward —
           # loud, not lossy.
           pushed=""
+          merge_only=""
           if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
             # -c http...extraheader=: this job's checkout persisted
             # github.token as an http.<origin>.extraheader authorization
@@ -1015,7 +1028,11 @@ jobs:
             # need this: their checkout persists MARVIN_TOKEN itself.)
             git -c http.https://github.com/.extraheader= push --quiet "https://x-access-token:${MARVIN:-$GH_TOKEN}@github.com/$REPO.git" "HEAD:refs/heads/$BRANCH"
             pushed=1
-            echo "pushed $(git rev-parse --short HEAD) to $BRANCH"
+            # HEAD still exactly the runner's clean base merge: codex changed
+            # nothing (any commit above would have moved it). Report that
+            # instead of silently dropping the "no code changes" line.
+            [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
+            echo "pushed $(git rev-parse --short HEAD) to $BRANCH${merge_only:+ (base merge only)}"
             [ "$IS_PR" != "true" ] && echo "branch_name=$BRANCH" >>"$GITHUB_OUTPUT"
           else
             echo "codex made no changes; nothing to push."
@@ -1033,6 +1050,7 @@ jobs:
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
             [ -z "$pushed" ] && printf '\n\n_No code changes were made._'
+            [ -n "$merge_only" ] && printf '\n\n_No code changes were made; the base-branch merge from the workflow was pushed._'
           } >"$RUNNER_TEMP/codex-comment.md"
           # GitHub caps comment bodies at 65,536 characters and codex's final
           # message is unbounded; here the post failing lands AFTER the push,
@@ -1267,6 +1285,7 @@ jobs:
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
@@ -1291,8 +1310,15 @@ jobs:
           # Provisioning died before the agent started (observed: a transient
           # curl failure downloading uv) — without this, the issue gets no
           # comment at all because the agent step was skipped, not failed.
+          # Provisioning runs against the PR head AFTER the sync step, so on
+          # the codex conflict path it sees the in-progress merge: a conflict
+          # in pyproject.toml / a lockfile is a plausible cause, not the
+          # transient network error the default text suggests — name it.
           if [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             err="environment provisioning (claude-setup) failed before the agent started — usually a transient dependency-download/network error; re-trigger to retry."
+            if [ -n "${SYNC_CONFLICTS:-}" ]; then
+              err="environment provisioning (claude-setup) failed before the agent started — the base-branch merge left conflicts in $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//'), so if one of those is a dependency file the provisioning ran over conflict markers (see the sync step's warning); otherwise usually a transient dependency-download/network error. Resolve the conflict or re-trigger to retry."
+            fi
           fi
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
