@@ -32,8 +32,8 @@ battle and scale badly with token count. So:
 ## The structural difference: Codex cannot post or push
 
 `openai/codex-action` runs the Codex CLI in a sandbox with **no network
-access and no GitHub credentials** (permission profiles `:read-only` /
-`:workspace`). Claude Code posts its own comments and pushes its own
+access and no GitHub credentials** (permission profile `:workspace`).
+Claude Code posts its own comments and pushes its own
 branches; Codex cannot. Every GitHub side effect on the codex path
 therefore moves into deterministic workflow steps:
 
@@ -132,10 +132,8 @@ temp root would expose the runner's step scripts and per-step
 checkout added to the codex user's git `safe.directory` (the repo stays
 runner-owned, so git run as codex otherwise refuses with "dubious
 ownership", and no profile sandbox lets the agent add the exemption
-itself). Two deliberate divergences from a four-way copy: the reviewer's
-step drops the example's workspace-write grants (its profile is
-`:read-only`, and the recursive sweep is pure latency on a full-history
-checkout), and the write-path land steps start with `chown -R runner` on
+itself). One deliberate divergence from a four-way copy: the write-path
+land steps start with `chown -R runner` on
 `.git` (object fan-out dirs codex creates are codex-owned, and the
 runner's codex-group membership never takes effect within the job, so
 runner-side object writes would otherwise fail intermittently). One more
