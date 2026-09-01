@@ -335,6 +335,33 @@ promotions (those are already tracked via their fork issue).
 
 ## The hourly Atlas sync
 
+**Design rule — every stored fact needs a staleness rule.** The sync acts
+hourly on records that were written once: the `Upstream PR` field, a
+CLOSED state, a parked stage. Each is a point-in-time claim, and every
+incident in this system's history has been the sync enforcing one after
+the world moved on: re-closing an issue a human deliberately closed
+(reopen guard, #15/#31 — a close is only the panel-auto-close signature
+until the ClosedEvent's `closer` says otherwise), leaving a Sign-off item
+parked after the upstream reviewer responded (#43 — "awaiting approval"
+expires the moment the other side acts), and re-closing a reopened issue
+because the field still named a PR merged weeks earlier (#46 — the field
+is *generational*: it describes one promotion, and a reopen after that
+PR's terminal state starts a new generation the field no longer
+represents — except the sync's *own* recovery reopen, which exists to
+decide that same PR's fate and is recognized by its marker comment).
+Retiring the stale field also resets the old generation's Stage to
+Agent (Review for External proxies, whose lifecycle has no Agent): a
+parked Sign-off/Merge is the same kind of stale claim, and with the
+field cleared the row leaves the hourly scan, so nothing else would
+ever correct it. Accepted cost of the guard: an issue whose new
+generation genuinely finished (companion merge was the correct final
+close, but no promotion refreshed the field) bounces open once and
+needs a manual re-close — consistent with the model that a companion
+merge never implies the upstream half is done, and both comments on the
+issue say what happened. When adding a sync behavior keyed on stored
+state, name the event that invalidates that state and check for it
+before acting.
+
 A single scheduled workflow hosted in the agents repo (migrated from the
 fork's `meridian` branch 2026-08-26 — org-wide board infrastructure;
 hosting only provides cron + script + secret visibility), hourly cron +
