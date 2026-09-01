@@ -152,12 +152,16 @@ workaround when #103's does).
 
 - **External proxy reviews stay on Claude** — their contributor-code
   sandbox overlay is Claude-settings-specific.
-- **Codex reviews are static**: the `:read-only` profile means codex
-  cannot install dependencies or execute tests to verify findings the
-  way the Claude reviewer does — its review is analysis of the checkout
-  only. The prompt says so explicitly (so codex doesn't fight the
-  sandbox), and the reviewer's claude-setup provisioning step is
-  skipped on codex reviews — nothing could use it.
+- **Codex reviews run tests since 2026-09-01** (they were static in the
+  first cut): the review step uses the `:workspace` profile with
+  claude-setup provisioning, so codex can verify findings with
+  pytest/ruff/mypy like the Claude reviewer. Read-only-ness of the
+  review is enforced by instruction plus structure — the review path
+  has no landing step, no push credentials, and no network, so stray
+  writes die with the runner (decided after inspect_ai#392's review
+  produced four static "blocking" findings of uncertain reality). No
+  network still means no installs: unprovisioned repos degrade to
+  static review.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which
