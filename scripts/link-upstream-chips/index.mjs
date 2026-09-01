@@ -291,11 +291,13 @@ async function firstVisible(locators) {
   return null;
 }
 
+// Returns 'linked' after a verified UI round, 'skipped' when the chip already
+// existed and no UI round ran — the caller logs them distinctly.
 async function linkOne(page, { issue, issueUrl, pr }) {
   const prNumber = pr.match(/\/pull\/(\d+)/)?.[1];
   const preexisting = linkedUrls(issue); // baseline for wrong-link detection
-  if (preexisting.includes(pr)) return; // already linked — replaying the UI
-  // flow would find the option SELECTED and clicking it would toggle it OFF
+  if (preexisting.includes(pr)) return 'skipped'; // already linked — replaying the
+  // UI flow would find the option SELECTED and clicking it would toggle it OFF
   await page.goto(issueUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500); // let the React sidebar hydrate
 
@@ -377,7 +379,7 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   for (let i = 0; i < 6; i++) {
     await page.waitForTimeout(2500);
     const now = linkedUrls(issue);
-    if (now.includes(pr)) return;
+    if (now.includes(pr)) return 'linked';
     const wrong = now.filter((u) => !before.has(u));
     if (wrong.length)
       throw new Error(
@@ -433,8 +435,9 @@ try {
   let failures = 0;
   for (const row of rows) {
     try {
-      await linkOne(page, row);
-      console.log(`linked  #${row.issue} -> ${row.pr}`);
+      if ((await linkOne(page, row)) === 'skipped')
+        console.log(`skip    #${row.issue} (already linked to ${row.pr})`);
+      else console.log(`linked  #${row.issue} -> ${row.pr}`);
     } catch (err) {
       failures++;
       console.error(`FAILED  #${row.issue}: ${err.message}`);
