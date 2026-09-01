@@ -347,6 +347,9 @@ jobs:
               merged=$(printf '%s' "$pr_json" | jq -r '.merged // false')
               if [ "$pr_state" = "closed" ] && [ "$merged" != "true" ] && [ "$head_repo" = "$GH_REPO" ]; then
                 live=$(api "repos/$GH_REPO/branches/$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')" 2>/dev/null | jq -r '.commit.sha // ""' || true)
+                # Belt-and-braces to match the fix-loop gate's check — this
+                # value becomes the checkout ref, so never pin non-SHA output.
+                [[ "$live" =~ ^[0-9a-f]{40}$ ]] || live=""
                 if [ -n "$live" ]; then
                   echo "PR #$PR_NUM is closed; pinning the live branch tip $live instead of the frozen head."
                   head_sha="$live"
@@ -1019,6 +1022,7 @@ jobs:
           SINCE: ${{ steps.trig.outputs.started }}
           MENTION: ${{ steps.who.outputs.mention }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
+          CONTINUATION: ${{ steps.trig.outputs.continuation }}
         run: |
           set -uo pipefail
           # No execution file at all = the agent never launched: a pre-launch
@@ -1073,8 +1077,14 @@ jobs:
           # immediate-merge flow for low-blast-radius PRs (CLAUDE.md) races
           # the auto-review by design, and the reviewer correctly posts
           # nothing on a finished PR (observed: agents#11 drew a spurious ⚠️).
+          # EXCEPT a live-branch continuation (see trig): there the closed PR
+          # is the loop's working surface and the verdict comment is the only
+          # thing that drives the next fix round, so a silent stall would
+          # hang the loop with the label on and nobody notified — keep the
+          # check live. MERGED still skips unconditionally (trig never pins
+          # a merged PR, so continuation is false there anyway).
           state=$(gh pr view "$NUM" --repo "$REPO" --json state --jq .state 2>/dev/null || echo "")
-          if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
+          if [ "$state" = "MERGED" ] || { [ "$state" = "CLOSED" ] && [ "${CONTINUATION:-}" != "true" ]; }; then
             echo "::notice::PR is $state — no review owed; skipping the posted-review check."
             exit 0
           fi
