@@ -594,8 +594,12 @@ jobs:
       # push to an existing PR owes a re-review (the reviewer does not run on
       # push). Gated on the backstop having actually pushed — a skipped push
       # (agent never ran, agent commits on top, already on origin, remote
-      # moved) owes nothing. Retries with backoff (same shape as the loops'
-      # "Ensure hand-back after push"): a swallowed 5xx here (observed there:
+      # moved) owes nothing. Like the loops' step it first checks for a
+      # hand-back already posted since the run started (the agent posting
+      # @review anyway — the prompt's "not on no-change runs" is advisory —
+      # or a human requesting a review mid-run), so it never double-posts
+      # and spawns two review runs. Retries with backoff (same shape as the
+      # loops' "Ensure hand-back after push"): a swallowed 5xx here (observed there:
       # GitHub 503 during an outage) would leave the merge pushed and the
       # board stranded at Agent. Fails loudly if the post never lands; the
       # Surface step reads this step's outcome and turns that into a PR
@@ -609,8 +613,36 @@ jobs:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          SINCE: ${{ steps.sync.outputs.started }}
         run: |
           set -euo pipefail
+          # Same "already posted this run" check as the loops' step: an exact
+          # @review comment or a LEADING hand-off marker since the run started
+          # means the hand-back exists — posting again would start a second
+          # review run (the older one cancelled by newest-wins), or re-review a
+          # PR the agent just handed to a human. The marker is matched as the
+          # first line (same shape as the loops' selfhandoff detector), not as
+          # a substring: claude-code-action's tracking comment is created after
+          # `started` and rewritten with the agent's final summary, and an
+          # agent editing these workflows routinely writes about the marker in
+          # prose — a substring match would read that as a posted hand-back and
+          # skip the one owed here. An API failure reads as 0 and
+          # falls through to posting — the safe completion. An empty SINCE
+          # gets the same treatment: GitHub ignores an empty `since=` rather
+          # than rejecting it, so the unguarded call would match every old
+          # hand-back on the PR and silently skip the one owed now. The
+          # composite stamps `started` first, so this only bites when the
+          # workflow and sync-branch@main skew (a branch-tested claude.yml
+          # against an older composite).
+          posted=0
+          if [ -n "${SINCE:-}" ]; then
+            posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
+              --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
+          fi
+          if [ "${posted:-0}" -gt 0 ]; then
+            echo "Hand-back already posted this run; not posting another."
+            exit 0
+          fi
           ok=""
           for i in 1 2 3 4 5; do
             if gh pr comment "$NUM" --repo "$REPO" --body '@review'; then ok=1; break; fi

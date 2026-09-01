@@ -70,6 +70,11 @@ outputs:
       up to date" leaves it empty). Gates the "review the runner's merge"
       prompt note and the push-base-merge backstop.
     value: ${{ steps.sync.outputs.merge_sha }}
+  started:
+    description: >-
+      Run-start timestamp (UTC ISO), stamped before the agent runs — the
+      "hand-back already posted since" checks key on it.
+    value: ${{ steps.sync.outputs.started }}
   agent_merge:
     description: >-
       `1` when the merge was handed back to the agent (Claude-path conflict, or
@@ -97,8 +102,22 @@ runs:
         set -euo pipefail
         git config user.name "i-am-marvin"
         git config user.email "i-am-marvin@users.noreply.github.com"
-        prj=$(gh pr view "$NUM" --repo "$REPO" \
-                --json headRefName,baseRefName,isCrossRepository,state)
+        # Run-start stamp for claude.yml's hand-back double-post check
+        # (the loops take theirs from "Record base SHA"; claude.yml has no
+        # such step, and this action runs before either agent).
+        echo "started=$(date -u +%FT%TZ)" >>"$GITHUB_OUTPUT"
+        # Retried: under set -e a single transient API error here would fail
+        # the run before the agent starts (surfaced, but recovery is a manual
+        # re-trigger) — and this is the sync's only API read, shared by all
+        # three callers.
+        prj=""
+        for i in 1 2 3; do
+          prj=$(gh pr view "$NUM" --repo "$REPO" \
+                  --json headRefName,baseRefName,isCrossRepository,state) && break
+          prj=""
+          [ "$i" -lt 3 ] && sleep $((i * 5))
+        done
+        [ -n "$prj" ] || { echo "::error::could not read PR #$NUM after 3 attempts"; exit 1; }
         branch=$(jq -r '.headRefName' <<<"$prj")
         base=$(jq -r '.baseRefName' <<<"$prj")
         if [ "$CHECKOUT" = "true" ]; then
