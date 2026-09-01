@@ -49,6 +49,7 @@ FORK = "meridianlabs-ai/inspect_ai"
 TS_MONO = "meridianlabs-ai/ts-mono"
 ORG = "meridianlabs-ai"
 REVIEWER = os.environ.get("REVIEWER", "ransomr")
+MACHINE_ACCOUNT = "i-am-marvin"  # the login this sync (and the loop) writes as
 
 PROJECT_ID = "PVT_kwDOC7YMCM4BU68p"
 PROJECT_NUMBER = 1
@@ -396,7 +397,7 @@ def upstream_pr(url: str):
     # colleague's review must not mask their own newer question.
     # (_req_ts stays by-anyone: the Contributor path and `rerequested`
     # deliberately count outside-initiated requests.)
-    _ours = {(d.get("author") or {}).get("login", ""), REVIEWER, "i-am-marvin"}
+    _ours = {(d.get("author") or {}).get("login", ""), REVIEWER, MACHINE_ACCOUNT}
     d["_our_req_ts"] = max(
         (
             n["createdAt"]
@@ -421,7 +422,10 @@ def _pr_events(owner: str, repo: str, num: int):
     missed entirely — accepted as rare for the latest-timestamp
     computations built on this. Author nodes carry login and __typename so
     callers can classify humans vs bots; review_state is the review's
-    state (e.g. DISMISSED) and None for comment events.
+    state (e.g. DISMISSED) for review events, the PARENT review's state
+    for thread comments (every inline comment belongs to a review, so a
+    dismissed review's nits are excludable along with it), and None for
+    issue comments.
     """
     d = gql(
         """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
@@ -429,7 +433,7 @@ def _pr_events(owner: str, repo: str, num: int):
                author{login}
                comments(last:50){nodes{author{login __typename} createdAt}}
                reviews(last:50){nodes{author{login __typename} submittedAt state}}
-               reviewThreads(last:50){nodes{comments(last:20){nodes{author{login __typename} createdAt}}}}
+               reviewThreads(last:50){nodes{comments(last:20){nodes{author{login __typename} createdAt pullRequestReview{state}}}}}
              }}}""",
         o=owner,
         r=repo,
@@ -445,7 +449,12 @@ def _pr_events(owner: str, repo: str, num: int):
     ]
     for t in d["reviewThreads"]["nodes"]:
         events += [
-            (c["author"], c["createdAt"], None) for c in t["comments"]["nodes"]
+            (
+                c["author"],
+                c["createdAt"],
+                (c.get("pullRequestReview") or {}).get("state"),
+            )
+            for c in t["comments"]["nodes"]
         ]
     return pr_author, events
 
@@ -475,7 +484,11 @@ def upstream_reviewer_activity(owner: str, repo: str, num: int) -> tuple[str, st
     submittedAt, and counting it would move a freshly-dismissed item past
     its documented Sign-off resting place — dismissal (manual or the
     stale-review auto-dismiss on push) retracts the verdict, it is not a
-    reviewer response.
+    reviewer response. That exclusion covers the review's inline thread
+    comments as well (they carry the parent review's state): an approval
+    submitted WITH nits is a common shape, and its nits are part of the
+    retracted review — while a genuine thread reply after dismissal
+    belongs to a different, non-dismissed review and still counts.
     """
     ours = ""
     others = ""
@@ -485,12 +498,37 @@ def upstream_reviewer_activity(owner: str, repo: str, num: int) -> tuple[str, st
         login = who.get("login", "")
         if not login or who.get("__typename") != "User" or state == "DISMISSED":
             continue
-        if login in (pr_author, REVIEWER, "i-am-marvin"):
+        if login in (pr_author, REVIEWER, MACHINE_ACCOUNT):
             if ts > ours:
                 ours = ts
         elif ts > others:
             others = ts
     return others, ours
+
+
+def outside_holds_ball(issue: int, pr) -> bool | None:
+    """Whether the newest human word on a promotion PR is an outside one.
+
+    The single ball-possession predicate: outside-human activity newer than
+    BOTH our side's latest textual activity and our side's latest review
+    request. The request leg (_our_req_ts) covers the driver handing back
+    with commits + a re-request but no comment — the reviewer's
+    changes-requested review is then the newest textual event, but the ball
+    is upstream; an outside actor's request deliberately does not mask
+    (the reviewer requesting a colleague must not hide their own newer
+    question). Both the Review -> Sign-off promotion gate and the
+    Sign-off -> Review yank call this, so the two transitions agree on
+    possession by construction and cannot flip an item between them.
+    Returns None when the activity lookup fails — callers hold the current
+    stage and retry next run (best-effort, warn-logged here).
+    """
+    owner, repo, num = pr["_ref"]
+    try:
+        others_ts, ours_ts = upstream_reviewer_activity(owner, repo, num)
+    except Exception as e:  # noqa: BLE001 — detection is best-effort
+        print(f"::warning::reviewer-activity check failed for #{issue}: {e}")
+        return None
+    return bool(others_ts and others_ts > max(ours_ts, pr["_our_req_ts"]))
 
 
 def close_issue(number: int, comment: str) -> None:
@@ -848,16 +886,16 @@ def sync_item(row) -> None:
         # A plain comment or inline question consumes neither the pending
         # request nor the sticky decision, so this condition would otherwise
         # stay true while the Sign-off branch below yanks the item back —
-        # the two transitions flipping it every run. Gate on the same
-        # predicate the yank uses, so both agree on who holds the ball; on
-        # lookup failure hold the stage (best-effort, like the yank — the
-        # promotion just waits a run).
-        try:
-            others_ts, ours_ts = upstream_reviewer_activity(owner, repo, num)
-        except Exception as e:  # noqa: BLE001 — detection is best-effort
-            print(f"::warning::reviewer-activity check failed for #{issue}: {e}")
+        # the two transitions flipping it every run. outside_holds_ball is
+        # the yank's predicate too, so both agree on possession; on lookup
+        # failure (None) hold the stage — the promotion just waits a run.
+        held = outside_holds_ball(issue, pr)
+        if held is None:
             return
-        if others_ts and others_ts > max(ours_ts, pr["_our_req_ts"]):
+        if held:
+            actions.append(
+                f"#{issue}: re-requested but the reviewer responded since — holding Review"
+            )
             return
         if set_stage(item, "Sign-off", stage):
             actions.append(f"#{issue}: review re-requested upstream -> Sign-off")
@@ -892,26 +930,12 @@ def sync_item(row) -> None:
             # thread — still puts the ball back with us; parked at Sign-off
             # it sat invisible until someone happened to look (observed:
             # upstream #5096, an approver comment awaited unnoticed,
-            # 2026-09-01). Outside-human activity newer than OUR latest
-            # (author/driver/machine) flips Sign-off -> Review; responding
-            # upstream advances our timestamp, so the hourly scan doesn't
-            # re-yank, and the Review -> Sign-off promotion above is gated
-            # on this same predicate, so the moved item rests until our
-            # side responds. A review request BY OUR SIDE counts as ours
-            # (_our_req_ts): the driver handing back with commits + a
-            # re-request but no comment leaves the reviewer's
-            # changes-requested review as the newest textual event, and
-            # without this the item would oscillate hourly with the
-            # promotion above. (The reviewer requesting a colleague's
-            # review is not ours — their own newer question still flips.)
-            try:
-                others_ts, ours_ts = upstream_reviewer_activity(owner, repo, num)
-            except Exception as e:  # noqa: BLE001 — detection is best-effort
-                print(f"::warning::reviewer-activity check failed for #{issue}: {e}")
-                return
-            if others_ts and others_ts > max(ours_ts, pr["_our_req_ts"]):
-                if set_stage(item, "Review", stage):
-                    actions.append(f"#{issue}: upstream reviewer responded -> Review")
+            # 2026-09-01). Responding upstream advances our timestamp, so
+            # the hourly scan doesn't re-yank, and the Review -> Sign-off
+            # promotion above holds on this same predicate, so the moved
+            # item rests until our side responds.
+            if outside_holds_ball(issue, pr) and set_stage(item, "Review", stage):
+                actions.append(f"#{issue}: upstream reviewer responded -> Review")
 
 
 def lifecycle_item(issue: int):
