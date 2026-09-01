@@ -985,10 +985,13 @@ jobs:
             git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
             pushed=1
             # HEAD still exactly the runner's clean base merge: codex changed
-            # nothing (any commit above would have moved it), so say so
-            # rather than announcing "changes pushed" over a summary that
-            # says nothing needed changing. Still a push, so "Ensure
-            # hand-back" owes the @review — the re-run is what gets real CI.
+            # nothing (any commit above would have moved it). The push itself
+            # is what restores CI (a computable merge ref); a re-review would
+            # only re-read the same code codex just declined to change, so
+            # this round is treated like a no-change round below and
+            # concludes with the hand-off. That also keeps the gate's
+            # no-progress escalation honest: a re-review here would let the
+            # moved tip read as progress on every round the base moves.
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
             echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
           fi
@@ -998,17 +1001,16 @@ jobs:
           # QUOTING one — likely, its prompt embeds the reviewer's verdict
           # comments verbatim — would forge a verdict or suppress an owed
           # hand-back: break those substrings too, in codex's text only, not
-          # the deliberate leading marker below). Pushed: a plain summary —
-          # "Ensure hand-back" below owes the @review. No changes: the round
-          # is concluded — lead with the auto-handoff marker so the
-          # selfhandoff detector moves the board.
+          # the deliberate leading marker below). Pushed with codex changes:
+          # a plain summary — "Ensure hand-back" below owes the @review. No
+          # changes, or the base merge alone: the round is concluded — lead
+          # with the auto-handoff marker so the selfhandoff detector moves
+          # the board and "Ensure hand-back" sees the hand-off already posted.
           {
-            if [ -z "$pushed" ]; then
+            if [ -z "$pushed" ] || [ -n "$merge_only" ]; then
               echo "<!-- auto-handoff -->"
               ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
-              printf '%sauto (codex, round %s): no code changes this round — summary below. Inline review threads are not auto-resolved on the codex engine; please resolve any settled ones.\n\n' "$ping" "$ROUND"
-            elif [ -n "$merge_only" ]; then
-              printf '🤖 auto (codex, round %s): base merge pushed; no code changes this round — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
+              printf '%sauto (codex, round %s): no code changes this round%s — summary below. Inline review threads are not auto-resolved on the codex engine; please resolve any settled ones.\n\n' "$ping" "$ROUND" "${merge_only:+ (the base-branch merge from the workflow was pushed)}"
             else
               printf '🤖 auto (codex, round %s): changes pushed — summary below. Inline review threads are not auto-resolved on the codex engine.\n\n' "$ROUND"
             fi

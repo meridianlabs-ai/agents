@@ -715,7 +715,8 @@ jobs:
             # nothing (any commit above would have moved it), so say so
             # rather than announcing "fix pushed" over a summary that says
             # nothing needed changing. Still a push, so the backstop below
-            # owes the @review — the re-run is what gets real CI.
+            # owes the @review — the push is what re-runs CI (a computable
+            # merge ref again); the re-review re-reads the now-current code.
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
             echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
           fi
