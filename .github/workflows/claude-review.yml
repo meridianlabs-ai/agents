@@ -508,6 +508,67 @@ jobs:
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
+      # Fallback provisioning where claude-setup is absent: PR heads on the
+      # inspect_ai fork are cut from pristine main, which deliberately
+      # carries no meridian files — so reviews there (both engines) degraded
+      # to static verification even though the WORKFLOW steps have network
+      # (only the agent sandboxes don't). If the checkout looks like a
+      # Python project, build the venv the way the fork's claude-setup does
+      # (decision: Ransom, 2026-09-01). The uv installer curl is retried —
+      # its tarball download flaked repeatedly on 2026-08-12; uv's own HTTP
+      # retries internally. Both bin dirs go on GITHUB_PATH so pytest/ruff/
+      # mypy resolve for either engine. Fatal on failure, exactly like
+      # claude-setup: a repo whose pyproject exists but cannot dev-install
+      # is a loud signal, not a silent static review. No plain `-e .`
+      # fallback: uv (verified on 0.9.4), like pip, only WARNS on an
+      # unknown extra, so the `[dev]` install already succeeds on repos
+      # without one — a fallback could only mask real failures as a silent
+      # static degrade. Dev tools may instead live in PEP 735
+      # `[dependency-groups]` (uv-native layouts: inspect_sandboxes has NO
+      # optional-dependencies at all), where the extras warning would mean
+      # a green step with a toolless venv — so when that table exists,
+      # `--group dev` is added; unlike an unknown extra, an absent group
+      # ERRORS, which is the loud failure this step wants. The table is
+      # detected with tomllib (runner python3 is ≥3.11), not grep: TOML
+      # allows whitespace in/before the header, and a formatting variant
+      # silently taking the extras-only branch is the exact toolless-venv
+      # outcome the group branch exists to prevent. Parity gap,
+      # accepted: claude-setup pins `--python
+      # 3.11` to the fork's CI, while bare `uv venv` resolves the runner's
+      # default (3.12 today, drifting with the image) — a generic fallback
+      # can't hardcode any one minor; repos that care can ship a
+      # `.python-version`, which uv honors.
+      - name: Provision project environment (fallback)
+        id: setupfb
+        # Same hazard class as the sandbox-install hang above: uv bootstrap
+        # plus a full dependency resolution, no other timeout before GitHub's
+        # 6h ceiling. On expiry SETUPFB_OUTCOME=failure feeds the Surface
+        # step's ⚠️ + re-trigger message.
+        timeout-minutes: 10
+        if: >-
+          steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external' &&
+          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
+          hashFiles('pyproject.toml') != ''
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh && break
+            if [ "$attempt" = 3 ]; then
+              echo "uv install failed after 3 attempts" >&2; exit 1
+            fi
+            echo "uv install attempt $attempt failed; retrying..." >&2
+            sleep $((attempt * 10))
+          done
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv
+          if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
+            uv pip install -e ".[dev]" --group dev
+          else
+            uv pip install -e ".[dev]"
+          fi
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+          echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
+
       # External mode keeps the caller's review_prompt (and the
       # append_system_prompt guidance, which flows in via claude_args as
       # always) — Meridian maintains the upstream repo, so its review
@@ -856,6 +917,7 @@ jobs:
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
           SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MENTION: ${{ steps.who.outputs.mention }}
@@ -871,6 +933,8 @@ jobs:
           # (observed: a transient curl failure downloading uv in claude-setup).
           if [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             err="environment provisioning (claude-setup) failed before the reviewer started — usually a transient dependency-download/network error; re-trigger to retry."
+          elif [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+            err="fallback environment provisioning (uv dev-install) failed before the reviewer started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); re-trigger if it looks transient."
           elif [ "${SANDBOX_OUTCOME:-}" = "failure" ]; then
             err="the external-review sandbox install failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
           fi
