@@ -350,9 +350,15 @@ PR's terminal state starts a new generation the field no longer
 represents — except the sync's *own* recovery reopen, which exists to
 decide that same PR's fate and is recognized by its marker comment).
 Retiring the stale field also resets the old generation's Stage to
-Agent: a parked Sign-off/Merge is the same kind of stale claim, and
-with the field cleared the row leaves the hourly scan, so nothing else
-would ever correct it. When adding a sync behavior keyed on stored
+Agent (Review for External proxies, whose lifecycle has no Agent): a
+parked Sign-off/Merge is the same kind of stale claim, and with the
+field cleared the row leaves the hourly scan, so nothing else would
+ever correct it. Accepted cost of the guard: an issue whose new
+generation genuinely finished (companion merge was the correct final
+close, but no promotion refreshed the field) bounces open once and
+needs a manual re-close — consistent with the model that a companion
+merge never implies the upstream half is done, and both comments on the
+issue say what happened. When adding a sync behavior keyed on stored
 state, name the event that invalidates that state and check for it
 before acting.
 

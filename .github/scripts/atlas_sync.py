@@ -697,7 +697,13 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
     means the reopen was the sync's own (the author check keeps another
     commenter's echo of the prefix from suppressing detection; the
     pagination-safe fetch keeps the marker from aging out of a fixed
-    window). Best-effort: unreadable timeline -> not stale (the old
+    window). Known gap: the marker posts in the API call right after the
+    recovery's reopen PATCH, so a transient comment failure between the
+    two leaves that reopen unmarked and the next run retires the field
+    instead of re-running the recovery's Review park — accepted: the
+    window is two consecutive calls in one run, and the outcome
+    self-announces (the retire comment lands on the issue, naming the
+    PR). Best-effort: unreadable timeline -> not stale (the old
     behavior).
     """
     terminal_ts = pr.get("mergedAt") or pr.get("closedAt") or ""
@@ -728,7 +734,7 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
         return False
 
 
-def retire_stale_field(issue: int, item, url: str, stage) -> None:
+def retire_stale_field(issue: int, item, url: str, stage, external: bool) -> None:
     """Clear the generational Upstream PR field and say so on the issue.
 
     Comment first, then clear — the trade close_issue already makes: a
@@ -741,18 +747,26 @@ def retire_stale_field(issue: int, item, url: str, stage) -> None:
     scan, so nothing would ever correct a stale park. Reset to Agent —
     the stage the #232 hand-recovery chose — which keeps the item inside
     reflect_companion_loops' Agent/Review domain, where the new
-    generation's loop state can move it.
+    generation's loop state can move it. External proxies reset to Review
+    instead: Agent isn't in their Review/Contributor/Merge lifecycle, and
+    Review is where discovery seeds them — the human who reopened the
+    proxy is driving from there.
     """
+    refresh = (
+        "set it to the successor upstream PR by hand to resume tracking"
+        if external
+        else "the next promotion will set the field afresh"
+    )
     comment(
         issue,
         f"Upstream PR field cleared: {url} reached its terminal state before "
         "this issue was reopened, so it no longer represents the work here — "
-        "the next promotion will set the field afresh. (Atlas sync)",
+        f"{refresh}. (Atlas sync)",
     )
     clear_field(item, UPSTREAM_PR_FIELD)
-    if not set_stage(item, "Agent", stage):
-        # already at Agent: set_stage no-oped, but a panel auto-close may
-        # have forced Status to Done — restore it directly
+    if not set_stage(item, "Review" if external else "Agent", stage):
+        # already at the target stage: set_stage no-oped, but a panel
+        # auto-close may have forced Status to Done — restore it directly
         set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
     actions.append(f"#{issue}: reopened after upstream terminal -> field cleared")
 
@@ -796,7 +810,7 @@ def sync_item(row) -> None:
             # mirror the checks below (and a closer-lookup failure prefers
             # the reopen, same as the fall-through below).
             gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
-            retire_stale_field(issue, item, row["url"], stage)
+            retire_stale_field(issue, item, row["url"], stage, row["external"])
             actions.append(f"#{issue}: closed off a stale upstream field -> reopened")
             return
         if pr["merged"] or (pr["state"] == "CLOSED" and row["external"]):
@@ -879,7 +893,7 @@ def sync_item(row) -> None:
 
     if pr["merged"]:
         if field_is_stale(issue, pr, row["url"]):
-            retire_stale_field(issue, item, row["url"], stage)
+            retire_stale_field(issue, item, row["url"], stage, row["external"])
             return
         try:
             companion_leftover_warning(issue, pr)
@@ -895,7 +909,7 @@ def sync_item(row) -> None:
 
     if pr["state"] == "CLOSED":  # closed without merge
         if field_is_stale(issue, pr, row["url"]):
-            retire_stale_field(issue, item, row["url"], stage)
+            retire_stale_field(issue, item, row["url"], stage, row["external"])
             return
         if row["external"]:
             close_issue(
