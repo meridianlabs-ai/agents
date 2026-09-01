@@ -115,6 +115,15 @@ did when the frozen head never moved. A review verdict landing after the close
 can therefore drive fix rounds up to the full cap. When closing a labeled PR as
 abandoned, remove the `auto` label in the same breath.
 
+A continuation that converges hands back again: the converged handoff's
+idempotence check (one hand-back per PR) is scoped to comments posted after the
+PR's close, because the designed history — converge → handoff → human promotes
+(closing the PR) → upstream feedback re-engages the loop — guarantees a
+pre-close handoff comment that would otherwise swallow the continuation's own
+ending (stage moved to Review, no comment, no @-mention). Its CI sentence also
+points at the upstream PR / branch-tip checks rather than the frozen pre-close
+checks.
+
 ## Autonomy ceiling and the round cap
 
 **Decision: drive to mergeable, but cap reviewer rounds at 10.** `@auto` may take

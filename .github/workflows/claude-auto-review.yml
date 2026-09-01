@@ -188,7 +188,7 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
-          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
+          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,closedAt,headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
             echo "#$PR is not a pull request (or the API is persistently unavailable); skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
@@ -234,8 +234,17 @@ jobs:
             echo "PR #$PR is $pr_state but auto-labeled with a live branch (promotion continuation); steering by branch tip $live_tip."
           fi
           continuation=false
-          [ -n "$live_tip" ] && continuation=true
+          closed_at=""
+          if [ -n "$live_tip" ]; then
+            continuation=true
+            # The close timestamp is the continuation epoch: the converged
+            # handoff's idempotence check only counts hand-backs posted after
+            # it, so the pre-promotion handoff (which is what led to the
+            # close) doesn't silence the continuation's own ending.
+            closed_at=$(jq -r '.closedAt // ""' <<<"$pr_json")
+          fi
           echo "continuation=$continuation" >>"$GITHUB_OUTPUT"
+          echo "closed_at=$closed_at" >>"$GITHUB_OUTPUT"
           echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
           # Engine selection (design/codex-engine.md): fix rounds follow the
           # PR's engine:codex label; relabeling switches later rounds.
@@ -389,6 +398,15 @@ jobs:
       # final review/merge (@auto never merges). Idempotent so a later clean
       # re-review doesn't re-ping. The `auto` label is left on, so further CI or
       # human-review activity can still re-engage @auto.
+      #
+      # On a closed-PR continuation (see the gate) the idempotence window
+      # starts at the PR's close: the designed flow is converge → handoff →
+      # human promotes (closing the PR) → upstream feedback re-engages the
+      # loop, so a pre-close handoff comment is near-certain and would
+      # otherwise swallow the continuation's own hand-back — the stage would
+      # move to Review with no comment and no @-mention, and the operator
+      # would learn the loop finished only by polling. Hand-backs posted
+      # after the close still dedupe against each other.
       - name: Converged handoff
         if: steps.gate.outputs.act == 'converged'
         env:
@@ -396,16 +414,32 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           MENTION: ${{ steps.gate.outputs.mention }}
+          CONTINUATION: ${{ steps.gate.outputs.continuation }}
+          CLOSED_AT: ${{ steps.gate.outputs.closed_at }}
           MARKER: "<!-- auto-converged -->"
         run: |
           set -euo pipefail
-          if gh api "repos/$REPO/issues/$PR/comments" --paginate \
-               --jq 'any(.[]; .body|contains("'"$MARKER"'"))' | grep -q true; then
-            echo "Handoff already posted; skipping."; exit 0
+          # ISO-8601 UTC timestamps compare correctly as strings; an empty
+          # $since (open PR) makes every marker comment count, as before.
+          # `--paginate` emits one JSON array per page; -s slurps them so
+          # the check yields a single true/false. An API failure yields ""
+          # and falls through to posting — same as before.
+          since=""
+          [ "${CONTINUATION:-}" = "true" ] && since="${CLOSED_AT:-}"
+          posted=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                     | jq -rs --arg m "$MARKER" --arg since "$since" \
+                         'any(.[][]; (.body|contains($m)) and (.created_at > $since))' || true)
+          if [ "$posted" = "true" ]; then
+            echo "Handoff already posted${since:+ since close ($since)}; skipping."; exit 0
           fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
+          if [ "${CONTINUATION:-}" = "true" ]; then
+            ci="this PR is closed, so the checks shown here are the frozen pre-close runs — CI for the live branch tip runs on the upstream PR (or as push-triggered checks on the branch)."
+          else
+            ci="see the checks above for CI status."
+          fi
           gh pr comment "$PR" --repo "$REPO" --body "$MARKER
-          ${ping}🤖 auto: the reviewer has no outstanding feedback — this PR has converged. auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; see the checks above for CI status. The \`auto\` label is left on, so auto will still react to new review or CI activity; remove it to disengage."
+          ${ping}🤖 auto: the reviewer has no outstanding feedback — this PR has converged. auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; $ci The \`auto\` label is left on, so auto will still react to new review or CI activity; remove it to disengage."
 
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
