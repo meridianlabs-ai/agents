@@ -405,11 +405,21 @@ jobs:
           # merge-only round push. Stamped after, a clean merge with no agent
           # edits would read as "nothing to push" and die with the runner —
           # exactly the drift this step exists to end.
-          echo "start_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          start_sha=$(git rev-parse HEAD)
+          echo "start_sha=$start_sha" >>"$GITHUB_OUTPUT"
           conflicts=""
           if git merge --no-edit "origin/$base"; then
-            echo "merged origin/$base cleanly"
-            echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+            # "Already up to date" also exits 0 without moving HEAD. Only a
+            # merge that actually happened gets a merge_sha: it gates the
+            # "review the runner's merge" note (which would otherwise point
+            # the agent at a merge that never happened on every round where
+            # the caller sets branch_sync_append) and the backstop push.
+            if [ "$(git rev-parse HEAD)" = "$start_sha" ]; then
+              echo "already up to date with origin/$base"
+            else
+              echo "merged origin/$base cleanly"
+              echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+            fi
           else
             # quotePath off: C-quoted (non-ASCII) paths would garble the codex
             # prompt's file list and dodge the landing guard's [ -f ] check,
@@ -613,6 +623,16 @@ jobs:
       # committed on top — pushed, or deliberately not — is never second-
       # guessed. always(), so a failed or cancelled agent still leaves the
       # branch current rather than resuming tomorrow's drift.
+      #
+      # A push here on an @auto run also owes the re-review request. The
+      # Claude path otherwise relies on the REQUEST_REVIEW prompt, which tells
+      # the agent NOT to post when it made no code changes — so a Q&A @auto
+      # run on a behind branch would move the head with nobody requesting
+      # re-review, and "Stage - Review (hand-back)" skips because this counts
+      # as a successful @auto PR run: board stranded at Agent. Mirrors the
+      # codex landing step's deterministic post; gated on the agent having
+      # succeeded (like the loops' "Ensure hand-back after push"), since a
+      # failed agent is already handed to a human by the Surface step.
       - name: Push base merge if unpushed
         if: >-
           always() && steps.engine.outputs.engine != 'codex' &&
@@ -621,8 +641,11 @@ jobs:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           MARVIN: ${{ secrets.MARVIN_TOKEN }}
           REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           BRANCH: ${{ steps.sync.outputs.branch }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
         run: |
           set -euo pipefail
           if [ "$(git rev-parse HEAD)" != "$MERGE_SHA" ]; then
@@ -642,6 +665,12 @@ jobs:
             "https://x-access-token:${MARVIN:-$GH_TOKEN}@github.com/$REPO.git" \
             "HEAD:refs/heads/$BRANCH"
           echo "pushed base merge $(git rev-parse --short HEAD) to $BRANCH"
+          # merge_sha is only set on PR-context runs, so this IS a PR: an
+          # @auto push to an existing PR owes a re-review (the reviewer does
+          # not run on push).
+          if [ "$TRIGGER_PHRASE" = "@auto" ] && [ "$CLAUDE_OUTCOME" = "success" ]; then
+            gh pr comment "$NUM" --repo "$REPO" --body '@review'
+          fi
 
       # ---- Codex engine (design/codex-engine.md) ----------------------------
       # The codex sandbox has no network and no GitHub credentials, so unlike

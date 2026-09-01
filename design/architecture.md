@@ -379,7 +379,7 @@ stale code.
 
 So the merge is now a **deterministic `Sync branch with base` step** in all
 three workflows, running before either engine starts, on PR-context runs only.
-Three details are load-bearing:
+Four details are load-bearing:
 
 - **The pre-merge tip is what gets stamped.** The landing steps treat "HEAD
   moved past the recorded SHA" as landable work. Stamped *after* the merge, a
@@ -422,7 +422,14 @@ A `Push base merge if unpushed` backstop covers the Claude path's remaining
 hole: if HEAD is still *exactly* the runner's merge commit when the agent
 finishes, nothing else will push it, so the workflow does. Gating on that exact
 SHA means an agent that committed on top — pushed or deliberately not — is
-never second-guessed.
+never second-guessed. In `claude.yml` that push also posts the `@review`
+re-review request on a successful `@auto` run: the Claude path's prompt tells
+the agent not to request re-review when it made no code changes, so a
+merge-only round would otherwise move the head with nobody owing the hand-back
+(the loop workflows already cover this with "Ensure hand-back after push"). A
+merge that reports "Already up to date" sets no `merge_sha` at all, so neither
+the backstop nor the "review the runner's merge" note fires on a branch that
+already contains its base.
 
 A failed sync step (a transient `gh`/fetch error, or the deliberate loud
 failure when `git merge` dies without content conflicts) skips every

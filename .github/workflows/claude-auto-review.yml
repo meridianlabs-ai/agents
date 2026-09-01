@@ -450,10 +450,20 @@ jobs:
           # head branch in the workspace, and "Record base SHA" above stamped
           # its PRE-merge tip — which is what makes a round whose only product
           # is the base merge still count as landable work and push.
+          before=$(git rev-parse HEAD)
           conflicts=""
           if git merge --no-edit "origin/$base"; then
-            echo "merged origin/$base cleanly"
-            echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+            # "Already up to date" also exits 0 without moving HEAD. Only a
+            # merge that actually happened gets a merge_sha: it gates the
+            # "review the runner's merge" note (which would otherwise point
+            # the agent at a merge that never happened on every round where
+            # the caller sets branch_sync_append) and the backstop push.
+            if [ "$(git rev-parse HEAD)" = "$before" ]; then
+              echo "already up to date with origin/$base"
+            else
+              echo "merged origin/$base cleanly"
+              echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+            fi
           else
             # quotePath off: C-quoted (non-ASCII) paths would garble the codex
             # prompt's file list and dodge the landing guard's [ -f ] check,
