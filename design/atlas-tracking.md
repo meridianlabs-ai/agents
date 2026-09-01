@@ -349,8 +349,12 @@ is *generational*: it describes one promotion, and a reopen after that
 PR's terminal state starts a new generation the field no longer
 represents — except the sync's *own* recovery reopen, which exists to
 decide that same PR's fate and is recognized by its marker comment).
-When adding a sync behavior keyed on stored state, name the event that
-invalidates that state and check for it before acting.
+Retiring the stale field also resets the old generation's Stage to
+Agent: a parked Sign-off/Merge is the same kind of stale claim, and
+with the field cleared the row leaves the hourly scan, so nothing else
+would ever correct it. When adding a sync behavior keyed on stored
+state, name the event that invalidates that state and check for it
+before acting.
 
 A single scheduled workflow hosted in the agents repo (migrated from the
 fork's `meridian` branch 2026-08-26 — org-wide board infrastructure;

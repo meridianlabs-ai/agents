@@ -693,45 +693,55 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
     closed-early recovery: it postdates the terminal by construction but
     exists to decide this same PR's fate, not to start a new generation.
     Its marker comment (see reopen_marker) lands right after the
-    ReopenedEvent, so a marker at/after the last reopen means the reopen
-    was the sync's own. Best-effort: unreadable timeline -> not stale
-    (the old behavior).
+    ReopenedEvent, so a MACHINE_ACCOUNT marker at/after the last reopen
+    means the reopen was the sync's own (the author check keeps another
+    commenter's echo of the prefix from suppressing detection; the
+    pagination-safe fetch keeps the marker from aging out of a fixed
+    window). Best-effort: unreadable timeline -> not stale (the old
+    behavior).
     """
     terminal_ts = pr.get("mergedAt") or pr.get("closedAt") or ""
     if not terminal_ts:
         return False
     try:
-        d = gql(
+        nodes = gql(
             """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
                  issue(number:$n){
                    timelineItems(itemTypes:[REOPENED_EVENT], last:1){
-                     nodes{ ... on ReopenedEvent{ createdAt }}}
-                   comments(last:100){nodes{ body createdAt }}}}}""",
+                     nodes{ ... on ReopenedEvent{ createdAt }}}}}}""",
             o=FORK.split("/")[0],
             r=FORK.split("/")[1],
             n=issue,
-        )["repository"]["issue"]
+        )["repository"]["issue"]["timelineItems"]["nodes"]
+        reopened_ts = nodes[0]["createdAt"] if nodes else ""
+        if not (reopened_ts and reopened_ts > terminal_ts):
+            return False
+        marker = reopen_marker(url)
+        return not any(
+            (c.get("body") or "").startswith(marker)
+            and (c.get("created_at") or "") >= reopened_ts
+            and (c.get("user") or {}).get("login") == MACHINE_ACCOUNT
+            for c in issue_comments(FORK, issue)
+        )
     except Exception as e:  # noqa: BLE001
         print(f"::warning::reopen-timeline check failed for #{issue}: {e}")
         return False
-    nodes = d["timelineItems"]["nodes"]
-    reopened_ts = nodes[0]["createdAt"] if nodes else ""
-    if not (reopened_ts and reopened_ts > terminal_ts):
-        return False
-    marker = reopen_marker(url)
-    return not any(
-        c["body"].startswith(marker) and c["createdAt"] >= reopened_ts
-        for c in d["comments"]["nodes"]
-    )
 
 
-def retire_stale_field(issue: int, item, url: str) -> None:
+def retire_stale_field(issue: int, item, url: str, stage) -> None:
     """Clear the generational Upstream PR field and say so on the issue.
 
     Comment first, then clear — the trade close_issue already makes: a
     failure between the two costs a duplicate comment on the retry, not a
     silent retire (a cleared field drops the row from the scan, so nothing
     would ever retry the comment).
+
+    Stage is generational too: the old generation may have parked it at
+    Sign-off/Merge, and with the field cleared the row leaves the hourly
+    scan, so nothing would ever correct a stale park. Reset to Agent —
+    the stage the #232 hand-recovery chose — which keeps the item inside
+    reflect_companion_loops' Agent/Review domain, where the new
+    generation's loop state can move it.
     """
     comment(
         issue,
@@ -740,6 +750,10 @@ def retire_stale_field(issue: int, item, url: str) -> None:
         "the next promotion will set the field afresh. (Atlas sync)",
     )
     clear_field(item, UPSTREAM_PR_FIELD)
+    if not set_stage(item, "Agent", stage):
+        # already at Agent: set_stage no-oped, but a panel auto-close may
+        # have forced Status to Done — restore it directly
+        set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
     actions.append(f"#{issue}: reopened after upstream terminal -> field cleared")
 
 
@@ -769,8 +783,8 @@ def sync_item(row) -> None:
         # linked PR as a closer). Reopen it; the panel link stays (it is the
         # board's PR pill).
         if (
-            field_is_stale(issue, pr, row["url"])
-            and row["state_reason"] not in ("NOT_PLANNED", "DUPLICATE")
+            row["state_reason"] not in ("NOT_PLANNED", "DUPLICATE")
+            and field_is_stale(issue, pr, row["url"])
             and auto_closed_by_pr(issue) is not False
         ):
             # The close ratified a stale field: the issue was reopened for
@@ -782,8 +796,7 @@ def sync_item(row) -> None:
             # mirror the checks below (and a closer-lookup failure prefers
             # the reopen, same as the fall-through below).
             gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
-            retire_stale_field(issue, item, row["url"])
-            set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
+            retire_stale_field(issue, item, row["url"], stage)
             actions.append(f"#{issue}: closed off a stale upstream field -> reopened")
             return
         if pr["merged"] or (pr["state"] == "CLOSED" and row["external"]):
@@ -866,7 +879,7 @@ def sync_item(row) -> None:
 
     if pr["merged"]:
         if field_is_stale(issue, pr, row["url"]):
-            retire_stale_field(issue, item, row["url"])
+            retire_stale_field(issue, item, row["url"], stage)
             return
         try:
             companion_leftover_warning(issue, pr)
@@ -882,7 +895,7 @@ def sync_item(row) -> None:
 
     if pr["state"] == "CLOSED":  # closed without merge
         if field_is_stale(issue, pr, row["url"]):
-            retire_stale_field(issue, item, row["url"])
+            retire_stale_field(issue, item, row["url"], stage)
             return
         if row["external"]:
             close_issue(
