@@ -622,7 +622,18 @@ jobs:
       # Gated on HEAD being EXACTLY that merge commit, so an agent that
       # committed on top — pushed, or deliberately not — is never second-
       # guessed. always(), so a failed or cancelled agent still leaves the
-      # branch current rather than resuming tomorrow's drift.
+      # branch current rather than resuming tomorrow's drift — but fenced on
+      # the agent having actually STARTED. claude-code-action, not steps.trig,
+      # is what authorizes the commenter (it fails its step for an actor
+      # without write access), so an unfenced always() would let an
+      # outsider's @claude on a public repo's behind PR produce a machine-
+      # account push and a CI re-run: a write reachable without write access.
+      # The execution file is the evidence: the action writes it only after
+      # the Claude session (or on an SDK error mid-run), never when it
+      # declines the actor or dies before starting Claude — verified in its
+      # src/entrypoints/run.ts and base-action/src/execution-file.ts. A run
+      # whose agent never started leaves the merge on the runner; the next
+      # authorized run re-merges.
       #
       # A push here on an @auto run also owes the re-review request. The
       # Claude path otherwise relies on the REQUEST_REVIEW prompt, which tells
@@ -632,8 +643,15 @@ jobs:
       # as a successful @auto PR run: board stranded at Agent. Mirrors the
       # codex landing step's deterministic post; gated on the agent having
       # succeeded (like the loops' "Ensure hand-back after push"), since a
-      # failed agent is already handed to a human by the Surface step.
+      # failed agent is already handed to a human by the Surface step. The
+      # post retries with backoff like the loops' step does — this comment IS
+      # the hand-back — and the step has an id so a failure here (push or
+      # post) reaches the Surface step, which comments on the PR and fails the
+      # job; that in turn switches off the successful-@auto-PR-run exception
+      # in "Stage - Review (hand-back)", so the board moves instead of
+      # sitting at Agent with a red job and nothing on the PR.
       - name: Push base merge if unpushed
+        id: backstop
         if: >-
           always() && steps.engine.outputs.engine != 'codex' &&
           steps.sync.outputs.merge_sha != ''
@@ -646,8 +664,15 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -euo pipefail
+          # Same fallback path as the Surface step: the output is unset when
+          # the action fails, but the file is still there if Claude ran.
+          if [ ! -s "${EXEC:-/home/runner/work/_temp/claude-execution-output.json}" ]; then
+            echo "the agent never ran (claude-code-action declined the actor, or failed before starting Claude) — leaving the runner's base merge unpushed."
+            exit 0
+          fi
           if [ "$(git rev-parse HEAD)" != "$MERGE_SHA" ]; then
             echo "agent commits sit on top of the base merge — leaving the push to it."
             exit 0
@@ -680,7 +705,21 @@ jobs:
           # @auto push to an existing PR owes a re-review (the reviewer does
           # not run on push).
           if [ "$TRIGGER_PHRASE" = "@auto" ] && [ "$CLAUDE_OUTCOME" = "success" ]; then
-            gh pr comment "$NUM" --repo "$REPO" --body '@review'
+            # Retry with backoff (same shape as the loops' "Ensure hand-back
+            # after push"): a swallowed 5xx here (observed there: GitHub 503
+            # during an outage) would leave the merge pushed and the board
+            # stranded at Agent. Fail the step loudly if it never lands; the
+            # Surface step turns that into a PR comment.
+            ok=""
+            for i in 1 2 3 4 5; do
+              if gh pr comment "$NUM" --repo "$REPO" --body '@review'; then ok=1; break; fi
+              echo "hand-back post failed (attempt $i); retrying"
+              sleep $((i * 15))
+            done
+            if [ -z "$ok" ]; then
+              echo "::error::hand-back @review comment failed after 5 attempts — post it manually"
+              exit 1
+            fi
           fi
 
       # ---- Codex engine (design/codex-engine.md) ----------------------------
@@ -1287,6 +1326,7 @@ jobs:
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
@@ -1323,6 +1363,16 @@ jobs:
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the Claude Code step failed before producing a result (see the job logs)."
+          fi
+          # The base-merge backstop failed AFTER a healthy agent run: its push
+          # of the runner's merge, or (on an autonomous run) the re-review
+          # request it owes — the post already retried five times. Without
+          # this clause the job is red with nothing on the PR, and because this
+          # step would still succeed, "Stage - Review (hand-back)" would treat
+          # the run as a successful @auto PR run and leave the board at Agent.
+          # Trigger tokens deliberately absent from the text: it is posted.
+          if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
+            err="the agent finished, but the step that pushes the runner's base-branch merge (and, on an autonomous run, posts the re-review request) failed — see the job logs. The PR branch may still be behind its base, or the re-review may need to be requested by hand."
           fi
           # Codex engine: no execution file exists; step outcomes are the
           # signal (landing is deterministic, so green steps cannot strand).
