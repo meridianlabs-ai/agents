@@ -113,6 +113,41 @@ the secret: codex-labeled runs fail at the codex step with a clear
 error rather than silently falling back (a silent Claude fallback would
 misattribute output).
 
+## Safety strategy: unprivileged-user, not drop-sudo
+
+codex-action's default `drop-sudo` chmods root-owned service sockets under
+`/run`, which breaks D-Bus, crashes systemd-resolved, and kills DNS — the
+hosted runner then dies with "lost communication" 52–65 minutes into the
+job (openai/codex-action#160; hit twice at ~62 min on the first codex
+runs, inspect_ai#389). Every codex step therefore creates a dedicated
+`codex` system user and runs with `safety-strategy: unprivileged-user`:
+containment is the user boundary plus the permission-profile sandbox, the
+API key stays unreadable (codex has no sudo), and the host is never
+mutated. The setup mirrors the action's `examples/unprivileged-user.yml`
+plus two grants its demo never needs: a codex-owned `$RUNNER_TEMP/codex`
+dir for the explicit `output-file` (`$RUNNER_TEMP` itself is 755
+`runner:runner` on the hosted image and stays that way — group-writing the
+temp root would expose the runner's step scripts and per-step
+`GITHUB_ENV`/`GITHUB_OUTPUT` files to a sandbox-escaped codex), and the
+checkout added to the codex user's git `safe.directory` (the repo stays
+runner-owned, so git run as codex otherwise refuses with "dubious
+ownership", and no profile sandbox lets the agent add the exemption
+itself). Two deliberate divergences from a four-way copy: the reviewer's
+step drops the example's workspace-write grants (its profile is
+`:read-only`, and the recursive sweep is pure latency on a full-history
+checkout), and the write-path land steps start with `chown -R runner` on
+`.git` (object fan-out dirs codex creates are codex-owned, and the
+runner's codex-group membership never takes effect within the job, so
+runner-side object writes would otherwise fail intermittently). One more
+unprivileged-user consequence, reviewer-only: the action's inline
+`output-schema` input is broken under this strategy at `@v1`
+(openai/codex-action#103 — the schema temp dir is mktemp'd as codex, mode
+700, then written as the runner, EACCES; fix #147 unmerged), so the setup
+step writes the review schema to a runner-owned file and the codex step
+passes `output-schema-file` instead — the explicit-path branch creates no
+temp dir. Revisit when #160's fixes land upstream (and drop the schema
+workaround when #103's does).
+
 ## v1 limitations (deliberate)
 
 - **External proxy reviews stay on Claude** — their contributor-code

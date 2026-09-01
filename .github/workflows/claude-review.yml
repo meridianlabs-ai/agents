@@ -619,6 +619,67 @@ jobs:
       # SAME markers the @auto loop consumes. The verdict is thereby
       # deterministic rather than prompt-enforced. Inline comments are a v1
       # non-goal; findings carry file:line references in the body instead.
+      #
+      # codex-action's default safety-strategy (drop-sudo) chmods root-owned
+      # service sockets under /run, breaking D-Bus -> systemd-resolved -> DNS;
+      # the hosted runner then dies with "lost communication" 52-65 minutes
+      # into the job (openai/codex-action#160; observed twice at ~62 min on
+      # inspect_ai#389, 2026-08-31). Until fixed upstream, run codex as a
+      # dedicated unprivileged user — the README's other blessed strategy for
+      # permission profiles: containment is the user boundary plus the
+      # profile sandbox, and the API key stays out of reach (codex has no
+      # sudo). Setup is the action's examples/unprivileged-user.yml MINUS
+      # its workspace-write grants (the chown/g+rwX/g+s sweep and the — in
+      # any case inert — runner->codex group add): this run's profile is
+      # :read-only, so codex never writes the checkout, and reading it needs
+      # no grant (checkout files are world-readable; /home/runner traversal
+      # comes from the runner-group line), while the recursive sweep is pure
+      # latency over a fetch-depth-0 checkout of a large caller repo. The
+      # sibling workflows' codex steps keep the full recipe — they land
+      # workspace edits; this one only reads. Plus two grants the example
+      # never needs (it passes no explicit output-file and its demo prompt
+      # never runs git) and a schema-file workaround for an upstream bug,
+      # all commented inline: a codex-owned output dir under RUNNER_TEMP,
+      # git safe.directory, and the review schema written to a runner-owned
+      # file.
+      - name: Create codex user
+        id: codexuser
+        if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
+        run: |
+          set -euo pipefail
+          sudo adduser --system --home /home/codex --shell /bin/bash --group codex
+          sudo usermod -a -G runner codex
+          # codex itself (via sudo -u) writes the explicit output-file and
+          # the action re-reads it as codex, but RUNNER_TEMP is 755
+          # runner:runner on the hosted image. Not g+w on the temp root:
+          # codex's runner-group membership IS effective (its processes
+          # start post-usermod), so that would hand it rename/delete over
+          # the runner's step scripts and the per-step GITHUB_ENV/OUTPUT/
+          # PATH files. A codex-owned subdir grants only the output-file
+          # write; 755 keeps $OUT readable for the runner-side post step.
+          sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
+          # The checkout stays runner-owned, so git commands running as
+          # codex hit the dubious-ownership refusal, and no profile sandbox
+          # lets the agent add the exemption itself.
+          sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # The action's inline output-schema input is broken with
+          # unprivileged-user at @v1 (openai/codex-action#103: it mktemps
+          # the schema dir as codex, mode 700, then writes schema.json as
+          # the runner -> EACCES before codex starts; fix #147 unmerged).
+          # Write the schema runner-owned here and hand the PATH to the
+          # step's output-schema-file input instead — that branch creates
+          # no temp dir and is excluded from the action's cleanup. 644
+          # under the 755 temp root stays codex-readable.
+          cat >"$RUNNER_TEMP/codex-schema.json" <<'SCHEMA'
+          {"type": "object", "additionalProperties": false,
+           "required": ["verdict", "review"],
+           "properties": {
+             "verdict": {"type": "string", "enum": ["clean", "suggestions"],
+               "description": "clean = nothing actionable remains; suggestions = at least one actionable finding"},
+             "review": {"type": "string",
+               "description": "the full review as GitHub markdown, findings with file:line references"}}}
+          SCHEMA
+
       # Our trig gate did the real authorization; allow-bot-users lifts the
       # action's own actor guard for the reviewer-bot trigger the Claude
       # path already accepts (the dev agent's @review hand-back).
@@ -628,19 +689,17 @@ jobs:
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: codex
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: ":read-only"
           allow-bot-users: "claude"
-          output-file: ${{ runner.temp }}/codex-review.json
-          output-schema: |
-            {"type": "object", "additionalProperties": false,
-             "required": ["verdict", "review"],
-             "properties": {
-               "verdict": {"type": "string", "enum": ["clean", "suggestions"],
-                 "description": "clean = nothing actionable remains; suggestions = at least one actionable finding"},
-               "review": {"type": "string",
-                 "description": "the full review as GitHub markdown, findings with file:line references"}}}
+          output-file: ${{ runner.temp }}/codex/codex-review.json
+          # Written runner-owned by the setup step above; NOT the inline
+          # output-schema input, which is broken with unprivileged-user
+          # (openai/codex-action#103 — see the setup step).
+          output-schema-file: ${{ runner.temp }}/codex-schema.json
           prompt: >-
             ${{ steps.reviewprompt.outputs.value }}
             CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction
@@ -685,7 +744,7 @@ jobs:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-          OUT: ${{ runner.temp }}/codex-review.json
+          OUT: ${{ runner.temp }}/codex/codex-review.json
         run: |
           set -euo pipefail
           verdict=$(jq -r '.verdict // empty' "$OUT" 2>/dev/null || true)
@@ -796,6 +855,7 @@ jobs:
           SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MENTION: ${{ steps.who.outputs.mention }}
+          CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
         run: |
@@ -814,9 +874,13 @@ jobs:
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review step failed before producing a result (see the job logs)."
           fi
-          # Codex engine: no execution file exists; the codex and posting
-          # step outcomes are the signal (posting is deterministic, so green
-          # steps cannot silently stall).
+          # Codex engine: no execution file exists; the setup, codex, and
+          # posting step outcomes are the signal (posting is deterministic,
+          # so green steps cannot silently stall). A failed setup step
+          # SKIPS the codex step, so it needs its own check.
+          if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
+            err="the codex user setup failed before the reviewer started (a runner-image change breaking adduser/usermod? — see the job logs)."
+          fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex review step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
           fi

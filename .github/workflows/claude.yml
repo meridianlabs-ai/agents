@@ -588,12 +588,62 @@ jobs:
             .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
             >>.git/info/exclude
 
+      # codex-action's default safety-strategy (drop-sudo) chmods root-owned
+      # service sockets under /run, breaking D-Bus -> systemd-resolved -> DNS;
+      # the hosted runner then dies with "lost communication" 52-65 minutes
+      # into the job (openai/codex-action#160; observed twice at ~62 min on
+      # inspect_ai#389, 2026-08-31). Until fixed upstream, run codex as a
+      # dedicated unprivileged user — the README's other blessed strategy for
+      # permission profiles: containment is the user boundary plus the
+      # profile sandbox, and the API key stays out of reach (codex has no
+      # sudo). Setup mirrors the action's examples/unprivileged-user.yml —
+      # the chown/g+rwX is what lets codex (primary group codex) write the
+      # runner-owned workspace — plus two grants the example never needs (it
+      # passes no explicit output-file and its demo prompt never runs git):
+      # a codex-owned output dir under RUNNER_TEMP and git safe.directory,
+      # commented inline.
+      # NB the runner->codex group grant is inert for this job:
+      # supplementary groups are fixed at process start, and every step is
+      # spawned from a Runner.Worker that predates the usermod. Landing
+      # codex's edits works anyway — runner still owns the pre-existing
+      # workspace directories, codex's files are world-readable under its
+      # umask, and the land step reclaims .git — the one place codex-owned
+      # dirs (objects/ fan-out) would block runner's writes. (Group kept as
+      # a faithful copy of the example; if codex ever drops a 600 file, the
+      # land step needs a chmod -R a+rX sweep, not this group.)
+      - name: Create codex user
+        id: codexuser
+        if: steps.engine.outputs.engine == 'codex'
+        run: |
+          set -euo pipefail
+          sudo adduser --system --home /home/codex --shell /bin/bash --group codex
+          sudo usermod -a -G codex runner
+          sudo usermod -a -G runner codex
+          sudo chown -R runner:codex "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
+          sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
+          # codex itself (via sudo -u) writes the explicit output-file and
+          # the action re-reads it as codex, but RUNNER_TEMP is 755
+          # runner:runner on the hosted image. Not g+w on the temp root:
+          # codex's runner-group membership IS effective (its processes
+          # start post-usermod), so that would hand it rename/delete over
+          # the runner's step scripts and the per-step GITHUB_ENV/OUTPUT/
+          # PATH files. A codex-owned subdir grants only the output-file
+          # write; 755 keeps $OUT readable for the runner-side land step.
+          sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
+          # The checkout stays runner-owned, so git commands running as
+          # codex hit the dubious-ownership refusal, and no profile sandbox
+          # lets the agent add the exemption itself.
+          sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Run Codex
         id: codexrun
         if: steps.engine.outputs.engine == 'codex'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          safety-strategy: unprivileged-user
+          codex-user: codex
           model: ${{ inputs.codex_model }}
           permission-profile: ":workspace"
           # Authorization: codex-action's own built-in write-access check on
@@ -607,7 +657,7 @@ jobs:
           # never pass steps.trig, so none reach this step — matching the
           # Claude path, which sets no allowed_bots on this verb either.
           prompt-file: .codex-prompt.md
-          output-file: ${{ runner.temp }}/codex-final.md
+          output-file: ${{ runner.temp }}/codex/codex-final.md
 
       # Land the codex work: commit + push (as the machine account, so the
       # push triggers CI), expose branch_name so the Open-or-adopt step below
@@ -625,10 +675,16 @@ jobs:
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BRANCH: ${{ steps.codexprep.outputs.branch }}
           START_SHA: ${{ steps.codexprep.outputs.sha }}
-          OUT: ${{ runner.temp }}/codex-final.md
+          OUT: ${{ runner.temp }}/codex/codex-final.md
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
         run: |
           set -euo pipefail
+          # Reclaim .git before writing objects as runner: any objects/XX
+          # fan-out dir codex created (any object-writing git command) is
+          # codex-owned, and runner's codex-group membership is inert this
+          # job — the commit below would intermittently fail with
+          # "insufficient permission for adding an object".
+          sudo chown -R runner "$GITHUB_WORKSPACE/.git"
           # Untracked files count: new source files are legitimate codex
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).
@@ -920,6 +976,7 @@ jobs:
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXCOMPOSE_OUTCOME: ${{ steps.codexcompose.outcome }}
+          CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexrun.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
@@ -943,6 +1000,11 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEXCOMPOSE_OUTCOME:-}" = "failure" ]; then
             err="composing the codex prompt failed before the agent started (see the job logs)."
+          fi
+          # A failed codex-user setup SKIPS the codex step, so it needs its
+          # own check or the failure is a silent red job.
+          if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
+            err="the codex user setup failed before the agent started (a runner-image change breaking adduser/usermod? — see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
