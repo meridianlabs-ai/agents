@@ -614,10 +614,16 @@ jobs:
         run: |
           set -euo pipefail
           # Same "already posted this run" check as the loops' step: an exact
-          # @review comment or a hand-off marker since the run started means
-          # the hand-back exists — posting again would start a second review
-          # run (the older one cancelled by newest-wins), or re-review a PR
-          # the agent just handed to a human. An API failure reads as 0 and
+          # @review comment or a LEADING hand-off marker since the run started
+          # means the hand-back exists — posting again would start a second
+          # review run (the older one cancelled by newest-wins), or re-review a
+          # PR the agent just handed to a human. The marker is matched as the
+          # first line (same shape as the loops' selfhandoff detector), not as
+          # a substring: claude-code-action's tracking comment is created after
+          # `started` and rewritten with the agent's final summary, and an
+          # agent editing these workflows routinely writes about the marker in
+          # prose — a substring match would read that as a posted hand-back and
+          # skip the one owed here. An API failure reads as 0 and
           # falls through to posting — the safe completion. An empty SINCE
           # gets the same treatment: GitHub ignores an empty `since=` rather
           # than rejecting it, so the unguarded call would match every old
@@ -628,7 +634,7 @@ jobs:
           posted=0
           if [ -n "${SINCE:-}" ]; then
             posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
-              --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | contains("auto-handoff")))] | length' 2>/dev/null || echo 0)
+              --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
           fi
           if [ "${posted:-0}" -gt 0 ]; then
             echo "Hand-back already posted this run; not posting another."

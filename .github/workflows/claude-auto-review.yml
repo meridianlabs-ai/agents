@@ -975,8 +975,12 @@ jobs:
           git fetch --quiet origin "$HEAD_BRANCH" 2>/dev/null || true
           tip=$(git rev-parse "origin/$HEAD_BRANCH" 2>/dev/null || echo "$BASE_SHA")
           [ "$tip" = "$BASE_SHA" ] && { echo "No push this round; no hand-back owed."; exit 0; }
+          # Hand-off marker matched as the leading line (same shape as the
+          # selfhandoff detector), not as a substring: the action's tracking
+          # comment is rewritten with the agent's summary, which may mention
+          # the marker in prose without being a hand-off.
           posted=$(gh api "repos/$REPO/issues/$PR/comments?since=$SINCE" \
-            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | contains("auto-handoff")))] | length' 2>/dev/null || echo 0)
+            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
           if [ "${posted:-0}" -gt 0 ]; then
             echo "Hand-back already posted this round."
           else

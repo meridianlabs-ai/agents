@@ -460,7 +460,12 @@ merge-only round would otherwise move the head with nobody owing the hand-back
 post is its own step, gated on the composite's `pushed` output; like the loops'
 step it first checks for a hand-back already posted since the run started (the
 agent posting `@review` anyway, or a human requesting a review mid-run) so it
-never double-posts, and it retries with backoff. In all three workflows the
+never double-posts, and it retries with backoff. That check matches the hand-off
+marker only as a comment's leading line, the same shape as the loops' selfhandoff
+detector — claude-code-action's tracking comment is rewritten with the agent's
+summary, which on a run editing these workflows may well mention the marker in
+prose, and a substring match would read that as a posted hand-back and skip the
+one owed. In all three workflows the
 backstop's outcome is read by "Surface agent errors": a failed push (or, in
 `claude.yml`, hand-back) is commented on the PR and fails the job. In
 `claude.yml` that is what lets "Stage - Review (hand-back)" move the board
