@@ -33,6 +33,23 @@ inputs:
     description: owner/name to push to (only used with push-token).
     required: false
     default: ${{ github.repository }}
+  require-file:
+    description: >-
+      Evidence the agent actually ran: a path that must exist and be non-empty
+      for the push to proceed; empty disables the check. claude.yml passes
+      claude-code-action's execution file, because the action — not the
+      workflow's own trigger check — is what authorizes the commenter (it
+      fails its step for an actor without write access) and the caller runs
+      this backstop under always(): unfenced, an outsider's @claude on a
+      public repo's behind PR would produce a machine-account push and a CI
+      re-run — a write reachable without write access. The action writes the
+      file only after the Claude session (or on an SDK error mid-run), never
+      when it declines the actor or dies before starting Claude (verified in
+      its src/entrypoints/run.ts and base-action/src/execution-file.ts). The
+      loops leave it empty: their own gate already authorized the actor
+      before checkout.
+    required: false
+    default: ""
 
 outputs:
   pushed:
@@ -49,8 +66,16 @@ runs:
         MERGE_SHA: ${{ inputs.merge_sha }}
         PUSH_TOKEN: ${{ inputs.push-token }}
         REPO: ${{ inputs.repo }}
+        REQUIRE_FILE: ${{ inputs.require-file }}
       run: |
         set -euo pipefail
+        # Fence first: a run whose agent never started leaves the merge on the
+        # runner; the next authorized run re-merges. No push here also means
+        # no hand-back owed by the caller (pushed stays empty).
+        if [ -n "$REQUIRE_FILE" ] && [ ! -s "$REQUIRE_FILE" ]; then
+          echo "the agent never ran ($REQUIRE_FILE is missing or empty: claude-code-action declined the actor, or failed before starting Claude) — leaving the runner's base merge unpushed."
+          exit 0
+        fi
         if [ "$(git rev-parse HEAD)" != "$MERGE_SHA" ]; then
           echo "agent commits sit on top of the base merge — leaving the push to it."
           exit 0

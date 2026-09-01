@@ -534,7 +534,18 @@ jobs:
       # Gated on HEAD being EXACTLY that merge commit, so an agent that
       # committed on top — pushed, or deliberately not — is never second-
       # guessed. always(), so a failed or cancelled agent still leaves the
-      # branch current rather than resuming tomorrow's drift.
+      # branch current rather than resuming tomorrow's drift — but fenced on
+      # the agent having actually STARTED. claude-code-action, not steps.trig,
+      # is what authorizes the commenter (it fails its step for an actor
+      # without write access), so an unfenced always() would let an
+      # outsider's @claude on a public repo's behind PR produce a machine-
+      # account push and a CI re-run: a write reachable without write access.
+      # The execution file is the evidence: the action writes it only after
+      # the Claude session (or on an SDK error mid-run), never when it
+      # declines the actor or dies before starting Claude — verified in its
+      # src/entrypoints/run.ts and base-action/src/execution-file.ts. A run
+      # whose agent never started leaves the merge on the runner; the next
+      # authorized run re-merges.
       #
       # A push here on an @auto run also owes the re-review request. The
       # Claude path otherwise relies on the REQUEST_REVIEW prompt, which tells
@@ -544,11 +555,23 @@ jobs:
       # as a successful @auto PR run: board stranded at Agent. Mirrors the
       # codex landing step's deterministic post; gated on the agent having
       # succeeded (like the loops' "Ensure hand-back after push"), since a
-      # failed agent is already handed to a human by the Surface step.
+      # failed agent is already handed to a human by the Surface step. The
+      # post retries with backoff like the loops' step does — this comment IS
+      # the hand-back — and both steps have ids so a failure in either (push
+      # or post) reaches the Surface step, which comments on the PR and fails
+      # the job; that in turn switches off the successful-@auto-PR-run
+      # exception in "Stage - Review (hand-back)", so the board moves instead
+      # of sitting at Agent with a red job and nothing on the PR.
+      #
       # Shared push-base-merge composite (exact-SHA gate, non-fast-forward
-      # guard, push). push-token is set here — same extraheader override as
-      # the codex landing step: this job's checkout persisted github.token as
-      # an http.<origin>.extraheader, which preempts the URL credential, so
+      # guard, push). Two inputs differ from the loops' calls: require-file
+      # carries the execution-file fence (the loops' own gate already
+      # authorized the actor, so they leave it empty), with the same fallback
+      # path the Surface step uses because the action's output is unset when
+      # its step fails even though the file is there if Claude ran; and
+      # push-token is set — same extraheader override as the codex landing
+      # step: this job's checkout persisted github.token as an
+      # http.<origin>.extraheader, which preempts the URL credential, so
       # without the reset the push runs as github-actions[bot] and triggers
       # nothing. The loops' checkouts persisted MARVIN_TOKEN and leave it
       # empty.
@@ -561,13 +584,21 @@ jobs:
         with:
           branch: ${{ steps.sync.outputs.branch }}
           merge_sha: ${{ steps.sync.outputs.merge_sha }}
+          require-file: ${{ steps.claude.outputs.execution_file || '/home/runner/work/_temp/claude-execution-output.json' }}
           push-token: ${{ secrets.MARVIN_TOKEN || github.token }}
 
       # merge_sha is only set on PR-context runs, so this IS a PR: an @auto
       # push to an existing PR owes a re-review (the reviewer does not run on
       # push). Gated on the backstop having actually pushed — a skipped push
-      # (agent commits on top, already on origin, remote moved) owes nothing.
+      # (agent never ran, agent commits on top, already on origin, remote
+      # moved) owes nothing. Retries with backoff (same shape as the loops'
+      # "Ensure hand-back after push"): a swallowed 5xx here (observed there:
+      # GitHub 503 during an outage) would leave the merge pushed and the
+      # board stranded at Agent. Fails loudly if the post never lands; the
+      # Surface step reads this step's outcome and turns that into a PR
+      # comment.
       - name: Request re-review after backstop push
+        id: handback
         if: >-
           always() && steps.backstop.outputs.pushed == '1' &&
           inputs.trigger_phrase == '@auto' && steps.claude.outcome == 'success'
@@ -575,7 +606,18 @@ jobs:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-        run: gh pr comment "$NUM" --repo "$REPO" --body '@review'
+        run: |
+          set -euo pipefail
+          ok=""
+          for i in 1 2 3 4 5; do
+            if gh pr comment "$NUM" --repo "$REPO" --body '@review'; then ok=1; break; fi
+            echo "hand-back post failed (attempt $i); retrying"
+            sleep $((i * 15))
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::hand-back @review comment failed after 5 attempts — post it manually"
+            exit 1
+          fi
 
       # ---- Codex engine (design/codex-engine.md) ----------------------------
       # The codex sandbox has no network and no GitHub credentials, so unlike
@@ -1163,6 +1205,8 @@ jobs:
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
+          HANDBACK_OUTCOME: ${{ steps.handback.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
@@ -1200,6 +1244,19 @@ jobs:
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the Claude Code step failed before producing a result (see the job logs)."
+          fi
+          # The base-merge backstop (push-base-merge) or its re-review post
+          # failed AFTER a healthy agent run — the post already retried five
+          # times. Without these clauses the job is red with nothing on the
+          # PR, and because this step would still succeed, "Stage - Review
+          # (hand-back)" would treat the run as a successful @auto PR run and
+          # leave the board at Agent. Trigger tokens deliberately absent from
+          # the text: it is posted.
+          if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
+            err="the agent finished, but the step that pushes the runner's base-branch merge failed — see the job logs. The PR branch may still be behind its base."
+          fi
+          if [ -z "$err" ] && [ "${HANDBACK_OUTCOME:-}" = "failure" ]; then
+            err="the agent finished and the runner's base-branch merge was pushed, but the re-review request that push owes could not be posted after 5 attempts — see the job logs. Request the re-review by hand."
           fi
           # Codex engine: no execution file exists; step outcomes are the
           # signal (landing is deterministic, so green steps cannot strand).

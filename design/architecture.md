@@ -383,8 +383,9 @@ The step body lives once, in the `.github/actions/sync-branch` composite
 (referenced `@main` like `set-stage`); the two enforcement pieces below are
 composites too — `unresolved-merge-guard` and `push-base-merge` — so the three
 workflows differ only in their inputs (`claude.yml` passes `checkout: true`
-because its checkout is not on the PR head, and a `push-token` because its
-checkout persisted `github.token`), never in the logic. Four details are
+because its checkout is not on the PR head, a `push-token` because its
+checkout persisted `github.token`, and a `require-file` fence because its
+backstop runs `always()` — see below), never in the logic. Four details are
 load-bearing:
 
 - **The pre-merge tip is what gets stamped.** The landing steps treat "HEAD
@@ -440,11 +441,27 @@ never second-guessed. If the remote tip moved during the run while HEAD stayed
 at the merge (the agent landed its change server-side via the API, or a human
 pushed mid-round), the backstop skips instead of failing red on a
 non-fast-forward push — the next round re-merges on top of the new tip. In
-`claude.yml` that push also posts the `@review`
-re-review request on a successful `@auto` run: the Claude path's prompt tells
+`claude.yml` the backstop is additionally fenced on the agent having actually
+*started* — the composite's `require-file` input names the execution file,
+which exists only once Claude ran (the loops leave the input empty: their gate
+authorized the actor before checkout). The workflow's own
+trigger check deliberately does not mirror claude-code-action's write-access
+check on the commenter (the action is the authorizer, and it fails its step
+for an outsider), so an unfenced `always()` would have let a non-collaborator's
+`@claude` on a public repo's behind PR produce a machine-account merge push
+and a CI re-run: a deterministic, low-harm payload, but a write reachable
+without write access that did not exist before. A declined or never-started
+agent leaves the merge on the runner for the next authorized run. That push
+also posts the `@review` re-review request on a successful `@auto` run: the
+Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a
 merge-only round would otherwise move the head with nobody owing the hand-back
-(the loop workflows already cover this with "Ensure hand-back after push"). One
+(the loop workflows already cover this with "Ensure hand-back after push"). The
+post is its own step, gated on the composite's `pushed` output; it retries with
+backoff like the loops' step, and both outcomes are read by "Surface agent
+errors": a failed push or hand-back is commented on the PR and fails the job,
+which is what lets "Stage - Review (hand-back)" move the board instead of
+treating the run as a successful autonomous PR round. One
 consequence in the CI-fix loop: when the agent gives up on a failure on a
 *behind* branch, the merge-only push re-runs CI, which fails the same way and
 spends exactly one more `fix_attempt_cap` attempt — that next attempt finds the
