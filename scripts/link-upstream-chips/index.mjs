@@ -187,9 +187,10 @@ function pendingPromotions() {
   // GraphQL query — `gh project item-list` pulls every field of every
   // item, which both trips the secondary rate limit and overflows
   // execFileSync's 1MB buffer (a swallowed overflow reads as "nothing
-  // pending"). Live items only: the sync clears Stage on every close
-  // path, so a null Stage means Done/closed, where a missing chip no
-  // longer matters.
+  // pending"). Open issues only, filtered on the issue's own state —
+  // a closed issue's missing chip no longer matters. (Stage would only
+  // proxy this: Todo items also carry an empty Stage, and stage cleanup
+  // on close is partly manual.)
   const rows = [];
   let after = '';
   for (;;) {
@@ -200,9 +201,7 @@ function pendingPromotions() {
           nodes{
             up: fieldValueByName(name:"Upstream PR"){
               ... on ProjectV2ItemFieldTextValue{text}}
-            stage: fieldValueByName(name:"Stage"){
-              ... on ProjectV2ItemFieldSingleSelectValue{name}}
-            content{ ... on Issue{number repository{nameWithOwner}
+            content{ ... on Issue{number state repository{nameWithOwner}
               closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{url}}}}
           }}}}}`;
     let out;
@@ -219,9 +218,10 @@ function pendingPromotions() {
     const page = out.data.organization.projectV2.items;
     for (const n of page.nodes) {
       const raw = (n.up?.text ?? '').trim();
-      if (!raw || !n.stage?.name) continue;
+      if (!raw) continue;
       const issue = n.content?.number;
       if (!issue || n.content?.repository?.nameWithOwner !== REPO) continue;
+      if (n.content.state !== 'OPEN') continue; // closed — chip no longer matters
       const pr = raw.match(PR_URL)?.[0];
       if (!pr) {
         console.warn(`#${issue}: "Upstream PR" field is not a PR URL (${JSON.stringify(raw)}); skipping`);
