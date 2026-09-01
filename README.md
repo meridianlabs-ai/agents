@@ -19,9 +19,9 @@ the auto-review and permission tradeoffs — see [design/architecture.md](design
 
 Both authenticate the same way (Workload Identity Federation) and default to
 the same model (Claude Fable 5.1, pinned, falling back to the account
-default). The hard
-privilege boundary between them is the GitHub token scope, not the prompt — the
-reviewer physically cannot push regardless of what it's asked to do.
+default). The hard privilege boundary between them is the GitHub token scope,
+not the prompt — the reviewer physically cannot push regardless of what it's
+asked to do.
 
 ## Layout
 
