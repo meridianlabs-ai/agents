@@ -107,6 +107,14 @@ escalation it **removes the label and pings a human**. On kickoff from an issue,
 the label is carried onto the PR so the switch stays in one place across the
 issue→PR boundary.
 
+Label hygiene matters when **closing** a labeled PR: a closed (not merged)
+same-repo PR that keeps the label and a live branch is a *promotion
+continuation* — fix rounds steer by the live branch tip, so the tip moves every
+round and the no-progress check no longer self-terminates the loop the way it
+did when the frozen head never moved. A review verdict landing after the close
+can therefore drive fix rounds up to the full cap. When closing a labeled PR as
+abandoned, remove the `auto` label in the same breath.
+
 ## Autonomy ceiling and the round cap
 
 **Decision: drive to mergeable, but cap reviewer rounds at 10.** `@auto` may take

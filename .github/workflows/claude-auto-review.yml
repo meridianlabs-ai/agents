@@ -159,13 +159,21 @@ jobs:
           # stalls with the label still on (see design/auto-agent.md). Retry
           # with backoff; a persistent failure still returns non-zero so the
           # gate-failure failsafe below surfaces it instead of dying quietly.
+          # Each attempt's stdout is captured and emitted only on overall
+          # success: a failed `gh api` prints the HTTP error body to STDOUT
+          # (stderr carries only the `gh:` line), so streaming attempts
+          # through would prefix a fail-then-succeed retry's real output
+          # with error bodies — poisoning every $(ghr …) capture in exactly
+          # the case the retry exists for. (Same pattern as api() in
+          # claude-review.yml's trig step.)
           ghr() {
-            local n=0
-            until "$@"; do
+            local n=0 out
+            until out=$("$@"); do
               n=$((n+1))
               if [ "$n" -ge 4 ]; then return 1; fi
               sleep $((n*3))
             done
+            printf '%s' "$out"
           }
           echo "review-fix gate: pr=#$PR comment_author='$AUTHOR' reviewer_login='$REVIEWER'"
           if [ "$HAS_TOKEN" != "true" ]; then
@@ -211,13 +219,12 @@ jobs:
             echo "PR #$PR is MERGED; nothing to continue. Skipping."
             act skip; exit 0
           elif [ "$pr_state" != "OPEN" ]; then
-            # Capture-then-reset, not `|| true`: on an HTTP error `gh api`
-            # prints the JSON error body to STDOUT (stderr carries only the
-            # `gh:` line), so the substitution would otherwise hold that body
-            # and the deleted-branch skip could never fire. The hex check
-            # also drops a fail-then-succeed ghr capture (earlier attempts'
-            # error bodies prefixed to the SHA) — fail-safe: skip, don't
-            # steer by garbage.
+            # ghr emits captured stdout only on success, so a deleted branch
+            # (persistent 404) yields an empty capture and the skip below
+            # fires — the error body `gh api` prints to STDOUT never reaches
+            # the substitution, and a fail-then-succeed retry still yields a
+            # clean SHA. The hex check is belt-and-braces against unexpected
+            # API output — fail-safe: skip, don't steer by garbage.
             live_tip=$(ghr gh api "repos/$REPO/branches/$(jq -r '.headRefName' <<<"$pr_json")" --jq '.commit.sha' 2>/dev/null) || live_tip=""
             [[ "$live_tip" =~ ^[0-9a-f]{40}$ ]] || live_tip=""
             if [ -z "$live_tip" ]; then
