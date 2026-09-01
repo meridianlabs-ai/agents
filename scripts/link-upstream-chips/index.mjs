@@ -49,10 +49,12 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-// A row's pr must be a real PR URL: linkOne derives prNumber from /pull/<n>,
-// and a hand-typed field value like "n/a" would otherwise become a row that
-// fails every sweep (`No result matching #undefined`) until the field is fixed.
-const PR_URL = /\/pull\/\d+/;
+// Match-and-EXTRACT the canonical PR URL — never pass field text through raw.
+// Every downstream check is exact-string against canonical API URLs, so a value
+// that merely contains a URL (`…/pull/N/files`, a trailing #fragment, prose
+// around it) would produce a row that can never verify and re-enqueues every
+// sweep; a hand-typed "n/a" would fail as `No result matching #undefined`.
+const PR_URL = /https:\/\/github\.com\/\S+\/pull\/\d+/;
 
 const gh = (args) => execFileSync('gh', args, { encoding: 'utf8' });
 const graphql = (query, fields = []) =>
@@ -81,11 +83,10 @@ function pendingProxies() {
     if (n.closedByPullRequestsReferences.nodes.length) continue; // chip exists
     const item = n.projectItems.nodes.find((i) => i.project?.number === PROJECT_NUMBER);
     const field = item?.fieldValueByName?.text?.trim();
-    if (field && !PR_URL.test(field))
+    const fromField = field?.match(PR_URL)?.[0];
+    if (field && !fromField)
       console.warn(`#${n.number}: "Upstream PR" field is not a PR URL (${JSON.stringify(field)}); ignoring it`);
-    const pr =
-      (field && PR_URL.test(field) ? field : undefined) ||
-      n.body.match(/https:\/\/github\.com\/\S+\/pull\/\d+/)?.[0];
+    const pr = fromField || n.body.match(PR_URL)?.[0];
     if (pr) rows.push({ issue: n.number, issueUrl: n.url, pr });
     else console.warn(`#${n.number}: no upstream PR URL in field or body; skipping`);
   }
@@ -201,7 +202,8 @@ function pendingPromotions() {
               ... on ProjectV2ItemFieldTextValue{text}}
             stage: fieldValueByName(name:"Stage"){
               ... on ProjectV2ItemFieldSingleSelectValue{name}}
-            content{ ... on Issue{number repository{nameWithOwner}}}
+            content{ ... on Issue{number repository{nameWithOwner}
+              closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{url}}}}
           }}}}}`;
     let out;
     try {
@@ -216,19 +218,20 @@ function pendingPromotions() {
     }
     const page = out.data.organization.projectV2.items;
     for (const n of page.nodes) {
-      const pr = (n.up?.text ?? '').trim();
-      if (!pr || !n.stage?.name) continue;
+      const raw = (n.up?.text ?? '').trim();
+      if (!raw || !n.stage?.name) continue;
       const issue = n.content?.number;
       if (!issue || n.content?.repository?.nameWithOwner !== REPO) continue;
-      if (!PR_URL.test(pr)) {
-        console.warn(`#${issue}: "Upstream PR" field is not a PR URL (${JSON.stringify(pr)}); skipping`);
+      const pr = raw.match(PR_URL)?.[0];
+      if (!pr) {
+        console.warn(`#${issue}: "Upstream PR" field is not a PR URL (${JSON.stringify(raw)}); skipping`);
         continue;
       }
-      try {
-        if (linkedUrls(issue).includes(pr)) continue; // upstream chip exists
-      } catch {
-        continue; // issue unreadable — skip rather than guess
-      }
+      // Chip check rides the board query itself (no per-candidate API call —
+      // the first live run hit the secondary rate limit); linkOne re-reads
+      // fresh at click time, so staleness here costs nothing.
+      if (n.content.closedByPullRequestsReferences.nodes.some((x) => x.url === pr))
+        continue; // upstream chip exists
       rows.push({ issue, issueUrl: `https://github.com/${REPO}/issues/${issue}`, pr });
     }
     if (!page.pageInfo.hasNextPage) break;
