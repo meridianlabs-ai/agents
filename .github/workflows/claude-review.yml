@@ -971,6 +971,8 @@ jobs:
       # the PR when a non-requested model served tokens or the result
       # reads like a classifier refusal. Best-effort, always exits 0. Codex
       # runs have no execution file and a pinned model — nothing to report.
+      # The note carries a `<!-- model-provenance -->` first line so "Verify
+      # the review was posted" below can tell it from review output.
       - name: Model provenance
         if: always() && steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine != 'codex'
         uses: meridianlabs-ai/agents/.github/actions/model-provenance@main
@@ -1122,9 +1124,12 @@ jobs:
             echo "::notice::PR is $state — no review owed; skipping the posted-review check."
             exit 0
           fi
+          # The Model provenance step above posts as the machine account too,
+          # stamped with a first-line marker; exclude it, or a fallback note
+          # on a stalled run would count as the review and silence the nudge.
           bots='select(.user.login=="claude[bot]" or .user.login=="i-am-marvin")'
           n=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
-                --jq "[.[] | $bots] | length" 2>/dev/null || echo 0)
+                --jq "[.[] | $bots | select((.body // \"\") | startswith(\"<!-- model-provenance -->\") | not)] | length" 2>/dev/null || echo 0)
           if [ "$MODE" != "external" ]; then
             r=$(gh api "repos/$REPO/pulls/$NUM/reviews" \
                   --jq "[.[] | $bots | select(.submitted_at >= \"$SINCE\")] | length" 2>/dev/null || echo 0)

@@ -76,23 +76,37 @@ runs:
         # traffic on every run, not a fallback; anything else that served
         # OUTPUT tokens without being the init model is the fallback (a
         # served set lacking the init model entirely is the clearest case).
-        others=$(jq -r --arg init "$init" 'to_entries
-          | map(select(.key != $init and (.key | test("haiku") | not) and ((.value.outputTokens // 0) > 0)))
-          | map("\(.key) (\(.value.outputTokens) output tokens)") | join(", ")' <<<"$usage")
-        has_init=$(jq -r --arg init "$init" 'has($init)' <<<"$usage")
+        # The comparison needs the init model: with no init line (no `system`
+        # message, or the field moved in a claude-code-action release) every
+        # served model would look like "not the init model" and the note would
+        # fire falsely on every run — so without it, report and don't judge.
+        note=""
+        if [ -n "$init" ]; then
+          others=$(jq -r --arg init "$init" 'to_entries
+            | map(select(.key != $init and (.key | test("haiku") | not) and ((.value.outputTokens // 0) > 0)))
+            | map("\(.key) (\(.value.outputTokens) output tokens)") | join(", ")' <<<"$usage")
+          has_init=$(jq -r --arg init "$init" 'has($init)' <<<"$usage")
+          if [ -n "$others" ] || [ "$has_init" != "true" ]; then
+            note="ℹ️ **Model fallback fired** on this run: requested \`${REQUESTED:-default}\` (\`${init:-?}\`), but tokens were served by ${others:-a different model}. The run's work is still valid; read it knowing the primary model was unavailable, overloaded, or declined."
+            echo "::warning::model fallback: requested $init, served by ${others:-other}"
+          fi
+        else
+          echo "model-provenance: no init line in the execution log; cannot judge whether the fallback fired."
+        fi
         # Refusal heuristic: the final result errored and its text reads like
         # a classifier/policy refusal. The execution log carries no per-message
         # stop_reason, so the result text is the only signal.
         refusal=$(jq -r "$msgs"' | map(select(.type=="result")) | last
           | if (.is_error == true) and ((.result // "") | test("refus|classif|safety|policy|cannot help|can'"'"'t help"; "i")) then (.result | .[0:300]) else empty end' "$file" 2>/dev/null || true)
-        note=""
-        if [ -n "$others" ] || [ "$has_init" != "true" ]; then
-          note="ℹ️ **Model fallback fired** on this run: requested \`${REQUESTED:-default}\` (\`${init:-?}\`), but tokens were served by ${others:-a different model}. The run's work is still valid; read it knowing the primary model was unavailable, overloaded, or declined."
-          echo "::warning::model fallback: requested $init, served by ${others:-other}"
-        fi
         if [ -n "$refusal" ]; then
-          # De-fang: agent/API text posts from a write-access account.
-          snippet=$(printf '%s' "$refusal" | tr '\n' ' ' | sed -E 's/@(review|claude|auto)/\1/g; s/claude-review-(summary|verdict|comment)/claude-review \1/g; s/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g')
+          # De-fang: agent/API text posts from a write-access account. Trigger
+          # tokens lose their @, the loop's substring-matched markers get a
+          # space, and backticks go (one inside the snippet would close the
+          # code span early and leave the rest as live markdown/HTML). The
+          # marker list mirrors the `<!-- … -->` comments the workflows read;
+          # keep it in step when adding one.
+          snippet=$(printf '%s' "$refusal" | tr -d '`' | tr '\n' ' ' \
+            | sed -E 's/@(review|claude|auto)/\1/g; s/claude-review-(summary|verdict|comment|nudge)/claude-review \1/g; s/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/g')
           line="⚠️ **Possible classifier refusal**: the run ended in an error whose text reads like a safety/policy refusal: \`$snippet\`"
           if [ -n "$note" ]; then note=$(printf '%s\n\n%s' "$note" "$line"); else note="$line"; fi
           echo "::warning::possible classifier refusal in the final result"
@@ -100,7 +114,12 @@ runs:
         [ -n "$note" ] || { echo "model-provenance: served by the requested model; no fallback, no refusal."; exit 0; }
         printf '%s\n' "$note" >>"$GITHUB_STEP_SUMMARY"
         if [ -n "$GH_TOKEN" ] && [ -n "$NUM" ]; then
-          gh api "repos/$REPO/issues/$NUM/comments" -f body="$note" --silent \
+          # First-line marker: the note posts as the machine account, and
+          # claude-review.yml's "Verify the review was posted" counts machine-
+          # account comments since run start as review output — it filters
+          # this marker out so a fallback note can't mask a stalled review.
+          body=$(printf '<!-- model-provenance -->\n%s' "$note")
+          gh api "repos/$REPO/issues/$NUM/comments" -f body="$body" --silent \
             && echo "model-provenance: posted the note on #$NUM" \
             || echo "::warning::model-provenance: could not post the note on #$NUM"
         fi

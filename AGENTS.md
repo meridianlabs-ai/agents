@@ -88,9 +88,13 @@ There is no unit-test suite — changes are validated by triggering the agents:
 
 - Comment `@claude …` (or add the `claude` label) on an issue/PR in the
   inspect_ai fork to exercise the dev agent; `@review` on a PR for the reviewer.
-- Each run uploads a `claude-execution-output.json` artifact. Read `modelUsage`
-  in it for the model/cost that actually ran — **not** the init line, which
-  echoes the requested model even when the model fallback fired.
+- Which model actually served a run is in the run's job summary ("Model
+  provenance" table, per-model token counts), and a machine-account note lands
+  on the issue/PR when a non-requested model served tokens or the result reads
+  like a classifier refusal. For cost, or when the summary is gone, each run
+  uploads a `claude-execution-output.json` artifact: read `modelUsage` in it —
+  **not** the init line, which echoes the requested model even when the model
+  fallback fired.
 - Auth/permission failures surface in that artifact and in the Anthropic Console
   → Workload identity → Authentication events.
 
