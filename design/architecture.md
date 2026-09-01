@@ -467,7 +467,9 @@ backstop's outcome is read by "Surface agent errors": a failed push (or, in
 instead of treating the run as a successful autonomous PR round; in the loops
 it keeps the unlanded-work check from misreading the runner's own merge commit
 (in `rev-list BASE_SHA..HEAD` with origin still at `BASE_SHA`) as agent edits
-that never landed. One consequence in the CI-fix loop: when the agent gives up
+that never landed — while still reporting uncommitted tracked-file edits the
+agent did leave behind, since that clause preempts the check that would
+otherwise have flagged them. One consequence in the CI-fix loop: when the agent gives up
 on a failure on a *behind* branch, the merge-only push re-runs CI, which fails
 the same way and spends another `fix_attempt_cap` attempt. On a static base
 that is exactly one: the next attempt finds the branch up to date, sets no

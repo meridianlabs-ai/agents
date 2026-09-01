@@ -1094,8 +1094,19 @@ jobs:
           # BASE_SHA..HEAD while origin still equals BASE_SHA, so without this
           # clause that check would report agent edits that never landed —
           # the wrong diagnosis for a round where the agent changed nothing.
+          # "Changed nothing" means COMMITTED nothing, though: the agent can
+          # still have left uncommitted edits to tracked files (edited, then
+          # ran out of turns or hit a tool denial before committing), and
+          # this clause preempts the check that would have reported them —
+          # so say so here when the tree is dirty instead of asserting that
+          # nothing was lost.
           if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
-            err="the agent finished, but pushing the runner's base-branch merge failed (see the job logs) — the PR branch is still behind its base; no fix was lost."
+            err="the agent finished, but pushing the runner's base-branch merge failed (see the job logs) — the PR branch is still behind its base."
+            if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ]; then
+              err="$err The agent also left uncommitted edits to tracked files that never reached the branch."
+            else
+              err="$err No fix was lost: the agent made no changes this round."
+            fi
           fi
           # Completed-but-blocked: the action reports success, but the agent did
           # work that never reached the branch — uncommitted edits or local
