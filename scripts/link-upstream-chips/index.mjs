@@ -317,7 +317,23 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   if (!result) throw new Error(`No result matching #${prNumber} for ${pr} — not clicking anything`);
   const label = (await result.textContent())?.trim() ?? '';
   if (!numRe.test(label)) throw new Error(`Result label ${JSON.stringify(label)} does not match #${prNumber}`);
-  await result.click();
+  try {
+    await result.click({ timeout: 10000 });
+  } catch {
+    // Primer SelectPanel virtualizes the option list; when the panel
+    // already carries a link (pinned above the results — promotions keep
+    // their superseded fork-PR link), the matching row can sit outside the
+    // overlay's scroll area, where Playwright's auto-scroll gives up
+    // ("element is outside of the viewport"; observed on #96). The label
+    // was strictly verified above and the API poll below is the ground
+    // truth — wrong links are detected, never assumed — so a forced click
+    // is safe here.
+    await result.scrollIntoViewIfNeeded().catch(() => {});
+    // force still computes mouse coordinates, so an off-viewport row fails
+    // identically; dispatch the DOM event instead — no viewport involved,
+    // and the API poll below still decides success.
+    await result.dispatchEvent('click');
+  }
 
   // Persist: some variants have an explicit button, others save on close.
   const apply = await firstVisible([
