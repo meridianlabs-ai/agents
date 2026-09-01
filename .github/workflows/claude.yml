@@ -371,8 +371,22 @@ jobs:
           set -euo pipefail
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
-          prj=$(gh pr view "$NUM" --repo "$REPO" \
-                  --json headRefName,baseRefName,isCrossRepository,state)
+          # Run-start stamp for the backstop's "hand-back already posted"
+          # check (the loops take theirs from "Record base SHA"; this
+          # workflow has no such step, and this one runs before the agent).
+          echo "started=$(date -u +%FT%TZ)" >>"$GITHUB_OUTPUT"
+          # Retried: under set -e a single transient API error here would
+          # fail the run before the agent starts (surfaced, but recovery is
+          # a manual re-trigger). The loops get this from their gate's
+          # retried PR fetch; this workflow has no gate, so retry inline.
+          prj=""
+          for i in 1 2 3; do
+            prj=$(gh pr view "$NUM" --repo "$REPO" \
+                    --json headRefName,baseRefName,isCrossRepository,state) && break
+            prj=""
+            [ "$i" -lt 3 ] && sleep $((i * 5))
+          done
+          [ -n "$prj" ] || { echo "::error::could not read PR #$NUM after 3 attempts"; exit 1; }
           branch=$(jq -r '.headRefName' <<<"$prj")
           base=$(jq -r '.baseRefName' <<<"$prj")
           # Closed/merged PRs: claude-code-action's setupBranch does not
@@ -643,7 +657,11 @@ jobs:
       # as a successful @auto PR run: board stranded at Agent. Mirrors the
       # codex landing step's deterministic post; gated on the agent having
       # succeeded (like the loops' "Ensure hand-back after push"), since a
-      # failed agent is already handed to a human by the Surface step. The
+      # failed agent is already handed to a human by the Surface step. Like
+      # that step it first checks for a hand-back already posted since the
+      # run started (the agent posting @review anyway — the prompt's "not on
+      # no-change runs" is advisory — or a human requesting a review
+      # mid-run), so it never double-posts and spawns two review runs. The
       # post retries with backoff like the loops' step does — this comment IS
       # the hand-back — and the step has an id so a failure here (push or
       # post) reaches the Surface step, which comments on the PR and fails the
@@ -662,6 +680,7 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           BRANCH: ${{ steps.sync.outputs.branch }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          SINCE: ${{ steps.sync.outputs.started }}
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
@@ -705,6 +724,19 @@ jobs:
           # @auto push to an existing PR owes a re-review (the reviewer does
           # not run on push).
           if [ "$TRIGGER_PHRASE" = "@auto" ] && [ "$CLAUDE_OUTCOME" = "success" ]; then
+            # Same "already posted this run" check as the loops' step: an
+            # exact @review comment or a hand-off marker since the run
+            # started means the hand-back exists — posting again would start
+            # a second review run (the older one cancelled by newest-wins),
+            # or re-review a PR the agent just handed to a human. An API
+            # failure reads as 0 and falls through to posting — the safe
+            # completion.
+            posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
+              --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | contains("auto-handoff")))] | length' 2>/dev/null || echo 0)
+            if [ "${posted:-0}" -gt 0 ]; then
+              echo "Hand-back already posted this run; not posting another."
+              exit 0
+            fi
             # Retry with backoff (same shape as the loops' "Ensure hand-back
             # after push"): a swallowed 5xx here (observed there: GitHub 503
             # during an outage) would leave the merge pushed and the board

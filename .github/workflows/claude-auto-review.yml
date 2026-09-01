@@ -203,7 +203,7 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
-          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,closedAt,headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
+          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,closedAt,headRefName,headRefOid,isCrossRepository,labels,baseRefName 2>/dev/null) || {
             echo "#$PR is not a pull request (or the API is persistently unavailable); skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
@@ -261,6 +261,9 @@ jobs:
           echo "continuation=$continuation" >>"$GITHUB_OUTPUT"
           echo "closed_at=$closed_at" >>"$GITHUB_OUTPUT"
           echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
+          # Base branch for "Sync branch with base": read here, through the
+          # retry, rather than by a second un-retried gh call in that step.
+          echo "base_branch=$(jq -r '.baseRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
           # Engine selection (design/codex-engine.md): fix rounds follow the
           # PR's engine:codex label; relabeling switches later rounds.
           echo "engine=$(jq -r 'if any(.labels[]; .name=="engine:codex") then "codex" else "claude" end' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
@@ -525,15 +528,16 @@ jobs:
         id: sync
         if: steps.gate.outputs.act == 'fix'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ inputs.pr_number }}
+          # From the gate's retried PR fetch — no second, un-retried gh call
+          # here, where under set -e one transient API error would fail the
+          # round before the agent starts.
+          BASE: ${{ steps.gate.outputs.base_branch }}
           ENGINE: ${{ steps.gate.outputs.engine }}
         run: |
           set -euo pipefail
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
-          base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName)
+          base="$BASE"
           git fetch --quiet origin "$base"
           echo "base=$base" >>"$GITHUB_OUTPUT"
           # No checkout here: this job's actions/checkout already put the PR
@@ -678,8 +682,13 @@ jobs:
       # compute a merge ref again, which is what lets CI run at all. Gated on
       # HEAD being EXACTLY that merge commit, so an agent that committed on top
       # — pushed, or deliberately not — is never second-guessed. always(), so a
-      # failed or cancelled agent still leaves the branch current.
+      # failed or cancelled agent still leaves the branch current. The id is
+      # for "Surface agent errors": without it a failed push here is
+      # misdiagnosed — the runner's merge sits in rev-list BASE_SHA..HEAD while
+      # origin still equals BASE_SHA, so the unlanded-work check would blame
+      # the agent for edits it never made.
       - name: Push base merge if unpushed
+        id: backstop
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
           steps.gate.outputs.engine != 'codex' && steps.sync.outputs.merge_sha != ''
@@ -1124,6 +1133,7 @@ jobs:
           MENTION: ${{ steps.gate.outputs.mention }}
           HANDED: ${{ steps.selfhandoff.outputs.found }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
@@ -1158,6 +1168,15 @@ jobs:
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review-fix step failed before producing a result (see the job logs)."
+          fi
+          # The base-merge backstop's push failed after a healthy agent run
+          # (token scope, transient network). Checked BEFORE the unlanded-work
+          # check below: the runner's merge commit is in rev-list
+          # BASE_SHA..HEAD while origin still equals BASE_SHA, so without this
+          # clause that check would report agent edits that never landed —
+          # the wrong diagnosis for a round where the agent changed nothing.
+          if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
+            err="the agent finished, but pushing the runner's base-branch merge failed (see the job logs) — the PR branch is still behind its base; no fix was lost."
           fi
           # Completed-but-blocked: the action reports success, but the agent did
           # work that never reached the branch — uncommitted edits or local

@@ -445,13 +445,19 @@ also posts the `@review` re-review request on a successful `@auto` run: the
 Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a
 merge-only round would otherwise move the head with nobody owing the hand-back
-(the loop workflows already cover this with "Ensure hand-back after push"). The
-post retries with backoff like the loops' step, and the backstop's outcome is
-read by "Surface agent errors": a failed push or hand-back is commented on the
-PR and fails the job, which is what lets "Stage - Review (hand-back)" move the
-board instead of treating the run as a successful autonomous PR round. One
-consequence in the CI-fix loop: when the agent gives up on a failure on a
-*behind* branch, the merge-only push re-runs CI, which fails the same way and
+(the loop workflows already cover this with "Ensure hand-back after push"). Like
+that step, it first checks for a hand-back already posted since the run started
+(the agent posting `@review` anyway, or a human requesting a review mid-run) so
+it never double-posts, and the post retries with backoff. In all three
+workflows the backstop's outcome is read by "Surface agent errors": a failed
+push (or, in `claude.yml`, hand-back) is commented on the PR and fails the job.
+In `claude.yml` that is what lets "Stage - Review (hand-back)" move the board
+instead of treating the run as a successful autonomous PR round; in the loops
+it keeps the unlanded-work check from misreading the runner's own merge commit
+(in `rev-list BASE_SHA..HEAD` with origin still at `BASE_SHA`) as agent edits
+that never landed. One consequence in the CI-fix loop: when the agent gives up
+on a failure on a *behind* branch, the merge-only push re-runs CI, which fails
+the same way and
 spends exactly one more `fix_attempt_cap` attempt — that next attempt finds the
 branch up to date, sets no `merge_sha`, pushes nothing, and stops. That is the
 intended cost of restoring a computable merge ref, not a loop bug. A
@@ -465,7 +471,11 @@ downstream step rather than failing them, so the "Surface agent errors" steps
 read the sync step's outcome explicitly and post the failure to the PR. In
 the loop workflows the round/attempt is recorded *after* the sync, so nothing
 is burned; without the surfacing, though, the board would sit at Agent with
-the label on and nothing running.
+the label on and nothing running. The step's own API surface is kept small
+for the same reason: the loops take the base branch from their gate's already
+retried PR fetch (a `base_branch` output) instead of a second, un-retried `gh
+pr view`, and `claude.yml`, which has no gate, retries its one PR read
+inline — so a single transient API error is not a new way to lose a round.
 
 ### Two prompt-injection sources, one flag
 
