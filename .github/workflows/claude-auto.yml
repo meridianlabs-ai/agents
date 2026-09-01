@@ -340,6 +340,29 @@ jobs:
           CAP: ${{ inputs.fix_attempt_cap }}
         run: |
           set -euo pipefail
+          # Retry-then-fail on context fetches — never swallow: the embedded
+          # context is load-bearing, so a swallowed transient either burns
+          # the round on inference (PR #392, 2026-09-01: the emptiness guard
+          # fired "empty — transient?" with the real gh error discarded) or
+          # silently degrades the prompt where no emptiness invariant exists
+          # (the inline-comments section). Three attempts absorb blips;
+          # exhaustion fails the step with gh's real stderr in the log,
+          # routing into the prep-failure surfacing and the attempt refund.
+          fetch() { # fetch <outfile> <gh args...>
+            local out="$1"; shift
+            local n=0
+            until gh "$@" >"$out"; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then
+                # >&2: call sites sit inside a stdout-redirected group, so a
+                # plain echo would land in the abandoned scratch file; the
+                # runner parses workflow commands on stderr too.
+                echo "::error::context fetch failed after 3 attempts: gh $*" >&2
+                return 1
+              fi
+              sleep $((n * 5))
+            done
+          }
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
           {
@@ -348,7 +371,8 @@ jobs:
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the fix (it becomes the commit subject), then a blank line, then a body explaining the root cause and the fix (posted as a comment). If you cannot fix it, leave the tree untouched and explain what is blocking."
             echo ""
             echo "FAILING CI LOG (run $CI_RUN_ID, failed jobs, tail):"
-            gh run view "$CI_RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 100000 || echo "(log unavailable)"
+            fetch "$RUNNER_TEMP/codex-ci-log.txt" run view "$CI_RUN_ID" --repo "$REPO" --log-failed
+            tail -c 100000 "$RUNNER_TEMP/codex-ci-log.txt"
           } >.codex-prompt.md
           # The landing step stages with a blanket `git add -A`, so exclude
           # the prompt file and the scratch codex's verification runs leave

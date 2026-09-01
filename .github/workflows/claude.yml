@@ -526,6 +526,29 @@ jobs:
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
           set -euo pipefail
+          # Retry-then-fail on context fetches — never swallow: the embedded
+          # context is load-bearing, so a swallowed transient either burns
+          # the round on inference (PR #392, 2026-09-01: the emptiness guard
+          # fired "empty — transient?" with the real gh error discarded) or
+          # silently degrades the prompt where no emptiness invariant exists
+          # (the inline-comments section). Three attempts absorb blips;
+          # exhaustion fails the step with gh's real stderr in the log,
+          # routing into the prep-failure surfacing.
+          fetch() { # fetch <outfile> <gh args...>
+            local out="$1"; shift
+            local n=0
+            until gh "$@" >"$out"; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then
+                # >&2: call sites sit inside a stdout-redirected group, so a
+                # plain echo would land in the abandoned scratch file; the
+                # runner parses workflow commands on stderr too.
+                echo "::error::context fetch failed after 3 attempts: gh $*" >&2
+                return 1
+              fi
+              sleep $((n * 5))
+            done
+          }
           {
             echo "You are the dev agent for $REPO, running on the Codex engine in a full local checkout of branch $BRANCH."
             if [ "$IS_PR" = "true" ]; then
@@ -553,17 +576,20 @@ jobs:
               # truncate away the newest comments on comment-heavy PRs.
               echo ""
               echo "PR TITLE AND BODY:"
-              gh pr view "$NUM" --repo "$REPO" --json title,body \
-                --jq '"\(.title)\n\n\(.body // "")"' 2>/dev/null || true
+              # No --slurp here, so gh's own --jq is fine; fetch to a file
+              # and cat it, same retry-then-fail as the comment fetches.
+              fetch "$RUNNER_TEMP/codex-prtb.txt" pr view "$NUM" --repo "$REPO" \
+                --json title,body --jq '"\(.title)\n\n\(.body // "")"'
+              cat "$RUNNER_TEMP/codex-prtb.txt"
               echo ""
               # --slurp is incompatible with gh's own --jq (gh rejects the
               # combination), so pipe to standalone jq instead.
               echo "RECENT PR COMMENTS (newest last):"
-              gh api "repos/$REPO/issues/$NUM/comments" --paginate --slurp 2>/dev/null \
-                | jq -r 'add | .[-12:][] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' 2>/dev/null || true
+              fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$NUM/comments" --paginate --slurp
+              jq -r '(add // []) | .[-12:][] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/codex-prc.json"
               echo "RECENT INLINE REVIEW COMMENTS (path:line; newest last):"
-              gh api "repos/$REPO/pulls/$NUM/comments" --paginate --slurp 2>/dev/null \
-                | jq -r 'add | .[-40:][] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' 2>/dev/null || true
+              fetch "$RUNNER_TEMP/codex-inline.json" api "repos/$REPO/pulls/$NUM/comments" --paginate --slurp
+              jq -r '(add // []) | .[-40:][] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' "$RUNNER_TEMP/codex-inline.json"
             elif [ -n "$COMMENT" ]; then
               printf '\nFor context, the issue title/body:\n%s\n\n%s\n' "$ITITLE" "$IBODY"
             fi
