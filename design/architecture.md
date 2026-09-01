@@ -362,6 +362,51 @@ plain issue comment) has neither, and the action branches off the base —  whic
 the hourly sync keeps current — so injecting "merge base in" there is pointless
 noise.
 
+#### The merge moved to the runner (2026-09-01)
+
+A prompted merge is **advisory**, and the loop workflows never carried the
+prompt at all — `claude-auto.yml` and `claude-auto-review.yml` call
+claude-code-action directly rather than through `claude.yml`, so
+`branch_sync_prompt` never reached a fix round. The codex engine could not
+comply even in principle: its sandbox has no network, and its prompt tells it
+so. inspect_ai#392 is what this cost — 20 commits over ~15 hours on a branch
+11 commits behind `main`, with a one-line `CHANGELOG.md` conflict nothing in
+the pipeline could resolve. Because GitHub cannot compute a merge ref for a
+conflicted PR, real CI never ran on any of it, and every review round read
+stale code.
+
+So the merge is now a **deterministic `Sync branch with base` step** in all
+three workflows, running before either engine starts, on PR-context runs only.
+Three details are load-bearing:
+
+- **The pre-merge tip is what gets stamped.** The landing steps treat "HEAD
+  moved past the recorded SHA" as landable work. Stamped *after* the merge, a
+  clean merge with no agent edits reads as "nothing to push" and dies with the
+  runner — recreating the drift. Stamped before, a merge-only round pushes,
+  which is exactly what restores CI.
+- **A conflict is handed on differently per engine, and the split is forced.**
+  claude-code-action's `setupBranch` runs `git checkout <branch> --`, which
+  aborts with "you need to resolve your current index first" whenever the index
+  holds unmerged entries. The Claude path therefore must be handed a clean
+  index: its conflicted merge is aborted and delegated back to the agent via
+  `branch_sync_prompt` (now spliced *only* in that case — on the clean path the
+  branch is already current and re-merging is noise). Codex, which cannot
+  fetch, is handed the merge still in progress and resolves the markers in the
+  working tree.
+- **The landing step is the enforcement point.** `git add -A` would happily
+  stage conflict markers and `git commit` would produce a valid merge commit
+  containing them, so codex's landing refuses to push when
+  `git ls-files --unmerged` is non-empty or a `<<<<<<< `/`>>>>>>> ` marker
+  survives in one of the reported files. `=======` is deliberately not matched:
+  a bare seven-equals line is a legitimate rST/Markdown heading underline, and
+  a repo-wide grep for it would fail honest docs changes.
+
+A `Push base merge if unpushed` backstop covers the Claude path's remaining
+hole: if HEAD is still *exactly* the runner's merge commit when the agent
+finishes, nothing else will push it, so the workflow does. Gating on that exact
+SHA means an agent that committed on top — pushed or deliberately not — is
+never second-guessed.
+
 ### Two prompt-injection sources, one flag
 
 There are two appended-system-prompt sources: `branch_sync_prompt` (the gated

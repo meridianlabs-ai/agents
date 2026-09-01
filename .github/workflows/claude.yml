@@ -119,11 +119,13 @@ on:
       branch_sync_prompt:
         description: >-
           Guidance appended to the system prompt (via --append-system-prompt,
-          so it adds to — not replaces — the comment-derived task) ONLY on
-          follow-up runs that continue an existing branch, i.e. when the
-          trigger is on a PR. Fresh runs from an issue create a new branch off
-          the (hourly-synced) base, so no merge is needed and this is skipped.
-          Pass "" to disable.
+          so it adds to — not replaces — the comment-derived task) on the Claude
+          path when the agent has to perform the base merge ITSELF: the "Sync
+          branch with base" step normally merges on the runner for both engines,
+          and only hands the job back here when it could not — a conflict (the
+          index must be clean before claude-code-action's setupBranch runs) or a
+          fork head. Fresh runs from an issue branch off the (hourly-synced)
+          base, so no merge is needed and this is skipped. Pass "" to disable.
         required: false
         type: string
         default: >-
@@ -137,9 +139,11 @@ on:
         description: >-
           Caller-specific guidance appended to branch_sync_prompt (not
           replacing it), so a repo can add to the shared base-sync instruction
-          without copying it. Same gating as branch_sync_prompt — only on PR
-          follow-up runs. Empty by default; e.g. the inspect_ai fork adds its
-          CHANGELOG-merge check here.
+          without copying it. Same gating as branch_sync_prompt on the Claude
+          path, and additionally spliced into the codex conflict-resolution
+          prompt — repo-specific merge rules matter most exactly when there is a
+          conflict to resolve. Empty by default; e.g. the inspect_ai fork adds
+          its CHANGELOG-merge check here.
         required: false
         type: string
         default: ""
@@ -326,6 +330,83 @@ jobs:
         with:
           fetch-depth: 0
 
+      # ---- Deterministic base-branch sync (design/architecture.md) ---------
+      # The base merge happens HERE, on the runner, for BOTH engines — not in
+      # a prompt. Two reasons. The codex sandbox has no network and cannot
+      # merge at all; and a prompted merge is advisory, so branches drifted
+      # anyway (inspect_ai#392 sat 11 commits behind main across 20 commits —
+      # GitHub cannot compute a merge ref for a conflicted PR, so CI never ran
+      # and every review round read stale code). PR-context runs only: a fresh
+      # issue run branches off the hourly-synced base, so nothing to merge.
+      #
+      # A CONFLICTED merge is handed on differently per engine, and the split
+      # is forced rather than stylistic. claude-code-action's setupBranch runs
+      # `git checkout <branch> --`, which aborts with "you need to resolve your
+      # current index first" whenever the index holds unmerged entries — so the
+      # Claude path must be handed a CLEAN index, and its merge is redone
+      # inside the agent (it has network and the git allow-list;
+      # branch_sync_prompt carries the instruction, spliced only in this case).
+      # Codex cannot fetch, so it is handed the merge still IN PROGRESS and
+      # resolves the markers in the working tree; its landing step refuses to
+      # push while any survive.
+      - name: Sync branch with base
+        id: sync
+        if: >-
+          steps.trig.outputs.ok == 'true' &&
+          (github.event.issue.pull_request != '' || github.event.pull_request != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          ENGINE: ${{ steps.engine.outputs.engine }}
+        run: |
+          set -euo pipefail
+          git config user.name "i-am-marvin"
+          git config user.email "i-am-marvin@users.noreply.github.com"
+          prj=$(gh pr view "$NUM" --repo "$REPO" \
+                  --json headRefName,baseRefName,isCrossRepository)
+          branch=$(jq -r '.headRefName' <<<"$prj")
+          base=$(jq -r '.baseRefName' <<<"$prj")
+          # Fork heads: the branch is not on origin and neither engine can push
+          # there. Leave the workspace untouched and let the engine paths apply
+          # their own fork handling (codexprep declines loudly; the Claude path
+          # fetches the pull ref itself). The agent-merge flag is still set so
+          # the Claude path keeps today's prompted-merge behavior there.
+          if [ "$(jq -r '.isCrossRepository' <<<"$prj")" = "true" ]; then
+            echo "PR #$NUM has a fork head — skipping the runner-side base sync."
+            echo "agent_merge=1" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --quiet origin "$branch" "$base"
+          git checkout --quiet "$branch"
+          echo "branch=$branch" >>"$GITHUB_OUTPUT"
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          # Pre-merge tip. The landing steps treat "HEAD moved past this" as
+          # landable work, so stamping it BEFORE the merge is what makes a
+          # merge-only round push. Stamped after, a clean merge with no agent
+          # edits would read as "nothing to push" and die with the runner —
+          # exactly the drift this step exists to end.
+          echo "start_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          conflicts=""
+          if git merge --no-edit "origin/$base"; then
+            echo "merged origin/$base cleanly"
+            echo "merge_sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          else
+            conflicts=$(git diff --name-only --diff-filter=U)
+            echo "::warning::merge of origin/$base conflicts in: $(tr '\n' ' ' <<<"$conflicts")"
+            if [ "$ENGINE" != "codex" ]; then
+              git merge --abort
+              echo "aborted: the Claude path needs a clean index; the agent re-merges."
+              echo "agent_merge=1" >>"$GITHUB_OUTPUT"
+              conflicts=""
+            fi
+          fi
+          {
+            echo "conflicts<<SYNC_CONFLICTS_EOF"
+            echo "$conflicts"
+            echo "SYNC_CONFLICTS_EOF"
+          } >>"$GITHUB_OUTPUT"
+
       # Provision the project environment so the agent's allow-listed
       # pytest/ruff/mypy can actually run (a bare runner has neither the deps
       # nor the package installed). Convention-based opt-in: a caller repo adds
@@ -381,8 +462,13 @@ jobs:
         id: sysprompt
         env:
           LANDING: "Your work exists ONLY on this ephemeral runner until it is committed and pushed — and a run can NEVER resume after your final turn ends. In THIS environment nothing can wake you: background tasks do NOT re-invoke you when they finish, their completion notifications never arrive, and a turn that ends 'waiting to be woken' simply ends the run and loses everything unpushed. So never end your turn waiting on anything — subagents, background commands, test suites: collect results in the foreground and complete the commit, push, and any PR or comment inside THIS run. If a final validation is long-running, commit/push/open the PR FIRST and let the PR's own CI be the gate (the automation reacts to it); an unpushed validated change is worth nothing, a pushed change awaiting CI is the normal pipeline."
-          BRANCH_SYNC: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_prompt || '' }}
-          BRANCH_SYNC_APPEND: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.branch_sync_append || '' }}
+          # Spliced only when the runner-side sync could NOT land the merge
+          # itself — a conflict it had to abort to keep the index clean for
+          # setupBranch, or a fork head it declined. On the ordinary clean-merge
+          # path the branch is ALREADY current when the agent starts, and
+          # telling it to merge again is noise that invites a redundant push.
+          BRANCH_SYNC: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_prompt || '' }}
+          BRANCH_SYNC_APPEND: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_append || '' }}
           REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address.' || '' }}"
           REQUEST_REVIEW: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.trigger_phrase == '@auto' && 'This is an autonomous run on an existing pull request. If your work pushed any new commit to the PR, finish by posting a top-level comment of exactly @review so the automated reviewer re-runs — it does not run automatically on push. Do not post it if you made no code changes. That exact standalone comment is the ONLY place to write the token bare: in any other comment text, backtick it (`@review`) — a bare token anywhere in a comment body starts a review run.' || '' }}"
           EXTRA: ${{ inputs.append_system_prompt }}
@@ -461,6 +547,44 @@ jobs:
             ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
             ${{ inputs.claude_args }}
 
+      # If the runner's base merge is STILL the branch tip, the agent finished
+      # without committing anything of its own — and on a PR run nothing else
+      # pushes it. Land it anyway: restoring the PR to mergeable is what lets
+      # GitHub compute a merge ref again, which is what lets CI run at all.
+      # Gated on HEAD being EXACTLY that merge commit, so an agent that
+      # committed on top — pushed, or deliberately not — is never second-
+      # guessed. always(), so a failed or cancelled agent still leaves the
+      # branch current rather than resuming tomorrow's drift.
+      - name: Push base merge if unpushed
+        if: >-
+          always() && steps.engine.outputs.engine != 'codex' &&
+          steps.sync.outputs.merge_sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          MARVIN: ${{ secrets.MARVIN_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.sync.outputs.branch }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "$MERGE_SHA" ]; then
+            echo "agent commits sit on top of the base merge — leaving the push to it."
+            exit 0
+          fi
+          git fetch --quiet origin "$BRANCH"
+          if [ "$(git rev-parse FETCH_HEAD)" = "$MERGE_SHA" ]; then
+            echo "base merge is already on origin/$BRANCH."
+            exit 0
+          fi
+          # Same extraheader override as the codex landing step: this job's
+          # checkout persisted github.token as an http.<origin>.extraheader,
+          # which preempts the URL credential, so without the reset the push
+          # runs as github-actions[bot] and triggers nothing.
+          git -c http.https://github.com/.extraheader= push --quiet \
+            "https://x-access-token:${MARVIN:-$GH_TOKEN}@github.com/$REPO.git" \
+            "HEAD:refs/heads/$BRANCH"
+          echo "pushed base merge $(git rev-parse --short HEAD) to $BRANCH"
+
       # ---- Codex engine (design/codex-engine.md) ----------------------------
       # The codex sandbox has no network and no GitHub credentials, so unlike
       # the Claude path the agent only edits the working tree: these steps
@@ -478,6 +602,7 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BASE: ${{ inputs.base_branch }}
+          SYNC_START_SHA: ${{ steps.sync.outputs.start_sha }}
         run: |
           set -euo pipefail
           git config user.name "i-am-marvin"
@@ -493,8 +618,14 @@ jobs:
               exit 1
             fi
             branch=$(jq -r '.headRefName' <<<"$prj")
-            git fetch --quiet origin "$branch"
-            git checkout --quiet "$branch"
+            # "Sync branch with base" already fetched, checked out and merged
+            # this branch. Re-running the checkout would abort on the unmerged
+            # index it deliberately leaves behind for codex to resolve, so only
+            # check out when that step did not (fork heads, which exit above).
+            if [ "$(git rev-parse --abbrev-ref HEAD)" != "$branch" ]; then
+              git fetch --quiet origin "$branch"
+              git checkout --quiet "$branch"
+            fi
           else
             base="${BASE:-$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)}"
             branch="claude/issue-$NUM-codex-$GITHUB_RUN_NUMBER"
@@ -504,8 +635,10 @@ jobs:
           echo "branch=$branch" >>"$GITHUB_OUTPUT"
           # Start marker for the landing step: HEAD moved past this = work to
           # land, even if codex committed locally instead of leaving a dirty
-          # tree.
-          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          # tree. On PR runs prefer the sync step's PRE-merge tip, so a round
+          # whose only product is the base merge still pushes; plain HEAD on
+          # issue runs, where no merge happened.
+          echo "sha=${SYNC_START_SHA:-$(git rev-parse HEAD)}" >>"$GITHUB_OUTPUT"
 
       # The prompt travels as a git-excluded workspace file (prompt-file must
       # be inside the repo root). The ending contract makes codex's final
@@ -519,6 +652,9 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BRANCH: ${{ steps.codexprep.outputs.branch }}
+          BASE: ${{ steps.sync.outputs.base }}
+          CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
           COMMENT: ${{ github.event.comment.body }}
           REVIEW: ${{ github.event.review.body }}
           IBODY: ${{ github.event.issue.body }}
@@ -557,6 +693,12 @@ jobs:
               echo "Context: issue #$NUM — your edits will be pushed to a new branch and opened as a PR fixing it."
             fi
             echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Make your changes in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts for you. Verify your work with the locally provisioned tools (pytest/ruff/mypy) where relevant."
+            if [ -n "${CONFLICTS:-}" ]; then
+              echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
+              sed 's/^/  /' <<<"$CONFLICTS"
+              [ -n "${SYNC_APPEND:-}" ] && echo "$SYNC_APPEND"
+              echo "Resolve every conflict by editing those files, preserving BOTH sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale. Local git is available and useful here (git status, git diff, git log, git add <file>); the network-dependent commands in the CONSTRAINTS above are still off, and you must NOT run git merge, git rebase or git checkout of any ref — that would strand the in-progress merge. Every conflict marker must be gone when you finish. A deterministic workflow step commits the merge for you and FAILS the run if any marker or unmerged path remains, so leaving them is strictly worse than resolving them. Once resolved, treat the MERGED tree as the code you are working on: re-read what you changed and re-run the relevant tests against it, not against the pre-merge state."
+            fi
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the change (it becomes the commit subject), then a blank line, then a body explaining what you did and why (it is posted as a comment on #$NUM). If you cannot or should not make a change, leave the tree untouched and explain why in the final message."
             [ -n "$EXTRA" ] && printf 'REPO GUIDANCE: %s\n' "$EXTRA"
             echo "TASK:"
@@ -703,6 +845,7 @@ jobs:
           START_SHA: ${{ steps.codexprep.outputs.sha }}
           OUT: ${{ runner.temp }}/codex/codex-final.md
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+          CONFLICTS: ${{ steps.sync.outputs.conflicts }}
         run: |
           set -euo pipefail
           # Reclaim .git before writing objects as runner: any objects/XX
@@ -711,6 +854,30 @@ jobs:
           # job — the commit below would intermittently fail with
           # "insufficient permission for adding an object".
           sudo chown -R runner "$GITHUB_WORKSPACE/.git"
+          # Unresolved-merge guard. `git add -A` would happily stage conflict
+          # markers and `git commit` would then produce a perfectly valid merge
+          # commit containing them, so the only thing standing between a
+          # half-resolved merge and the PR branch is this check. Two distinct
+          # failures: an unmerged index (codex never staged a resolution) and
+          # staged-but-unresolved text (it staged the markers).
+          #
+          # Only the files the sync step reported are scanned, and `=======` is
+          # deliberately NOT matched: a bare seven-equals line is a legitimate
+          # reStructuredText/Markdown heading underline, so a repo-wide grep
+          # for it would fail honest docs changes.
+          if [ -n "$(git ls-files --unmerged)" ]; then
+            echo "::error::codex left unmerged paths after the base merge: $(git diff --name-only --diff-filter=U | tr '\n' ' ')— resolve them manually, or drop the engine:codex label to use the Claude path."
+            exit 1
+          fi
+          if [ -n "${CONFLICTS:-}" ]; then
+            while IFS= read -r f; do
+              [ -n "$f" ] && [ -f "$f" ] || continue
+              if grep -qE '^(<<<<<<<|>>>>>>>) ' -- "$f"; then
+                echo "::error::conflict markers remain in $f — refusing to push a half-resolved merge."
+                exit 1
+              fi
+            done <<<"$CONFLICTS"
+          fi
           # Untracked files count: new source files are legitimate codex
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).
