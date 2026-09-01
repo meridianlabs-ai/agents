@@ -197,8 +197,11 @@ function pendingPromotions() {
           }}}}}`;
     let out;
     try {
-      out = graphql(q, ['-F', `org=${OWNER}`, '-F', `num=${PROJECT_NUMBER}`,
-                        ...(after ? ['-F', `after=${after}`] : [])]);
+      // -f (raw string) for org and the opaque cursor: -F magic-types
+      // digits-only / true / false / null values, which the String
+      // variables would then reject. Only num is genuinely an Int.
+      out = graphql(q, ['-f', `org=${OWNER}`, '-F', `num=${PROJECT_NUMBER}`,
+                        ...(after ? ['-f', `after=${after}`] : [])]);
     } catch (e) {
       console.warn(`promotion discovery failed (board unreadable): ${e.message ?? e}`);
       return rows; // partial results beat silence; re-swept next run
@@ -276,6 +279,8 @@ async function firstVisible(locators) {
 async function linkOne(page, { issue, issueUrl, pr }) {
   const prNumber = pr.match(/\/pull\/(\d+)/)?.[1];
   const preexisting = linkedUrls(issue); // baseline for wrong-link detection
+  if (preexisting.includes(pr)) return; // already linked — replaying the UI
+  // flow would find the option SELECTED and clicking it would toggle it OFF
   await page.goto(issueUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500); // let the React sidebar hydrate
 
@@ -358,6 +363,20 @@ async function linkOne(page, { issue, issueUrl, pr }) {
   throw new Error(`UI flow completed but the link never appeared for #${issue}`);
 }
 
+function dedupe(rows) {
+  // The populations overlap: a pending External proxy with the "Upstream PR"
+  // field set is found by BOTH pendingProxies and pendingPromotions. One row
+  // per issue+pr pair — a second linkOne pass on the same pair is at best a
+  // wasted UI round and at worst toggles the fresh link back off.
+  const seen = new Set();
+  return rows.filter((r) => {
+    const key = `${r.issue} ${r.pr}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 const rows = LOGIN_ONLY
   ? []
   : PAIRS.length
@@ -368,7 +387,7 @@ const rows = LOGIN_ONLY
         }
         return true;
       })
-    : [...pendingProxies(), ...pendingAgentPairs(), ...pendingCompanionPairs(), ...pendingPromotions()];
+    : dedupe([...pendingProxies(), ...pendingAgentPairs(), ...pendingCompanionPairs(), ...pendingPromotions()]);
 if (!LOGIN_ONLY && rows.length === 0) {
   console.log('Nothing pending — every target already has its chip.');
   process.exit(0);
