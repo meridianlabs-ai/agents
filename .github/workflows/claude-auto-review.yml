@@ -200,12 +200,28 @@ jobs:
           # escalated "pushed no new changes" while its fix rounds' pushes
           # were landing on the upstream diff. Steer by the LIVE branch tip
           # instead; a deleted branch means a genuinely dead PR — skip.
+          # CLOSED only: the continuation contract is promotion-shaped
+          # (promotion closes the fork PR, nothing merges it) — a MERGED PR
+          # is done, and looping on its surviving branch would push commits
+          # that never reach main while the moving tip defeats the
+          # no-progress escalation that used to kill exactly that zombie.
           pr_state=$(jq -r '.state' <<<"$pr_json")
           live_tip=""
-          if [ "$pr_state" != "OPEN" ]; then
-            live_tip=$(ghr gh api "repos/$REPO/branches/$(jq -r '.headRefName' <<<"$pr_json")" --jq '.commit.sha' 2>/dev/null || true)
+          if [ "$pr_state" = "MERGED" ]; then
+            echo "PR #$PR is MERGED; nothing to continue. Skipping."
+            act skip; exit 0
+          elif [ "$pr_state" != "OPEN" ]; then
+            # Capture-then-reset, not `|| true`: on an HTTP error `gh api`
+            # prints the JSON error body to STDOUT (stderr carries only the
+            # `gh:` line), so the substitution would otherwise hold that body
+            # and the deleted-branch skip could never fire. The hex check
+            # also drops a fail-then-succeed ghr capture (earlier attempts'
+            # error bodies prefixed to the SHA) — fail-safe: skip, don't
+            # steer by garbage.
+            live_tip=$(ghr gh api "repos/$REPO/branches/$(jq -r '.headRefName' <<<"$pr_json")" --jq '.commit.sha' 2>/dev/null) || live_tip=""
+            [[ "$live_tip" =~ ^[0-9a-f]{40}$ ]] || live_tip=""
             if [ -z "$live_tip" ]; then
-              echo "PR #$PR is $pr_state and its branch is gone; nothing to continue. Skipping."
+              echo "PR #$PR is $pr_state and its branch is gone (or the API is persistently unavailable); nothing to continue. Skipping."
               act skip; exit 0
             fi
             echo "PR #$PR is $pr_state but auto-labeled with a live branch (promotion continuation); steering by branch tip $live_tip."

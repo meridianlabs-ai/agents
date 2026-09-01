@@ -280,7 +280,7 @@ jobs:
           IBODY: ${{ github.event.issue.body }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          ok=false mode=pr upstream="" trusted=false head_sha=""
+          ok=false mode=pr upstream="" trusted=false head_sha="" continuation=false
           # One retry for the gating lookups: they refuse fail-closed, so a
           # transient API blip shouldn't block a legitimate review outright.
           # Each attempt is captured and emitted only on success: a failed
@@ -336,13 +336,21 @@ jobs:
               # frozen at close and no longer reflects the work, so pin the
               # LIVE branch tip. Same-repo heads only: the trust decision
               # below is about head provenance, and a fork head's closed PR
-              # has no continuation contract here.
+              # has no continuation contract here. Merged PRs excluded: REST
+              # reports state=closed for them too, but a merged PR is done —
+              # its branch is not a continuation surface, and reviewing the
+              # tip against a base that already contains the merged commits
+              # would produce a nonsense diff. `continuation` records that
+              # the pin actually happened; the prompt's continuation NOTE
+              # keys on it, not on raw closed state.
               pr_state=$(printf '%s' "$pr_json" | jq -r '.state // ""')
-              if [ "$pr_state" = "closed" ] && [ "$head_repo" = "$GH_REPO" ]; then
+              merged=$(printf '%s' "$pr_json" | jq -r '.merged // false')
+              if [ "$pr_state" = "closed" ] && [ "$merged" != "true" ] && [ "$head_repo" = "$GH_REPO" ]; then
                 live=$(api "repos/$GH_REPO/branches/$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')" 2>/dev/null | jq -r '.commit.sha // ""' || true)
                 if [ -n "$live" ]; then
                   echo "PR #$PR_NUM is closed; pinning the live branch tip $live instead of the frozen head."
                   head_sha="$live"
+                  continuation=true
                 fi
               fi
               if [ -z "$head_sha" ]; then
@@ -381,7 +389,7 @@ jobs:
             echo "ack=$ack"
             echo "mode=$mode"
             echo "head_sha=$head_sha"
-            echo "pr_state=${pr_state:-}"
+            echo "continuation=$continuation"
             echo "upstream=$upstream"
             echo "up_repo=$(printf '%s' "$upstream" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/.*#\1#')"
             echo "up_num=$(printf '%s' "$upstream" | grep -oE '[0-9]+$')"
@@ -613,13 +621,16 @@ jobs:
           REPO: ${{ github.repository }}
           DEFAULT_PROMPT: ${{ inputs.review_prompt }}
           THIS_PR: ${{ github.event.issue.number || github.event.pull_request.number }}
-          PR_STATE: ${{ steps.trig.outputs.pr_state }}
+          CONTINUATION: ${{ steps.trig.outputs.continuation }}
         run: |
           if [ "$MODE" != "external" ]; then
             # Promotion continuation (see trig): the closed PR's diff view is
             # frozen, so point the reviewer at the checked-out tree instead.
+            # Keyed on the pin having actually happened — a closed PR whose
+            # branch is gone (or whose head is a fork) checks out the frozen
+            # head, where this note's claims would be false.
             closed_note=""
-            if [ "${PR_STATE:-}" = "closed" ]; then
+            if [ "${CONTINUATION:-}" = "true" ]; then
               closed_note=" NOTE: PR #$THIS_PR is CLOSED — it was promoted upstream and its branch is the live continuation (pushes here update the upstream PR's diff). The checkout is the branch TIP, which may be AHEAD of the closed PR's frozen diff view: review the checked-out tree against the base branch, NOT the PR page's stale diff, and still post everything to PR #$THIS_PR."
             fi
             # Pin the target: with several hot sibling PRs, an agent that
