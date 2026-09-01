@@ -114,8 +114,9 @@ summary comment (no inline comments, no thread auto-resolution), and
 external proxy reviews always use Claude. Codex reviews run tests to
 verify findings like the Claude reviewer — via the repo's claude-setup
 action, or a fallback uv dev-install when the checkout has a
-pyproject.toml but no claude-setup (fork PR branches); non-Python
-repos degrade to static review.
+pyproject.toml but no claude-setup (fork PR branches, and any Python
+caller repo that never added the action); non-Python repos degrade to
+static review.
 Details: [design/codex-engine.md](design/codex-engine.md).
 
 ## The inspect_ai fork

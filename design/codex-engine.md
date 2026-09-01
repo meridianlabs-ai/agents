@@ -161,9 +161,10 @@ workaround when #103's does).
   network still means no installs by the AGENT — but the reviewer
   workflow provisions a fallback venv (uv dev-install, as the runner,
   which has network) when claude-setup is absent and a pyproject.toml
-  exists, so fork PR heads cut from pristine main get test-verified
-  reviews too. Only repos that are not Python projects (or whose
-  dev-install fails, loudly) degrade to static review.
+  exists, so fork PR heads cut from pristine main — and Python caller
+  repos that never added claude-setup — get test-verified reviews too.
+  Only repos that are not Python projects (or whose dev-install fails,
+  loudly) degrade to static review.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which
