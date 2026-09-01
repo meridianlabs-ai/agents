@@ -523,7 +523,13 @@ jobs:
       # fallback: uv (verified on 0.9.4), like pip, only WARNS on an
       # unknown extra, so the `[dev]` install already succeeds on repos
       # without one — a fallback could only mask real failures as a silent
-      # static degrade. Parity gap, accepted: claude-setup pins `--python
+      # static degrade. Dev tools may instead live in PEP 735
+      # `[dependency-groups]` (uv-native layouts: inspect_sandboxes has NO
+      # optional-dependencies at all), where the extras warning would mean
+      # a green step with a toolless venv — so when that table exists,
+      # `--group dev` is added; unlike an unknown extra, an absent group
+      # ERRORS, which is the loud failure this step wants. Parity gap,
+      # accepted: claude-setup pins `--python
       # 3.11` to the fork's CI, while bare `uv venv` resolves the runner's
       # default (3.12 today, drifting with the image) — a generic fallback
       # can't hardcode any one minor; repos that care can ship a
@@ -551,7 +557,11 @@ jobs:
           done
           export PATH="$HOME/.local/bin:$PATH"
           uv venv
-          uv pip install -e ".[dev]"
+          if grep -q '^\[dependency-groups\]' pyproject.toml; then
+            uv pip install -e ".[dev]" --group dev
+          else
+            uv pip install -e ".[dev]"
+          fi
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
           echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
 
@@ -920,7 +930,7 @@ jobs:
           if [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             err="environment provisioning (claude-setup) failed before the reviewer started — usually a transient dependency-download/network error; re-trigger to retry."
           elif [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            err="fallback environment provisioning (uv dev-install) failed before the reviewer started — usually a transient dependency-download/network error; re-trigger to retry."
+            err="fallback environment provisioning (uv dev-install) failed before the reviewer started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); re-trigger if it looks transient."
           elif [ "${SANDBOX_OUTCOME:-}" = "failure" ]; then
             err="the external-review sandbox install failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
           fi
