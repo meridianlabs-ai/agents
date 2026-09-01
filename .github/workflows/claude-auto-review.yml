@@ -174,13 +174,21 @@ jobs:
           # stalls with the label still on (see design/auto-agent.md). Retry
           # with backoff; a persistent failure still returns non-zero so the
           # gate-failure failsafe below surfaces it instead of dying quietly.
+          # Each attempt's stdout is captured and emitted only on overall
+          # success: a failed `gh api` prints the HTTP error body to STDOUT
+          # (stderr carries only the `gh:` line), so streaming attempts
+          # through would prefix a fail-then-succeed retry's real output
+          # with error bodies — poisoning every $(ghr …) capture in exactly
+          # the case the retry exists for. (Same pattern as api() in
+          # claude-review.yml's trig step.)
           ghr() {
-            local n=0
-            until "$@"; do
+            local n=0 out
+            until out=$("$@"); do
               n=$((n+1))
               if [ "$n" -ge 4 ]; then return 1; fi
               sleep $((n*3))
             done
+            printf '%s' "$out"
           }
           echo "review-fix gate: pr=#$PR comment_author='$AUTHOR' reviewer_login='$REVIEWER'"
           if [ "$HAS_TOKEN" != "true" ]; then
@@ -195,7 +203,7 @@ jobs:
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
-          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
+          pr_json=$(ghr gh pr view "$PR" --repo "$REPO" --json state,closedAt,headRefName,headRefOid,isCrossRepository,labels 2>/dev/null) || {
             echo "#$PR is not a pull request (or the API is persistently unavailable); skipping."; act skip; exit 0; }
           if [ "$(jq -r '.isCrossRepository' <<<"$pr_json")" = "true" ]; then
             echo "PR #$PR is from a fork (cross-repository); skipping — would run untrusted code under MARVIN_TOKEN."
@@ -204,6 +212,54 @@ jobs:
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr_json")" != "true" ]; then
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
           fi
+          # Closed PR, still auto-labeled: on the fork that is a deliberate
+          # continuation surface, not garbage — promotion opens the upstream
+          # PR from the SAME branch (upstream runs no agents), so
+          # post-promotion feedback is fixed by looping HERE, and every push
+          # lands on the upstream PR's diff. But a closed PR's recorded
+          # headRefOid is FROZEN at close: steering by it makes reviews
+          # re-read old code and the no-progress check compare frozen
+          # against frozen — observed on fork PR #351 (2026-09-01), which
+          # escalated "pushed no new changes" while its fix rounds' pushes
+          # were landing on the upstream diff. Steer by the LIVE branch tip
+          # instead; a deleted branch means a genuinely dead PR — skip.
+          # CLOSED only: the continuation contract is promotion-shaped
+          # (promotion closes the fork PR, nothing merges it) — a MERGED PR
+          # is done, and looping on its surviving branch would push commits
+          # that never reach main while the moving tip defeats the
+          # no-progress escalation that used to kill exactly that zombie.
+          pr_state=$(jq -r '.state' <<<"$pr_json")
+          live_tip=""
+          if [ "$pr_state" = "MERGED" ]; then
+            echo "PR #$PR is MERGED; nothing to continue. Skipping."
+            act skip; exit 0
+          elif [ "$pr_state" != "OPEN" ]; then
+            # ghr emits captured stdout only on success, so a deleted branch
+            # (persistent 404) yields an empty capture and the skip below
+            # fires — the error body `gh api` prints to STDOUT never reaches
+            # the substitution, and a fail-then-succeed retry still yields a
+            # clean SHA. The hex check is belt-and-braces against unexpected
+            # API output — fail-safe: skip, don't steer by garbage.
+            live_tip=$(ghr gh api "repos/$REPO/branches/$(jq -r '.headRefName' <<<"$pr_json")" --jq '.commit.sha' 2>/dev/null) || live_tip=""
+            [[ "$live_tip" =~ ^[0-9a-f]{40}$ ]] || live_tip=""
+            if [ -z "$live_tip" ]; then
+              echo "PR #$PR is $pr_state and its branch is gone (or the API is persistently unavailable); nothing to continue. Skipping."
+              act skip; exit 0
+            fi
+            echo "PR #$PR is $pr_state but auto-labeled with a live branch (promotion continuation); steering by branch tip $live_tip."
+          fi
+          continuation=false
+          closed_at=""
+          if [ -n "$live_tip" ]; then
+            continuation=true
+            # The close timestamp is the continuation epoch: the converged
+            # handoff's idempotence check only counts hand-backs posted after
+            # it, so the pre-promotion handoff (which is what led to the
+            # close) doesn't silence the continuation's own ending.
+            closed_at=$(jq -r '.closedAt // ""' <<<"$pr_json")
+          fi
+          echo "continuation=$continuation" >>"$GITHUB_OUTPUT"
+          echo "closed_at=$closed_at" >>"$GITHUB_OUTPUT"
           echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")" >>"$GITHUB_OUTPUT"
           # Engine selection (design/codex-engine.md): fix rounds follow the
           # PR's engine:codex label; relabeling switches later rounds.
@@ -288,6 +344,9 @@ jobs:
           fi
           next=$((prev + 1))
           head=$(jq -r '.headRefOid' <<<"$pr_json")
+          # Closed-PR continuation: the frozen headRefOid lies; the live tip
+          # is what fix rounds push to and what progress is measured by.
+          [ -n "$live_tip" ] && head="$live_tip"
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
           echo "round=$next" >>"$GITHUB_OUTPUT"
           echo "head=$head" >>"$GITHUB_OUTPUT"
@@ -354,6 +413,15 @@ jobs:
       # final review/merge (@auto never merges). Idempotent so a later clean
       # re-review doesn't re-ping. The `auto` label is left on, so further CI or
       # human-review activity can still re-engage @auto.
+      #
+      # On a closed-PR continuation (see the gate) the idempotence window
+      # starts at the PR's close: the designed flow is converge → handoff →
+      # human promotes (closing the PR) → upstream feedback re-engages the
+      # loop, so a pre-close handoff comment is near-certain and would
+      # otherwise swallow the continuation's own hand-back — the stage would
+      # move to Review with no comment and no @-mention, and the operator
+      # would learn the loop finished only by polling. Hand-backs posted
+      # after the close still dedupe against each other.
       - name: Converged handoff
         if: steps.gate.outputs.act == 'converged'
         env:
@@ -361,16 +429,33 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           MENTION: ${{ steps.gate.outputs.mention }}
+          CONTINUATION: ${{ steps.gate.outputs.continuation }}
+          CLOSED_AT: ${{ steps.gate.outputs.closed_at }}
           MARKER: "<!-- auto-converged -->"
         run: |
           set -euo pipefail
-          if gh api "repos/$REPO/issues/$PR/comments" --paginate \
-               --jq 'any(.[]; .body|contains("'"$MARKER"'"))' | grep -q true; then
-            echo "Handoff already posted; skipping."; exit 0
+          # ISO-8601 UTC timestamps compare correctly as strings; an empty
+          # $since (open PR) makes every marker comment count, as before.
+          # `--paginate` output is one merged array on current gh, one array
+          # per page on older releases; -s plus `.[][]` flattens either so
+          # the check yields a single true/false. An API failure yields ""
+          # and falls through to posting — same as before.
+          since=""
+          [ "${CONTINUATION:-}" = "true" ] && since="${CLOSED_AT:-}"
+          posted=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                     | jq -rs --arg m "$MARKER" --arg since "$since" \
+                         'any(.[][]; (.body|contains($m)) and (.created_at > $since))' || true)
+          if [ "$posted" = "true" ]; then
+            echo "Handoff already posted${since:+ since close ($since)}; skipping."; exit 0
           fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
+          if [ "${CONTINUATION:-}" = "true" ]; then
+            ci="this PR is closed, so the checks shown here are the frozen pre-close runs — CI for the live branch tip runs as push-triggered checks on the branch (and, on repos with a promotion flow, on the upstream PR)."
+          else
+            ci="see the checks above for CI status."
+          fi
           gh pr comment "$PR" --repo "$REPO" --body "$MARKER
-          ${ping}🤖 auto: the reviewer has no outstanding feedback — this PR has converged. auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; see the checks above for CI status. The \`auto\` label is left on, so auto will still react to new review or CI activity; remove it to disengage."
+          ${ping}🤖 auto: the reviewer has no outstanding feedback — this PR has converged. auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; $ci The \`auto\` label is left on, so auto will still react to new review or CI activity; remove it to disengage."
 
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
@@ -538,7 +623,18 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SYNC_BASE: ${{ steps.sync.outputs.base }}
           SYNC_APPEND: ${{ inputs.branch_sync_append }}
+          CONTINUATION: ${{ steps.gate.outputs.continuation }}
         run: |
+          # Live-branch continuation (see the gate): without this note the
+          # fix agent discovers a CLOSED PR cold and may plausibly conclude
+          # there is nothing to do — the class of misreading the continuation
+          # flow exists to fix. Mirrors the reviewer prompt's NOTE, and
+          # overrides the handoff's mergeability and CI reports, both of
+          # which read the frozen pre-close state on a closed PR.
+          note=""
+          if [ "${CONTINUATION:-}" = "true" ]; then
+            note=" NOTE — closed-PR continuation: PR #$PR is CLOSED but still auto-labeled with a live branch (on repos with a promotion flow this means it was promoted upstream and pushes to this branch update the upstream PR's diff). The checked-out branch is the loop's working surface, not a dead PR: address the feedback and push to the current branch as usual. Two handoff adjustments: mergeable/mergeStateStatus is meaningless on a closed PR, so skip that report; and \`gh pr checks\` reflects the FROZEN pre-close head (PR checks never re-run for post-close pushes, so 'this re-runs CI' does not apply here either) — skip it too. Instead note that CI and merge/promotion of the continued work happen on the upstream PR (or as push-triggered checks on the branch tip), outside this loop."
+          fi
           # The merge instruction is spliced only when "Sync branch with base"
           # could not land the merge itself — it aborts a conflicted merge to
           # hand the Claude path a clean index (see that step's comment), so
@@ -554,7 +650,7 @@ jobs:
           elif [ -n "${MERGE_SHA:-}" ] && [ -n "${SYNC_APPEND:-}" ]; then
             merge_note=" NOTE: a workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before your other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
           fi
-          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, reply to that specific comment with a brief rationale instead of changing code. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, commit and push to the current branch as the machine account (this re-runs CI), then post a single top-level comment of exactly \`@review\` to request re-review. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you pushed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT post the re-review request — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. ENDING CONTRACT (mandatory): a run that pushed ANY commit must end with exactly ONE of the two hand-backs — the \`@review\` re-review comment, or the doc-only exception's handoff comment. Pushing and posting neither is never permitted: it strands the board at Agent with nothing running, because the loop's only stage transitions come from reviewer verdicts and handoff markers. After pushing, resolve the inline review threads you fully addressed in code, so settled feedback is visibly closed: list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\`, \`isResolved\`, and its \`comments\`), then for each thread you resolved in code run the \`resolveReviewThread\` mutation, e.g. \`gh api graphql -f query='mutation(\$id:ID!){resolveReviewThread(input:{threadId:\$id}){thread{isResolved}}}' -F id=<threadId>\`. Leave UNRESOLVED any thread you deliberately declined (the one you replied to with a rationale) so a human can adjudicate it, and never resolve a thread you did not actually address. Hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a posted rationale, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then post ONE comment whose FIRST line is exactly \`<!-- auto-handoff -->\` (the workflow moves the board stage on that marker), followed by a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status, and @-mention the PR's originating human (the author of the issue referenced by \"Fixes #<n>\" in the PR body, if any). Do NOT merge — auto hands the final step to a human. In any comment you post here, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. The same discipline applies to the review trigger: the ONLY place you may write that token bare is the single exact re-review request comment described above — anywhere else in comment prose, backtick it (\`@review\`), because your comments post as a write-access account and a bare token anywhere in the body starts a review run. The loop's marker substrings get the same discipline: never write claude-review-summary, claude-review-verdict, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment you post — the loop matches them by plain substring, so quoting a reviewer verdict comment verbatim would forge a verdict; when referencing one, break it (e.g. 'claude-review summary'). The auto-handoff marker is legitimate ONLY as the first line of the single handoff comment described above; never quote it elsewhere. Skip posting if an equivalent handoff comment already exists.${merge_note}" >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, reply to that specific comment with a brief rationale instead of changing code. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, commit and push to the current branch as the machine account (this re-runs CI), then post a single top-level comment of exactly \`@review\` to request re-review. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you pushed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT post the re-review request — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. ENDING CONTRACT (mandatory): a run that pushed ANY commit must end with exactly ONE of the two hand-backs — the \`@review\` re-review comment, or the doc-only exception's handoff comment. Pushing and posting neither is never permitted: it strands the board at Agent with nothing running, because the loop's only stage transitions come from reviewer verdicts and handoff markers. After pushing, resolve the inline review threads you fully addressed in code, so settled feedback is visibly closed: list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\`, \`isResolved\`, and its \`comments\`), then for each thread you resolved in code run the \`resolveReviewThread\` mutation, e.g. \`gh api graphql -f query='mutation(\$id:ID!){resolveReviewThread(input:{threadId:\$id}){thread{isResolved}}}' -F id=<threadId>\`. Leave UNRESOLVED any thread you deliberately declined (the one you replied to with a rationale) so a human can adjudicate it, and never resolve a thread you did not actually address. Hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a posted rationale, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then post ONE comment whose FIRST line is exactly \`<!-- auto-handoff -->\` (the workflow moves the board stage on that marker), followed by a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status, and @-mention the PR's originating human (the author of the issue referenced by \"Fixes #<n>\" in the PR body, if any). Do NOT merge — auto hands the final step to a human. In any comment you post here, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. The same discipline applies to the review trigger: the ONLY place you may write that token bare is the single exact re-review request comment described above — anywhere else in comment prose, backtick it (\`@review\`), because your comments post as a write-access account and a bare token anywhere in the body starts a review run. The loop's marker substrings get the same discipline: never write claude-review-summary, claude-review-verdict, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment you post — the loop matches them by plain substring, so quoting a reviewer verdict comment verbatim would forge a verdict; when referencing one, break it (e.g. 'claude-review summary'). The auto-handoff marker is legitimate ONLY as the first line of the single handoff comment described above; never quote it elsewhere. Skip posting if an equivalent handoff comment already exists.${note}${merge_note}" >>"$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
@@ -635,6 +731,7 @@ jobs:
           SYNC_BASE: ${{ steps.sync.outputs.base }}
           SYNC_APPEND: ${{ inputs.branch_sync_append }}
           CAP: ${{ inputs.review_round_cap }}
+          CONTINUATION: ${{ steps.gate.outputs.continuation }}
         run: |
           set -euo pipefail
           git config user.name "i-am-marvin"
@@ -664,6 +761,13 @@ jobs:
           }
           {
             echo "You are auto, addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP), running on the Codex engine in a local checkout of the PR's head branch."
+            # Same continuation note as the Claude fix prompt: the codex
+            # agent cannot query PR state itself, but the embedded comments
+            # below may mention the close, so pre-empt the "closed PR,
+            # nothing to do" misreading here too.
+            if [ "${CONTINUATION:-}" = "true" ]; then
+              echo "NOTE — closed-PR continuation: PR #$PR is CLOSED but still auto-labeled with a live branch (on repos with a promotion flow this means it was promoted upstream and pushes to this branch update the upstream PR's diff). The checked-out branch is the loop's working surface, not a dead PR — address the feedback as usual."
+            fi
             echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Edit the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts the re-review request for you. Verify your changes with the local tools (pytest/ruff/mypy) where relevant."
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"

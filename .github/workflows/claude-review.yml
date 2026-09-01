@@ -280,7 +280,7 @@ jobs:
           IBODY: ${{ github.event.issue.body }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          ok=false mode=pr upstream="" trusted=false head_sha=""
+          ok=false mode=pr upstream="" trusted=false head_sha="" continuation=false
           # One retry for the gating lookups: they refuse fail-closed, so a
           # transient API blip shouldn't block a legitimate review outright.
           # Each attempt is captured and emitted only on success: a failed
@@ -330,6 +330,32 @@ jobs:
               pr_json=$(api "repos/$GH_REPO/pulls/$PR_NUM" || echo '{}')
               head_repo=$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')
               head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')
+              # Closed PR with a live same-repo branch: a promotion
+              # continuation (the upstream PR was opened from this same
+              # branch; see the review-fix gate) — the PR's recorded head is
+              # frozen at close and no longer reflects the work, so pin the
+              # LIVE branch tip. Same-repo heads only: the trust decision
+              # below is about head provenance, and a fork head's closed PR
+              # has no continuation contract here. Merged PRs excluded: REST
+              # reports state=closed for them too, but a merged PR is done —
+              # its branch is not a continuation surface, and reviewing the
+              # tip against a base that already contains the merged commits
+              # would produce a nonsense diff. `continuation` records that
+              # the pin actually happened; the prompt's continuation NOTE
+              # keys on it, not on raw closed state.
+              pr_state=$(printf '%s' "$pr_json" | jq -r '.state // ""')
+              merged=$(printf '%s' "$pr_json" | jq -r '.merged // false')
+              if [ "$pr_state" = "closed" ] && [ "$merged" != "true" ] && [ "$head_repo" = "$GH_REPO" ]; then
+                live=$(api "repos/$GH_REPO/branches/$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')" 2>/dev/null | jq -r '.commit.sha // ""' || true)
+                # Belt-and-braces to match the fix-loop gate's check — this
+                # value becomes the checkout ref, so never pin non-SHA output.
+                [[ "$live" =~ ^[0-9a-f]{40}$ ]] || live=""
+                if [ -n "$live" ]; then
+                  echo "PR #$PR_NUM is closed; pinning the live branch tip $live instead of the frozen head."
+                  head_sha="$live"
+                  continuation=true
+                fi
+              fi
               if [ -z "$head_sha" ]; then
                 echo "::warning::@review on PR #$PR_NUM — the head lookup failed, so there is no pinned SHA to check out; refusing. A collaborator can re-trigger"
               elif [ "$head_repo" = "$GH_REPO" ] || [ "$trusted" = "true" ]; then
@@ -366,6 +392,7 @@ jobs:
             echo "ack=$ack"
             echo "mode=$mode"
             echo "head_sha=$head_sha"
+            echo "continuation=$continuation"
             echo "upstream=$upstream"
             echo "up_repo=$(printf '%s' "$upstream" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/.*#\1#')"
             echo "up_num=$(printf '%s' "$upstream" | grep -oE '[0-9]+$')"
@@ -597,14 +624,27 @@ jobs:
           REPO: ${{ github.repository }}
           DEFAULT_PROMPT: ${{ inputs.review_prompt }}
           THIS_PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          CONTINUATION: ${{ steps.trig.outputs.continuation }}
         run: |
           if [ "$MODE" != "external" ]; then
+            # Live-branch continuation (see trig): the closed PR's diff view
+            # is frozen, so point the reviewer at the checked-out tree
+            # instead. Keyed on the pin having actually happened — a closed
+            # PR whose branch is gone (or whose head is a fork) checks out
+            # the frozen head, where this note's claims would be false. The
+            # pin fires for ANY closed same-repo PR with a live branch, so
+            # the note states promotion as the promotion-flow reading, not
+            # as fact.
+            closed_note=""
+            if [ "${CONTINUATION:-}" = "true" ]; then
+              closed_note=" NOTE: PR #$THIS_PR is CLOSED but its branch is still live (on repos with a promotion flow this means it was promoted upstream and pushes here update the upstream PR's diff). The checkout is the branch TIP, which may be AHEAD of the closed PR's frozen diff view: review the checked-out tree against the base branch, NOT the PR page's stale diff, and still post everything to PR #$THIS_PR. Inline comments anchor to the frozen diff, so they may fail (422) on lines only the tip touches — fold any finding that will not anchor into the summary comment instead."
+            fi
             # Pin the target: with several hot sibling PRs, an agent that
             # orients from ambient repo state (gh pr list, the checkout's
             # log) can latch onto the WRONG one — observed: a run triggered
             # on one PR posted its entire review to the recently-updated
             # sibling. The event, not the workspace, defines the target.
-            printf 'value=%s %s\n' "$DEFAULT_PROMPT" "TARGET: you are reviewing PR #$THIS_PR of $REPO and nothing else. Its head (or, on pull_request triggers, its merge preview with the base) is checked out in the workspace. Post the summary, all inline comments, and the marker comment to PR #$THIS_PR ONLY — never to any other PR or issue, no matter what gh pr list, the git log, or any workspace state suggests. If the checked-out tree seems to disagree with PR #$THIS_PR's diff, say so on PR #$THIS_PR rather than switching targets." >>"$GITHUB_OUTPUT"
+            printf 'value=%s %s%s\n' "$DEFAULT_PROMPT" "TARGET: you are reviewing PR #$THIS_PR of $REPO and nothing else. Its head (or, on pull_request triggers, its merge preview with the base) is checked out in the workspace. Post the summary, all inline comments, and the marker comment to PR #$THIS_PR ONLY — never to any other PR or issue, no matter what gh pr list, the git log, or any workspace state suggests. If the checked-out tree seems to disagree with PR #$THIS_PR's diff, say so on PR #$THIS_PR rather than switching targets." "$closed_note" >>"$GITHUB_OUTPUT"
             exit 0
           fi
           printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above or in your system prompt. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING to the upstream PR — no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay. Instead post your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\`. Do NOT post the '🔎 Review complete' marker comment at all — this review is for a human, not the automation loop. Repo guidance in your system prompt about directing PR authors to reply with top-level @claude comments applies only to this repo's OWN PRs and does NOT apply here: the upstream PR and its author have no agent integration and nothing you write reaches them directly (the maintainer relays), so do not include any such instruction in your findings. Guidance about never writing the literal review-trigger token DOES still apply — your comment lands on the tracking issue, where that token would retrigger this workflow. The environment is not pre-provisioned, but every Bash command you run is confined by an OS-level sandbox (writes limited to the workspace, network egress limited to PyPI, repo and API tokens hidden from your commands), so you MAY install dependencies and run tests to verify findings: create a venv (\`python3 -m venv .venv\`), \`.venv/bin/pip install -e '.[dev]'\` (or the project's documented dev install), then run TARGETED tests near the changed code — not the full suite. If a command fails from a sandbox restriction (blocked host or path) or the install proves impractical, fall back to static review of that point: unsandboxed retries are disabled, so do not fight the sandbox, and do not let environment wrangling crowd out the review itself. You may write scratch test files inside the workspace via shell, but do not alter the contributor's code, and never commit or push. You MUST post the proxy-issue comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
@@ -1000,6 +1040,7 @@ jobs:
           SINCE: ${{ steps.trig.outputs.started }}
           MENTION: ${{ steps.who.outputs.mention }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
+          CONTINUATION: ${{ steps.trig.outputs.continuation }}
         run: |
           set -uo pipefail
           # No execution file at all = the agent never launched: a pre-launch
@@ -1054,8 +1095,14 @@ jobs:
           # immediate-merge flow for low-blast-radius PRs (CLAUDE.md) races
           # the auto-review by design, and the reviewer correctly posts
           # nothing on a finished PR (observed: agents#11 drew a spurious ⚠️).
+          # EXCEPT a live-branch continuation (see trig): there the closed PR
+          # is the loop's working surface and the verdict comment is the only
+          # thing that drives the next fix round, so a silent stall would
+          # hang the loop with the label on and nobody notified — keep the
+          # check live. MERGED still skips unconditionally (trig never pins
+          # a merged PR, so continuation is false there anyway).
           state=$(gh pr view "$NUM" --repo "$REPO" --json state --jq .state 2>/dev/null || echo "")
-          if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
+          if [ "$state" = "MERGED" ] || { [ "$state" = "CLOSED" ] && [ "${CONTINUATION:-}" != "true" ]; }; then
             echo "::notice::PR is $state — no review owed; skipping the posted-review check."
             exit 0
           fi
