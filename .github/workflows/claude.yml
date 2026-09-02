@@ -1221,6 +1221,22 @@ jobs:
           gh issue comment "$ISSUE" --repo "$REPO" --body "$(printf '⚠️ The agent run finished WITHOUT landing its work (%s). The runner is ephemeral, so those changes are gone — the summary above may describe work that exists on no branch. Re-trigger to redo the task.' "$unlanded")" || true
           exit 1
 
+      # Which model actually served this run (design/architecture.md → Model
+      # selection): the init line echoes the requested model even when
+      # --fallback-model fires, so this parses modelUsage and posts a note on
+      # the issue/PR when a non-requested model served tokens or the result
+      # reads like a classifier refusal. Best-effort, always exits 0. Codex
+      # runs have no execution file and a pinned model — nothing to report.
+      - name: Model provenance
+        if: always() && steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine != 'codex'
+        uses: meridianlabs-ai/agents/.github/actions/model-provenance@main
+        with:
+          exec-file: ${{ steps.claude.outputs.execution_file }}
+          requested: ${{ inputs.model }}
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          number: ${{ github.event.issue.number || github.event.pull_request.number }}
+
       # Surface agent errors the action swallows. A model API error (overload /
       # 529, a model 404, etc.) leaves the run green at the workflow level but
       # with no result — and a stale "I'll get back to you" comment. Detect

@@ -1034,6 +1034,22 @@ jobs:
           issue: ${{ inputs.pr_number }}
           branch: ${{ steps.gate.outputs.head_branch }}
 
+      # Which model actually served this run (design/architecture.md → Model
+      # selection): the init line echoes the requested model even when
+      # --fallback-model fires, so this parses modelUsage and posts a note on
+      # the PR when a non-requested model served tokens or the result
+      # reads like a classifier refusal. Best-effort, always exits 0. Codex
+      # runs have no execution file and a pinned model — nothing to report.
+      - name: Model provenance
+        if: always() && steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
+        uses: meridianlabs-ai/agents/.github/actions/model-provenance@main
+        with:
+          exec-file: ${{ steps.claude.outputs.execution_file }}
+          requested: ${{ inputs.model }}
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          number: ${{ inputs.pr_number }}
+
       # Surface agent errors the action swallows (model overload/529, 404, etc.),
       # which otherwise leave the review-fix run green with no fix/handoff posted.
       # Also catches the "completed-but-blocked" case: the agent finishes with no

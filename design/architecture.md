@@ -152,7 +152,19 @@ This was verified the hard way: when Fable became unavailable, a run's init
 line still reported `claude-fable-5`, but `modelUsage` in the execution-log
 artifact showed every token served by `claude-opus-4-8` — the fallback fired
 correctly, and **the init line echoes the *requested* model, not the one that
-ran.** Always read `modelUsage` to know what actually executed.
+ran.** Always read `modelUsage` to know what actually executed. The
+`model-provenance` composite action does that on every Claude-path run: it
+writes the served-model token table to the job summary, and posts a note on
+the issue/PR (as the machine account, first line `<!-- model-provenance -->`)
+when a non-requested model served output tokens — haiku excluded, it is Claude
+Code's own subagent/summarization traffic on every run — or when the result
+errored with text that reads like a classifier refusal. The note calls it a
+fallback outright only when the requested model served nothing; when both
+served output it hedges, because a subagent launched on an explicit model
+(the Agent tool's `model` override) is indistinguishable from a per-request
+fallback in `modelUsage`. It only judges the
+fallback when the log has an init line to compare against; without one it
+reports the table and says so. Best-effort: every path exits 0.
 
 The `fable` alias (not a pinned `claude-fable-5[1m]`) is used so the model
 auto-updates if Fable returns under a new version.
@@ -687,8 +699,10 @@ The intended Slack story, mostly off-the-shelf:
 ### Spend / model visibility
 
 Usage is attributed to the "Claude Code Agent" workspace in the Anthropic
-Console (set rate limits and spend caps there). Per-run model and cost are in
-the `claude-execution-output.json` artifact each run uploads — read `modelUsage`
+Console (set rate limits and spend caps there). Per-run served model is in the
+job summary ("Model provenance" table; a note lands on the issue/PR when the
+fallback fired — see Model selection). Cost is in the
+`claude-execution-output.json` artifact each run uploads — read `modelUsage`
 for the model that actually ran (the init line echoes the *requested* model).
 
 ## Open items
