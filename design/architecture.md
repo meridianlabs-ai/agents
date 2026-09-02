@@ -156,15 +156,24 @@ ran.** Always read `modelUsage` to know what actually executed. The
 `model-provenance` composite action does that on every Claude-path run: it
 writes the served-model token table to the job summary, and posts a note on
 the issue/PR (as the machine account, first line `<!-- model-provenance -->`)
-when a non-requested model served output tokens — haiku excluded, it is Claude
-Code's own subagent/summarization traffic on every run — or when the result
-errored with text that reads like a classifier refusal. The note calls it a
-fallback outright only when the requested model served nothing; when both
-served output it hedges, because a subagent launched on an explicit model
-(the Agent tool's `model` override) is indistinguishable from a per-request
-fallback in `modelUsage`. It only judges the
-fallback when the log has an init line to compare against; without one it
-reports the table and says so. Best-effort: every path exits 0.
+when an **unexplained** non-requested model served output tokens — or when the
+result errored with text that reads like a classifier refusal. Haiku is
+excluded outright (Claude Code's own subagent/summarization traffic on every
+run). Other non-requested models are first attributed against the `Agent`/
+`Task` tool-use `model` inputs in the log: a subagent the agent launched on
+`opus` lands in `modelUsage` exactly like a per-request fallback would, but it
+is the agent's own choice, so it is recorded in the job summary only
+(decision: Ransom, 2026-09-02, after fork #398's two opus subagents drew a
+fallback-shaped note). The note posts in two shapes: when the requested model
+served nothing, "fallback fired" outright — nothing is attributed then, since a
+whole-run fallback landing on a model a subagent also asked for is still the
+fallback; when the requested model also served, a hedge, because only the
+Agent tool's `model` *input* is attributable — a subagent model set in
+`.claude/agents/*.md` frontmatter, a built-in agent default, or the Workflow
+tool's `agent({model})` leaves no such input and is indistinguishable from a
+per-request fallback. It only judges the fallback when the log has an init
+line to compare against; without one it reports the table and says so.
+Best-effort: every path exits 0.
 
 The `fable` alias (not a pinned `claude-fable-5[1m]`) is used so the model
 auto-updates if Fable returns under a new version.

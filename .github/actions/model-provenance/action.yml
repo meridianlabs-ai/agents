@@ -1,12 +1,13 @@
 name: model-provenance
 description: >-
   Report which Claude model actually served an agent run, and say so on the
-  PR/issue when it was not the one requested (the --fallback-model fired) or
-  when the run ended in what looks like a classifier refusal. The init line
-  of claude-execution-output.json echoes the REQUESTED model even when the
-  fallback fires — only `modelUsage` in the final result shows what ran
-  (design/architecture.md → Model selection), and until this step the only
-  way to know was downloading the artifact. Best-effort by design: every
+  PR/issue when a model other than the requested one served output that the
+  agent's own subagent model choices don't explain (the --fallback-model
+  fired) or when the run ended in what looks like a classifier refusal. The
+  init line of claude-execution-output.json echoes the REQUESTED model even
+  when the fallback fires — only `modelUsage` in the final result shows what
+  ran (design/architecture.md → Model selection), and until this step the
+  only way to know was downloading the artifact. Best-effort by design: every
   path exits 0 — provenance must never fail the agent's real work. Referenced
   fully-qualified (meridianlabs-ai/agents/.github/actions/model-provenance@main)
   so it works regardless of what the job checked out; NO post step (local
@@ -73,30 +74,56 @@ runs:
           echo "$table"
         } >>"$GITHUB_STEP_SUMMARY"
         # Fallback detection. Haiku is Claude Code's own subagent/summarization
-        # traffic on every run, not a fallback; anything else that served
-        # OUTPUT tokens without being the init model is suspect. Two grades:
-        # a served set lacking the init model entirely is unambiguous — the
-        # fallback took the whole run; the init model ALSO serving output
-        # tokens is not, because a subagent launched on an explicit model
-        # (the Agent tool's `model` override, or `model:` frontmatter in a
-        # caller's .claude/agents/*.md) lands in modelUsage the same way as a
-        # per-request fallback, so that headline hedges.
+        # traffic on every run, not a fallback. Of the remaining non-init
+        # models that served OUTPUT tokens, only an UNEXPLAINED one is a
+        # fallback: a subagent launched on an explicit model (the Agent/Task
+        # tool's `model` input — an alias like `opus`, or a full id) lands in
+        # modelUsage exactly like a per-request fallback would, but it is the
+        # agent's own choice. Attribute those first and say nothing about them
+        # beyond the job summary (decision: Ransom, 2026-09-02, after #398's
+        # two general-purpose subagents on opus drew a fallback-shaped note).
+        # A served set LACKING the init model is a fallback regardless — the
+        # primary never ran — so nothing is attributed then: a whole-run
+        # fallback that happens to land on a model a subagent also asked for
+        # is still the fallback, and the note must name it.
         # The comparison needs the init model: with no init line (no `system`
         # message, or the field moved in a claude-code-action release) every
         # served model would look like "not the init model" and the note would
         # fire falsely on every run — so without it, report and don't judge.
         note=""
         if [ -n "$init" ]; then
-          others=$(jq -r --arg init "$init" 'to_entries
-            | map(select(.key != $init and (.key | test("haiku") | not) and ((.value.outputTokens // 0) > 0)))
-            | map("\(.key) (\(.value.outputTokens) output tokens)") | join(", ")' <<<"$usage")
           has_init=$(jq -r --arg init "$init" 'has($init)' <<<"$usage")
+          sub_models=$(jq -c "$msgs"' | map(select(.type=="assistant"))
+            | map(.message.content[]? | select(.type=="tool_use" and (.name | test("^(Task|Agent)$")))
+                | .input.model // empty | select(type=="string" and length > 0))
+            | unique' "$file" 2>/dev/null || echo '[]')
+          # Classify each candidate: explained when some Agent-tool `model`
+          # input is a substring of the served id (alias `opus` is inside
+          # `claude-opus-5[1m]`; a full id matches itself — jq's contains()
+          # is literal, so `[1m]` is not a glob). $want selects which list.
+          classify='to_entries
+            | map(select(.key != $init and (.key | test("haiku") | not) and ((.value.outputTokens // 0) > 0)))
+            | map(.key as $k | . + {explained: ($has_init and any($subs[]; . as $a | $k | contains($a)))})
+            | map(select(.explained == $want) | "\(.key) (\(.value.outputTokens) output tokens)") | join(", ")'
+          explained=$(jq -r --arg init "$init" --argjson has_init "$has_init" --argjson subs "$sub_models" --argjson want true "$classify" <<<"$usage")
+          fallback=$(jq -r --arg init "$init" --argjson has_init "$has_init" --argjson subs "$sub_models" --argjson want false "$classify" <<<"$usage")
+          if [ -n "$explained" ]; then
+            echo "model-provenance: subagents ran on $explained — the agent's own model choice, not a fallback."
+            printf '\nSubagents ran on %s — the agent'"'"'s own model choice (Agent tool `model` input), not a fallback.\n' "$explained" >>"$GITHUB_STEP_SUMMARY"
+          fi
           if [ "$has_init" != "true" ]; then
-            note="ℹ️ **Model fallback fired** on this run: requested \`${REQUESTED:-default}\` (\`${init:-?}\`), but tokens were served by ${others:-a different model}. The run's work is still valid; read it knowing the primary model was unavailable, overloaded, or declined."
-            echo "::warning::model fallback: requested $init, served by ${others:-other}"
-          elif [ -n "$others" ]; then
-            note="ℹ️ **A non-requested model also served tokens** on this run: requested \`${REQUESTED:-default}\` (\`${init:-?}\`), which did serve output, but so did ${others}. Either the fallback fired for some requests or a subagent ran on an explicitly chosen model — the job summary's provenance table has the per-model split."
-            echo "::warning::non-requested model served tokens alongside $init: ${others}"
+            served=${fallback:+tokens were served by $fallback}
+            note="ℹ️ **Model fallback fired** on this run: requested \`${REQUESTED:-default}\` (\`$init\`), but ${served:-the primary never served any tokens}. The run's work is still valid; read it knowing the primary model was unavailable, overloaded, or declined."
+            echo "::warning::model fallback: requested $init, served by ${fallback:-other}"
+          elif [ -n "$fallback" ]; then
+            # The primary served too, so this is a hedge, not a verdict: only
+            # the Agent tool's `model` INPUT is attributable from the log. A
+            # subagent whose model comes from its definition (`.claude/agents/
+            # *.md` frontmatter, a built-in agent's default) or from the
+            # Workflow tool's `agent({model})` leaves no such input and looks
+            # exactly like a per-request fallback here.
+            note="ℹ️ **Unexplained model served output** on this run: requested \`${REQUESTED:-default}\` (\`$init\`) served the main thread, but tokens were also served by $fallback and no Agent-tool \`model\` choice in the log accounts for it. Either the fallback fired for some requests (primary overloaded or declined) or a subagent ran on a model set in its definition rather than per call. The run's work is still valid."
+            echo "::warning::unexplained model alongside $init: served by $fallback"
           fi
         else
           echo "model-provenance: no init line in the execution log; cannot judge whether the fallback fired."
