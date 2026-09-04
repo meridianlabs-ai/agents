@@ -673,11 +673,18 @@ jobs:
       # status would post a review on a merged PR whose branch is gone, or on
       # a 5xx — the values are validated and the check skips instead.
       # Same since-check as the step above (the two never double-post), same
-      # retry/backoff, same loud failure into the Surface step.
+      # retry/backoff, same loud failure into the Surface step. Gated on the
+      # trigger like the other post-agent steps: a comment that merely quotes
+      # the phrase passes the stub's contains() filter but fails the
+      # word-boundary check, and the claude step still runs (and succeeds,
+      # logging "No trigger found") because Detect engine was skipped — the
+      # unguarded step would warn about a missing run-start stamp on a run
+      # where no agent ran.
       - name: Ensure hand-back after agent push
         id: agentpush
         if: >-
-          always() && steps.claude.outcome == 'success' &&
+          always() && steps.trig.outputs.ok == 'true' &&
+          steps.claude.outcome == 'success' &&
           inputs.trigger_phrase == '@auto' &&
           (github.event.issue.pull_request != '' || github.event.pull_request != '')
         env:
