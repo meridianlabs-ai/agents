@@ -64,6 +64,15 @@ outputs:
       landable work, so stamping it before the merge is what makes a
       merge-only round push.
     value: ${{ steps.sync.outputs.start_sha }}
+  head_sha:
+    description: >-
+      The head branch's LIVE tip on origin when the run started, read from the
+      API and emitted BEFORE the closed-PR skip — so claude.yml's "Ensure
+      hand-back after agent push" can tell a moved tip on a closed-PR
+      continuation, where start_sha is never set. Empty for fork heads (the
+      branch is not in this repo) and when the branch is gone or the read
+      failed.
+    value: ${{ steps.sync.outputs.head_sha }}
   merge_sha:
     description: >-
       The merge commit, ONLY when a merge actually happened cleanly ("Already
@@ -120,6 +129,21 @@ runs:
         [ -n "$prj" ] || { echo "::error::could not read PR #$NUM after 3 attempts"; exit 1; }
         branch=$(jq -r '.headRefName' <<<"$prj")
         base=$(jq -r '.baseRefName' <<<"$prj")
+        # Live head tip, stamped before the agent runs and BEFORE the
+        # closed-PR skip below: claude.yml's "Ensure hand-back after agent
+        # push" compares it to the live tip after the run, and the closed-PR
+        # continuation is exactly where start_sha is never set. Not the PR's
+        # headRefOid — that is FROZEN at close (see the review loop's gate).
+        # `gh api` prints the error body to STDOUT on a non-2xx, so the value
+        # is hex-validated rather than trusted; a deleted branch reads as
+        # empty, and the consumer skips its check on empty. Fork heads are
+        # not in this repo, so no lookup there.
+        head_sha=""
+        if [ "$(jq -r '.isCrossRepository' <<<"$prj")" != "true" ]; then
+          head_sha=$(gh api "repos/$REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null) || head_sha=""
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || head_sha=""
+        fi
+        echo "head_sha=$head_sha" >>"$GITHUB_OUTPUT"
         if [ "$CHECKOUT" = "true" ]; then
           # Closed/merged PRs: claude-code-action's setupBranch does not
           # continue the old head there — it cuts a fresh branch off base — so
