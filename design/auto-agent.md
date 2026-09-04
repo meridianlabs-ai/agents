@@ -135,7 +135,11 @@ the reviewer was made comprehensive per-pass — see architecture.md → reviewe
 and then to 10, so a PR with several genuine, serially-surfaced findings can
 converge instead of escalating mid-productive-streak. The no-progress check below
 stops a *stuck* loop early, so the higher ceiling only costs rounds when the loop
-is actually moving.)
+is actually moving. The cap stays at 10 after the 2026-09-04 review-bar change:
+rounds are now spent only on blocking findings, so a productive loop should
+converge in far fewer, and the cap only bites on one that keeps landing
+blocking fixes — lowering it would buy nothing the no-progress check does not
+already provide.)
 
 A "round" is one *review→fix* cycle. After each fix push, `@auto` explicitly
 **requests re-review** (`@review` does not run on `synchronize` by design —
@@ -143,17 +147,36 @@ architecture.md → reviewer — to avoid re-billing every push), and the result
 review is the next round. Counting explicit review requests, not raw pushes,
 keeps CI-only fix iterations from burning the budget.
 
-**Documentation-only nit rounds end the loop instead of re-reviewing** (added
-2026-07-21): when every suggestion the fix agent acted on was explicitly
-non-blocking (nit-level) AND every change it pushed is documentation-only
-(markdown/doc files, code comments, docstrings — zero behavioral code), it
-skips `@review` and hands off to a human directly — another review round would
-just re-read prose. The judgment lives in the agent's prompt; the *detection*
-is deterministic: any agent self-handoff comment starts with the
-`<!-- auto-handoff -->` marker, which the workflow keys on (it moves the Atlas
-stage to Review — see atlas-tracking.md). The same marker covers the
-older self-handoff case (all remaining feedback declined with rationale),
-which previously ended the loop without any deterministic trace.
+**Only blocking findings spend a round — the maintainers' review bar**
+(decision: Eric, 2026-09-04). The reviewer tags every finding `blocking` or
+`non-blocking`. A finding blocks only if it is a regression on a mainline path,
+a weakened security boundary, data loss or corruption, or a claim in the PR
+description the code does not deliver. Scope is the problem the PR states;
+findings outside it, and fringe cases left unsolved, are notes, not blockers.
+The verdict follows: **`clean` means no blocking findings** (non-blocking
+findings may still have been posted), `suggestions` means at least one. A fix
+round therefore runs only when something blocks; in it the fixer fixes the
+blocking findings, takes non-blocking ones that are cheap and in scope, and
+declines the rest with a one-line reply. Non-blocking findings are posted once
+and never spend another round.
+
+This REVERSES the earlier decision (Phase 2 below) that the fixer addresses
+every nit and `clean` means zero suggestions of any kind. Why: agent reviewers
+hold a much higher bar than the maintainers historically did — careful is
+wanted, but not at a large cost to throughput — and every maintainer has
+watched review→fix loops fail to converge on nits. The documentation-only nit
+round exception (added 2026-07-21: a round that pushed only doc nits handed off
+instead of re-reviewing) went with it — a nits-only review is now `clean` and
+never reaches the fixer. The bar is a maintainer principle: it lives only in
+this private repo (which drives every repo's `@review`/`@auto`, and whose
+`skills/review-pass` maintainers symlink for local sessions), never in a public
+repo's AGENTS.md.
+
+The fixer may still end the loop itself when it pushes nothing because every
+blocking finding was declined with a reason. That self-handoff comment starts
+with the `<!-- auto-handoff -->` marker, which the workflow keys on (it moves
+the Atlas stage to Review — see atlas-tracking.md); before the marker that case
+ended the loop without any deterministic trace.
 
 **Counting must be deterministic, not LLM-maintained** — it gates whether the
 agent runs at all. The orchestration step counts completed review cycles for the
@@ -302,15 +325,15 @@ The simple case ships first and is independently useful:
   sticky-comment counter that also records the per-round branch tip, sharing
   claude-auto.yml's per-PR `concurrency` group); at the cap — or on the first
   round that pushes no new commit — it comments and removes the `auto` label. **Decisions:** only the automated reviewer drives the
-  loop (human reviews are the escalation endpoint, not a turn); whether a review
-  needs another round is the fixer agent's judgment. The fixer is **aggressive**:
-  it addresses *minor / explicitly non-blocking* suggestions too (nits, naming,
-  small refactors, reuse) — the goal is the best-shape PR, not just unblocking —
-  and only declines an item it disagrees with / that's out of scope / not a net
-  improvement, replying with a rationale. It hands off when nothing remains worth
-  improving (clean review, or all remaining items declined-with-rationale). This
-  can use more rounds on a nitty review, but the 10-round cap (and the
-  no-progress check) still bounds it (then escalate to a human). **Why `issue_comment`, not `pull_request_review`:**
+  loop (human reviews are the escalation endpoint, not a turn). The fixer was
+  originally **aggressive**: it addressed *minor / explicitly non-blocking*
+  suggestions too (nits, naming, small refactors, reuse) — the goal was the
+  best-shape PR, not just unblocking — and that cost rounds on nitty reviews.
+  Reversed 2026-09-04 (see "Only blocking findings spend a round" above): the
+  fixer now runs only on a `suggestions` verdict, fixes the blocking findings,
+  takes cheap in-scope non-blocking ones, and declines the rest with a one-line
+  reply. It hands off when it pushes nothing (every blocking finding declined
+  with a reason). **Why `issue_comment`, not `pull_request_review`:**
   the latter resolves workflows from the PR base branch, so it never fires on the
   pristine-base fork; `issue_comment` resolves from the default branch and fires
   everywhere — one mechanism for all repos. The reviewer marks its summary
@@ -356,6 +379,8 @@ The simple case ships first and is independently useful:
     `suggestions` → spend a fix round as before. Absent verdict (older reviewer,
     or a caller overriding `review_prompt`) falls back to the round-count path, so
     the change is backward-compatible. A clean review no longer consumes a round.
+    Since 2026-09-04 `clean` means *no blocking findings*, not zero suggestions
+    — the nit-chasing that motivated the verdict was itself reversed (above).
   - **Handoff @-mentions the originating human** (author of the PR's
     `Fixes/Closes #N` issue, bots skipped; overridable via the `handoff_mention`
     input) — on **both** the convergence handoff and the cap escalation. The

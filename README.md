@@ -30,6 +30,8 @@ reviewer physically cannot push regardless of what it's asked to do.
 - `examples/claude-review-stub.yml` — reviewer stub to copy into a repo.
 - `scripts/enable-claude.sh` — opens a PR adding both agent stubs to a repo.
 - `design/architecture.md` — design rationale and history.
+- `skills/` — Claude Code skills for maintainers' local sessions (see
+  Maintainers below); never installed into consumer repos.
 
 ## Enabling the agents in a repo
 
@@ -89,7 +91,13 @@ The reviewer posts a top-level summary plus inline comments on a PR. It runs:
 
 It is read-only: it can run tests to verify a finding but cannot modify code or
 push. Its findings are confidence-filtered (few high-signal items over many
-speculative ones).
+speculative ones), and every finding is tagged **blocking** or
+**non-blocking** — a finding blocks only for a regression on a mainline path, a
+weakened security boundary, data loss or corruption, or a PR-description claim
+the code does not deliver. A review with no blocking findings is a pass (the
+`clean` verdict the `@auto` loop converges on); non-blocking findings are posted
+once for the author to fix or dismiss with a reason. Rationale:
+[design/auto-agent.md](design/auto-agent.md).
 
 ### The review → fix loop
 
@@ -192,7 +200,28 @@ changed (the reusable workflow it calls updates automatically).
 ## Maintainers
 
 You don't need any of this to *use* the agents — there are no secrets or config
-to set up per repo. For working on the infra:
+to set up per repo.
+
+**Local skills.** `skills/` holds Claude Code skills for maintainers' own
+sessions. They are installed per machine as user-level symlinks — one `ln -s`
+per skill into `~/.claude/skills/<name>`, pointing at this checkout — and are
+never copied into consumer repos:
+
+```sh
+ln -s "$PWD/skills/review-pass" ~/.claude/skills/review-pass
+```
+
+| Skill | What it does |
+|---|---|
+| `review-pass` | Review a PR/branch with the maintainers' review bar: findings tagged blocking/non-blocking, one verdict line |
+| `checkout` | Check out the PR branch for an issue |
+| `import` | Mirror an upstream inspect_ai issue into the fork and onto Atlas |
+| `promote` | Open the upstream PR for a reviewed fork branch and do the bookkeeping |
+| `post-upstream-review` | Relay an External proxy's review findings to the contributor's upstream PR |
+| `merge-approved-prs` | Merge approved upstream PRs from the Atlas Merge stage |
+| `resolve-board` | Bring the Atlas board current on demand |
+
+For working on the infra:
 
 - [design/architecture.md](design/architecture.md) — auth (WIF), the permission
   model, model selection, branch protection, one-time org setup, and the

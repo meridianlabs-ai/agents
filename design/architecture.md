@@ -624,7 +624,9 @@ substring collision in trigger gates). Design choices:
   knob for continuous review if the manual re-review becomes tedious.
 - **Comprehensive per pass, not one finding at a time.** The prompt asks for
   *every* confident finding in a single review (nits included), still behind a
-  high-confidence bar. This is mostly for the `@auto` loop: the reviewer runs
+  high-confidence bar, each tagged blocking or non-blocking; only blocking
+  findings drive the verdict (the maintainers' review bar — see auto-agent.md).
+  This is mostly for the `@auto` loop: the reviewer runs
   statelessly each round, so a "report only the top issue" bias made it surface
   findings serially — one per round — which burned a whole review→fix round per
   finding and pushed multi-issue PRs into escalation. Batching lets the fixer

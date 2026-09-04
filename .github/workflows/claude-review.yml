@@ -31,12 +31,23 @@ on:
         type: string
         default: >-
           Review this pull request. Focus on correctness bugs, security
-          issues, and clear simplification or reuse opportunities. Be
-          comprehensive within this single review: report every finding you are
-          confident about in one pass — including minor and non-blocking nits —
-          rather than surfacing one issue at a time, so the author can address
-          them together in a single round. Still hold a high-confidence bar: do
-          NOT pad the review with speculative or marginal guesses. Beyond the
+          issues, and clear simplification or reuse opportunities. Hold it to
+          the maintainers' agreed REVIEW BAR: (1) Scope is the problem the PR
+          states. Findings outside it are comments, not blockers; the PR does
+          not have to fix everything nearby. (2) A finding blocks only if it
+          is a regression on a mainline path, a weakened security boundary,
+          data loss or corruption, or a claim in the PR description the code
+          does not deliver. Tag EVERY finding `blocking` or `non-blocking`.
+          (3) A review with no blocking findings is a pass. Post non-blocking
+          findings once; the author fixes or dismisses each with a reason, and
+          no further round is spent on them. (4) Fringe regressions and fringe
+          cases left unsolved are notes, not blockers. The test is whether the
+          PR leaves the code better than it found it. Be comprehensive within
+          this single review: report every finding you are confident about in
+          one pass — non-blocking ones included — rather than surfacing one
+          issue at a time, so the author can address them together in a single
+          round. Still hold a high-confidence bar: do NOT pad the review with
+          speculative or marginal guesses. Beyond the
           diff itself, assess REGRESSION RISK: what existing behavior could
           this change break? Consider changed defaults or config semantics;
           public API signature/type changes; compatibility of serialized data
@@ -50,13 +61,13 @@ on:
           regression findings — a plausible, concrete risk is reportable — but
           each one must name four things: the behavior that changes, who or
           what depends on it, the trigger scenario, and a classification:
-          regression-blocking (breaks a documented contract, or silently
-          changes or damages existing users' behavior or data, with no
-          migration note) or regression-accepted (unlikely, guarded, or
-          mitigation costs more than the risk — say why). Only
-          regression-blocking findings count as actionable for your verdict;
-          regression-accepted notes are informational and must NOT flip the
-          verdict to `suggestions` on their own. You may run
+          regression-blocking (a mainline path or documented contract breaks,
+          or existing users' behavior or data is silently changed or damaged,
+          with no migration note) or regression-accepted (a fringe path:
+          unlikely, guarded, or mitigation costs more than the risk — say
+          why). regression-blocking is a blocking finding; regression-accepted
+          is non-blocking and must NOT flip the verdict to `suggestions` on
+          its own. You may run
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere
@@ -74,13 +85,11 @@ on:
           line-level findings. THEN, as your final action, post a SEPARATE
           standalone comment with a single `gh pr comment --body` call — post it
           in one call and do NOT edit it afterward. Its body must be EXACTLY one
-          of these two lines, chosen by whether you are asking the author to
-          change ANYTHING:
-          (a) if you have NO outstanding suggestions at all — no blocking issues
-          and no non-blocking nits, nothing you want changed:
-          `🔎 Review complete — no outstanding suggestions. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->`
-          (b) otherwise — you raised anything actionable, even a single minor or
-          explicitly non-blocking nit:
+          of these two lines, chosen by whether ANY finding is blocking:
+          (a) if you have NO blocking findings — non-blocking findings may
+          still have been posted; the PR passes regardless:
+          `🔎 Review complete — no blocking findings. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->`
+          (b) otherwise — at least one finding is blocking:
           `🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->`
           (The trailing HTML comments are markers the @auto loop keys on:
           `claude-review-summary` fires the loop; `claude-review-verdict` tells it
@@ -837,10 +846,11 @@ jobs:
             change from the local checkout (git log/diff against the base
             branch; full history is available). Produce your ENTIRE review as
             your final message conforming to the output schema. Verdict
-            'clean' ONLY when nothing actionable remains (regression-accepted
-            notes are informational and do not flip it); 'suggestions'
-            otherwise. Include every finding in the review body with
-            file:line references, each tagged blocking or non-blocking. Never
+            'clean' when NO finding is blocking (non-blocking findings and
+            regression-accepted notes may still be listed and do not flip
+            it); 'suggestions' when at least one finding is blocking. Include
+            every finding in the review body with file:line references, each
+            tagged blocking or non-blocking. Never
             write a literal @-prefixed trigger token (review, claude, auto)
             in the review text — it is posted from a write-access account and
             would fire a workflow; backtick such tokens instead. Likewise do
@@ -894,7 +904,7 @@ jobs:
           gh pr comment "$NUM" --repo "$REPO" --body-file "$RUNNER_TEMP/codex-review-body.md"
           if [ "$verdict" = "clean" ]; then
             gh pr comment "$NUM" --repo "$REPO" --body \
-              '🔎 Review complete — no outstanding suggestions. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->'
+              '🔎 Review complete — no blocking findings. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->'
           else
             gh pr comment "$NUM" --repo "$REPO" --body \
               '🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->'
