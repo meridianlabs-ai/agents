@@ -516,6 +516,25 @@ merge that reports "Already up to date" sets no `merge_sha` at all, so neither
 the backstop nor the "review the runner's merge" note fires on a branch that
 already contains its base.
 
+The agent's *own* push owes the same hand-back, and in `claude.yml` a second
+step, "Ensure hand-back after agent push", guarantees it (the loops' "Ensure
+hand-back after push" already does). Observed on fork PR #416 (2026-09-03): an
+`@auto` run on a closed-PR continuation pushed its fix to the branch shared
+with the upstream PR, then reasoned that the upstream PR was the review surface
+and skipped the `@review`; nothing requested a review and the board sat at
+Agent. The step compares the head branch's live tip after the run with the
+live tip `sync-branch` recorded before the agent ran (its `head_sha`, emitted
+*before* the composite's closed-PR skip, since that skip leaves `branch` and
+`start_sha` empty in exactly the continuation case — and not the PR's
+`headRefOid`, which is frozen at close). A tip comparison, like the loops',
+also catches a fast-forward of pre-existing commits, which a commit-date
+filter would miss. Fork heads are skipped (nothing can push there, and the
+fork's branch name would be looked up in the base repo), and every API read is
+fail-safe — `gh api` prints the error body to stdout on a non-2xx, so a
+deleted branch or a 5xx skips the check instead of posting a review on a PR
+nobody pushed to. The same since-the-run-started check as the backstop's
+hand-back keeps the two from double-posting.
+
 A failed sync step (a transient `gh`/fetch error, or the deliberate loud
 failure when `git merge` dies without content conflicts) skips every
 downstream step rather than failing them, so the "Surface agent errors" steps

@@ -659,12 +659,19 @@ jobs:
       # nothing requested a review, the loop never engaged, and "Stage -
       # Review (hand-back)" kept the board at Agent expecting the loop to own
       # it. Mirror the loops' "Ensure hand-back after push": on an @auto PR
-      # run with a successful agent, if commits landed on the PR's head
-      # branch since the run started and no @review / leading hand-off
-      # marker was posted since, post the @review. Branch and "moved" are
-      # read live (PR head + commits since `started`) rather than from the
-      # sync outputs, because sync-branch deliberately skips closed PRs and
-      # emits no branch/start_sha there — exactly the continuation case.
+      # run with a successful agent, if the PR's head branch tip moved during
+      # the run and no @review / leading hand-off marker was posted since,
+      # post the @review. "Moved" is the live tip against the live tip
+      # sync-branch recorded before the agent ran (its `head_sha`, emitted
+      # before its closed-PR skip — that skip is why `branch`/`start_sha` are
+      # empty in exactly the continuation case), so like the loops' SHA
+      # comparison it also catches a fast-forward of pre-existing commits
+      # (the agent pulling the upstream PR's branch), which a commit-date
+      # filter would miss. The branch is read live from the PR because the
+      # sync outputs are empty on closed PRs. Every read is fail-safe: `gh
+      # api` prints the error body to STDOUT on a non-2xx, so a swallowed
+      # status would post a review on a merged PR whose branch is gone, or on
+      # a 5xx — the values are validated and the check skips instead.
       # Same since-check as the step above (the two never double-post), same
       # retry/backoff, same loud failure into the Surface step.
       - name: Ensure hand-back after agent push
@@ -678,21 +685,56 @@ jobs:
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           SINCE: ${{ steps.sync.outputs.started }}
+          START_TIP: ${{ steps.sync.outputs.head_sha }}
         run: |
           set -uo pipefail
           if [ -z "${SINCE:-}" ]; then
             echo "::warning::no run-start stamp from sync-branch; cannot judge whether the agent pushed — skipping the hand-back check"
             exit 0
           fi
-          branch=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq .headRefName 2>/dev/null || true)
+          # Fork heads owe nothing (no engine can push there — the same skip
+          # sync-branch applies), and must not be looked up: headRefName is
+          # the FORK's branch name, and a base-repo branch of the same name
+          # (a fork's `main`, on a repo whose main is re-synced hourly) would
+          # have its own commits counted as the agent's push.
+          prj=$(gh pr view "$NUM" --repo "$REPO" --json headRefName,isCrossRepository 2>/dev/null) || prj=""
+          branch=$(jq -r '.headRefName // empty' <<<"${prj:-null}")
           if [ -z "$branch" ]; then
             echo "::warning::could not read the head branch of PR #$NUM; skipping the hand-back check"
             exit 0
           fi
-          pushed=$(gh api "repos/$REPO/commits?sha=$branch&since=$SINCE&per_page=5" --jq 'length' 2>/dev/null || echo 0)
-          if [ "${pushed:-0}" -eq 0 ]; then
-            echo "No commits on $branch since $SINCE; no hand-back owed."
+          if [ "$(jq -r '.isCrossRepository' <<<"$prj")" = "true" ]; then
+            echo "PR #$NUM has a fork head; nothing pushes there — no hand-back owed."
             exit 0
+          fi
+          tip=$(gh api "repos/$REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null) || tip=""
+          [[ "$tip" =~ ^[0-9a-f]{40}$ ]] || tip=""
+          if [ -z "$tip" ]; then
+            echo "::warning::could not read the tip of $branch (branch deleted, or API error); skipping the hand-back check"
+            exit 0
+          fi
+          if [ -n "${START_TIP:-}" ]; then
+            if [ "$tip" = "$START_TIP" ]; then
+              echo "Tip of $branch unchanged ($tip); no hand-back owed."
+              exit 0
+            fi
+            moved="$START_TIP -> $tip"
+          else
+            # No pre-run tip (sync-branch's read failed, or a branch-tested
+            # claude.yml against an older composite): fall back to commits
+            # dated after the run started. Weaker (a fast-forward of older
+            # commits reads as 0) but still fail-safe: a non-number means an
+            # API error, and that skips rather than posts.
+            if ! pushed=$(gh api "repos/$REPO/commits?sha=$branch&since=$SINCE&per_page=5" --jq 'length' 2>/dev/null) \
+               || ! [[ "$pushed" =~ ^[0-9]+$ ]]; then
+              echo "::warning::could not list commits on $branch since $SINCE; skipping the hand-back check"
+              exit 0
+            fi
+            if [ "$pushed" -eq 0 ]; then
+              echo "No commits on $branch since $SINCE; no hand-back owed."
+              exit 0
+            fi
+            moved="$pushed commit(s) since $SINCE"
           fi
           posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
             --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
@@ -700,7 +742,7 @@ jobs:
             echo "Hand-back already posted this run; not posting another."
             exit 0
           fi
-          echo "Agent pushed $pushed commit(s) to $branch this run without a hand-back; posting the re-review request."
+          echo "Agent pushed to $branch this run ($moved) without a hand-back; posting the re-review request."
           ok=""
           for i in 1 2 3 4 5; do
             if gh pr comment "$NUM" --repo "$REPO" --body '@review'; then ok=1; break; fi
