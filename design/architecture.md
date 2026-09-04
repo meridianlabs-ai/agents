@@ -511,7 +511,12 @@ moves, so a round whose only product is the runner's merge concludes with the
 hand-off rather than a re-review on both engines — the Claude path's prompt
 tells a no-change round to post the hand-off (which "Ensure hand-back after
 push" honors), and the codex landing step posts it itself when HEAD is still
-exactly the runner's merge. A
+exactly the runner's merge. The review loop's backstop accepts a hand-off
+comment as the hand-back *only* when the pushed tip is exactly that
+`merge_sha`; any other tip is agent work, which the fixer's ending contract
+says always owes the `@review`, so the backstop posts it if the agent did not
+(2026-09-04; before that any hand-off comment was accepted, the now-deleted
+doc-only nit exception being the case it covered). A
 merge that reports "Already up to date" sets no `merge_sha` at all, so neither
 the backstop nor the "review the runner's merge" note fires on a branch that
 already contains its base.

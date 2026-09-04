@@ -954,10 +954,17 @@ jobs:
       # Agent. If the tip moved and no hand-back was posted, post the
       # re-review request as the machine account — a redundant review round is
       # the safe completion (word-boundary gate + newest-wins concurrency make
-      # duplicates cheap). A handoff comment still counts as the hand-back:
-      # on both engines a round can hand off with no changes of its own and
-      # still move the tip via the runner's base merge (the codex landing,
-      # or "Push base merge if unpushed" above), which owes no re-review.
+      # duplicates cheap). A handoff comment counts as the hand-back ONLY when
+      # the tip is exactly the runner's base merge (sync-branch's merge_sha,
+      # pushed by "Push base merge if unpushed" above or by the codex landing's
+      # merge-only branch): that is a round that changed nothing of its own
+      # and legitimately hands off. Any other tip is agent work, which the
+      # ENDING CONTRACT says always owes the @review — so with the doc-only
+      # exception gone there is no prompt-level reason left to accept a
+      # hand-off after a push, and gating on merge_sha closes the #206 shape
+      # deterministically instead of trusting prompt compliance. An empty
+      # merge_sha (branch already contained its base) means every tip move is
+      # agent work.
       # Codex gate is codexfix, not codexland: a landing that pushed and then
       # died posting its comment still owes the @review — this step detects
       # the push itself, so gating on the earlier step closes that gap.
@@ -971,6 +978,7 @@ jobs:
           PR: ${{ inputs.pr_number }}
           HEAD_BRANCH: ${{ steps.gate.outputs.head_branch }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SINCE: ${{ steps.base.outputs.started }}
         run: |
           set -uo pipefail
@@ -980,9 +988,19 @@ jobs:
           # Hand-off marker matched as the leading line (same shape as the
           # selfhandoff detector), not as a substring: the action's tracking
           # comment is rewritten with the agent's summary, which may mention
-          # the marker in prose without being a hand-off.
+          # the marker in prose without being a hand-off. Single-quoted so jq
+          # receives the `\\s` escapes as written (expansion below does not
+          # re-process them).
+          review_request='(.body | test("^\\s*@review\\s*$"))'
+          if [ -n "${MERGE_SHA:-}" ] && [ "$tip" = "$MERGE_SHA" ]; then
+            echo "Tip is the runner's base merge ($tip): a hand-off comment also completes the round."
+            handback="$review_request or (.body | startswith(\"<!-- auto-handoff -->\"))"
+          else
+            echo "Tip carries agent work ($BASE_SHA -> $tip): only the re-review request completes the round."
+            handback="$review_request"
+          fi
           posted=$(gh api "repos/$REPO/issues/$PR/comments?since=$SINCE" \
-            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
+            --jq "[.[] | select($handback)] | length" 2>/dev/null || echo 0)
           if [ "${posted:-0}" -gt 0 ]; then
             echo "Hand-back already posted this round."
           else
