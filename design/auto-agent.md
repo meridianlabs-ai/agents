@@ -156,8 +156,9 @@ findings outside it, and fringe cases left unsolved, are notes, not blockers.
 The verdict follows: **`clean` means no blocking findings** (non-blocking
 findings may still have been posted), `suggestions` means at least one. A fix
 round therefore runs only when something blocks; in it the fixer fixes the
-blocking findings, takes non-blocking ones that are cheap and in scope, and
-declines the rest with a one-line reply. Non-blocking findings are posted once
+blocking findings, takes non-blocking ones that are cheap and in scope (only
+alongside a blocking fix — nits are never pushed alone), and declines the rest
+with a one-line reply. Non-blocking findings are posted once
 and never spend another round.
 
 This REVERSES the earlier decision (Phase 2 below) that the fixer addresses

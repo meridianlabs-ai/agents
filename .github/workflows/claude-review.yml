@@ -801,7 +801,7 @@ jobs:
            "required": ["verdict", "review"],
            "properties": {
              "verdict": {"type": "string", "enum": ["clean", "suggestions"],
-               "description": "clean = nothing actionable remains; suggestions = at least one actionable finding"},
+               "description": "clean = no blocking finding (non-blocking findings may be listed); suggestions = at least one blocking finding"},
              "review": {"type": "string",
                "description": "the full review as GitHub markdown, findings with file:line references"}}}
           SCHEMA
