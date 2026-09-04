@@ -208,6 +208,7 @@ per skill into `~/.claude/skills/<name>`, pointing at this checkout — and are
 never copied into consumer repos:
 
 ```sh
+mkdir -p ~/.claude/skills
 ln -s "$PWD/skills/review-pass" ~/.claude/skills/review-pass
 ```
 
