@@ -21,8 +21,13 @@ STATUS_FIELD=PVTSSF_lADOC7YMCM4BU68pzhKizZM  # In progress option below
 INPROGRESS_OPT=47fc9ee4
 UPSTREAM_PR_FIELD=PVTF_lADOC7YMCM4BU68pzhYZp9Q
 # Upstream reviewer to assign + request (also on the ts-mono companion);
-# override per run with REVIEWER=<login>. Validated in preflight below.
-REVIEWER=${REVIEWER:-dragonstyle}
+# override per run with REVIEWER=<login>. An override is validated in
+# preflight below; the default is known-good and skips the upstream lookup.
+# Lower-cased once: logins are case-insensitive at the API, and the
+# idempotency checks compare against canonical `.login` values (also
+# lower-cased there), so `REVIEWER=DragonStyle` heals instead of re-POSTing.
+DEFAULT_REVIEWER=dragonstyle
+REVIEWER=$(tr 'A-Z' 'a-z' <<<"${REVIEWER:-$DEFAULT_REVIEWER}")
 
 N=${1:?usage: promote.sh <issue-number> [--dry-run]}
 DRY=${2:-}
@@ -85,12 +90,22 @@ check_reviewer() {  # $1 = owner/repo; 204 ok, 404 exit 5, other → warn
     *)   echo "WARN: could not verify REVIEWER=$REVIEWER on $1 (HTTP ${rc:-none}); continuing" >&2 ;;
   esac
 }
-check_reviewer "$UPSTREAM"
+# Only an OVERRIDE needs validating upstream: the default was never checked
+# before and is known-good, and a promoting token without push access there
+# would otherwise print the WARN line on every default run.
+[ "$REVIEWER" = "$DEFAULT_REVIEWER" ] || check_reviewer "$UPSTREAM"
 # The ts-mono companion (same branch name, open) gets the SAME reviewer, so an
 # override valid upstream but unknown on ts-mono would 422 there instead —
-# look the companion up here and check it too, before any write.
+# look the companion up here and check it too, before any write. Unconditional
+# (default included): the promoting token has push on ts-mono, so this never
+# warns spuriously and catches a dropped collaborator for free.
 COMPANION=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
 [ -n "$COMPANION" ] && check_reviewer "$TSMONO"
+# Idempotency probe for the assign/request steps: $1 = key (a|r) in the
+# state JSON $2. Case-insensitive on both sides (see REVIEWER above).
+has_login() {
+  jq -e --arg u "$REVIEWER" --arg k "$1" '(.[$k] // []) | map(ascii_downcase) | index($u)' <<<"$2" >/dev/null 2>&1
+}
 # --paginate: busy @auto issues/PRs exceed 100 comments, and the API returns
 # oldest-first — a single page never sees recent comments.
 VERDICT=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
@@ -179,9 +194,9 @@ fi
 if [ "$M" != "0" ]; then
   UP_STATE=$(gh api "repos/$UPSTREAM/pulls/$M" --jq '{a: [.assignees[].login], r: [.requested_reviewers[].login], state}' 2>/dev/null || echo '{}')
   if [ "$(jq -r .state <<<"$UP_STATE")" = "open" ]; then
-    jq -e --arg u "$REVIEWER" '.a | index($u)' <<<"$UP_STATE" >/dev/null 2>&1 ||
+    has_login a "$UP_STATE" ||
       write gh api "repos/$UPSTREAM/issues/$M/assignees" -X POST -f "assignees[]=$REVIEWER" --silent
-    jq -e --arg u "$REVIEWER" '.r | index($u)' <<<"$UP_STATE" >/dev/null 2>&1 ||
+    has_login r "$UP_STATE" ||
       write gh api "repos/$UPSTREAM/pulls/$M/requested_reviewers" -X POST -f "reviewers[]=$REVIEWER" --silent
   fi
 fi
@@ -193,9 +208,9 @@ fi
 # (COMPANION was looked up in preflight, where the reviewer was checked on it.)
 if [ -n "$COMPANION" ]; then
   C_STATE=$(gh api "repos/$TSMONO/pulls/$COMPANION" --jq '{a: [.assignees[].login], r: [.requested_reviewers[].login]}' 2>/dev/null || echo '{}')
-  jq -e --arg u "$REVIEWER" '.a | index($u)' <<<"$C_STATE" >/dev/null 2>&1 ||
+  has_login a "$C_STATE" ||
     write gh api "repos/$TSMONO/issues/$COMPANION/assignees" -X POST -f "assignees[]=$REVIEWER" --silent
-  jq -e --arg u "$REVIEWER" '.r | index($u)' <<<"$C_STATE" >/dev/null 2>&1 ||
+  has_login r "$C_STATE" ||
     write gh api "repos/$TSMONO/pulls/$COMPANION/requested_reviewers" -X POST -f "reviewers[]=$REVIEWER" --silent
   echo "companion $TSMONO#$COMPANION: $REVIEWER assigned + review requested"
 fi

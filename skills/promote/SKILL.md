@@ -115,11 +115,14 @@ cannot resolve org-fork heads at all).
   reviewer for one run with `REVIEWER=<login>` in the environment
   (`REVIEWER=<login> bash <skill-base-dir>/promote.sh <N>`); the default
   stays `dragonstyle`. The override covers the ts-mono companion too (both
-  halves deliberately get the same reviewer), and preflight checks the login
-  against upstream and, when a companion exists, against ts-mono (exit 5 on
-  a 404, before any write). The collaborator lookup needs push access on the
-  repo, so a token that cannot see it gets a `WARN: could not verify` line
-  and the run continues as before — only a 404 is treated as a bad login.
-  The script prints the effective reviewer on its `ADVISORY:` line.
+  halves deliberately get the same reviewer). Preflight checks an OVERRIDDEN
+  login against upstream (the default is known-good and skipped there) and
+  any reviewer against ts-mono when a companion exists (exit 5 on a 404,
+  before any write). The upstream collaborator lookup needs push access, so
+  a token that cannot see it gets a `WARN: could not verify` line and the
+  run continues as before — only a 404 is treated as a bad login. The login
+  is case-insensitive (lower-cased once; the idempotency checks compare
+  case-insensitively too). The script prints the effective reviewer on its
+  `ADVISORY:` line.
 - Do not merge anything — upstream merges are upstream's call; the fork
   issue closes via the sync when that happens.
