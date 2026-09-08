@@ -35,8 +35,9 @@ a human to resolve on the branch) and creates it with the fully-qualified
 `Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
 would rebind to upstream's tracker), plus a bare `Fixes #<up>` when the
 fork issue was imported from upstream (its `Upstream issue:` body line —
-see the import skill; creation-time only, adopted PRs aren't edited); assigns + requests review from
-`dragonstyle` on open PRs; sets the board's `Upstream PR` field (the sync's
+see the import skill; creation-time only, adopted PRs aren't edited); assigns +
+requests review from `dragonstyle` on open PRs (the default — `REVIEWER=<login>`
+overrides it, see Cautions); sets the board's `Upstream PR` field (the sync's
 join key — the #90 lesson), stage → Sign-off + Status → In progress (never
 on a CLOSED issue, never downgrading Sign-off/Merge); comments the upstream
 link on the fork issue; supersedes and closes the open fork PR.
@@ -45,8 +46,10 @@ Exit codes: **0** ok (report the `OK …` line plus which steps were created
 vs already present); **3** no fork-PR chip — resolve inputs via the slow
 path below, then run the script anyway if a branch emerges (it only needs
 the chip for resolution); **4** branch not on the fork; **5** preflight
-hard failure (includes a conflict merging upstream main into the branch —
-no upstream PR was opened; resolve the conflict on the branch and re-run).
+hard failure (a `REVIEWER` who is provably not a collaborator on upstream or
+on the ts-mono companion's repo, or a conflict merging upstream main into the
+branch — either way no upstream PR was opened; fix the login / resolve the
+conflict on the branch and re-run).
 
 ## Slow path (no chip)
 
@@ -109,6 +112,18 @@ cannot resolve org-fork heads at all).
   it touches no other ref.
 - Upstream is not ours: no labels and no Meridian-internal markers on the
   upstream PR beyond the `Fixes` ref. The one exception is the `dragonstyle`
-  assignee + review request (explicitly requested by Ransom).
+  assignee + review request (explicitly requested by Ransom). Override the
+  reviewer for one run with `REVIEWER=<login>` in the environment
+  (`REVIEWER=<login> bash <skill-base-dir>/promote.sh <N>`); the default
+  stays `dragonstyle`. The override covers the ts-mono companion too (both
+  halves deliberately get the same reviewer). Preflight checks an OVERRIDDEN
+  login against upstream (the default is known-good and skipped there) and
+  any reviewer against ts-mono when a companion exists (exit 5 on a 404,
+  before any write). The upstream collaborator lookup needs push access, so
+  a token that cannot see it gets a `WARN: could not verify` line and the
+  run continues as before — only a 404 is treated as a bad login. The login
+  is case-insensitive (lower-cased once; the idempotency checks compare
+  case-insensitively too). The script prints the effective reviewer on its
+  `ADVISORY:` line.
 - Do not merge anything — upstream merges are upstream's call; the fork
   issue closes via the sync when that happens.
