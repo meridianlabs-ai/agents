@@ -240,9 +240,11 @@ jobs:
       # stage move (issue #59; header comment). Decided here, before any
       # checkout, from the PR's head-repo identity (not from who commented):
       # issue_comment looks the PR up via the API; pull_request_review /
-      # pull_request_review_comment read it from the event payload. A lookup
-      # failure refuses too (`fork_head=unknown` — don't admit), with its own
-      # comment text so a same-repo PR is never told it is from a fork. The
+      # pull_request_review_comment read it from the event payload. An API
+      # lookup that never answers refuses too (`fork_head=unknown` — don't
+      # admit), with its own comment text so a same-repo PR is never told it
+      # is from a fork; a payload with NO head repo is a deleted fork, not a
+      # blip, and refuses as a known fork head. The
       # one visible effect is the refusal comment step below, posted only for
       # a write-access commenter so outsiders cannot make the workflow post.
       - name: Check trigger (stage gating)
@@ -298,11 +300,16 @@ jobs:
           # must not refuse a legitimate same-repo run outright — but a
           # persistent failure refuses, fail-closed: only an explicit `false`
           # admits). Review events: the payload's head repo must equal this
-          # repo; an empty value (payload shape drift) also refuses. Three
-          # states, so the refusal comment can tell the truth: `true` is a
-          # known fork head, `unknown` is a lookup that never answered (the
-          # PR may well be same-repo — the comment must not claim otherwise,
-          # nor tell the requester to "push the branch here"). Both refuse.
+          # repo. An EMPTY head repo there is not a lookup failure — no API
+          # call was made — but the shape a PR takes when its fork has been
+          # deleted (head.repo is null), which is by definition not same-repo,
+          # so it counts as a known fork head: `unknown` would promise that a
+          # re-trigger can help, and here every re-trigger lands in the same
+          # place. Three states, so the refusal comment can tell the truth:
+          # `true` is a known fork head, `unknown` is an API lookup that never
+          # answered (the PR may well be same-repo — the comment must not
+          # claim otherwise, nor tell the requester to "push the branch
+          # here"). Both refuse.
           fork_head=false
           if [ "$ok" = "true" ]; then
             if [ "$EVENT" = "issue_comment" ] && [ "$IS_PR_COMMENT" = "true" ]; then
@@ -322,8 +329,8 @@ jobs:
               fi
             elif [ "$EVENT" = "pull_request_review" ] || [ "$EVENT" = "pull_request_review_comment" ]; then
               if [ -z "$HEAD_REPO" ]; then
-                fork_head=unknown
-                echo "::warning::PR #$PR_NUM — the event payload carries no head repo, so whether the head is a fork is unknown; refusing fail-closed."
+                fork_head=true
+                echo "::warning::PR #$PR_NUM — the event payload carries no head repo (its fork was deleted, or the payload shape drifted); not a same-repo head either way — refusing: the dev agent does not run on fork-head PRs."
               elif [ "$HEAD_REPO" != "$REPO" ]; then
                 fork_head=true
                 echo "::warning::PR #$PR_NUM has a fork head ($HEAD_REPO) — refusing: the dev agent does not run on fork-head PRs; use @review for a sandboxed review."

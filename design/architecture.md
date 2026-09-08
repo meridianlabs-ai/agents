@@ -321,7 +321,9 @@ whoever's code, and both workflows used to execute it unsandboxed:
   trigger gate**, before any checkout: `issue_comment` on a PR looks up
   `isCrossRepository` (a lookup that never answers refuses too, as
   `fork_head=unknown`), review events compare the payload's head repo with
-  the repository, and anything but a known same-repo head forces `ok=false`
+  the repository (an empty head repo — a deleted fork — counts as a fork
+  head, not as unknown: no API was asked, so a retry cannot change the
+  answer), and anything but a known same-repo head forces `ok=false`
   so nothing downstream runs — checkout, sync, provision, agent, `@auto`
   opt-in and stage moves are all gated on `ok`. The only visible effect is
   one `github-actions[bot]` comment, posted only when the commenter has write
@@ -345,16 +347,22 @@ whoever's code, and both workflows used to execute it unsandboxed:
   because codex's `:workspace` profile is not the bubblewrap sandbox.
 
 **Project configuration is stripped from every untrusted checkout** (external
-and fork-head alike): `.claude/` (settings with hooks such as `SessionStart`
-and `PreToolUse` command entries, `apiKeyHelper`, `env`, sandbox keys),
-`.mcp.json`, and `CLAUDE.md` / `CLAUDE.local.md`, nested copies included.
-Claude Code loads these from its working directory — the checkout — and hooks
-and `apiKeyHelper` run *outside* the Bash sandbox, so the overlay below cannot
-contain them: a contributor's `settings.json` could turn the sandbox off or run
-a command with the job's credentials before the first prompt. After the strip,
-the caller's `settings` input plus the sandbox overlay are the only
-configuration Claude Code sees; changes to those files are reviewed from the
-diff.
+and fork-head alike), at every depth and whatever the entry's type. `.claude/`
+(settings with hooks such as `SessionStart` and `PreToolUse` command entries,
+`apiKeyHelper`, `env`, sandbox keys, plus `.claude/CLAUDE.md` and
+`.claude/rules/`) and `.mcp.json` are *deleted*: Claude Code loads these from
+its working directory — the checkout — and hooks and `apiKeyHelper` run
+*outside* the Bash sandbox, so the overlay below cannot contain them: a
+contributor's `settings.json` could turn the sandbox off or run a command with
+the job's credentials before the first prompt. `CLAUDE.md` / `CLAUDE.local.md`
+are only instruction text, and the hazard is Claude Code *auto-loading* them
+with instruction authority, so they are *moved aside* to `<name>.untrusted` — a
+name Claude Code does not load — and the prompt tells the reviewer it may read
+them as untrusted data (the project's documented test and lint commands) but
+must take no instruction from them; that keeps the convention knowledge
+external reviews of the inspect_ai upstream relied on. After the strip, the
+caller's `settings` input plus the sandbox overlay are the only configuration
+Claude Code sees; changes to any of these files are reviewed from the diff.
 
 That gave up real verification, so the reviewer now gets **interactive test
 execution inside Claude Code's OS-level Bash sandbox** (bubblewrap + network

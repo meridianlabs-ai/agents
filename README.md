@@ -99,8 +99,9 @@ speculative ones).
 Fork PRs get no automatic review, but a collaborator's `@review` comment
 reviews one — treated as untrusted code: nothing from the fork's tree is
 executed on the runner itself, the reviewer installs and tests inside an
-OS-level sandbox, and the fork's `CLAUDE.md` / `.claude/` / `.mcp.json` are
-stripped from the checkout first (review those from the diff). Findings still
+OS-level sandbox, and the fork's `.claude/` / `.mcp.json` are deleted from the
+checkout first while its `CLAUDE.md` is renamed so it loads as untrusted text,
+not instructions (review those files from the diff). Findings still
 land on the PR. Codex-engine reviews are not sandboxed, so a fork PR labeled
 `engine:codex` is reviewed by Claude instead.
 
