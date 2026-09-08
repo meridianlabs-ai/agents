@@ -21,7 +21,7 @@ take effect on every repo's next run.
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `unresolved-merge-guard`,
-  `push-base-merge`). Referenced fully-qualified
+  `push-base-merge`, `model-provenance`, `reduce-transcript`). Referenced fully-qualified
   (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
   regardless of what the job checked out; put step bodies that would otherwise
   be copied between `claude.yml`, `claude-auto.yml` and `claude-auto-review.yml`
@@ -93,11 +93,19 @@ There is no unit-test suite — changes are validated by triggering the agents:
   on the issue/PR when an unexplained non-requested model served tokens (a
   subagent the agent launched on an explicit model is attributed, not flagged)
   or the result reads like a classifier refusal. For cost, or when the summary
-  is gone, each run uploads a `claude-execution-output.json` artifact: read
-  `modelUsage` in it — **not** the init line, which echoes the requested model
-  even when the model fallback fired.
-- Auth/permission failures surface in that artifact and in the Anthropic Console
-  → Workload identity → Authentication events.
+  is gone, each run uploads a `*-execution-output` artifact (14-day retention)
+  holding a REDUCED, credential-scrubbed transcript — `system`/`assistant`/
+  `result` messages only, no `user`/`tool_result` bodies, no tool inputs
+  beyond Agent-tool model choices (`.github/actions/reduce-transcript`; the
+  raw file can carry the agent's token, and artifacts are neither log-masked
+  nor private on public repos). Read `modelUsage` in it — **not** the init
+  line, which echoes the requested model even when the model fallback fired.
+  The raw file is available as `*-execution-output-full` (3-day retention)
+  only when a caller sets `upload_full_transcript: true` — private repos,
+  while debugging, never as a default.
+- Auth/permission failures surface in that artifact (`is_error` and `result`
+  in the final message) and in the Anthropic Console → Workload identity →
+  Authentication events.
 
 ## Don't
 

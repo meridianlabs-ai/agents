@@ -1,0 +1,115 @@
+name: reduce-transcript
+description: >-
+  Write a reduced, credential-scrubbed copy of claude-code-action's execution
+  file for upload as the run artifact. The raw file is Claude Code's verbose
+  stream-json transcript: besides the `system`/`assistant`/`result` messages
+  the workflows consume, it carries every `user` message with `tool_result`
+  bodies — full Bash stdout/stderr and the contents of every file the agent
+  read — and the agent holds MARVIN_TOKEN as its github_token on most paths,
+  so `gh`, `git`, `env` or a `cat .git/config` would print it. GitHub's log
+  masking does not apply to artifacts, and on public caller repos anyone can
+  download them (Claude Security scan 2026-09-04, finding 4122328; #60). The
+  RAW file stays where it is: every in-job consumer (model-provenance, the
+  "Surface agent errors" / "Refund" steps, push-base-merge's require-file)
+  reads the local path, not the artifact. Only the upload changes.
+
+  Field list (keep in step with model-provenance, which documents the
+  consumers): system → type, subtype, model, session_id, cwd; assistant →
+  type, message.model, message.usage, and message.content filtered to
+  `tool_use` blocks named Task/Agent, each reduced to {type, name, input:
+  {model, description}} (text blocks and every other tool's input go — Bash
+  commands and Write contents can embed secrets); result → type, subtype,
+  is_error, duration_ms, num_turns, total_cost_usd, modelUsage, result; user
+  messages are dropped entirely. The reduced text is then scrubbed for known
+  credential shapes — `.result` is the agent's final message and the one
+  field that could still carry a secret it chose to print. Best-effort: every
+  path exits 0 (forensics must never fail the agent's real work), and on any
+  failure NOTHING is written, so the upload has nothing rather than the raw
+  file. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/reduce-transcript@main); NO post
+  step (local composite actions with post steps break teardown on the fork).
+
+inputs:
+  exec-file:
+    description: >-
+      Path to claude-execution-output.json (claude-code-action's
+      execution_file output). Empty falls back to the runner's default
+      location; a missing file (pre-launch skip, or the codex engine) writes
+      nothing.
+    required: false
+    default: ""
+  output:
+    description: Where to write the reduced file.
+    required: false
+    default: ${{ runner.temp }}/claude-execution-reduced.json
+
+outputs:
+  path:
+    description: The reduced file's path when one was written; empty otherwise.
+    value: ${{ steps.reduce.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - id: reduce
+      shell: bash
+      env:
+        EXEC: ${{ inputs.exec-file }}
+        OUT: ${{ inputs.output }}
+      run: |
+        set -uo pipefail
+        file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+        [ -s "$file" ] || { echo "reduce-transcript: no execution file; nothing to reduce."; exit 0; }
+        rm -f "$OUT"
+        # Both shapes claude-code-action has written: a bare array of messages,
+        # or an object with a `messages` array (mirrors model-provenance).
+        # Nulls from the {a, b, c} shorthand are dropped so an absent field
+        # reads as absent, not null, in the artifact.
+        filter='(if type=="array" then . else .messages end)
+          | map(
+              if .type == "system" then
+                {type, subtype, model, session_id, cwd}
+              elif .type == "assistant" then
+                {type, message: {
+                  model: .message.model,
+                  usage: .message.usage,
+                  content: ((.message.content // []) | map(
+                    select(.type == "tool_use" and ((.name // "") | test("^(Task|Agent)$")))
+                    | {type, name, input: {model: .input.model, description: .input.description}}))}}
+              elif .type == "result" then
+                {type, subtype, is_error, duration_ms, num_turns, total_cost_usd, modelUsage, result}
+              else empty end)
+          | walk(if type == "object" then with_entries(select(.value != null)) else . end)'
+        if ! jq "$filter" "$file" >"$OUT.tmp" 2>"$OUT.err"; then
+          echo "::warning::reduce-transcript: jq could not reduce $file ($(head -c 300 "$OUT.err")); no transcript artifact this run."
+          rm -f "$OUT.tmp" "$OUT.err"
+          exit 0
+        fi
+        rm -f "$OUT.err"
+        # Scrub known credential shapes. Case-insensitive where the shape is a
+        # header name. `[REDACTED]` has no quote or backslash, so the JSON stays
+        # valid; none of the matched alphabets include `"` or `\` either.
+        #   github_pat_ / gh[pousr]_  GitHub fine-grained + classic/app tokens
+        #   sk-...                    Anthropic (sk-ant-) and OpenAI (sk-proj-) keys
+        #   xox[abp]-                 Slack tokens
+        #   eyJ….eyJ….sig             JWTs — what OIDC and installation tokens look like
+        #   Authorization: <scheme>   basic/bearer/token header values (gh, curl -v)
+        #   x-access-token:…@         credential embedded in a git remote URL (.git/config)
+        sed -E -i \
+          -e 's/github_pat_[A-Za-z0-9_]{20,}/[REDACTED]/g' \
+          -e 's/gh[pousr]_[A-Za-z0-9]{20,}/[REDACTED]/g' \
+          -e 's/sk-[A-Za-z0-9_-]{20,}/[REDACTED]/g' \
+          -e 's/xox[abp]-[A-Za-z0-9-]{20,}/[REDACTED]/g' \
+          -e 's/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/[REDACTED]/g' \
+          -e 's/(authorization: *(basic|bearer|token)) [A-Za-z0-9+\/=._~-]+/\1 [REDACTED]/gI' \
+          -e 's/x-access-token:[^@"[:space:]]+@/x-access-token:[REDACTED]@/g' \
+          "$OUT.tmp"
+        if ! jq empty "$OUT.tmp" 2>/dev/null; then
+          echo "::warning::reduce-transcript: the scrubbed transcript is not valid JSON; no transcript artifact this run."
+          rm -f "$OUT.tmp"
+          exit 0
+        fi
+        mv "$OUT.tmp" "$OUT"
+        echo "path=$OUT" >>"$GITHUB_OUTPUT"
+        echo "reduce-transcript: wrote $OUT ($(wc -c <"$OUT") bytes from $(wc -c <"$file"); $(jq 'length' "$OUT") messages kept)"
+        exit 0

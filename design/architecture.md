@@ -132,9 +132,18 @@ distinct signature:
   (`repository_owner == "meridianlabs-ai"`) which is also the cleaner org-wide
   constraint regardless.
 
-Lesson encoded in the workflows: every run uploads its
-`claude-execution-output.json` as an artifact, so auth and model failures are
-diagnosable after the fact. A later "Surface agent errors" post-step also reads
+Lesson encoded in the workflows: every run uploads a reduced, credential-
+scrubbed copy of its `claude-execution-output.json` as an artifact, so auth and
+model failures are diagnosable after the fact. (Reduced since #60: the raw
+transcript carries every `tool_result` body — Bash output and file contents,
+where a `gh`/`env`/`cat .git/config` prints the agent's MARVIN_TOKEN — and
+artifacts are neither log-masked nor private on public repos. The
+`reduce-transcript` composite keeps only the `system`/`assistant`/`result`
+fields the in-job consumers use, drops `user` messages and non-Agent tool
+inputs, and scrubs known credential shapes; `upload_full_transcript: true`
+adds the raw file at 3-day retention for private-repo debugging. The in-job
+consumers all read the raw LOCAL file, so nothing they see changed.) A later
+"Surface agent errors" post-step also reads
 `is_error` from that log (e.g. a model overload/529 or 404) and posts a visible
 comment + fails the run — because claude-code-action otherwise exits 0 on a
 model-API error, leaving a misleading green run with no result (and a stale
@@ -729,9 +738,10 @@ The intended Slack story, mostly off-the-shelf:
 Usage is attributed to the "Claude Code Agent" workspace in the Anthropic
 Console (set rate limits and spend caps there). Per-run served model is in the
 job summary ("Model provenance" table; a note lands on the issue/PR when the
-fallback fired — see Model selection). Cost is in the
-`claude-execution-output.json` artifact each run uploads — read `modelUsage`
-for the model that actually ran (the init line echoes the *requested* model).
+fallback fired — see Model selection). Cost is in the reduced transcript
+artifact each run uploads (`*-execution-output`, 14-day retention) — read
+`modelUsage` and `total_cost_usd` in its `result` message for the model that
+actually ran (the init line echoes the *requested* model).
 
 ## Open items
 

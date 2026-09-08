@@ -113,6 +113,20 @@ on:
           "Bash(git diff:*)","Bash(git show:*)","Bash(git rev-parse:*)",
           "Bash(git remote:*)",
           "Bash(git add:*)","Bash(git commit:*)","Bash(git config:*)"]}}
+      upload_full_transcript:
+        description: >-
+          Also upload the RAW execution file — every tool_result body: Bash
+          stdout/stderr and the contents of every file the agent read,
+          unredacted — as `claude-auto-execution-output-full` with 3-day
+          retention. Debugging aid ONLY: the fix agent holds MARVIN_TOKEN and a
+          `gh`/`git`/`env` call prints it; GitHub's log masking does not apply
+          to artifacts, and anyone can download a public repo's run artifacts.
+          Enable this only on PRIVATE caller repos, and only while debugging.
+          The default artifact is the reduced, scrubbed transcript
+          (.github/actions/reduce-transcript; #60).
+        required: false
+        type: boolean
+        default: false
     secrets:
       MARVIN_TOKEN:
         description: >-
@@ -947,10 +961,30 @@ jobs:
           gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
           echo "Refunded attempt $ATTEMPT -> $prev."
 
+      # Reduced, scrubbed transcript — not the raw execution file, whose
+      # tool_result bodies can carry MARVIN_TOKEN; artifacts are not
+      # log-masked and a public repo's are downloadable by anyone (#60). The
+      # in-job consumers above keep reading the raw LOCAL file.
+      - name: Reduce execution log for upload
+        if: always()
+        uses: meridianlabs-ai/agents/.github/actions/reduce-transcript@main
+        with:
+          exec-file: ${{ steps.claude.outputs.execution_file }}
+
       - name: Upload execution log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: claude-auto-execution-output
+          path: ${{ runner.temp }}/claude-execution-reduced.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload full execution log (debug; private repos only)
+        if: always() && inputs.upload_full_transcript == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-auto-execution-output-full
           path: /home/runner/work/_temp/claude-execution-output.json
           if-no-files-found: ignore
+          retention-days: 3
