@@ -197,8 +197,9 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
   visible and recoverable. That comment is deliberately **trigger-free** (no
   literal `@review`/`@auto`): a bot-authored comment carrying a live trigger
   would re-fire the loop and, on a persistent gate failure, spin.
-- **Cost visibility** — the per-run `claude-execution-output.json` artifacts
-  already make spend auditable after the fact.
+- **Cost visibility** — the per-run `*-execution-output` artifacts (reduced
+  transcript; `total_cost_usd` and `modelUsage` are kept) already make spend
+  auditable after the fact.
 
 ## Event-driven implementation sketch
 

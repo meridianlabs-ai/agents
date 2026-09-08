@@ -73,7 +73,7 @@ runs:
                 {type, message: {
                   model: .message.model,
                   usage: .message.usage,
-                  content: ((.message.content // []) | map(
+                  content: ((.message.content | if type == "array" then . else [] end) | map(
                     select(.type == "tool_use" and ((.name // "") | test("^(Task|Agent)$")))
                     | {type, name, input: {model: .input.model, description: .input.description}}))}}
               elif .type == "result" then
@@ -95,11 +95,18 @@ runs:
         #   eyJ….eyJ….sig             JWTs — what OIDC and installation tokens look like
         #   Authorization: <scheme>   basic/bearer/token header values (gh, curl -v)
         #   x-access-token:…@         credential embedded in a git remote URL (.git/config)
+        # The short prefixes (sk-, gh?_, xox?-) get a left boundary so kebab
+        # identifiers such as `task-notification-handler-v2` or `risk-based-…`
+        # in the agent's text are not half-redacted. Not `\b`: the text is
+        # JSON, where a token at the start of a line is preceded by a literal
+        # `\n` whose `n` is a word character, so `\b` would miss it — the
+        # boundary is "line start, a non-word character, or a `\n`/`\r`/`\t`
+        # escape", restored by `\1`.
         sed -E -i \
           -e 's/github_pat_[A-Za-z0-9_]{20,}/[REDACTED]/g' \
-          -e 's/gh[pousr]_[A-Za-z0-9]{20,}/[REDACTED]/g' \
-          -e 's/sk-[A-Za-z0-9_-]{20,}/[REDACTED]/g' \
-          -e 's/xox[abp]-[A-Za-z0-9-]{20,}/[REDACTED]/g' \
+          -e 's/(^|[^A-Za-z0-9_]|\\[nrt])gh[pousr]_[A-Za-z0-9]{20,}/\1[REDACTED]/g' \
+          -e 's/(^|[^A-Za-z0-9_]|\\[nrt])sk-[A-Za-z0-9_-]{20,}/\1[REDACTED]/g' \
+          -e 's/(^|[^A-Za-z0-9_]|\\[nrt])xox[abp]-[A-Za-z0-9-]{20,}/\1[REDACTED]/g' \
           -e 's/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/[REDACTED]/g' \
           -e 's/(authorization: *(basic|bearer|token)) [A-Za-z0-9+\/=._~-]+/\1 [REDACTED]/gI' \
           -e 's/x-access-token:[^@"[:space:]]+@/x-access-token:[REDACTED]@/g' \
