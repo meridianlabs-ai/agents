@@ -319,15 +319,18 @@ whoever's code, and both workflows used to execute it unsandboxed:
   the commenter, in a job holding `MARVIN_TOKEN`, the contents-write job
   token and the OIDC request token. It now **refuses fork heads in the
   trigger gate**, before any checkout: `issue_comment` on a PR looks up
-  `isCrossRepository` (lookup failure counts as a fork), review events
-  compare the payload's head repo with the repository, and a fork head
-  forces `ok=false` so nothing downstream runs — checkout, sync, provision,
-  agent, `@auto` opt-in and stage moves are all gated on `ok`. The only
-  visible effect is one `github-actions[bot]` comment pointing at `@review`,
-  posted only when the commenter has write access (outsiders must not be able
-  to make the workflow post). No sandboxed dev path for forks: reviewing fork
-  PRs is the reviewer's job, and "push the branch to this repository" is the
-  route to agent work on it.
+  `isCrossRepository` (a lookup that never answers refuses too, as
+  `fork_head=unknown`), review events compare the payload's head repo with
+  the repository, and anything but a known same-repo head forces `ok=false`
+  so nothing downstream runs — checkout, sync, provision, agent, `@auto`
+  opt-in and stage moves are all gated on `ok`. The only visible effect is
+  one `github-actions[bot]` comment, posted only when the commenter has write
+  access (outsiders must not be able to make the workflow post): a known fork
+  head gets "use `@review` / push the branch here", once per PR (stubs fire
+  on comment edits too); an unknown head gets "the lookup failed, re-trigger"
+  every time, and is never told it is from a fork. No sandboxed dev path for
+  forks: reviewing fork PRs is the reviewer's job, and "push the branch to
+  this repository" is the route to agent work on it.
 - The **reviewer** admitted a fork head when a write-access user commented
   `@review`, then checked it out with credentials persisted and executed it
   on the runner before the agent started (its `claude-setup` if the fork

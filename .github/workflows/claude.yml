@@ -133,12 +133,15 @@ on:
           branch with base" step normally merges on the runner for both engines,
           and only hands the job back here when it could not — a conflict (the
           index must be clean before claude-code-action's setupBranch runs) or a
-          fork head. Fresh runs from an issue branch off the (hourly-synced)
-          base, so no merge is needed and this is skipped. NB an empty value is
-          NOT a sync off-switch: the runner-side merge always runs on
-          PR-context runs; empty only suppresses this agent-side instruction,
-          leaving the agent uninstructed on the conflict/fork paths — so keep
-          it non-empty unless the caller handles those cases itself.
+          fork head (unreachable in this workflow since issue #59: the trigger
+          gate refuses fork heads before the sync runs; the shared composite's
+          fork-head hand-off is kept as defense in depth). Fresh runs from an
+          issue branch off the (hourly-synced) base, so no merge is needed and
+          this is skipped. NB an empty value is NOT a sync off-switch: the
+          runner-side merge always runs on PR-context runs; empty only
+          suppresses this agent-side instruction, leaving the agent
+          uninstructed on the conflict path — so keep it non-empty unless the
+          caller handles that case itself.
         required: false
         type: string
         default: >-
@@ -152,8 +155,9 @@ on:
         description: >-
           Caller-specific guidance about the base merge, reaching the agent
           whenever a merge happened this run — on BOTH engines. When "Sync
-          branch with base" hands the merge to the agent (conflict / fork
-          head) it is appended to branch_sync_prompt; when the runner merged
+          branch with base" hands the merge to the agent (a conflict; the
+          composite's fork-head hand-off is unreachable here since issue #59)
+          it is appended to branch_sync_prompt; when the runner merged
           cleanly it is spliced on its own, behind a one-line lead-in saying a
           workflow step already merged and the agent should review the result.
           Clean merges are the case that motivated it: git can auto-merge a
@@ -236,10 +240,11 @@ jobs:
       # stage move (issue #59; header comment). Decided here, before any
       # checkout, from the PR's head-repo identity (not from who commented):
       # issue_comment looks the PR up via the API; pull_request_review /
-      # pull_request_review_comment read it from the event payload. Any
-      # lookup failure counts as a fork head — refuse, don't admit. The one
-      # visible effect is the refusal comment step below, posted only for a
-      # write-access commenter so outsiders cannot make the workflow post.
+      # pull_request_review_comment read it from the event payload. A lookup
+      # failure refuses too (`fork_head=unknown` — don't admit), with its own
+      # comment text so a same-repo PR is never told it is from a fork. The
+      # one visible effect is the refusal comment step below, posted only for
+      # a write-access commenter so outsiders cannot make the workflow post.
       - name: Check trigger (stage gating)
         id: trig
         env:
@@ -293,7 +298,11 @@ jobs:
           # must not refuse a legitimate same-repo run outright — but a
           # persistent failure refuses, fail-closed: only an explicit `false`
           # admits). Review events: the payload's head repo must equal this
-          # repo; an empty value (payload shape drift) also refuses.
+          # repo; an empty value (payload shape drift) also refuses. Three
+          # states, so the refusal comment can tell the truth: `true` is a
+          # known fork head, `unknown` is a lookup that never answered (the
+          # PR may well be same-repo — the comment must not claim otherwise,
+          # nor tell the requester to "push the branch here"). Both refuse.
           fork_head=false
           if [ "$ok" = "true" ]; then
             if [ "$EVENT" = "issue_comment" ] && [ "$IS_PR_COMMENT" = "true" ]; then
@@ -304,18 +313,24 @@ jobs:
                 xr=""
                 [ "$i" -lt 2 ] && sleep 5
               done
-              if [ "$xr" != "false" ]; then
+              if [ "$xr" = "true" ]; then
                 fork_head=true
-                echo "::warning::PR #$PR_NUM has a fork head (isCrossRepository='${xr:-lookup failed}') — refusing: the dev agent does not run on fork-head PRs; use @review for a sandboxed review."
+                echo "::warning::PR #$PR_NUM has a fork head — refusing: the dev agent does not run on fork-head PRs; use @review for a sandboxed review."
+              elif [ "$xr" != "false" ]; then
+                fork_head=unknown
+                echo "::warning::PR #$PR_NUM — the head-repo lookup failed (isCrossRepository='${xr:-lookup failed}'), so whether the head is a fork is unknown; refusing fail-closed. Re-trigger to retry."
               fi
             elif [ "$EVENT" = "pull_request_review" ] || [ "$EVENT" = "pull_request_review_comment" ]; then
-              if [ -z "$HEAD_REPO" ] || [ "$HEAD_REPO" != "$REPO" ]; then
+              if [ -z "$HEAD_REPO" ]; then
+                fork_head=unknown
+                echo "::warning::PR #$PR_NUM — the event payload carries no head repo, so whether the head is a fork is unknown; refusing fail-closed."
+              elif [ "$HEAD_REPO" != "$REPO" ]; then
                 fork_head=true
-                echo "::warning::PR #$PR_NUM has a fork head (${HEAD_REPO:-unknown head repo}) — refusing: the dev agent does not run on fork-head PRs; use @review for a sandboxed review."
+                echo "::warning::PR #$PR_NUM has a fork head ($HEAD_REPO) — refusing: the dev agent does not run on fork-head PRs; use @review for a sandboxed review."
               fi
             fi
           fi
-          [ "$fork_head" = "true" ] && ok=false
+          [ "$fork_head" != "false" ] && ok=false
           echo "trigger check for stage tracking: ok=$ok fork_head=$fork_head"
           echo "ok=$ok" >>"$GITHUB_OUTPUT"
           echo "fork_head=$fork_head" >>"$GITHUB_OUTPUT"
@@ -332,13 +347,27 @@ jobs:
       # with a looser gate). The permission read fails closed: no
       # permission, or a lookup error, means no comment. Best-effort — never
       # fails the run.
+      #
+      # Two texts, one per refusal state. A KNOWN fork head is a fixed
+      # property of the PR, so its refusal posts once per PR: the caller
+      # stubs fire on comment `edited` as well as `created`, and without the
+      # marker check each edit of the collaborator's comment would pile up
+      # another identical refusal (the 👀 ack is idempotent; a comment is
+      # not). An UNKNOWN head (the lookup never answered) is a transient
+      # event on a PR that may be same-repo, so it posts every time it
+      # happens — silence would look like the trigger was ignored — and
+      # never claims the PR is from a fork. Neither text writes the dev
+      # trigger phrase bare (backticked like `@review`, belt and braces:
+      # github-actions comments start no workflows anyway).
       - name: Refuse fork-head PR (explain to collaborators)
-        if: steps.trig.outputs.fork_head == 'true'
+        if: steps.trig.outputs.fork_head == 'true' || steps.trig.outputs.fork_head == 'unknown'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           ACTOR: ${{ github.actor }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          FORK_HEAD: ${{ steps.trig.outputs.fork_head }}
+          PHRASE: ${{ inputs.trigger_phrase }}
         run: |
           case "$ACTOR" in *"[bot]") echo "bot actor; no refusal comment."; exit 0 ;; esac
           perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission' 2>/dev/null || echo none)
@@ -346,9 +375,25 @@ jobs:
             admin|write|maintain) ;;
             *) echo "$ACTOR has no write access ($perm); refusing silently."; exit 0 ;;
           esac
-          gh pr comment "$NUM" --repo "$REPO" --body 'The dev agent does not run on pull requests from forks. Use `@review` for a sandboxed review, or push the branch to this repository.' \
-            && echo "posted the fork-head refusal on PR #$NUM" \
-            || echo "::warning::could not post the fork-head refusal comment on PR #$NUM"
+          if [ "$FORK_HEAD" = "true" ]; then
+            marker='<!-- claude-fork-head-refusal -->'
+            # Once per PR. Fail-open on the read: a duplicate refusal is
+            # harmless, a missing one leaves the requester guessing.
+            prior=$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
+                      --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" 2>/dev/null || true)
+            if [ -n "$prior" ]; then
+              echo "fork-head refusal already posted on PR #$NUM; not repeating."
+              exit 0
+            fi
+            body=$(printf 'The dev agent does not run on pull requests from forks. Use `@review` for a sandboxed review, or push the branch to this repository.\n\n%s' "$marker")
+            what="fork-head refusal"
+          else
+            body=$(printf 'The dev agent could not determine whether the head of this pull request is in a fork (the PR lookup failed), so it did not run. Usually a transient GitHub API error — re-trigger with `%s`.' "$PHRASE")
+            what="unknown-head refusal"
+          fi
+          gh pr comment "$NUM" --repo "$REPO" --body "$body" \
+            && echo "posted the $what on PR #$NUM" \
+            || echo "::warning::could not post the $what comment on PR #$NUM"
 
       # Acknowledge the trigger with an 👀 reaction from the machine account, so
       # the requester immediately sees the agent picked their message up
@@ -528,9 +573,12 @@ jobs:
           LANDING: "Your work exists ONLY on this ephemeral runner until it is committed and pushed — and a run can NEVER resume after your final turn ends. In THIS environment nothing can wake you: background tasks do NOT re-invoke you when they finish, their completion notifications never arrive, and a turn that ends 'waiting to be woken' simply ends the run and loses everything unpushed. So never end your turn waiting on anything — subagents, background commands, test suites: collect results in the foreground and complete the commit, push, and any PR or comment inside THIS run. If a final validation is long-running, commit/push/open the PR FIRST and let the PR's own CI be the gate (the automation reacts to it); an unpushed validated change is worth nothing, a pushed change awaiting CI is the normal pipeline."
           # Spliced only when the runner-side sync could NOT land the merge
           # itself — a conflict it had to abort to keep the index clean for
-          # setupBranch, or a fork head it declined. On the ordinary clean-merge
-          # path the branch is ALREADY current when the agent starts, and
-          # telling it to merge again is noise that invites a redundant push.
+          # setupBranch, or a fork head it declined (the latter unreachable
+          # here since issue #59: the trigger gate refuses fork heads before
+          # the sync step; the composite's skip is shared with the loops and
+          # kept as defense in depth). On the ordinary clean-merge path the
+          # branch is ALREADY current when the agent starts, and telling it to
+          # merge again is noise that invites a redundant push.
           BRANCH_SYNC: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_prompt || '' }}
           # branch_sync_append is NOT gated the same way: it must reach the
           # agent whenever a merge happened this run, clean or delegated. The
@@ -822,7 +870,10 @@ jobs:
           # sync-branch applies), and must not be looked up: headRefName is
           # the FORK's branch name, and a base-repo branch of the same name
           # (a fork's `main`, on a repo whose main is re-synced hourly) would
-          # have its own commits counted as the agent's push.
+          # have its own commits counted as the agent's push. Unreachable
+          # since issue #59 (the trigger gate refuses fork heads, so no agent
+          # runs and this step is skipped); kept as defense in depth, a
+          # re-resolution of the same property from the same API field.
           prj=$(gh pr view "$NUM" --repo "$REPO" --json headRefName,isCrossRepository 2>/dev/null) || prj=""
           branch=$(jq -r '.headRefName // empty' <<<"${prj:-null}")
           if [ -z "$branch" ]; then

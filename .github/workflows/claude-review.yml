@@ -508,8 +508,14 @@ jobs:
       # configuration Claude Code sees. Reviews of these repos' own agent
       # config therefore work from the diff, not the loaded files — the
       # accepted cost. The deletion is workspace-only and never committed
-      # (the reviewer cannot push).
+      # (the reviewer cannot push). Nested .mcp.json copies go too: Claude
+      # Code loads only the root one, but the survivor check below searches
+      # every depth, so a fixture or example .mcp.json in the tree would
+      # otherwise fail this step (found in review of #63). A failure here
+      # feeds the Surface step via STRIP_OUTCOME, so it posts the usual ⚠️
+      # instead of a silent red job.
       - name: Strip project configuration from untrusted checkout
+        id: strip
         if: >-
           steps.trig.outputs.ok == 'true' &&
           (steps.trig.outputs.mode == 'external' || steps.trig.outputs.fork_head == 'true')
@@ -518,6 +524,7 @@ jobs:
           rm -rf .claude .mcp.json CLAUDE.md CLAUDE.local.md
           find . -name CLAUDE.md -not -path './.git/*' -delete
           find . -name CLAUDE.local.md -not -path './.git/*' -delete
+          find . -name .mcp.json -not -path './.git/*' -delete
           find . -type d -name .claude -not -path './.git/*' -prune -exec rm -rf {} +
           left=$(find . \( -name CLAUDE.md -o -name CLAUDE.local.md -o -name .mcp.json -o -name .claude \) -not -path './.git/*' | head -5)
           if [ -n "$left" ]; then
@@ -1106,6 +1113,7 @@ jobs:
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
           SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
+          STRIP_OUTCOME: ${{ steps.strip.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MENTION: ${{ steps.who.outputs.mention }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
@@ -1122,6 +1130,8 @@ jobs:
             err="environment provisioning (claude-setup) failed before the reviewer started — usually a transient dependency-download/network error; re-trigger to retry."
           elif [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the reviewer started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); re-trigger if it looks transient."
+          elif [ "${STRIP_OUTCOME:-}" = "failure" ]; then
+            err="stripping project Claude Code configuration from the untrusted checkout (external mode / fork-head PR) failed before the reviewer started — the job log names what survived; this is not transient, so check the step before re-triggering."
           elif [ "${SANDBOX_OUTCOME:-}" = "failure" ]; then
             err="the review sandbox install (external mode / fork-head PR) failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
           fi
