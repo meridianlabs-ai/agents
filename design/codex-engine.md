@@ -196,11 +196,12 @@ workaround when #103's does).
   agent via `branch_sync_prompt`. The loop workflows run the action in
   agent mode, which does not call `setupBranch`, and mirror the split for
   one mental model. Same behavior, different mechanism.
-- **Model**: `codex_model` input, default `gpt-5.6-sol` (the strongest
-  OpenAI tier; the `gpt-5.6` alias routes there). Reviews additionally pin
-  `codex_effort: xhigh` — correctness over turnaround; implementation runs
-  (dev agent, both loops) keep the codex default reasoning effort
-  (decision: Ransom, 2026-08-31).
+- **Model**: `codex_model` input, default `gpt-6-astra` (the strongest
+  OpenAI tier, and the codex CLI default since 2026-09; was `gpt-5.6-sol`
+  from 2026-08-31). Reasoning effort is pinned per role via `codex_effort`:
+  reviews run at `xhigh` — correctness over turnaround — and implementation
+  runs (dev agent, both loops) at `high` (decision: Ransom, 2026-09-08;
+  implementation runs took the codex CLI default before that).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
 

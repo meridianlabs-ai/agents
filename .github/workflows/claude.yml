@@ -63,11 +63,21 @@ on:
       codex_model:
         description: >-
           Model for the codex engine (design/codex-engine.md). Defaults to the
-          strongest OpenAI tier (gpt-5.6-sol; decision: Ransom, 2026-08-31).
-          Empty falls back to the codex CLI default.
+          strongest OpenAI tier (gpt-6-astra, now also the codex CLI default;
+          decision: Ransom, 2026-09-08). Empty falls back to the codex CLI
+          default.
         required: false
         type: string
-        default: "gpt-5.6-sol"
+        default: "gpt-6-astra"
+      codex_effort:
+        description: >-
+          Reasoning effort for codex implementation runs
+          (low|medium|high|xhigh|max). Runs at high — reviews run at xhigh
+          (decision: Ransom, 2026-09-08). Empty falls back to the codex CLI
+          default.
+        required: false
+        type: string
+        default: "high"
       settings:
         description: >-
           Claude Code settings JSON (inline). Owns the permission allow-list:
@@ -995,6 +1005,7 @@ jobs:
           safety-strategy: unprivileged-user
           codex-user: codex
           model: ${{ inputs.codex_model }}
+          effort: ${{ inputs.codex_effort }}
           permission-profile: ":workspace"
           # Authorization: codex-action's own built-in write-access check on
           # the triggering actor is the real gate here — steps.trig
