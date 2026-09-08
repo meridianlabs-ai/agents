@@ -111,18 +111,19 @@ on:
         default: "default"
       codex_model:
         description: >-
-          Model for the codex engine (design/codex-engine.md). Defaults to the
-          strongest OpenAI tier (gpt-5.6-sol; decision: Ransom, 2026-08-31).
-          Empty falls back to the codex CLI default.
+          Model for the codex engine (design/codex-engine.md). Empty (the
+          default) omits --model so the run uses the codex CLI's own default,
+          which tracks OpenAI's current flagship without edits here (decision:
+          Ransom, 2026-09-08; previously pinned gpt-5.6-sol). Set to pin.
         required: false
         type: string
-        default: "gpt-5.6-sol"
+        default: ""
       codex_effort:
         description: >-
           Reasoning effort for codex reviews (low|medium|high|xhigh|max).
           Reviews run at xhigh — correctness over turnaround (decision:
-          Ransom, 2026-08-31); implementation runs elsewhere keep the codex
-          default. Empty falls back to the codex CLI default.
+          Ransom, 2026-08-31); implementation runs elsewhere run at high
+          (2026-09-08). Empty falls back to the codex CLI default.
         required: false
         type: string
         default: "xhigh"
