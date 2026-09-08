@@ -77,6 +77,11 @@ Notes:
   ref again, so CI can run.
 - The agent runs the project's tests/lint to verify its work before opening a
   PR (per each repo's CLAUDE.md conventions).
+- **It does not run on PRs whose head lives in a fork.** That code would
+  execute unsandboxed in a job holding write credentials, so the run stops
+  before checking anything out; collaborators get a short comment saying so
+  (outsiders get silence). Use `@review` for a sandboxed review of a fork PR,
+  or push the branch to the repository itself.
 
 ## Using the reviewer
 
@@ -90,6 +95,14 @@ The reviewer posts a top-level summary plus inline comments on a PR. It runs:
 It is read-only: it can run tests to verify a finding but cannot modify code or
 push. Its findings are confidence-filtered (few high-signal items over many
 speculative ones).
+
+Fork PRs get no automatic review, but a collaborator's `@review` comment
+reviews one — treated as untrusted code: nothing from the fork's tree is
+executed on the runner itself, the reviewer installs and tests inside an
+OS-level sandbox, and the fork's `CLAUDE.md` / `.claude/` / `.mcp.json` are
+stripped from the checkout first (review those from the diff). Findings still
+land on the PR. Codex-engine reviews are not sandboxed, so a fork PR labeled
+`engine:codex` is reviewed by Claude instead.
 
 ### The review → fix loop
 

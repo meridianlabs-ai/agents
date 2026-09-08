@@ -262,6 +262,18 @@ jobs:
       # marvin-authenticated 👀 / stage steps run — a drive-by @review must
       # not move the board or spend reactions. Marvin has write, so
       # loop-posted @review keeps its ack.
+      #
+      # `fork_head` (issue #59) records whether the ADMITTED PR's head lives
+      # in a fork — a property of the code, decided here before any checkout,
+      # independent of who triggered the run. A trusted commenter's @review on
+      # a fork-head PR is admitted (that is the explicit escape hatch), but
+      # the run then takes the SANDBOXED path external mode already uses:
+      # no runner-side provisioning (the fork's claude-setup or build backend
+      # would otherwise execute unsandboxed with the job token present), the
+      # bubblewrap sandbox + settings overlay, project configuration stripped
+      # from the checkout, and the Claude engine only. Findings still post to
+      # the PR itself. External mode leaves it false — its own mode gates
+      # carry the same consequences.
       - name: Check trigger (run + ack/stage gating)
         id: trig
         env:
@@ -280,7 +292,7 @@ jobs:
           IBODY: ${{ github.event.issue.body }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          ok=false mode=pr upstream="" trusted=false head_sha="" continuation=false
+          ok=false mode=pr upstream="" trusted=false head_sha="" continuation=false fork_head=false
           # One retry for the gating lookups: they refuse fail-closed, so a
           # transient API blip shouldn't block a legitimate review outright.
           # Each attempt is captured and emitted only on success: a failed
@@ -305,6 +317,11 @@ jobs:
               echo "::warning::fork head on pull_request_target — refusing (same-repo only); check the caller stub's gate"
             else
               ok=true
+              # A pull_request run with a fork head cannot normally reach
+              # here (no OIDC token → the job dies at startup; the stubs gate
+              # it too). Recorded anyway so the sandboxed path applies if a
+              # caller stub ever admits one.
+              [ "$HEAD_REPO" = "$GH_REPO" ] || fork_head=true
             fi
           elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
             # Commenter trust: a non-bot actor with write access. Bots never
@@ -358,8 +375,13 @@ jobs:
               fi
               if [ -z "$head_sha" ]; then
                 echo "::warning::@review on PR #$PR_NUM — the head lookup failed, so there is no pinned SHA to check out; refusing. A collaborator can re-trigger"
-              elif [ "$head_repo" = "$GH_REPO" ] || [ "$trusted" = "true" ]; then
+              elif [ "$head_repo" = "$GH_REPO" ]; then
                 ok=true
+              elif [ "$trusted" = "true" ]; then
+                # The explicit escape hatch: admitted, but as UNTRUSTED code —
+                # sandboxed path (see the fork_head note above).
+                ok=true fork_head=true
+                echo "PR #$PR_NUM has a fork head ($head_repo); admitted by write-access commenter $ACTOR — taking the sandboxed review path."
               else
                 echo "::warning::@review by $ACTOR (no write access, or the permission lookup failed) on a fork-head PR — refusing (the run would check out and execute the fork head); a collaborator can re-trigger"
               fi
@@ -386,11 +408,12 @@ jobs:
               ack=$trusted
             fi
           fi
-          echo "ok=$ok  ack=$ack  mode=$mode  upstream=$upstream"
+          echo "ok=$ok  ack=$ack  mode=$mode  fork_head=$fork_head  upstream=$upstream"
           {
             echo "ok=$ok"
             echo "ack=$ack"
             echo "mode=$mode"
+            echo "fork_head=$fork_head"
             echo "head_sha=$head_sha"
             echo "continuation=$continuation"
             echo "upstream=$upstream"
@@ -426,10 +449,19 @@ jobs:
       # On a pull_request event the default checkout is the PR merge ref. On an
       # @review comment (issue_comment) the default would be the repo default
       # branch, so resolve the PR head explicitly.
+      # persist-credentials:false in ALL modes (issue #59): checkout otherwise
+      # writes the job token into the workspace's git config, where code the
+      # sandbox runs on a fork head could read it, and nothing after this
+      # step needs an authenticated remote — claude-code-action's agent mode
+      # does no fetch, and the codex path has no network. (The action then
+      # embeds its OWN app token in the origin URL for the agent run; that is
+      # its behavior, out of reach here — see design/architecture.md →
+      # untrusted checkouts, residual risks.)
       - if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           # issue_comment default would be the repo default branch;
           # pull_request_target's would be the BASE branch (the action requires
           # not defaulting to an untrusted ref — same-repo PRs, our only
@@ -451,7 +483,7 @@ jobs:
       # otherwise writes the job token into .git/config, where sandboxed
       # contributor code could read it — the repo is public, nothing after
       # this needs an authenticated remote. See design/architecture.md →
-      # External reviews.
+      # Untrusted checkouts.
       - if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
         uses: actions/checkout@v4
         with:
@@ -460,17 +492,55 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # External mode runs UNTRUSTED contributor code (installs execute build
-      # hooks; pytest executes the tree), so it gets Claude Code's OS-level
-      # Bash sandbox (bubblewrap + network proxy): every Bash command and
-      # child process is confined to workspace writes and PyPI-only egress,
-      # with the job's tokens hidden via the settings overlay below. The
-      # seccomp filter (sandbox-runtime) is NOT optional here: without it
-      # sandboxed code can connect to Unix domain sockets, and GitHub runners
-      # expose /var/run/docker.sock — a full sandbox escape.
+      # Untrusted checkouts (external mode, fork heads) must not carry PROJECT
+      # CONFIGURATION into the agent run (issue #59): claude-code-action runs
+      # Claude Code with the workspace as its working directory, and Claude
+      # Code loads project-scope settings from there — .claude/settings.json
+      # and settings.local.json (hooks such as SessionStart / PreToolUse
+      # command entries, apiKeyHelper, env, sandbox keys), .mcp.json (MCP
+      # servers are spawned as processes), and CLAUDE.md / CLAUDE.local.md
+      # (instructions). Hooks and apiKeyHelper run OUTSIDE the Bash sandbox,
+      # so the bubblewrap overlay below does not contain them — a
+      # contributor's settings.json could disable the sandbox or run a
+      # command with the job's credentials before the first prompt. Strip
+      # them all, nested .claude dirs and CLAUDE.md files included, so the
+      # caller's `settings` input plus the sandbox overlay are the ONLY
+      # configuration Claude Code sees. Reviews of these repos' own agent
+      # config therefore work from the diff, not the loaded files — the
+      # accepted cost. The deletion is workspace-only and never committed
+      # (the reviewer cannot push).
+      - name: Strip project configuration from untrusted checkout
+        if: >-
+          steps.trig.outputs.ok == 'true' &&
+          (steps.trig.outputs.mode == 'external' || steps.trig.outputs.fork_head == 'true')
+        run: |
+          set -euo pipefail
+          rm -rf .claude .mcp.json CLAUDE.md CLAUDE.local.md
+          find . -name CLAUDE.md -not -path './.git/*' -delete
+          find . -name CLAUDE.local.md -not -path './.git/*' -delete
+          find . -type d -name .claude -not -path './.git/*' -prune -exec rm -rf {} +
+          left=$(find . \( -name CLAUDE.md -o -name CLAUDE.local.md -o -name .mcp.json -o -name .claude \) -not -path './.git/*' | head -5)
+          if [ -n "$left" ]; then
+            echo "::error::project configuration survived the strip: $left"
+            exit 1
+          fi
+          echo "stripped project-scope Claude Code configuration from the untrusted checkout."
+
+      # Untrusted code — external mode's contributor tree, and a fork head a
+      # write-access commenter admitted (issue #59) — is executed only inside
+      # Claude Code's OS-level Bash sandbox (bubblewrap + network proxy):
+      # installs execute build hooks and pytest executes the tree, so every
+      # Bash command and child process is confined to workspace writes and
+      # PyPI-only egress, with the job's tokens hidden via the settings
+      # overlay below. The seccomp filter (sandbox-runtime) is NOT optional
+      # here: without it sandboxed code can connect to Unix domain sockets,
+      # and GitHub runners expose /var/run/docker.sock — a full sandbox
+      # escape.
       - name: Install review sandbox
         id: sandbox
-        if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
+        if: >-
+          steps.trig.outputs.ok == 'true' &&
+          (steps.trig.outputs.mode == 'external' || steps.trig.outputs.fork_head == 'true')
         # A hung apt/npm here once sat for 3+ hours with no output (the job
         # had no timeout at all, so only GitHub's 6h ceiling would end it).
         # Fail fast instead: SANDBOX_OUTCOME=failure feeds the Surface step,
@@ -490,7 +560,13 @@ jobs:
       # the PR routes this review to Codex. Read via the API at gate time —
       # comment-trigger payloads carry stale label lists. External proxy
       # reviews stay on Claude in v1 (their sandbox overlay is
-      # Claude-specific). Best-effort: an unreadable label list means Claude.
+      # Claude-specific). Fork heads likewise stay on Claude (issue #59):
+      # codex's :workspace profile is not the bubblewrap sandbox, and its
+      # provisioning would run the fork's build backend unsandboxed — so an
+      # engine:codex label on a fork-head PR falls through to the Claude
+      # engine with a log line (the simpler of "fall through" and "skip with
+      # a comment": the review still happens, on the sandboxed path). Best-
+      # effort: an unreadable label list means Claude.
       - name: Detect engine
         id: engine
         if: steps.trig.outputs.ok == 'true'
@@ -499,12 +575,19 @@ jobs:
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MODE: ${{ steps.trig.outputs.mode }}
+          FORK_HEAD: ${{ steps.trig.outputs.fork_head }}
         run: |
           engine=claude
           if [ "$MODE" != "external" ] && [ -n "${NUM:-}" ]; then
             labels=$(gh api "repos/$REPO/issues/$NUM/labels" --paginate \
                        --jq '.[].name' 2>/dev/null || true)
-            grep -qx 'engine:codex' <<<"$labels" && engine=codex
+            if grep -qx 'engine:codex' <<<"$labels"; then
+              if [ "$FORK_HEAD" = "true" ]; then
+                echo "::notice::PR #$NUM is labeled engine:codex but has a fork head — codex reviews are not sandboxed, so this review runs on the Claude engine inside the sandbox instead."
+              else
+                engine=codex
+              fi
+            fi
           fi
           echo "engine: $engine"
           echo "engine=$engine" >>"$GITHUB_OUTPUT"
@@ -516,9 +599,10 @@ jobs:
       # existing, cache-backed CI setup; the GitHub cache is the caller's, so it
       # hits the entries normal CI populates. `./` resolves against the
       # checked-out workspace. The hashFiles guard makes this a no-op for repos
-      # that don't define it. Fatal on failure. NEVER in external mode: the
-      # workspace there is an untrusted upstream head, which could supply its
-      # own action — external provisioning happens inside the sandbox instead.
+      # that don't define it. Fatal on failure. NEVER on an untrusted checkout
+      # — external mode's upstream head, or a fork head (issue #59): either
+      # could supply its own action, which would execute unsandboxed with the
+      # job token present — those runs provision inside the sandbox instead.
       # NOTE: the reviewer checks out the PR head (above), so on the
       # inspect_ai fork — whose PR branches are cut from pristine main and
       # carry no meridian files — the action is absent and this is skipped;
@@ -532,6 +616,7 @@ jobs:
         id: setup
         if: >-
           steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external' &&
+          steps.trig.outputs.fork_head != 'true' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
@@ -564,7 +649,10 @@ jobs:
       # 3.11` to the fork's CI, while bare `uv venv` resolves the runner's
       # default (3.12 today, drifting with the image) — a generic fallback
       # can't hardcode any one minor; repos that care can ship a
-      # `.python-version`, which uv honors.
+      # `.python-version`, which uv honors. Never on a fork head (issue #59):
+      # `uv pip install -e` runs the checkout's build backend as `runner`
+      # with sudo, unrestricted egress and the job token present — a fork
+      # head gets provisioned by the agent inside the sandbox instead.
       - name: Provision project environment (fallback)
         id: setupfb
         # Same hazard class as the sandbox-install hang above: uv bootstrap
@@ -574,6 +662,7 @@ jobs:
         timeout-minutes: 10
         if: >-
           steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external' &&
+          steps.trig.outputs.fork_head != 'true' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
         run: |
@@ -613,11 +702,19 @@ jobs:
       # the sandbox blocks something).
       # (Engine selection moved above provisioning — see the Detect engine
       # step there.)
+      # A fork head in pr mode (issue #59) keeps the whole pr-mode prompt —
+      # findings and the verdict marker still post to the PR itself, not to
+      # a proxy — and appends only the SANDBOX guidance the external prompt
+      # carries: the environment is not pre-provisioned (no runner-side
+      # claude-setup / uv step ran), and the agent provisions and tests
+      # inside the sandbox. One shared sentence for both untrusted paths so
+      # they cannot drift.
       - name: Compose review prompt
         if: steps.trig.outputs.ok == 'true'
         id: reviewprompt
         env:
           MODE: ${{ steps.trig.outputs.mode }}
+          FORK_HEAD: ${{ steps.trig.outputs.fork_head }}
           UP_REPO: ${{ steps.trig.outputs.up_repo }}
           UP_NUM: ${{ steps.trig.outputs.up_num }}
           PROXY: ${{ github.event.issue.number }}
@@ -625,6 +722,7 @@ jobs:
           DEFAULT_PROMPT: ${{ inputs.review_prompt }}
           THIS_PR: ${{ github.event.issue.number || github.event.pull_request.number }}
           CONTINUATION: ${{ steps.trig.outputs.continuation }}
+          SANDBOX_NOTE: "The environment is not pre-provisioned, but every Bash command you run is confined by an OS-level sandbox (writes limited to the workspace, network egress limited to PyPI, repo and API tokens hidden from your commands), so you MAY install dependencies and run tests to verify findings: create a venv (`python3 -m venv .venv`), `.venv/bin/pip install -e '.[dev]'` (or the project's documented dev install), then run TARGETED tests near the changed code — not the full suite. If a command fails from a sandbox restriction (blocked host or path) or the install proves impractical, fall back to static review of that point: unsandboxed retries are disabled, so do not fight the sandbox, and do not let environment wrangling crowd out the review itself. You may write scratch test files inside the workspace via shell, but do not alter the contributor's code, and never commit or push."
         run: |
           if [ "$MODE" != "external" ]; then
             # Live-branch continuation (see trig): the closed PR's diff view
@@ -644,12 +742,20 @@ jobs:
             # log) can latch onto the WRONG one — observed: a run triggered
             # on one PR posted its entire review to the recently-updated
             # sibling. The event, not the workspace, defines the target.
-            printf 'value=%s %s%s\n' "$DEFAULT_PROMPT" "TARGET: you are reviewing PR #$THIS_PR of $REPO and nothing else. Its head (or, on pull_request triggers, its merge preview with the base) is checked out in the workspace. Post the summary, all inline comments, and the marker comment to PR #$THIS_PR ONLY — never to any other PR or issue, no matter what gh pr list, the git log, or any workspace state suggests. If the checked-out tree seems to disagree with PR #$THIS_PR's diff, say so on PR #$THIS_PR rather than switching targets." "$closed_note" >>"$GITHUB_OUTPUT"
+            # Fork head: same PR-targeted review, but the tree is UNTRUSTED
+            # code and the run is sandboxed (issue #59) — say so, and that
+            # project files carrying agent instructions were stripped.
+            fork_note=""
+            if [ "${FORK_HEAD:-}" = "true" ]; then
+              fork_note=" FORK-HEAD PR: this PR's head lives in a fork, so its tree is treated as untrusted code and the run is sandboxed. $SANDBOX_NOTE Project-scope Claude Code configuration (CLAUDE.md, .claude/, .mcp.json) was removed from the checkout before you started; if the PR changes those files, review them from the diff."
+            fi
+            printf 'value=%s %s%s%s\n' "$DEFAULT_PROMPT" "TARGET: you are reviewing PR #$THIS_PR of $REPO and nothing else. Its head (or, on pull_request triggers, its merge preview with the base) is checked out in the workspace. Post the summary, all inline comments, and the marker comment to PR #$THIS_PR ONLY — never to any other PR or issue, no matter what gh pr list, the git log, or any workspace state suggests. If the checked-out tree seems to disagree with PR #$THIS_PR's diff, say so on PR #$THIS_PR rather than switching targets." "$closed_note" "$fork_note" >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above or in your system prompt. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING to the upstream PR — no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay. Instead post your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\`. Do NOT post the '🔎 Review complete' marker comment at all — this review is for a human, not the automation loop. Repo guidance in your system prompt about directing PR authors to reply with top-level @claude comments applies only to this repo's OWN PRs and does NOT apply here: the upstream PR and its author have no agent integration and nothing you write reaches them directly (the maintainer relays), so do not include any such instruction in your findings. Guidance about never writing the literal review-trigger token DOES still apply — your comment lands on the tracking issue, where that token would retrigger this workflow. The environment is not pre-provisioned, but every Bash command you run is confined by an OS-level sandbox (writes limited to the workspace, network egress limited to PyPI, repo and API tokens hidden from your commands), so you MAY install dependencies and run tests to verify findings: create a venv (\`python3 -m venv .venv\`), \`.venv/bin/pip install -e '.[dev]'\` (or the project's documented dev install), then run TARGETED tests near the changed code — not the full suite. If a command fails from a sandbox restriction (blocked host or path) or the install proves impractical, fall back to static review of that point: unsandboxed retries are disabled, so do not fight the sandbox, and do not let environment wrangling crowd out the review itself. You may write scratch test files inside the workspace via shell, but do not alter the contributor's code, and never commit or push. You MUST post the proxy-issue comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
+          printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above or in your system prompt. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING to the upstream PR — no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay. Instead post your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE comment on the tracking issue $REPO#$PROXY using \`gh issue comment $PROXY --repo $REPO\`. Do NOT post the '🔎 Review complete' marker comment at all — this review is for a human, not the automation loop. Repo guidance in your system prompt about directing PR authors to reply with top-level @claude comments applies only to this repo's OWN PRs and does NOT apply here: the upstream PR and its author have no agent integration and nothing you write reaches them directly (the maintainer relays), so do not include any such instruction in your findings. Guidance about never writing the literal review-trigger token DOES still apply — your comment lands on the tracking issue, where that token would retrigger this workflow. $SANDBOX_NOTE You MUST post the proxy-issue comment — your output is not surfaced anywhere else." >>"$GITHUB_OUTPUT"
 
-      # External mode merges a sandbox overlay into the caller's settings (the
+      # Untrusted checkouts (external mode, and fork heads — issue #59) merge a
+      # sandbox overlay into the caller's settings (the
       # allow/deny permission rules are unchanged). failIfUnavailable makes a
       # broken sandbox a hard failure instead of a silent fallback to
       # unsandboxed execution; allowUnsandboxedCommands:false removes the
@@ -666,9 +772,14 @@ jobs:
       # can post its findings: exclusion applies to commands the AGENT issues —
       # a gh spawned by sandboxed contributor code stays sandboxed and
       # credential-less. This protects against malicious contributor CODE; a
-      # prompt-injected agent is a separate (pre-existing) channel.
+      # prompt-injected agent is a separate (pre-existing) channel. The
+      # settings the agent sees are exactly this merge: the strip step above
+      # removed the checkout's own .claude/settings*.json, which would
+      # otherwise load as project scope alongside (hooks outside the sandbox).
       - name: Compose settings (external sandbox overlay)
-        if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode == 'external'
+        if: >-
+          steps.trig.outputs.ok == 'true' &&
+          (steps.trig.outputs.mode == 'external' || steps.trig.outputs.fork_head == 'true')
         id: reviewsettings
         env:
           SETTINGS: ${{ inputs.settings }}
@@ -1012,7 +1123,7 @@ jobs:
           elif [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the reviewer started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); re-trigger if it looks transient."
           elif [ "${SANDBOX_OUTCOME:-}" = "failure" ]; then
-            err="the external-review sandbox install failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
+            err="the review sandbox install (external mode / fork-head PR) failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
           fi
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
