@@ -109,6 +109,6 @@ cannot resolve org-fork heads at all).
   it touches no other ref.
 - Upstream is not ours: no labels and no Meridian-internal markers on the
   upstream PR beyond the `Fixes` ref. The one exception is the `dragonstyle`
-  assignee + review request (explicitly requested by Ransom).
+  assignee + review request (explicitly requested by Ransom). Override the reviewer for one run with `REVIEWER=<login>` in the environment (`REVIEWER=jjallaire bash promote.sh 123`); the default stays `dragonstyle`.
 - Do not merge anything — upstream merges are upstream's call; the fork
   issue closes via the sync when that happens.

@@ -19,7 +19,8 @@ SIGNOFF_OPT=da6137e6
 STATUS_FIELD=PVTSSF_lADOC7YMCM4BU68pzhKizZM  # In progress option below
 INPROGRESS_OPT=47fc9ee4
 UPSTREAM_PR_FIELD=PVTF_lADOC7YMCM4BU68pzhYZp9Q
-REVIEWER=dragonstyle
+# Upstream reviewer to assign + request; override per run with REVIEWER=<login>.
+REVIEWER=${REVIEWER:-dragonstyle}
 
 N=${1:?usage: promote.sh <issue-number> [--dry-run]}
 DRY=${2:-}
