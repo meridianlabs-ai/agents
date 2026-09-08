@@ -363,6 +363,12 @@ must take no instruction from them; that keeps the convention knowledge
 external reviews of the inspect_ai upstream relied on. After the strip, the
 caller's `settings` input plus the sandbox overlay are the only configuration
 Claude Code sees; changes to any of these files are reviewed from the diff.
+The overlay also carries `disableAllHooks: true` as a second, independent
+barrier: if the strip's predicates ever miss a hooks-bearing file (a name a
+later Claude Code release starts loading), the switch still stops the hooks.
+It is defense in depth, not a replacement — the action writes the merged
+settings to the *user* scope, which any surviving project-scope settings file
+could override, so the strip is what keeps that scope empty.
 
 That gave up real verification, so the reviewer now gets **interactive test
 execution inside Claude Code's OS-level Bash sandbox** (bubblewrap + network

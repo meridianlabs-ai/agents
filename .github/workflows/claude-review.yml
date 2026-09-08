@@ -813,6 +813,15 @@ jobs:
       # settings the agent sees are exactly this merge: the strip step above
       # removed the checkout's own .claude/settings*.json, which would
       # otherwise load as project scope alongside (hooks outside the sandbox).
+      # disableAllHooks is a second, independent barrier against those hooks
+      # (also a custom statusLine command): should the strip's predicates miss
+      # a hooks-bearing file — a name a later Claude Code release starts
+      # loading — the switch still stops them, and the caller's default
+      # settings define no hooks, so nothing the reviewer relies on is lost.
+      # It is defense in depth, not a substitute for the strip: the action
+      # writes this merge to ~/.claude/settings.json (USER scope, lowest
+      # precedence), so a surviving project-scope settings file could set the
+      # key back to false — the strip is what keeps that scope empty.
       - name: Compose settings (external sandbox overlay)
         if: >-
           steps.trig.outputs.ok == 'true' &&
@@ -822,7 +831,7 @@ jobs:
           SETTINGS: ${{ inputs.settings }}
         run: |
           [ -n "$SETTINGS" ] || SETTINGS='{}'
-          overlay='{"sandbox":{
+          overlay='{"disableAllHooks":true,"sandbox":{
             "enabled":true,
             "failIfUnavailable":true,
             "allowUnsandboxedCommands":false,
