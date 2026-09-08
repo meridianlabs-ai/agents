@@ -244,9 +244,9 @@ jobs:
       # lookup that never answers refuses too (`fork_head=unknown` — don't
       # admit), with its own comment text so a same-repo PR is never told it
       # is from a fork; a payload with NO head repo is a deleted fork, not a
-      # blip, and refuses as a known fork head. The
-      # one visible effect is the refusal comment step below, posted only for
-      # a write-access commenter so outsiders cannot make the workflow post.
+      # blip, and refuses as a known fork head. The one visible effect is the
+      # refusal comment step below, posted only for a write-access commenter
+      # so outsiders cannot make the workflow post.
       - name: Check trigger (stage gating)
         id: trig
         env:

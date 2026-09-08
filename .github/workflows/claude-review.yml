@@ -533,9 +533,13 @@ jobs:
       # left a directory named CLAUDE.md to fail the step with find's own
       # error — review of #63). The rename walks depth-first so an entry
       # inside a directory that is itself renamed is renamed before its
-      # parent, and the survivor check then finds neither. A failure here
-      # feeds the Surface step via STRIP_OUTCOME, so it posts the usual ⚠️
-      # instead of a silent red job.
+      # parent, and the survivor check then finds neither. It first removes
+      # any pre-existing `<name>.untrusted` — otherwise a checkout that
+      # carries a DIRECTORY of that name would make `mv` move the file INTO
+      # it, where the survivor check finds it and fails the step (fail-closed
+      # and surfaced, but needless — review of #63). A failure here feeds the
+      # Surface step via STRIP_OUTCOME, so it posts the usual ⚠️ instead of a
+      # silent red job.
       - name: Strip project configuration from untrusted checkout
         id: strip
         if: >-
@@ -546,7 +550,7 @@ jobs:
           # Instruction files: move aside (kept readable as untrusted text).
           find . -depth -not \( -path ./.git -o -path './.git/*' \) \
             \( -name CLAUDE.md -o -name CLAUDE.local.md \) \
-            -exec sh -c 'for f; do mv "$f" "$f.untrusted"; done' _ {} +
+            -exec sh -c 'for f; do rm -rf "$f.untrusted"; mv "$f" "$f.untrusted"; done' _ {} +
           # Executable configuration: delete.
           find . -path ./.git -prune -o \( -name .claude -o -name .mcp.json \) -prune -exec rm -rf {} +
           left=$(find . -path ./.git -prune -o \( -name CLAUDE.md -o -name CLAUDE.local.md -o -name .mcp.json -o -name .claude \) -print | head -5)
