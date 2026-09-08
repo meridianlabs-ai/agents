@@ -6,8 +6,8 @@
 # Usage: promote.sh <issue-number> [--dry-run]
 # Exit codes: 0 ok; 3 no open same-repo fork PR chip (resolve inputs via the
 # skill's slow path); 4 branch not on the fork; 5 preflight hard failure
-# (includes a conflict merging upstream main into the branch — aborts before
-# any upstream PR is opened).
+# (a REVIEWER who is not an upstream collaborator, or a conflict merging
+# upstream main into the branch — both abort before any upstream PR is opened).
 set -euo pipefail
 
 FORK=meridianlabs-ai/inspect_ai
@@ -19,7 +19,8 @@ SIGNOFF_OPT=da6137e6
 STATUS_FIELD=PVTSSF_lADOC7YMCM4BU68pzhKizZM  # In progress option below
 INPROGRESS_OPT=47fc9ee4
 UPSTREAM_PR_FIELD=PVTF_lADOC7YMCM4BU68pzhYZp9Q
-# Upstream reviewer to assign + request; override per run with REVIEWER=<login>.
+# Upstream reviewer to assign + request (also on the ts-mono companion);
+# override per run with REVIEWER=<login>. Validated in preflight below.
 REVIEWER=${REVIEWER:-dragonstyle}
 
 N=${1:?usage: promote.sh <issue-number> [--dry-run]}
@@ -66,16 +67,20 @@ ITEM=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.num
 CUR_STAGE=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].stage.name // empty' <<<"$JSON")
 CUR_UP=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].up.text // empty' <<<"$JSON")
 
-# ---- preflight (branch pushed; review verdict + CI are advisory)
+# ---- preflight (branch pushed + reviewer valid; review verdict + CI are advisory)
 gh api "repos/$FORK/branches/$BRANCH" --silent 2>/dev/null ||
   { echo "branch $BRANCH not on the fork" >&2; exit 4; }
+# A typo'd or non-collaborator REVIEWER would 422 the review request AFTER the
+# upstream PR exists (set -e then exits mid-bookkeeping); fail before any write.
+gh api "repos/$UPSTREAM/collaborators/$REVIEWER" --silent 2>/dev/null ||
+  { echo "REVIEWER=$REVIEWER is not a collaborator on $UPSTREAM" >&2; exit 5; }
 # --paginate: busy @auto issues/PRs exceed 100 comments, and the API returns
 # oldest-first — a single page never sees recent comments.
 VERDICT=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
   --jq '.[] | select(.body | contains("claude-review-verdict")) | .body' 2>/dev/null \
   | tail -1 | grep -o 'verdict:[a-z]*' || echo "verdict:none")
 CI=$(gh pr checks "$FPR" -R "$FORK" 2>&1 | awk -F'\t' '{print $2}' | sort | uniq -c | tr '\n' ' ' || true)
-echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}"
+echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}; reviewer: $REVIEWER"
 
 # ---- upstream PR: adopt or create. Adoption detection uses the issue's own
 # cross-repo chip (same branch, upstream repo) — the REST `pulls?head=org:br`

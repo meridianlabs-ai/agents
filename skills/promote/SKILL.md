@@ -45,8 +45,9 @@ Exit codes: **0** ok (report the `OK …` line plus which steps were created
 vs already present); **3** no fork-PR chip — resolve inputs via the slow
 path below, then run the script anyway if a branch emerges (it only needs
 the chip for resolution); **4** branch not on the fork; **5** preflight
-hard failure (includes a conflict merging upstream main into the branch —
-no upstream PR was opened; resolve the conflict on the branch and re-run).
+hard failure (a `REVIEWER` who is not an upstream collaborator, or a
+conflict merging upstream main into the branch — either way no upstream PR
+was opened; fix the login / resolve the conflict on the branch and re-run).
 
 ## Slow path (no chip)
 
@@ -109,6 +110,12 @@ cannot resolve org-fork heads at all).
   it touches no other ref.
 - Upstream is not ours: no labels and no Meridian-internal markers on the
   upstream PR beyond the `Fixes` ref. The one exception is the `dragonstyle`
-  assignee + review request (explicitly requested by Ransom). Override the reviewer for one run with `REVIEWER=<login>` in the environment (`REVIEWER=jjallaire bash promote.sh 123`); the default stays `dragonstyle`.
+  assignee + review request (explicitly requested by Ransom). Override the
+  reviewer for one run with `REVIEWER=<login>` in the environment
+  (`REVIEWER=<login> bash <skill-base-dir>/promote.sh <N>`); the default
+  stays `dragonstyle`. The override covers the ts-mono companion too (both
+  halves deliberately get the same reviewer), and preflight rejects a login
+  that is not an upstream collaborator (exit 5, before any write) — the
+  script prints the effective reviewer on its `ADVISORY:` line.
 - Do not merge anything — upstream merges are upstream's call; the fork
   issue closes via the sync when that happens.
