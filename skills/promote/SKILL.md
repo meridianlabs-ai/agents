@@ -45,9 +45,10 @@ Exit codes: **0** ok (report the `OK …` line plus which steps were created
 vs already present); **3** no fork-PR chip — resolve inputs via the slow
 path below, then run the script anyway if a branch emerges (it only needs
 the chip for resolution); **4** branch not on the fork; **5** preflight
-hard failure (a `REVIEWER` who is not an upstream collaborator, or a
-conflict merging upstream main into the branch — either way no upstream PR
-was opened; fix the login / resolve the conflict on the branch and re-run).
+hard failure (a `REVIEWER` who is provably not a collaborator on upstream or
+on the ts-mono companion's repo, or a conflict merging upstream main into the
+branch — either way no upstream PR was opened; fix the login / resolve the
+conflict on the branch and re-run).
 
 ## Slow path (no chip)
 
@@ -114,8 +115,11 @@ cannot resolve org-fork heads at all).
   reviewer for one run with `REVIEWER=<login>` in the environment
   (`REVIEWER=<login> bash <skill-base-dir>/promote.sh <N>`); the default
   stays `dragonstyle`. The override covers the ts-mono companion too (both
-  halves deliberately get the same reviewer), and preflight rejects a login
-  that is not an upstream collaborator (exit 5, before any write) — the
-  script prints the effective reviewer on its `ADVISORY:` line.
+  halves deliberately get the same reviewer), and preflight checks the login
+  against upstream and, when a companion exists, against ts-mono (exit 5 on
+  a 404, before any write). The collaborator lookup needs push access on the
+  repo, so a token that cannot see it gets a `WARN: could not verify` line
+  and the run continues as before — only a 404 is treated as a bad login.
+  The script prints the effective reviewer on its `ADVISORY:` line.
 - Do not merge anything — upstream merges are upstream's call; the fork
   issue closes via the sync when that happens.

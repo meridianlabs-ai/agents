@@ -6,8 +6,9 @@
 # Usage: promote.sh <issue-number> [--dry-run]
 # Exit codes: 0 ok; 3 no open same-repo fork PR chip (resolve inputs via the
 # skill's slow path); 4 branch not on the fork; 5 preflight hard failure
-# (a REVIEWER who is not an upstream collaborator, or a conflict merging
-# upstream main into the branch — both abort before any upstream PR is opened).
+# (a REVIEWER who is provably not a collaborator on upstream or on the ts-mono
+# companion's repo, or a conflict merging upstream main into the branch — both
+# abort before any upstream PR is opened).
 set -euo pipefail
 
 FORK=meridianlabs-ai/inspect_ai
@@ -72,8 +73,24 @@ gh api "repos/$FORK/branches/$BRANCH" --silent 2>/dev/null ||
   { echo "branch $BRANCH not on the fork" >&2; exit 4; }
 # A typo'd or non-collaborator REVIEWER would 422 the review request AFTER the
 # upstream PR exists (set -e then exits mid-bookkeeping); fail before any write.
-gh api "repos/$UPSTREAM/collaborators/$REVIEWER" --silent 2>/dev/null ||
-  { echo "REVIEWER=$REVIEWER is not a collaborator on $UPSTREAM" >&2; exit 5; }
+# The collaborator lookup is permission-gated (push access on the repo; a
+# lesser token gets 403, not 404), so only a 404 proves the login wrong —
+# anything else is "could not verify" and must not break the default path.
+check_reviewer() {  # $1 = owner/repo; 204 ok, 404 exit 5, other → warn
+  local rc
+  rc=$(gh api -i "repos/$1/collaborators/$REVIEWER" 2>/dev/null | head -1 | awk '{print $2}' || true)
+  case "$rc" in
+    204) ;;
+    404) echo "REVIEWER=$REVIEWER is not a collaborator on $1" >&2; exit 5 ;;
+    *)   echo "WARN: could not verify REVIEWER=$REVIEWER on $1 (HTTP ${rc:-none}); continuing" >&2 ;;
+  esac
+}
+check_reviewer "$UPSTREAM"
+# The ts-mono companion (same branch name, open) gets the SAME reviewer, so an
+# override valid upstream but unknown on ts-mono would 422 there instead —
+# look the companion up here and check it too, before any write.
+COMPANION=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+[ -n "$COMPANION" ] && check_reviewer "$TSMONO"
 # --paginate: busy @auto issues/PRs exceed 100 comments, and the API returns
 # oldest-first — a single page never sees recent comments.
 VERDICT=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
@@ -173,7 +190,7 @@ fi
 # Companions share the branch name (dev-agent convention; the sync and the
 # chip sweep key on it). ts-mono has no promotion step — its PR merges in
 # place — so sign-off review is requested here, at promotion time.
-COMPANION=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open   --json number --jq '.[0].number // empty' 2>/dev/null || true)
+# (COMPANION was looked up in preflight, where the reviewer was checked on it.)
 if [ -n "$COMPANION" ]; then
   C_STATE=$(gh api "repos/$TSMONO/pulls/$COMPANION" --jq '{a: [.assignees[].login], r: [.requested_reviewers[].login]}' 2>/dev/null || echo '{}')
   jq -e --arg u "$REVIEWER" '.a | index($u)' <<<"$C_STATE" >/dev/null 2>&1 ||
