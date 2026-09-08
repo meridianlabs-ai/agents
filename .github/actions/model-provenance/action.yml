@@ -6,9 +6,13 @@ description: >-
   fired) or when the run ended in what looks like a classifier refusal. The
   init line of claude-execution-output.json echoes the REQUESTED model even
   when the fallback fires — only `modelUsage` in the final result shows what
-  ran (design/architecture.md → Model selection), and until this step the
-  only way to know was downloading the artifact. Best-effort by design: every
-  path exits 0 — provenance must never fail the agent's real work. Referenced
+  ran (design/architecture.md → Model selection). Also writes the run's cost,
+  duration, turn count and result status to the job summary: the execution
+  file itself is NOT uploaded (it carries every command output and file the
+  agent read — design/architecture.md → No transcript artifacts), so this
+  summary is the only after-the-fact record of what a run cost. Best-effort
+  by design: every path exits 0 — provenance must never fail the agent's
+  real work. Referenced
   fully-qualified (meridianlabs-ai/agents/.github/actions/model-provenance@main)
   so it works regardless of what the job checked out; NO post step (local
   composite actions with post steps break teardown on the fork).
@@ -62,8 +66,15 @@ runs:
         usage=$(jq -c "$msgs"' | map(select(.type=="result")) | last | .modelUsage // {}' "$file" 2>/dev/null || echo '{}')
         [ "$usage" != "{}" ] || { echo "model-provenance: no modelUsage in the result (agent produced no result); nothing to report."; exit 0; }
         table=$(jq -r 'to_entries | map("| `\(.key)` | \(.value.inputTokens // 0) | \(.value.outputTokens // 0) |") | join("\n")' <<<"$usage")
+        # Run totals from the result message. Numbers and booleans only —
+        # never `.result`: that is the agent's free-text final message, the
+        # one field that could carry a secret the agent chose to print, and
+        # the summary is visible to anyone who can see the run.
+        totals=$(jq -r "$msgs"' | map(select(.type=="result")) | last
+          | "cost (USD): \((.total_cost_usd // 0) * 10000 | round / 10000) · duration: \((.duration_ms // 0) / 1000 | floor)s · turns: \(.num_turns // 0) · is_error: \(.is_error // false) · subtype: `\(.subtype // "unknown" | tostring | gsub("[^A-Za-z0-9_-]"; ""))`"' "$file" 2>/dev/null || true)
         echo "model-provenance: requested='${REQUESTED:-<default>}' init='$init'"
         echo "$table" | sed 's/^/model-provenance: /'
+        [ -z "$totals" ] || echo "model-provenance: $totals"
         {
           echo "### Model provenance"
           echo ""
@@ -72,6 +83,8 @@ runs:
           echo "| served by | input tokens | output tokens |"
           echo "|---|---:|---:|"
           echo "$table"
+          # Blank line first: GFM only ends a table at a blank line.
+          [ -z "$totals" ] || printf '\n%s\n' "$totals"
         } >>"$GITHUB_STEP_SUMMARY"
         # Fallback detection. Haiku is Claude Code's own subagent/summarization
         # traffic on every run, not a fallback. Of the remaining non-init

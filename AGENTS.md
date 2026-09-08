@@ -92,12 +92,15 @@ There is no unit-test suite — changes are validated by triggering the agents:
   provenance" table, per-model token counts), and a machine-account note lands
   on the issue/PR when an unexplained non-requested model served tokens (a
   subagent the agent launched on an explicit model is attributed, not flagged)
-  or the result reads like a classifier refusal. For cost, or when the summary
-  is gone, each run uploads a `claude-execution-output.json` artifact: read
-  `modelUsage` in it — **not** the init line, which echoes the requested model
-  even when the model fallback fired.
-- Auth/permission failures surface in that artifact and in the Anthropic Console
-  → Workload identity → Authentication events.
+  or the result reads like a classifier refusal. Cost, duration and turn count
+  are on the line under that table. The summary's served-by column is
+  `modelUsage` — **not** the init line, which echoes the requested model even
+  when the model fallback fired. The transcript is NOT uploaded as an artifact
+  (it carries every command output and file the agent read — see
+  design/architecture.md → No transcript artifacts); the job log and the
+  `Surface agent errors` comment are the after-the-fact record.
+- Auth/permission failures surface in that comment, the job log, and the
+  Anthropic Console → Workload identity → Authentication events.
 
 ## Don't
 
