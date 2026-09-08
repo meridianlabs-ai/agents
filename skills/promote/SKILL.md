@@ -35,8 +35,9 @@ a human to resolve on the branch) and creates it with the fully-qualified
 `Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
 would rebind to upstream's tracker), plus a bare `Fixes #<up>` when the
 fork issue was imported from upstream (its `Upstream issue:` body line —
-see the import skill; creation-time only, adopted PRs aren't edited); assigns + requests review from
-`dragonstyle` on open PRs; sets the board's `Upstream PR` field (the sync's
+see the import skill; creation-time only, adopted PRs aren't edited); assigns +
+requests review from `dragonstyle` on open PRs (the default — `REVIEWER=<login>`
+overrides it, see Cautions); sets the board's `Upstream PR` field (the sync's
 join key — the #90 lesson), stage → Sign-off + Status → In progress (never
 on a CLOSED issue, never downgrading Sign-off/Merge); comments the upstream
 link on the fork issue; supersedes and closes the open fork PR.
