@@ -13,7 +13,9 @@ name: Claude (reusable)
 # Note: GitHub does not issue OIDC tokens to workflows triggered by PRs from
 # forks, so fork PRs cannot authenticate. All triggers in the stub run in the
 # base-repo context, so this only matters if a caller adds pull_request
-# triggers of its own.
+# triggers of its own — and since issue #59 those would not run the agent
+# anyway: the trigger gate below has no pull_request branch, so `ok` stays
+# false and every gated step (checkout through the action) is skipped.
 #
 # Fork-head PRs are REFUSED outright (issue #59): a comment or review on a PR
 # whose head lives in a fork used to check out and execute that fork's code —
@@ -277,8 +279,15 @@ jobs:
           # and both Atlas stage steps, so the board never showed the pickup.
           # Reading the label NAME carries no quoted-token hazard; bots stay
           # excluded everywhere.
+          # Case-FOLDED, like the action: claude-code-action compiles its
+          # trigger regexes with the `i` flag and lower-cases both label names
+          # before comparing (src/github/validation/trigger.ts), and the stubs'
+          # contains() gate is case-insensitive too. Since `ok` now gates the
+          # whole run, a stricter mirror would turn `@Claude fix this` (mobile
+          # auto-capitalisation) or a `Claude` label into a silent no-op.
+          lname=${LNAME,,}; label=${LABEL,,}
           if [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] \
-             && [ -n "$LABEL" ] && [ "$LNAME" = "$LABEL" ]; then
+             && [ -n "$label" ] && [ "$lname" = "$label" ]; then
             case "$ACTOR" in *"[bot]") ;; *) ok=true ;; esac
           fi
           case "$ACTOR" in
@@ -290,8 +299,8 @@ jobs:
           $ITITLE"
               fi
               esc=$(printf '%s' "$PHRASE" | sed 's/[.[\*^$()+?{|]/\\&/g')
-              printf '%s' "$text" | grep -qE "(^|[[:space:]])$esc([[:space:],.!?;:]|$)" && ok=true
-              [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] && [ "$LNAME" = "$LABEL" ] && ok=true
+              printf '%s' "$text" | grep -qiE "(^|[[:space:]])$esc([[:space:],.!?;:]|$)" && ok=true
+              [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] && [ -n "$label" ] && [ "$lname" = "$label" ] && ok=true
               ;;
           esac
           # Fork-head refusal (issue #59). Resolved only for runs that would

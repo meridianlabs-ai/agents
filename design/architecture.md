@@ -690,7 +690,7 @@ substring collision in trigger gates). Design choices:
   `@review` being the same trust decision made explicitly — and since
   issue #59 that admission is about *who may ask*, not about trusting the
   code: an admitted fork head takes the sandboxed path described under
-  "Untrusted checkouts" below. The dev agent, which has no sandbox and
+  "Untrusted checkouts" above. The dev agent, which has no sandbox and
   holds write credentials, refuses fork heads outright (same section).
 - **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
   `synchronize` fires on every push, so reviewing on it would re-review (and
