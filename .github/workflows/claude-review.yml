@@ -56,7 +56,10 @@ on:
           mitigation costs more than the risk — say why). Only
           regression-blocking findings count as actionable for your verdict;
           regression-accepted notes are informational and must NOT flip the
-          verdict to `suggestions` on their own. You may run
+          verdict to `suggestions` on their own. Do NOT restate a
+          regression-accepted note that an earlier review on this PR already
+          posted unless the risk itself changed — repeating it every round
+          pads the review and the fix agent's context. You may run
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere
@@ -1195,13 +1198,11 @@ jobs:
           set -euo pipefail
           verdict=$(jq -r '.verdict // empty' "$OUT" 2>/dev/null || true)
           case "$verdict" in clean|suggestions) ;; *) verdict=suggestions ;; esac
-          {
-            jq -r '.review // "codex returned no review body."' "$OUT" \
-              | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
-                       -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
-                       -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g'
-            printf '\n\n🤖 engine: codex\n'
-          } >"$RUNNER_TEMP/codex-review-body.md"
+          jq -r '.review // "codex returned no review body."' "$OUT" \
+            | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                     -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+            >"$RUNNER_TEMP/codex-review-body.md"
           # GitHub caps comment bodies at 65,536 characters and the model's
           # review is unbounded (the prompt side is head -c-capped, the
           # output side wasn't): over the cap the post fails and the review
@@ -1214,6 +1215,10 @@ jobs:
             printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-review-body.trunc"
             mv "$RUNNER_TEMP/codex-review-body.trunc" "$RUNNER_TEMP/codex-review-body.md"
           fi
+          # The footer goes on AFTER the cap: it is the anchor the
+          # pr-feedback-context filter keys on for the next codex fix
+          # round, so a review long enough to truncate must still carry it.
+          printf '\n\n🤖 engine: codex\n' >>"$RUNNER_TEMP/codex-review-body.md"
           gh pr comment "$NUM" --repo "$REPO" --body-file "$RUNNER_TEMP/codex-review-body.md"
           if [ "$verdict" = "clean" ]; then
             gh pr comment "$NUM" --repo "$REPO" --body \
