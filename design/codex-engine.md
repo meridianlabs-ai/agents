@@ -176,7 +176,8 @@ workaround when #103's does).
   pytest / ruff / pyright`), the rounds that pushed were verified only by
   tests that import nothing (which is how a broken test reached CI), and
   CI-fix attempt 2 correctly declined to guess. Both loops now run the
-  reviewer's two provisioning steps after the base sync and before the
+  reviewer's two provisioning steps (the uv fallback body is the shared
+  `provision-fallback` composite) after the base sync and before the
   attempt/round is recorded, so a provisioning failure skips the agent
   without burning a round; the Surface step names it. On a **conflicted**
   codex round the failure is tolerated instead (`continue-on-error` when

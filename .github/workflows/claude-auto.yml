@@ -336,7 +336,8 @@ jobs:
       # Provision the project environment BEFORE the fix agent starts, so its
       # pytest/ruff/pyright actually run — the same two steps the reviewer
       # has (claude-review.yml; rationale there and in design/architecture.md
-      # → Test provisioning). Until 2026-09-09 the loops had neither, and the
+      # → "Provisioning the environment for the verify loop"). Until
+      # 2026-09-09 the loops had neither, and the
       # gap was invisible on the Claude engine, which installs what it needs
       # from inside the agent (it has network), but total on codex, which is
       # sandboxed with NO network: every codex fix round ran in a bare
@@ -376,14 +377,12 @@ jobs:
       # fork, whose branches are cut from pristine main; Python caller repos
       # that never added the action — NOT cross-repository fork heads, which
       # never reach this step: the CI-fix stub filters on
-      # `head_repository.full_name == github.repository`): the reviewer's
-      # recipe — see claude-review.yml for the uv version, retry,
-      # extras/`--group dev` and PATH reasoning — plus one line the reviewer
-      # never needed: it excludes the `.venv/` it creates, because unlike the
-      # reviewer the Claude-engine agent commits and pushes from this tree and
-      # only the caller's .gitignore would otherwise keep the venv out (the
-      # codex path re-excludes it in its prep step regardless). Same
-      # conflicted-round tolerance as above.
+      # `head_repository.full_name == github.repository`): the same
+      # provision-fallback composite the reviewer runs (uv version, retry,
+      # extras/`--group dev`, PATH and `.venv/`-exclude reasoning in its
+      # description) — the exclude matters here because, unlike the
+      # reviewer, the Claude-engine agent commits and pushes from this tree.
+      # Same conflicted-round tolerance as above.
       - name: Provision project environment (fallback)
         id: setupfb
         timeout-minutes: 10
@@ -392,26 +391,7 @@ jobs:
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh && break
-            if [ "$attempt" = 3 ]; then
-              echo "uv install failed after 3 attempts" >&2; exit 1
-            fi
-            echo "uv install attempt $attempt failed; retrying..." >&2
-            sleep $((attempt * 10))
-          done
-          export PATH="$HOME/.local/bin:$PATH"
-          printf '%s\n' .venv/ >>.git/info/exclude
-          uv venv
-          if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
-            uv pip install -e ".[dev]" --group dev
-          else
-            uv pip install -e ".[dev]"
-          fi
-          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-          echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
+        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
 
       # Record the attempt (idempotent sticky comment) before invoking the
       # agent — but AFTER the sync and provisioning steps, matching the review

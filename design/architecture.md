@@ -320,19 +320,26 @@ out different things on the inspect_ai fork:
   shim fires. Because `meridian`'s source ≈ pristine `main` ≈ upstream, the
   installed env matches the `main`-cut branch the agent then edits.
 - The **reviewer** deliberately checks out `refs/pull/{N}/head` (so it reviews
-  exactly the upstream-bound diff). That branch is cut from pristine `main` and
-  carries no meridian files, so the shim is absent — and the reviewer used to
-  stay on static checks there. A **fallback provisioning step** now covers this
-  case (decision: Ransom, 2026-09-01): when the shim is absent but the checkout
+  exactly the upstream-bound diff), and the **two `@auto` loops** check out
+  the PR head *branch*. On the fork both are cut from pristine `main` and
+  carry no meridian files, so the shim is absent — and the reviewer used to
+  stay on static checks there (the loops, until 2026-09-09, had no
+  provisioning at all). A **fallback provisioning step** now covers this case
+  in all three workflows (decision: Ransom, 2026-09-01 for the reviewer;
+  extended to the loops 2026-09-09): when the shim is absent but the checkout
   has a root `pyproject.toml` (and the trigger passed the same gate that guards
-  the shim — never in external mode), the workflow step itself bootstraps uv
-  and dev-installs the project, mirroring the fork's claude-setup recipe. The
-  earlier alternative — an extra checkout of `meridian`'s `.github/actions`
-  into a fixed subdir — remains not done; the generic fallback needed no
+  the shim — never in external mode, never on a cross-repository fork head),
+  the workflow step itself bootstraps uv and dev-installs the project,
+  mirroring the fork's claude-setup recipe. The recipe lives once, in the
+  `.github/actions/provision-fallback` composite (referenced `@main` like the
+  other shared step bodies); each workflow keeps only its own gate, timeout
+  and — in the loops — the conflicted-round tolerance above. The earlier
+  alternative — an extra checkout of `meridian`'s `.github/actions` into a
+  fixed subdir — remains not done; the generic fallback needed no
   fork-specific wiring. Like the shim, the fallback is fatal on failure, with
-  its own clause in the error-surfacing step. Non-Python repos (no
+  its own clause in each error-surfacing step. Non-Python repos (no
   `pyproject.toml`) still degrade to static review. For normal (non-fork)
-  repos with claude-setup, both agents provision identically as before.
+  repos with claude-setup, all three provision identically as before.
 
 ### Untrusted checkouts: sandboxed execution of untrusted code
 
