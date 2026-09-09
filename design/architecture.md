@@ -263,6 +263,83 @@ One thing this does not change: on the codex path no runner-side git command
 trusts anything under `.git` until the `reclaim-codex-workspace` step has
 restored it — see design/codex-engine.md → Hook-safe landing.
 
+### Landing job
+
+Step-scoped credentials bound *where* a token sits, not *who can reach it*:
+every agent workflow still hands `MARVIN_TOKEN` to the job that runs the
+agent — as the `claude-code-action` step's `github_token`, and as `GH_TOKEN`
+on the steps that run after the agent in the same job — because pushes and
+comments must come from a real identity (a `GITHUB_TOKEN` push triggers no
+CI and a `GITHUB_TOKEN` comment triggers no `@review`), and issue and board
+writes cross repos. The consequence is that anything the agent runs, reads,
+or leaves running shares a job with a long-lived, multi-repo credential
+(Claude Security scans 2026-09-04; findings 4085112, 4085110, 4122321). The
+codex path already had the right shape — codex runs with no credential and
+a runner-side "Land codex work" step commits, pushes and comments afterwards
+— and issue #79 (Phase 1, 2026-09-09) generalizes it into reusable pieces so
+the Claude path can use it too, and so the landing can move to a **separate
+job on a fresh runner**, where nothing the agent job did can reach it:
+
+```
+gate job   (trusted: trigger check + pre-agent marvin writes; job token + MARVIN_TOKEN; no checkout of PR code)
+  -> agent job  (untrusted: checkout, provision, agent; job token ONLY; commits locally; emit-landing)
+  -> land job   (trusted: fresh runner; downloads the artifact; validates; pushes, posts, resolves, stages as marvin)
+```
+
+Three rules define the shape:
+
+- **The agent job references no secret.** Not in `env:`, not as an action
+  input, not through a composite. Its checkout is the job token with
+  `persist-credentials: false`; the agent's own `GITHUB_TOKEN` is the job
+  token (or claude-code-action's App token). It commits locally and never
+  pushes; the `emit-landing` composite runs last (`if: always()`, holds no
+  token) and packages the commits above the run's start SHA as a git
+  bundle plus a `manifest.json` into one artifact (`retention-days: 1`).
+- **The manifest is the trust boundary.** The land job treats everything in
+  the artifact as data: `.github/scripts/validate_manifest.py` (stdlib only,
+  one line per violation, any violation refuses the whole manifest) runs
+  before any network call and before any field is read into a shell
+  variable. It pins `repo` and `run_id` to the land job's own (no replay of
+  another run's artifact), the branch to a bare non-default name that
+  matches the PR's live head ref, the SHAs to 40 hex with `has_bundle` ⇔
+  `head_sha != start_sha`, every `*_file` reference to a regular,
+  non-symlinked file inside the artifact under 64 KiB, `issues[].repo` to
+  an allow-list, thread IDs and numbers to their shapes, `stage` to the
+  Atlas options — and rejects unknown keys at every level, so schema drift
+  fails closed. The schema is documented in
+  `.github/actions/emit-landing/README.md`; `tests/test_validate_manifest.py`
+  covers one failing case per rule.
+- **The land job never checks out third-party code and installs nothing.**
+  The `land` composite is its whole body. The push materializes the bundle
+  in an *empty* bare repo: fetch the start SHA from origin by SHA (read
+  token), `git bundle verify`, unbundle, assert the tip is `head_sha` and
+  descends from `start_sha`, `ls-remote` the branch's live tip and refuse
+  unless it is an ancestor of `head_sha` ("moved during the run", as
+  `push-base-merge`), then push `head_sha:refs/heads/<branch>` with the
+  privileged token through the same step-scoped credential-helper block as
+  every other push — never `--force`, and the read and the write are
+  separate steps because a step has one `GIT_TOKEN`. After the push it
+  opens or adopts the PR, posts comments and review replies, resolves only
+  the review threads that belong to that PR, files follow-up issues in
+  allow-listed repos and adds them to Atlas by node ID, posts the hand-back
+  or the hand-off, moves the stage (`set-stage`), posts the provenance note,
+  and finally reports the manifest's `error` — failing the run when it says
+  so, after every other step ran. Every agent-authored body passes through
+  the de-fang sed (triggers lose their `@`, loop markers are split,
+  case-insensitively, capped under the comment limit) before posting; the
+  one exception is the hand-back, posted verbatim as exactly `@review`.
+
+Phase 1 (#79) adds the plumbing only — the two composites, the validator and
+its tests — and changes no workflow. Six follow-on issues convert one
+workflow each; `examples/landing-smoke.yml` runs the three-job shape on a
+throwaway branch. What the `gate` job keeps: the trigger check and any write
+that must happen *before* the agent runs (the stage move to Agent, the
+"working on it" comment) — those stay trusted because they run before any
+untrusted code is checked out. What moves to `land`: everything after.
+`model-provenance` splits along the same line — the agent job runs it with
+an empty token (job summary only) and the workflow turns its note into
+`provenance_comment_file`.
+
 ## Model selection: prefer Fable, fall back gracefully
 
 Default is the `fable` alias with `--fallback-model default`. Claude Code's

@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""Validate a landing manifest before the land job acts on it.
+
+The manifest is the trust boundary between the untrusted agent job and the
+trusted land job (design/architecture.md → "Landing job"). The agent job —
+where the agent, its subagents, and anything it left running had a shell —
+writes `manifest.json` plus body files into an artifact; the land job, on a
+fresh runner with the privileged token, downloads that artifact and runs
+this validator FIRST, before any network call and before any field is read
+into a shell variable. Everything here fails closed: an unknown key, a
+wrong type, an out-of-range value or an escaping file reference is a
+violation, and one violation is enough to refuse the whole manifest.
+
+Stdlib only — the land job installs nothing. Prints one line per violation
+to stdout and exits 1 when there is at least one; exits 0 on a clean
+manifest. Usage:
+
+    validate_manifest.py --dir "$RUNNER_TEMP/landing" \
+        --repo owner/name --run-id "$GITHUB_RUN_ID" --default-branch main \
+        --allowed-issue-repos owner/name,owner/other \
+        [--pr-head-ref <headRefName of manifest.pr_number, from the API>]
+
+The schema is documented in .github/actions/emit-landing/README.md; keep
+the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
+to the README, or every manifest carrying it is rejected).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+MAX_MANIFEST_BYTES = 1024 * 1024  # 1 MiB
+MAX_BODY_FILE_BYTES = 64 * 1024  # 64 KiB (GitHub caps comments at 65,536 chars)
+MAX_TITLE_CHARS = 256
+MAX_MESSAGE_CHARS = MAX_BODY_FILE_BYTES
+
+BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+THREAD_RE = re.compile(r"^PRRT_[A-Za-z0-9_-]+$")
+FILE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+# Atlas Stage options (.github/actions/set-stage/action.yml).
+STAGES = ("Contributor", "Agent", "Review", "Sign-off", "Merge")
+
+KNOWN_TOP_LEVEL = {
+    "schema",
+    "repo",
+    "run_id",
+    "branch",
+    "start_sha",
+    "head_sha",
+    "has_bundle",
+    "pr_number",
+    "issue_number",
+    "pr",
+    "comments",
+    "replies",
+    "resolve_threads",
+    "issues",
+    "stage",
+    "handback",
+    "handoff_body_file",
+    "error",
+    "provenance_comment_file",
+}
+KNOWN_PR = {"open", "title", "body_file", "base", "labels", "issue"}
+KNOWN_COMMENT = {"target", "number", "body_file"}
+KNOWN_REPLY = {"review_comment_id", "body_file"}
+KNOWN_ISSUE = {"repo", "title", "body_file", "labels", "comment_on"}
+KNOWN_ERROR = {"message", "fail_run"}
+
+
+def _is_int(value) -> bool:
+    # bool is a subclass of int; `true` must not pass as a number.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_positive_int(value) -> bool:
+    return _is_int(value) and value > 0
+
+
+class Validator:
+    def __init__(
+        self,
+        manifest,
+        *,
+        artifact_dir: Path,
+        repo: str,
+        run_id: str,
+        default_branch: str,
+        allowed_issue_repos,
+        pr_head_ref: str = "",
+    ) -> None:
+        self.m = manifest
+        self.dir = Path(artifact_dir)
+        self.repo = repo
+        self.run_id = str(run_id)
+        self.default_branch = default_branch
+        self.allowed_issue_repos = {r.strip().lower() for r in allowed_issue_repos if r.strip()}
+        self.pr_head_ref = pr_head_ref
+        self.errors: list[str] = []
+
+    def err(self, msg: str) -> None:
+        self.errors.append(msg)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _unknown_keys(self, obj: dict, known: set, where: str) -> None:
+        for key in sorted(set(obj) - known):
+            self.err(f"{where}: unknown key {key!r} (fail closed on schema drift)")
+
+    def _str(self, obj: dict, key: str, where: str, *, required: bool, max_len: int | None = None) -> str | None:
+        if key not in obj or obj[key] is None:
+            if required:
+                self.err(f"{where}: {key} is required")
+            return None
+        value = obj[key]
+        if not isinstance(value, str):
+            self.err(f"{where}: {key} must be a string")
+            return None
+        if required and not value:
+            self.err(f"{where}: {key} must not be empty")
+            return None
+        if max_len is not None and len(value) > max_len:
+            self.err(f"{where}: {key} exceeds {max_len} characters")
+        return value
+
+    def _bool(self, obj: dict, key: str, where: str, *, required: bool) -> bool | None:
+        if key not in obj or obj[key] is None:
+            if required:
+                self.err(f"{where}: {key} is required")
+            return None
+        if not isinstance(obj[key], bool):
+            self.err(f"{where}: {key} must be a boolean")
+            return None
+        return obj[key]
+
+    def _positive_int(self, obj: dict, key: str, where: str, *, required: bool) -> int | None:
+        if key not in obj or obj[key] is None:
+            if required:
+                self.err(f"{where}: {key} is required")
+            return None
+        if not _is_positive_int(obj[key]):
+            self.err(f"{where}: {key} must be a positive integer")
+            return None
+        return obj[key]
+
+    def _file_ref(self, obj: dict, key: str, where: str, *, required: bool) -> None:
+        ref = self._str(obj, key, where, required=required)
+        if ref is None:
+            return
+        label = f"{where}: {key} {ref!r}"
+        if not ref or ref.startswith("/"):
+            self.err(f"{label} must be a relative path inside the artifact")
+            return
+        # A tight charset: the land job reads these names line by line from
+        # jq output, so a newline (or any other oddity) in a name must never
+        # get that far.
+        if not FILE_REF_RE.match(ref):
+            self.err(f"{label} has characters outside [A-Za-z0-9._/-] or is longer than 200")
+            return
+        parts = ref.split("/")
+        if any(part in ("", ".", "..") for part in parts):
+            self.err(f"{label} must not contain '..', '.' or empty path components")
+            return
+        # Walk the components with lstat so a symlink ANYWHERE in the path is
+        # caught — not just at the leaf — without following it.
+        current = self.dir
+        for part in parts:
+            current = current / part
+            try:
+                st = current.lstat()
+            except FileNotFoundError:
+                self.err(f"{label} does not exist")
+                return
+            except OSError as exc:
+                self.err(f"{label} cannot be read: {exc.strerror}")
+                return
+            if os.path.islink(current) or (st.st_mode & 0o170000) == 0o120000:
+                self.err(f"{label} is (or passes through) a symlink")
+                return
+        if not current.is_file():
+            self.err(f"{label} is not a regular file")
+            return
+        try:
+            resolved = current.resolve(strict=True)
+            root = self.dir.resolve(strict=True)
+        except OSError as exc:
+            self.err(f"{label} cannot be resolved: {exc}")
+            return
+        if root != resolved and root not in resolved.parents:
+            self.err(f"{label} resolves outside the artifact directory")
+            return
+        if st.st_size > MAX_BODY_FILE_BYTES:
+            self.err(f"{label} is {st.st_size} bytes; the cap is {MAX_BODY_FILE_BYTES}")
+
+    def _labels(self, obj: dict, where: str) -> None:
+        if "labels" not in obj or obj["labels"] is None:
+            return
+        labels = obj["labels"]
+        if not isinstance(labels, list) or not all(isinstance(x, str) and 0 < len(x) <= 50 for x in labels):
+            self.err(f"{where}: labels must be a list of non-empty strings (≤ 50 chars)")
+
+    # -- rules -------------------------------------------------------------
+
+    def run(self) -> list[str]:
+        m = self.m
+        if not isinstance(m, dict):
+            self.err("manifest: top level must be a JSON object")
+            return self.errors
+        self._unknown_keys(m, KNOWN_TOP_LEVEL, "manifest")
+
+        if m.get("schema") != SCHEMA_VERSION or not _is_int(m.get("schema")):
+            self.err(f"manifest: schema must be {SCHEMA_VERSION}")
+
+        repo = self._str(m, "repo", "manifest", required=True)
+        if repo is not None and repo.lower() != self.repo.lower():
+            self.err(f"manifest: repo {repo!r} is not the repo this land job operates on ({self.repo!r})")
+
+        run_id = m.get("run_id")
+        if not _is_positive_int(run_id) or str(run_id) != self.run_id:
+            self.err(f"manifest: run_id {run_id!r} does not match this run ({self.run_id})")
+
+        branch = self._str(m, "branch", "manifest", required=True)
+        pr = m.get("pr")
+        pr_base = None
+        if pr is not None:
+            if not isinstance(pr, dict):
+                self.err("manifest: pr must be an object")
+                pr = None
+        if branch is not None:
+            if not BRANCH_RE.match(branch):
+                self.err("manifest: branch has characters outside [A-Za-z0-9._/-] or is longer than 200")
+            if ".." in branch:
+                self.err("manifest: branch must not contain '..'")
+            if branch.startswith("refs/"):
+                self.err("manifest: branch must be a bare branch name, not a ref (starts with 'refs/')")
+            if branch.startswith("/") or branch.endswith("/") or branch.endswith(".lock"):
+                self.err("manifest: branch must not start or end with '/' or end with '.lock'")
+            if self.default_branch and branch == self.default_branch:
+                self.err(f"manifest: branch must not be the default branch ({self.default_branch!r})")
+
+        pr_number = self._positive_int(m, "pr_number", "manifest", required=False)
+        if pr_number is not None:
+            if not self.pr_head_ref:
+                self.err("manifest: pr_number is set but no PR head ref was supplied to compare against (--pr-head-ref)")
+            elif branch is not None and branch != self.pr_head_ref:
+                self.err(f"manifest: branch {branch!r} is not PR #{pr_number}'s head ref ({self.pr_head_ref!r})")
+
+        self._positive_int(m, "issue_number", "manifest", required=False)
+
+        start_sha = self._str(m, "start_sha", "manifest", required=True)
+        head_sha = self._str(m, "head_sha", "manifest", required=True)
+        for name, sha in (("start_sha", start_sha), ("head_sha", head_sha)):
+            if sha is not None and not SHA_RE.match(sha):
+                self.err(f"manifest: {name} must be 40 lowercase hex characters")
+        has_bundle = self._bool(m, "has_bundle", "manifest", required=True)
+        if has_bundle is not None and start_sha and head_sha:
+            if has_bundle and head_sha == start_sha:
+                self.err("manifest: has_bundle is true but head_sha equals start_sha")
+            if not has_bundle and head_sha != start_sha:
+                self.err("manifest: has_bundle is false but head_sha differs from start_sha")
+        if has_bundle:
+            bundle = self.dir / "commits.bundle"
+            if bundle.is_symlink() or not bundle.is_file():
+                self.err("manifest: has_bundle is true but commits.bundle is missing or not a regular file")
+
+        if pr is not None:
+            self._unknown_keys(pr, KNOWN_PR, "pr")
+            self._bool(pr, "open", "pr", required=True)
+            self._str(pr, "title", "pr", required=True, max_len=MAX_TITLE_CHARS)
+            self._file_ref(pr, "body_file", "pr", required=True)
+            pr_base = self._str(pr, "base", "pr", required=True)
+            if pr_base is not None and not BRANCH_RE.match(pr_base):
+                self.err("pr: base has characters outside [A-Za-z0-9._/-] or is longer than 200")
+            if pr_base is not None and branch is not None and pr_base == branch:
+                self.err("manifest: branch must not equal pr.base")
+            self._labels(pr, "pr")
+            self._positive_int(pr, "issue", "pr", required=False)
+
+        comments = m.get("comments")
+        if comments is not None:
+            if not isinstance(comments, list):
+                self.err("manifest: comments must be a list")
+            else:
+                for i, c in enumerate(comments):
+                    where = f"comments[{i}]"
+                    if not isinstance(c, dict):
+                        self.err(f"{where}: must be an object")
+                        continue
+                    self._unknown_keys(c, KNOWN_COMMENT, where)
+                    target = self._str(c, "target", where, required=True)
+                    if target is not None and target not in ("pr", "issue"):
+                        self.err(f"{where}: target must be 'pr' or 'issue'")
+                    self._positive_int(c, "number", where, required=True)
+                    self._file_ref(c, "body_file", where, required=True)
+
+        replies = m.get("replies")
+        if replies is not None:
+            if not isinstance(replies, list):
+                self.err("manifest: replies must be a list")
+            else:
+                for i, r in enumerate(replies):
+                    where = f"replies[{i}]"
+                    if not isinstance(r, dict):
+                        self.err(f"{where}: must be an object")
+                        continue
+                    self._unknown_keys(r, KNOWN_REPLY, where)
+                    self._positive_int(r, "review_comment_id", where, required=True)
+                    self._file_ref(r, "body_file", where, required=True)
+                if replies and pr_number is None:
+                    self.err("manifest: replies need pr_number (the PR whose review comments they answer)")
+
+        threads = m.get("resolve_threads")
+        if threads is not None:
+            if not isinstance(threads, list):
+                self.err("manifest: resolve_threads must be a list")
+            else:
+                for i, t in enumerate(threads):
+                    if not isinstance(t, str) or not THREAD_RE.match(t):
+                        self.err(f"resolve_threads[{i}]: must match ^PRRT_[A-Za-z0-9_-]+$")
+                if threads and pr_number is None:
+                    self.err("manifest: resolve_threads need pr_number (the PR the threads belong to)")
+
+        issues = m.get("issues")
+        if issues is not None:
+            if not isinstance(issues, list):
+                self.err("manifest: issues must be a list")
+            else:
+                for i, it in enumerate(issues):
+                    where = f"issues[{i}]"
+                    if not isinstance(it, dict):
+                        self.err(f"{where}: must be an object")
+                        continue
+                    self._unknown_keys(it, KNOWN_ISSUE, where)
+                    irepo = self._str(it, "repo", where, required=True)
+                    if irepo is not None:
+                        if not REPO_RE.match(irepo):
+                            self.err(f"{where}: repo {irepo!r} is not owner/name")
+                        elif irepo.lower() not in self.allowed_issue_repos:
+                            self.err(f"{where}: repo {irepo!r} is not in the allowed issue repos")
+                    self._str(it, "title", where, required=True, max_len=MAX_TITLE_CHARS)
+                    self._file_ref(it, "body_file", where, required=True)
+                    self._labels(it, where)
+                    self._positive_int(it, "comment_on", where, required=False)
+
+        stage = m.get("stage")
+        if stage is not None and stage not in STAGES:
+            self.err(f"manifest: stage must be one of {', '.join(STAGES)}")
+
+        self._bool(m, "handback", "manifest", required=False)
+        if m.get("handback") is True and pr_number is None and not (pr and pr.get("open") is True):
+            self.err("manifest: handback needs a PR (pr_number, or pr.open)")
+
+        self._file_ref(m, "handoff_body_file", "manifest", required=False)
+        self._file_ref(m, "provenance_comment_file", "manifest", required=False)
+
+        error = m.get("error")
+        if error is not None:
+            if not isinstance(error, dict):
+                self.err("manifest: error must be an object")
+            else:
+                self._unknown_keys(error, KNOWN_ERROR, "error")
+                self._str(error, "message", "error", required=True, max_len=MAX_MESSAGE_CHARS)
+                self._bool(error, "fail_run", "error", required=True)
+
+        return self.errors
+
+
+def validate(manifest, **kwargs) -> list[str]:
+    """Return the list of violations (empty when the manifest is valid)."""
+    return Validator(manifest, **kwargs).run()
+
+
+def load_manifest(artifact_dir: Path) -> tuple[object, list[str]]:
+    path = Path(artifact_dir) / "manifest.json"
+    if path.is_symlink():
+        return None, ["manifest.json is a symlink"]
+    if not path.is_file():
+        return None, ["manifest.json is missing"]
+    size = path.stat().st_size
+    if size > MAX_MANIFEST_BYTES:
+        return None, [f"manifest.json is {size} bytes; the cap is {MAX_MANIFEST_BYTES}"]
+    try:
+        with path.open("rb") as fh:
+            return json.loads(fh.read().decode("utf-8")), []
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, [f"manifest.json is not valid UTF-8 JSON: {exc}"]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--dir", required=True, help="artifact directory holding manifest.json")
+    ap.add_argument("--repo", required=True, help="owner/name the land job operates on")
+    ap.add_argument("--run-id", required=True, help="$GITHUB_RUN_ID")
+    ap.add_argument("--default-branch", required=True, help="the repo's default branch")
+    ap.add_argument(
+        "--allowed-issue-repos",
+        default="",
+        help="comma-separated owner/name list issues[] may target",
+    )
+    ap.add_argument(
+        "--pr-head-ref",
+        default="",
+        help="headRefName of manifest.pr_number as read from the API (required when pr_number is set)",
+    )
+    args = ap.parse_args(argv)
+
+    manifest, errors = load_manifest(Path(args.dir))
+    if not errors:
+        errors = validate(
+            manifest,
+            artifact_dir=Path(args.dir),
+            repo=args.repo,
+            run_id=args.run_id,
+            default_branch=args.default_branch,
+            allowed_issue_repos=args.allowed_issue_repos.split(","),
+            pr_head_ref=args.pr_head_ref,
+        )
+    for line in errors:
+        print(f"manifest violation: {line}")
+    if errors:
+        print(f"{len(errors)} violation(s); refusing the manifest.")
+        return 1
+    print("manifest ok.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
