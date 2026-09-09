@@ -204,9 +204,12 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   Everything downstream —
   the guard, the landing, the loops' hand-back and unlanded-work fetches —
   is either gated on that step's success or (Surface) sets its error and
-  skips its git calls when it failed, so everything codex could have
-  configured is gone before the first runner-side git command on every
-  path, not just the success path. The reclaim lived inside the landing step
+  skips its git calls whenever the step did *not* succeed — `!= success`,
+  not `= failure`: a job cancel that lands mid-reclaim leaves the step
+  `cancelled` with the kill/chown/restore only partly done, and `always()`
+  still runs Surface afterwards (review round 7 of #73) — so everything
+  codex could have configured is gone before the first runner-side git
+  command on every path, not just the success path. The reclaim lived inside the landing step
   first (review round 1 of #73); round 3 found that a failed guard, or the
   landing's own refusal, left the loops' `Ensure hand-back after push`
   (gated on the codex step, not the landing, so a landing that pushed and
@@ -227,7 +230,12 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   restore would land on a file git no longer reads (review finding on #73).
   The reclaim step's refusal is the primary defence — nothing runs git
   through a redirected dir — and the pins are belt and braces for the two
-  steps that write;
+  steps that write. The same two steps set `GIT_CONFIG_GLOBAL=/dev/null`:
+  codex is in the `runner` group, so a group-writable `~runner/.gitconfig`
+  would be a config file outside the restore; the hosted image ships it
+  runner-only, and the pin makes that structural (the commit identity is in
+  the repo config the reclaim restored, so nothing there needs the global
+  file);
 - hooks and fsmonitor are neutralized for *every* post-codex step at the
   reclaim, not per step: the two things a config restore cannot cover are
   hooks (files in `.git/hooks`) and the fsmonitor extension (in the index),

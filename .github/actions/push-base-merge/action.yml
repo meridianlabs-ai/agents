@@ -74,9 +74,15 @@ runs:
         # silently reference an unset name. The empty first entry resets any
         # helper inherited from the runner image's global config; the helper
         # itself is scoped to this server's URL, so no other host is ever
-        # answered with the token. (A URL-embedded credential, as
-        # claude-code-action leaves on origin after a Claude run, takes
-        # precedence over helpers: same machine account there.)
+        # answered with the token. (A URL-embedded credential would take
+        # precedence over this helper — git never consults one when the URL
+        # carries auth — which is why the callers' `reset-origin-url` step,
+        # run right after the claude-code-action step, put checkout's
+        # credential-free origin URL back before this runs: the action
+        # leaves its github_token on origin, and on a marvin-less caller
+        # that is the App token it revokes in its own final step. With the
+        # reset in place this helper is what authenticates the fetch and the
+        # push.)
         GIT_TOKEN: ${{ inputs.push-token }}
         GIT_CONFIG_COUNT: "2"
         GIT_CONFIG_KEY_0: credential.helper

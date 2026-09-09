@@ -110,11 +110,14 @@ take effect on every repo's next run.
   to the restored config (hooks and the index are files a restore cannot
   cover, and `git fetch`/`git status` run hooks too, not just `git
   commit`) — so keep every later git-running step gated on its success
-  (guard, landing, the loops' hand-back fetch) and put nothing that runs
-  git between codex and it. The guard and landing steps additionally pin
-  `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` and the same two `core.*`
-  keys by env as belt and braces, and every post-codex `git status` passes
-  `--ignore-submodules=dirty`; keep all of that when touching them. See
+  (guard, landing, the loops' hand-back fetch; the Surface steps set their
+  error on `!= success`, not `= failure`, so a reclaim cancelled mid-run
+  skips their git calls too) and put nothing that runs git between codex
+  and it. The guard and landing steps additionally pin
+  `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE`, `GIT_CONFIG_GLOBAL=/dev/null`
+  and the same two `core.*` keys by env as belt and braces, and every
+  post-codex `git status` passes `--ignore-submodules=dirty`; keep all of
+  that when touching them. See
   design/architecture.md → No persisted git credentials and
   design/codex-engine.md → Hook-safe landing.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat

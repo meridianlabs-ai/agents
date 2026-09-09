@@ -28,8 +28,16 @@ runs:
         # header (AUTHORIZATION: basic <base64>) into the job log. checkout
         # registers that string with setSecret, but this check's own failure
         # mode should not depend on another action's masking.
-        if git config --get-all "http.$SERVER_URL/.extraheader" >/dev/null; then
-          echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
-          exit 1
-        fi
-        echo "no credential persisted in .git/config."
+        #
+        # And the status is read, not just tested: `git config --get-all`
+        # exits 1 when the key is not set and 128 when it could not read the
+        # config at all (a corrupt or unreadable file, a safe.directory
+        # refusal). A plain `if ! git config …` would treat that error as
+        # "no credential" and pass the guard vacuously — fail closed instead.
+        rc=0
+        git config --get-all "http.$SERVER_URL/.extraheader" >/dev/null 2>&1 || rc=$?
+        case $rc in
+          1) echo "no credential persisted in .git/config." ;;
+          0) echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"; exit 1 ;;
+          *) echo "::error::git config failed (exit $rc) — cannot verify the no-persisted-credential invariant"; exit 1 ;;
+        esac

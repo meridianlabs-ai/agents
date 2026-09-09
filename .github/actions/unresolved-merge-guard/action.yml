@@ -41,10 +41,14 @@ runs:
         # same way the landing steps pin it, so a codex-written
         # .git/commondir could not point this read at an index and config
         # codex owns even if the reclaim's refusal had missed it
-        # (design/codex-engine.md → Hook-safe landing).
+        # (design/codex-engine.md → Hook-safe landing). GIT_CONFIG_GLOBAL
+        # skips the runner's ~/.gitconfig too: codex is in the runner group,
+        # and a group-writable home file would sit outside the restore (the
+        # hosted image ships it runner-only; this makes that structural).
         GIT_DIR: ${{ github.workspace }}/.git
         GIT_COMMON_DIR: ${{ github.workspace }}/.git
         GIT_WORK_TREE: ${{ github.workspace }}
+        GIT_CONFIG_GLOBAL: /dev/null
         GIT_CONFIG_COUNT: "1"
         GIT_CONFIG_KEY_0: core.fsmonitor
         GIT_CONFIG_VALUE_0: "false"

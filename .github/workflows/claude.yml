@@ -1370,8 +1370,12 @@ jobs:
       # path; and the index may carry the fsmonitor extension, so fsmonitor
       # is off. The reclaim already moved .git/hooks aside and appended the
       # same two keys to the restored config for every later step; the env
-      # pin here is belt and braces on the step that pushes. The credential
-      # helper is the machine account where the caller
+      # pin here is belt and braces on the step that pushes. GIT_CONFIG_GLOBAL
+      # skips the runner's ~/.gitconfig as well: codex is in the runner
+      # group, and a group-writable home file would sit outside the restore
+      # (the hosted image ships it runner-only; this makes that structural —
+      # identity for the commit is in the repo config the reclaim restored).
+      # The credential helper is the machine account where the caller
       # has it — the push must trigger CI — it is scoped to this server's
       # URL, and it lives only in this step's environment.
       - name: Land codex work
@@ -1390,6 +1394,7 @@ jobs:
           GIT_DIR: ${{ github.workspace }}/.git
           GIT_COMMON_DIR: ${{ github.workspace }}/.git
           GIT_WORK_TREE: ${{ github.workspace }}
+          GIT_CONFIG_GLOBAL: /dev/null
           GIT_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           GIT_CONFIG_COUNT: "4"
           GIT_CONFIG_KEY_0: credential.helper
@@ -1816,10 +1821,14 @@ jobs:
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
           fi
-          # A failed reclaim SKIPS the guard and the landing, so it needs its
-          # own check or the failure is a silent red job.
-          if [ -z "$err" ] && [ "${CODEXRECLAIM_OUTCOME:-}" = "failure" ]; then
-            err="codex finished but the workspace could not be reclaimed from it — .git is not a plain directory, a .git/commondir redirect exists, or the pre-codex git config could not be restored (see the job logs); nothing was pushed. Inspect the codex run's transcript before re-triggering."
+          # A reclaim that did not succeed SKIPS the guard and the landing, so
+          # it needs its own check or the failure is a silent red job. `!=
+          # success` (not `= failure`) so a job cancel that landed mid-reclaim
+          # is named too, as in the loops' Surface steps — this step runs no
+          # git, so here it is only the message; the codexuser test keeps the
+          # Claude path's `skipped` reclaim from tripping it.
+          if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXRECLAIM_OUTCOME:-}" != "success" ]; then
+            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was pushed. Inspect the codex run's transcript before re-triggering."
           fi
           # A failed guard SKIPS the landing step, so it needs its own check.
           if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then
