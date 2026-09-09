@@ -1522,11 +1522,3 @@ jobs:
           token: ${{ secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}
-
-      - name: Upload execution log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: claude-execution-output
-          path: /home/runner/work/_temp/claude-execution-output.json
-          if-no-files-found: ignore

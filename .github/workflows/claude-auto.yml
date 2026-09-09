@@ -957,11 +957,3 @@ jobs:
           🤖 auto CI-fix attempts: $prev (cap $CAP). (one attempt refunded — the fix agent crashed before starting: infrastructure, not the fix)"
           gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
           echo "Refunded attempt $ATTEMPT -> $prev."
-
-      - name: Upload execution log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: claude-auto-execution-output
-          path: /home/runner/work/_temp/claude-execution-output.json
-          if-no-files-found: ignore

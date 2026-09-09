@@ -1231,11 +1231,3 @@ jobs:
           <!-- auto-review-head:$HEAD -->"
           gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
           echo "Refunded round $ROUND -> $prev."
-
-      - name: Upload execution log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: claude-auto-review-execution-output
-          path: /home/runner/work/_temp/claude-execution-output.json
-          if-no-files-found: ignore

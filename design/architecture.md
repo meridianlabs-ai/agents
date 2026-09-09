@@ -132,13 +132,32 @@ distinct signature:
   (`repository_owner == "meridianlabs-ai"`) which is also the cleaner org-wide
   constraint regardless.
 
-Lesson encoded in the workflows: every run uploads its
-`claude-execution-output.json` as an artifact, so auth and model failures are
-diagnosable after the fact. A later "Surface agent errors" post-step also reads
-`is_error` from that log (e.g. a model overload/529 or 404) and posts a visible
-comment + fails the run — because claude-code-action otherwise exits 0 on a
-model-API error, leaving a misleading green run with no result (and a stale
-"I'll get back to you" comment).
+Lesson encoded in the workflows: a "Surface agent errors" post-step reads
+`is_error` from the run's local `claude-execution-output.json` (e.g. a model
+overload/529 or 404) and posts a visible comment + fails the run — because
+claude-code-action otherwise exits 0 on a model-API error, leaving a misleading
+green run with no result (and a stale "I'll get back to you" comment). Auth and
+model failures are diagnosed from that comment and the job log; there is no
+transcript artifact (see No transcript artifacts, below).
+
+### No transcript artifacts
+
+The workflows used to upload `claude-execution-output.json` as a build artifact
+on every run, unredacted and with no retention limit. They no longer do
+(decision: Ransom, 2026-09-08, after Claude Security finding 4122328; #65,
+superseding #60/#62): the file is Claude Code's verbose stream-json transcript,
+so it carries every `tool_result` — full Bash stdout/stderr and the contents of
+every file the agent read. Three of the four workflows hand the agent
+`MARVIN_TOKEN` as its `github_token`, so an `env` or `gh auth token` in the
+transcript put a write-access token in an artifact GitHub does not mask and
+anyone can download on a public caller repo. Nothing automated consumed the
+artifact — every in-job consumer (`model-provenance`, `Surface agent errors`,
+the `Refund` steps, `push-base-merge`'s `require-file`) reads the local file on
+the runner — and no reduced, scrubbed, or opt-in form was judged both safe and
+useful, so none was added. The human uses it had are covered elsewhere:
+failures by the `Surface agent errors` comment and the job log, cost and
+served-model by the `model-provenance` job summary. Anything more is a
+deliberate, temporary local change on a branch, not a workflow feature.
 
 ## Model selection: prefer Fable, fall back gracefully
 
@@ -149,12 +168,14 @@ primary, and `default` expands to the account default. So `--model fable
 gone" in one invocation, with no pre-flight availability probe.
 
 This was verified the hard way: when Fable became unavailable, a run's init
-line still reported `claude-fable-5`, but `modelUsage` in the execution-log
-artifact showed every token served by `claude-opus-4-8` — the fallback fired
+line still reported `claude-fable-5`, but `modelUsage` in the execution log
+showed every token served by `claude-opus-4-8` — the fallback fired
 correctly, and **the init line echoes the *requested* model, not the one that
 ran.** Always read `modelUsage` to know what actually executed. The
 `model-provenance` composite action does that on every Claude-path run: it
-writes the served-model token table to the job summary, and posts a note on
+writes the served-model token table to the job summary (plus the run's cost,
+duration, turn count, `is_error` and result subtype — numbers and booleans
+only, never the free-text `.result`), and posts a note on
 the issue/PR (as the machine account, first line `<!-- model-provenance -->`)
 when an **unexplained** non-requested model served output tokens — or when the
 result errored with text that reads like a classifier refusal. Haiku is
@@ -729,9 +750,9 @@ The intended Slack story, mostly off-the-shelf:
 Usage is attributed to the "Claude Code Agent" workspace in the Anthropic
 Console (set rate limits and spend caps there). Per-run served model is in the
 job summary ("Model provenance" table; a note lands on the issue/PR when the
-fallback fired — see Model selection). Cost is in the
-`claude-execution-output.json` artifact each run uploads — read `modelUsage`
-for the model that actually ran (the init line echoes the *requested* model).
+fallback fired — see Model selection). Cost is in the same job summary
+(`total_cost_usd` from the result, alongside duration and turn count), not an
+artifact — the transcript is not uploaded (see No transcript artifacts).
 
 ## Open items
 

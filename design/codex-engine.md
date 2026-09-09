@@ -217,5 +217,5 @@ Create the label per repo (`gh label create engine:codex -c 8250DF -d
 "route agent runs to Codex"`), apply it to a scratch issue/PR, then
 exercise verbs exactly like the Claude paths (AGENTS.md → Testing a
 change): @claude on a labeled issue, @review on a labeled PR, the auto
-loop on a labeled PR. The codex-action step log replaces
-claude-execution-output.json as the run forensics on codex runs.
+loop on a labeled PR. The codex-action step log replaces the Claude path's
+job summary as the run forensics on codex runs.
