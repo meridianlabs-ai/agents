@@ -535,6 +535,16 @@ out different things on the inspect_ai fork:
   from that tree and the codex landing step stages with `git add -A` (the
   codex prep steps re-exclude both regardless).
 
+  The fallback also **warms network-fetched caches** the tests need
+  (2026-09-09): tiktoken's BPE files into its default `/tmp` cache, readable
+  by the codex user, because the codex reviewer on inspect_ai#428 stopped on
+  "an unavailable tokenizer download". Evidence-driven list in the
+  composite; the warm is bounded by `timeout` (tiktoken downloads with no
+  request timeout, and an unbounded stall would fail provisioning at the
+  caller's step timeout), so a failed or stalled warm only costs a slower
+  first test. The cache dir is left sticky-writable like `/tmp` so codex can
+  still cache an encoding outside the list once it has egress.
+
   The **dev agent gained the same fallback on 2026-09-09** — it was the last
   path without one. Its PR-context runs check out the PR head too, so on the
   fork a dev-verb run on a PR (`@auto fix review feedback` on inspect_ai#428)
