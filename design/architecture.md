@@ -430,21 +430,22 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   authenticated remote (claude-code-action's agent mode does no fetch; the
   codex path has no network).
 - **Credential file masks** (`sandbox.credentials.files`, issue #70):
-  checkout's token is not the only one that lands in `.git/config`.
-  claude-code-action's own prepare step rewrites the origin URL to embed the
-  **app installation token** (`replaceCheckoutCredentials` in its
-  `git-config.ts`, every mode) — a `contents: read` / `pull-requests: write`
-  credential, present for the whole agent step, that neither
-  `persist-credentials: false` nor the env-var denies touch because it is the
-  action's, not one this repo passes in. The action's credential-helper
-  alternative is tied to its `allowed_non_write_users` input, which would
-  widen who may trigger runs, so the overlay masks the file instead: a
-  `mask` entry on `$GITHUB_WORKSPACE/.git/config` makes sandboxed commands
-  read a sentinel copy (Linux behavior; Claude Code ≥ 2.1.221) with an
-  `extract` regex confining the replacement to the token so git still parses
-  its config — the agent's own sandboxed `git diff` / `git log` keep working
-  — and `onExtractNoMatch: deny` making the file unreadable if the action
-  ever changes the URL shape, rather than exposing the real file. The proxy
+  `persist-credentials: false` keeps checkout's token out of `.git/config`,
+  but a different token lands there anyway. claude-code-action's own prepare
+  step rewrites the origin URL to embed the **app installation token**
+  (`replaceCheckoutCredentials` in its `git-config.ts`, every mode) — a
+  `contents: read` / `pull-requests: write` credential, present for the whole
+  agent step, that neither `persist-credentials: false` nor the env-var
+  denies touch because it is the action's, not one this repo passes in. The
+  action's credential-helper alternative is tied to its
+  `allowed_non_write_users` input, which would widen who may trigger runs, so
+  the overlay masks the file instead: a `mask` entry on
+  `$GITHUB_WORKSPACE/.git/config` makes sandboxed commands read a sentinel
+  copy (Linux behavior; Claude Code ≥ 2.1.221) with an `extract` regex
+  confining the replacement to the token so git still parses its config — the
+  agent's own sandboxed `git diff` / `git log` keep working — and
+  `onExtractNoMatch: deny` making the file unreadable if the action ever
+  changes the URL shape, rather than exposing the real file. The proxy
   never substitutes the real token back into a sandboxed request because the
   overlay configures no `network.tlsTerminate` (and no
   `credentials.allowPlaintextInject`): the proxy cannot see request contents,
@@ -464,7 +465,9 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   checkout), and the CLI version can only be checked *after* the agent step
   (the action installs the pinned CLI — 2.1.266 at the time of writing —
   from inside its own steps), so a post-agent step fails the run loudly if
-  the version ever drops below 2.1.221. The proper fix is an action-side
+  the version ever drops below 2.1.221 (the external stage hand-back runs
+  under `always()` so that failure cannot park the proxy issue at Agent
+  Working). The proper fix is an action-side
   git-auth option independent of `allowed_non_write_users`; a request for
   one on `anthropics/claude-code-action` was drafted in #70 (to be filed by
   hand — the machine account cannot open issues outside the org). If the

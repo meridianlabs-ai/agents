@@ -1165,9 +1165,15 @@ jobs:
       # External review finished: the findings sit on the proxy issue awaiting
       # the maintainer's judgment — hand the stage back (mirrors the dev
       # agent's hand-back; without this the proxy would stay parked at Agent
-      # Working after the review posts).
+      # Working after the review posts). always(): the version check above
+      # fails the job AFTER a successful review — exactly the case it exists
+      # for — and without always() the implicit success() gate would skip
+      # this hand-back and leave the proxy at Agent Working. The
+      # steps.claude.outcome guard is what ties it to a posted review.
       - name: Stage - Review (external review posted)
-        if: steps.trig.outputs.mode == 'external' && steps.claude.outcome == 'success'
+        if: >-
+          always() && steps.trig.outputs.mode == 'external' &&
+          steps.claude.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Review
