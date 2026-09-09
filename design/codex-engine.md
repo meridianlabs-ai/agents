@@ -358,8 +358,8 @@ Verification for a change here, all cases prompted to codex (any verb):
 - **Loop fix rounds run tests since 2026-09-09**: `claude-auto.yml` and
   `claude-auto-review.yml` had no provisioning step at all — neither
   claude-setup nor the reviewer's uv fallback. On Claude that was
-  invisible (the agent installs what it needs; it has network); on codex
-  it was total: inspect_flow#824's two review-fix rounds and two CI-fix
+  invisible (the agent installs what it needs); on codex — sandbox network
+  still off at the time — it was total: inspect_flow#824's two review-fix rounds and two CI-fix
   attempts all ran in a bare checkout (`No module named inspect_ai /
   pytest / ruff / pyright`), the rounds that pushed were verified only by
   tests that import nothing (which is how a broken test reached CI), and
@@ -499,6 +499,20 @@ rejected through `codex-args`). The home and `.codex` are 755 so the
 runner-side action can read the file back — a 700 home would make it read
 "" and drop the block silently.
 
+Pre-creating `.codex` has one side effect the step must compensate for
+(caught in review round 1 of #87): codex-action's `resolve-codex-home`
+returns early when `~codex/.codex` already exists ("assume it's correctly
+permissioned"), and only its create path pre-touches the world-writable
+`$CODEX_HOME/$GITHUB_RUN_ID.json` that `codex-responses-api-proxy` —
+launched as `runner`, no sudo — writes its server info into. Without that
+file the proxy gets EACCES in the codex-owned 755 dir and the action fails
+at "Wait for Responses API proxy" before codex runs. So the step mirrors
+the action: `sudo touch` + `chmod 666` on that path (the action's `-s`
+probe treats the empty file as "not running yet" and locks it to
+`444`/root once the proxy is up). Anyone adding another file under
+`.codex` before the action runs should check what else the skipped
+bootstrap would have done.
+
 Why: with network off, codex's Linux sandbox installs a seccomp filter
 (`linux-sandbox/src/landlock.rs`, `Restricted` mode) that allows AF_UNIX
 `socket`/`socketpair` but denies `setsockopt`, `getsockopt`,
@@ -520,8 +534,33 @@ fixtures, not a push path or an exfiltration channel beyond what the
 Claude engine already has (it runs pytest unsandboxed with full network
 AND a token). Read-only-ness of reviews and the deterministic landing of
 fix rounds never rested on the network being off. The prompts now say
-network is available for installs and fixtures and that nothing reaches
-GitHub. The alternatives considered — a runner-side test sidecar with an
+network is available for installs and fixtures and that nothing codex runs
+can push to or post on GitHub.
+
+What DID shift is the "codex cannot fetch" rationale scattered through the
+sync comments: checkout runs `persist-credentials: false`, so origin is a
+plain tokenless URL and an anonymous `git fetch` from a public caller (the
+inspect_ai fork) would now succeed. The prompts therefore say "must NOT"
+rather than "cannot" — a "cannot" invites the agent to test it and trust
+its own finding — and the in-progress merge hand-off means codex never
+needs to fetch. The guarantee is instruction, not structure; the
+unresolved-merge-guard and the landing step never depended on it.
+
+Two install caveats the prompts carry, both regressions accepted in #87's
+review: `reclaim-codex-workspace` refuses any nested `.git` codex added
+(compared against the pre-codex snapshot), and a `pip install -e git+…`
+into a workspace venv creates exactly that (pip's default `--src` is
+`<venv>/src`) — so the prompts forbid editable/VCS installs, and the guard
+fails the run loudly if one slips through. And on the landing paths a
+`uv add`-style install rewrites `pyproject.toml`/`uv.lock`, which the
+landing step would commit — so the prompts also say not to edit dependency
+files the task does not call for. Where provisioning FAILED on a
+conflicted round, the prompt now tells codex it may provision the venv
+itself after resolving the dependency file (`.venv/` and `*.egg-info/`
+are already in `.git/info/exclude` from the prep step), instead of the
+former "cannot install (no network)".
+
+The alternatives considered — a runner-side test sidecar with an
 allow-list, or an upstream AF_UNIX-complete restricted mode — remain
 options if the posture ever needs to tighten.
 

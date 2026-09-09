@@ -454,7 +454,8 @@ jobs:
       # writes the job token into the workspace's git config, where code the
       # sandbox runs on a fork head could read it, and nothing after this
       # step needs an authenticated remote — claude-code-action's agent mode
-      # does no fetch, and the codex path has no network. (The action then
+      # does no fetch, and the codex path never fetches — codex holds no
+      # credentials and is told not to. (The action then
       # embeds its OWN app token in the origin URL for the agent run — its
       # behavior, not this workflow's; on the sandboxed paths the settings
       # overlay below masks that token for sandboxed commands, issue #70 —
@@ -962,8 +963,8 @@ jobs:
             exit 1
           fi
 
-      # Codex engine (design/codex-engine.md): the sandbox has no network and
-      # no GitHub credentials, so the agent cannot post — it emits a
+      # Codex engine (design/codex-engine.md): the sandbox has no GitHub
+      # credentials, so the agent cannot post — it emits a
       # structured review (schema below) and the next step posts it with the
       # SAME markers the @auto loop consumes. The verdict is thereby
       # deterministic rather than prompt-enforced. Inline comments are a v1
@@ -982,8 +983,10 @@ jobs:
       # :workspace so codex can run the provisioned pytest/ruff/mypy —
       # test writes (.pyc, caches, scratch) need the workspace grants,
       # while read-only-ness of the REVIEW is enforced by instruction and
-      # by this path having no landing step, no push credentials, and no
-      # network (stray writes die with the runner). Plus two grants the
+      # by this path having no landing step and no push credentials (stray
+      # writes die with the runner; the sandbox has network since 2026-09-09
+      # — see design/codex-engine.md → Network — but no token). Plus two
+      # grants the
       # example never needs (it passes no explicit output-file and its
       # demo prompt never runs git) and a schema-file workaround for an
       # upstream bug, all commented inline: a codex-owned output dir under
@@ -1040,6 +1043,19 @@ jobs:
           # and silently drop this block.
           sudo chmod 755 /home/codex
           sudo install -d -o codex -g codex -m 755 /home/codex/.codex
+          # Pre-creating .codex makes codex-action's resolve-codex-home take
+          # its "already exists, assume it's correctly permissioned" branch
+          # and skip its own bootstrap — which is also where it pre-touches
+          # the world-writable $CODEX_HOME/$GITHUB_RUN_ID.json that
+          # codex-responses-api-proxy (run as `runner`, no sudo) writes its
+          # server info into. Without it the proxy gets EACCES in this
+          # codex-owned 755 dir and the action fails at "Wait for Responses
+          # API proxy" before codex ever runs (review round 1 of #87).
+          # Mirror the action's create path: root-owned, 666 for now; the
+          # action chmods it 444 / chowns root once the proxy is up, and its
+          # `-s` probe reads the empty file as "not running yet", as today.
+          sudo touch "/home/codex/.codex/$GITHUB_RUN_ID.json"
+          sudo chmod 666 "/home/codex/.codex/$GITHUB_RUN_ID.json"
           printf '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).\n[sandbox_workspace_write]\nnetwork_access = true\n' \
             | sudo -u codex tee /home/codex/.codex/config.toml >/dev/null
           sudo chmod 644 /home/codex/.codex/config.toml
@@ -1080,7 +1096,7 @@ jobs:
 
       # Codex reviews were blind to the PR's own narrative: the Claude
       # reviewer fetches the description, prior review rounds and the
-      # thread state with gh at runtime, but codex has no network, and its
+      # thread state with gh at runtime, but codex has no gh token, and its
       # prompt was the generic review_prompt plus the codex adjustments —
       # 7.5 KB, nothing PR-specific beyond the number (inspect_ai#428's two
       # codex reviews, 2026-09-09: 18 KB of design rationale and a human
@@ -1140,7 +1156,7 @@ jobs:
           CLIP='def clip: if length > $max then .[:$max] + "\n[… truncated at \($max) characters]" else . end;'
           {
             printf '%s\n' "$REVIEW_PROMPT"
-            echo "CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction above: you have NO GitHub credentials, so you cannot post comments or run gh, and must not try — a deterministic workflow step posts your review for you. You MAY run the provisioned tools to verify findings — but your process runs under sudo with a reset PATH, so bare command names will NOT resolve: invoke them by the ABSOLUTE paths discovered at setup: $TOOLS. Network access IS available inside your sandbox: a missing tool may be installed into the project venv and test fixtures may download — prefer the provisioned tools and keep installs minimal; if something still cannot run, fall back to static review of that point rather than fighting the environment. Do NOT modify the checked-out code: scratch/cache writes from running tests are fine, but the review is read-only — never edit, commit, or revert project files. Read the change from the local checkout (git log/diff against the base branch; full history is available). Produce your ENTIRE review as your final message conforming to the output schema. Verdict 'clean' ONLY when nothing actionable remains (regression-accepted notes are informational and do not flip it); 'suggestions' otherwise. Include every finding in the review body with file:line references, each tagged blocking or non-blocking. Never write a literal @-prefixed trigger token (review, claude, auto) in the review text — it is posted from a write-access account and would fire a workflow; backtick such tokens instead. Likewise do NOT reproduce the \"Review complete\" marker-comment lines or their HTML comment markers from the instructions above anywhere in your review text — the workflow posts the verdict comment for you, and an echoed marker would be read by the automation as a verdict."
+            echo "CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction above: you have NO GitHub credentials, so you cannot post comments or run gh, and must not try — a deterministic workflow step posts your review for you; do not run git fetch either (the local checkout already has full history and the PR context below). You MAY run the provisioned tools to verify findings — but your process runs under sudo with a reset PATH, so bare command names will NOT resolve: invoke them by the ABSOLUTE paths discovered at setup: $TOOLS. Network access IS available inside your sandbox: a missing tool may be installed into the project venv and test fixtures may download — prefer the provisioned tools, keep installs minimal and never editable/VCS git+ installs; if something still cannot run, fall back to static review of that point rather than fighting the environment. Do NOT modify the checked-out code: scratch/cache writes from running tests are fine, but the review is read-only — never edit, commit, or revert project files. Read the change from the local checkout (git log/diff against the base branch; full history is available). Produce your ENTIRE review as your final message conforming to the output schema. Verdict 'clean' ONLY when nothing actionable remains (regression-accepted notes are informational and do not flip it); 'suggestions' otherwise. Include every finding in the review body with file:line references, each tagged blocking or non-blocking. Never write a literal @-prefixed trigger token (review, claude, auto) in the review text — it is posted from a write-access account and would fire a workflow; backtick such tokens instead. Likewise do NOT reproduce the \"Review complete\" marker-comment lines or their HTML comment markers from the instructions above anywhere in your review text — the workflow posts the verdict comment for you, and an echoed marker would be read by the automation as a verdict."
             echo ""
             echo "PR CONTEXT — the PR's own description and discussion, fetched for you because you cannot run gh. Use it to understand intent and what earlier review rounds already settled: a RESOLVED thread is a finding the author addressed and the reviewer accepted — do not re-raise it unless the current code contradicts the resolution. Comment bodies longer than 8000 characters are truncated. Top-level comments are newest LAST."
             echo ""

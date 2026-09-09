@@ -658,7 +658,10 @@ jobs:
 
       # ---- Deterministic base-branch sync (design/architecture.md) ---------
       # The base merge happens HERE, on the runner, for BOTH engines — not in a
-      # prompt. The codex sandbox has no network and cannot merge at all, and a
+      # prompt. The codex sandbox holds no credentials and is told not to fetch,
+      # so it cannot be asked to merge (instruction, not structure, since its
+      # sandbox gained network on 2026-09-09; the in-progress hand-off means it
+      # never needs to), and a
       # prompted merge is advisory, so branches drifted anyway: inspect_ai#392
       # sat 11 commits behind main across 20 commits, and because GitHub cannot
       # compute a merge ref for a conflicted PR, CI never ran and every fix
@@ -701,8 +704,8 @@ jobs:
       # → "Provisioning the environment for the verify loop"). Until
       # 2026-09-09 the loops had neither, and the
       # gap was invisible on the Claude engine, which installs what it needs
-      # from inside the agent (it has network), but total on codex, which is
-      # sandboxed with NO network: every codex fix round ran in a bare
+      # from inside the agent, but total on codex, whose sandbox had NO
+      # network until 2026-09-09: every codex fix round ran in a bare
       # checkout — "No module named inspect_ai / pytest / ruff / pyright" —
       # pushed changes verified only by whatever tests import nothing, and
       # finally declined to fix at all (inspect_flow#824, 2026-09-09). Placed
@@ -899,7 +902,7 @@ jobs:
           push-token: ${{ secrets.MARVIN_TOKEN }}
 
       # ---- Codex engine fix round (design/codex-engine.md) -------------------
-      # No network/credentials in the codex sandbox, so the review feedback is
+      # No GitHub credentials in the codex sandbox, so the review feedback is
       # pre-fetched into the prompt file and the landing (commit/push/post) is
       # deterministic. The existing backstops then close the loop: a push with
       # no hand-back gets the @review from "Ensure hand-back after push"; a
@@ -947,7 +950,7 @@ jobs:
             done
             verify="Verify your changes with the locally provisioned tools where relevant. Your process runs under sudo with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
           elif [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            verify="NOTE: environment provisioning FAILED before you started (on this conflicted round the likely cause is a conflicted dependency file — pyproject.toml or a lockfile — see the merge conflict task below), so pytest and the project's dependencies are probably NOT installed and you cannot install them (no network). Resolve the merge conflict first; verify as far as the bare runner allows (py_compile, reading the code), and state plainly in your final message that verification was static-only this round — the next round provisions normally once the resolved branch is pushed."
+            verify="NOTE: environment provisioning FAILED before you started (on this conflicted round the likely cause is a conflicted dependency file — pyproject.toml or a lockfile — see the merge conflict task below), so pytest and the project's dependencies are probably NOT installed. Resolve the merge conflict first; THEN you may provision them yourself (network is available inside your sandbox): create .venv in the project root and dev-install the project into it (e.g. /usr/bin/python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' — .venv/ and *.egg-info/ are already git-excluded; keep it to that). If that fails too, verify as far as the bare runner allows (py_compile, reading the code) and state plainly in your final message that verification was static-only this round — the next round provisions normally once the resolved branch is pushed."
           else
             verify="Verify your changes locally (pytest/ruff/mypy) where relevant and available — no project environment was provisioned for this checkout (no claude-setup action and no pyproject.toml)."
           fi
@@ -983,12 +986,12 @@ jobs:
             if [ "${CONTINUATION:-}" = "true" ]; then
               echo "NOTE — closed-PR continuation: PR #$PR is CLOSED but still auto-labeled with a live branch (on repos with a promotion flow this means it was promoted upstream and pushes to this branch update the upstream PR's diff). The checked-out branch is the loop's working surface, not a dead PR — address the feedback as usual."
             fi
-            echo "CONSTRAINTS: you have NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Network access IS available inside your sandbox for package downloads and test fixtures (install into the project venv if a tool is missing; keep installs minimal), but nothing you do reaches GitHub. Edit the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts the re-review request for you. $verify"
+            echo "CONSTRAINTS: you have NO GitHub credentials — nothing you run can push or post, and you must NOT run gh, git fetch or git push at all (an anonymous fetch might succeed on a public repo; do not try it — the checked-out tree is the one to work on). Network access IS available inside your sandbox for package downloads and test fixtures (install into the project venv if a tool is missing; keep installs minimal, never editable/VCS git+ installs — a nested checkout fails the run — and do not edit dependency files the task does not call for), but nothing you do can push to or post on GitHub. Edit the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts the re-review request for you. $verify"
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
               [ -n "${SYNC_APPEND:-}" ] && echo "$SYNC_APPEND"
-              echo "Resolve every conflict by editing those files, preserving BOTH sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale. Local git is available and useful here (git status, git diff, git log, git add <file>); the network-dependent commands in the CONSTRAINTS above are still off, and you must NOT run git merge, git rebase or git checkout of any ref — that would strand the in-progress merge. After resolving each file you MUST stage it with git add <file>: the landing step FAILS the run on any path still unmerged in the index (that index check is what catches binary and modify/delete conflicts, which have no markers), and on any surviving conflict marker — so leaving either is strictly worse than resolving and staging. Once resolved, treat the MERGED tree as the code you are working on: re-run the relevant tests against it, not against the pre-merge state."
+              echo "Resolve every conflict by editing those files, preserving BOTH sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale. Local git is available and useful here (git status, git diff, git log, git add <file>); the GitHub-facing commands the CONSTRAINTS above forbid (gh, git fetch, git push) stay forbidden, and you must NOT run git merge, git rebase or git checkout of any ref — that would strand the in-progress merge. After resolving each file you MUST stage it with git add <file>: the landing step FAILS the run on any path still unmerged in the index (that index check is what catches binary and modify/delete conflicts, which have no markers), and on any surviving conflict marker — so leaving either is strictly worse than resolving and staging. Once resolved, treat the MERGED tree as the code you are working on: re-run the relevant tests against it, not against the pre-merge state."
             elif [ -n "${MERGE_SHA:-}" ] && [ -n "${SYNC_APPEND:-}" ]; then
               # Clean merge: the repo-specific merge rule still applies (the
               # fork's is about a NON-conflicting CHANGELOG mis-merge).
@@ -1153,6 +1156,19 @@ jobs:
           # and silently drop this block.
           sudo chmod 755 /home/codex
           sudo install -d -o codex -g codex -m 755 /home/codex/.codex
+          # Pre-creating .codex makes codex-action's resolve-codex-home take
+          # its "already exists, assume it's correctly permissioned" branch
+          # and skip its own bootstrap — which is also where it pre-touches
+          # the world-writable $CODEX_HOME/$GITHUB_RUN_ID.json that
+          # codex-responses-api-proxy (run as `runner`, no sudo) writes its
+          # server info into. Without it the proxy gets EACCES in this
+          # codex-owned 755 dir and the action fails at "Wait for Responses
+          # API proxy" before codex ever runs (review round 1 of #87).
+          # Mirror the action's create path: root-owned, 666 for now; the
+          # action chmods it 444 / chowns root once the proxy is up, and its
+          # `-s` probe reads the empty file as "not running yet", as today.
+          sudo touch "/home/codex/.codex/$GITHUB_RUN_ID.json"
+          sudo chmod 666 "/home/codex/.codex/$GITHUB_RUN_ID.json"
           printf '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).\n[sandbox_workspace_write]\nnetwork_access = true\n' \
             | sudo -u codex tee /home/codex/.codex/config.toml >/dev/null
           sudo chmod 644 /home/codex/.codex/config.toml

@@ -598,8 +598,10 @@ external mode and fork heads only — normal same-repo reviews are untouched):
 - **`persist-credentials: false`** on every reviewer checkout: checkout
   otherwise writes the job token into `.git/config`, inside the workspace the
   sandbox lets contributor code read. Nothing after checkout needs an
-  authenticated remote (claude-code-action's agent mode does no fetch; the
-  codex path has no network). Since #61 the dev agent and both loops run
+  authenticated remote (claude-code-action's agent mode does no fetch; codex
+  holds no credentials and is told not to fetch — its sandbox has network
+  since 2026-09-09, see design/codex-engine.md → Network inside the codex
+  sandbox). Since #61 the dev agent and both loops run
   the same way, with their runner-side git calls authenticating per step —
   see No persisted git credentials above.
 - **Credential file masks** (`sandbox.credentials.files`, issue #70):
@@ -712,8 +714,10 @@ A prompted merge is **advisory**, and the loop workflows never carried the
 prompt at all — `claude-auto.yml` and `claude-auto-review.yml` call
 claude-code-action directly rather than through `claude.yml`, so
 `branch_sync_prompt` never reached a fix round. The codex engine could not
-comply even in principle: its sandbox has no network, and its prompt tells it
-so. inspect_ai#392 is what this cost — 20 commits over ~15 hours on a branch
+comply even in principle: its sandbox had no network at the time (on since
+2026-09-09 — design/codex-engine.md → Network inside the codex sandbox — but
+still credential-less and told not to fetch), and its prompt said so.
+inspect_ai#392 is what this cost — 20 commits over ~15 hours on a branch
 11 commits behind `main`, with a one-line `CHANGELOG.md` conflict nothing in
 the pipeline could resolve. Because GitHub cannot compute a merge ref for a
 conflicted PR, real CI never ran on any of it, and every review round read

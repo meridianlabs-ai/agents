@@ -45,7 +45,9 @@ description: >-
      in the environment (review round 5 of #73). Compared against a
      snapshot rather than refused outright so a caller's provisioning that
      legitimately leaves one (an editable `git+` install under `src/`)
-     keeps working; codex itself has no network and no reason to create one.
+     keeps working; codex's prompts forbid editable/VCS (`git+`) installs —
+     since its sandbox gained network (2026-09-09) such an install is the
+     one way it could create one, and this check then fails the run loudly.
   4. `chown -R runner .git` — object fan-out dirs codex created are
      codex-owned, and the runner's codex-group membership is inert within
      the job, so runner-side object writes would otherwise fail
