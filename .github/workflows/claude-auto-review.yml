@@ -833,8 +833,18 @@ jobs:
           # would spend the round on a feedback-less prompt and conclude the
           # loop on missing context; fail loud instead — a codexprep failure
           # routes into the existing error surfacing and the round refund.
-          if ! sed -n '/^RECENT PR COMMENTS/,/^INLINE REVIEW COMMENTS/p' \
-              "$RUNNER_TEMP/codex-context.md" | grep -q '^--- '; then
+          # NOT `sed … | grep -q` (the original shape): grep -q exits on
+          # its first match and closes the pipe, sed then fails flushing
+          # what it still had buffered ("couldn't flush stdout: Broken
+          # pipe"), and under pipefail the pipeline's status is sed's — so
+          # a feedback section large enough to outrun grep read as "no
+          # comments" and failed a healthy round (inspect_ai#428 round 7,
+          # 2026-09-09: 55 comments, long review). Same SIGPIPE hazard the
+          # head -c note below already avoids; extract to a file, then
+          # grep the file — no writer ever sees a closed pipe.
+          sed -n '/^RECENT PR COMMENTS/,/^INLINE REVIEW COMMENTS/p' \
+              "$RUNNER_TEMP/codex-context.md" >"$RUNNER_TEMP/codex-feedback-section.md"
+          if ! grep -q '^--- ' "$RUNNER_TEMP/codex-feedback-section.md"; then
             echo "::error::review-feedback fetch returned no comments (transient gh/API failure?) — failing the round rather than running codex without the feedback"
             exit 1
           fi
