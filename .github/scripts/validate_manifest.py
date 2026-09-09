@@ -32,7 +32,9 @@ PR of its choosing. On a PR run that also pins `branch` to that PR's live
 head ref. On a run that names no PR, `branch` is agent-chosen unless
 `--branch-prefix` is set: then it must start with the prefix (the caller
 composes it from trusted context — an issue run's `claude/issue-N-`), which
-keeps the push off every other open PR's branch.
+keeps the push off the branches of PRs opened for other issues (an earlier
+run's still-open PR for the same issue carries the same prefix; reaching it
+is the adopt path, not a breach).
 
 The schema is documented in .github/actions/emit-landing/README.md; keep
 the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
@@ -330,7 +332,7 @@ class Validator:
                 self.err(f"manifest: branch {branch!r} is not PR #{pr_number}'s head ref ({self.pr_head_ref!r})")
         elif self.branch_prefix and branch is not None and not branch.startswith(self.branch_prefix):
             # No PR to pin the branch to (an issue run): without this the
-            # agent job could name another open PR's head, bundle on its tip
+            # agent job could name another issue's open PR head, bundle on its tip
             # and fast-forward it — the push is non-force and never the
             # default branch, but it would land on a PR of the agent's
             # choosing and `pr.open` would adopt it. The caller composes the

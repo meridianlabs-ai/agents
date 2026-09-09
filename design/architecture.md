@@ -311,8 +311,9 @@ Three rules define the shape:
   head ref; on a run that names no PR, the branch to the land job's
   `branch-prefix` (an issue run's `claude/issue-N-`, composed from the
   trusted issue number — without it the branch is agent-chosen there, and
-  the agent job could fast-forward another open PR's branch and have
-  `pr.open` adopt that PR), the SHAs to 40 hex with `has_bundle` ⇔
+  the agent job could fast-forward another issue's open PR branch and have
+  `pr.open` adopt that PR; a still-open PR from an earlier run on the same
+  issue carries the prefix, and adopting it is intended), the SHAs to 40 hex with `has_bundle` ⇔
   `head_sha != start_sha`, every `*_file` reference to a regular,
   non-symlinked file inside the artifact under 64 KiB, `issues[].repo` to
   an allow-list, thread IDs and numbers to their shapes, `stage` to the

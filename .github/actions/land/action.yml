@@ -33,9 +33,11 @@ description: >-
   PR is pushed to, replied on, thread-resolved and handed back; on a PR run
   the manifest's `branch` must be that PR's live head ref. On a run that
   names no PR, `branch-prefix` (composed from trusted context, e.g. the
-  issue run's `claude/issue-N-`) is what keeps the push off other PRs'
-  branches — without it the branch is agent-chosen there. Callers pass the
-  same expressions to `emit-landing` and here.
+  issue run's `claude/issue-N-`) is what keeps the push off the branches of
+  PRs opened for other issues (a still-open PR from an earlier run on the
+  same issue carries the prefix and is adopted, not refused) — without it
+  the branch is agent-chosen there. Callers pass the same expressions to
+  `emit-landing` and here.
 
   Two tokens: `read-token` (the job token) for the artifact-adjacent reads —
   the PR head-ref and default-branch lookups, the start-SHA fetch, the
@@ -109,8 +111,9 @@ inputs:
       (an issue run has no PR head ref to pin the branch to). Composed from
       trusted context — claude-code-action's issue branches are
       `claude/issue-${{ github.event.issue.number }}-` — so an agent job
-      cannot name another open PR's head as `branch` and fast-forward it.
-      Ignored on PR runs (the head-ref pin is stricter); empty leaves the
+      cannot name another issue's open PR head as `branch` and fast-forward
+      it (an earlier run's still-open PR for the same issue carries the
+      prefix; landing on it is the adopt path). Ignored on PR runs (the head-ref pin is stricter); empty leaves the
       branch agent-chosen on runs that name no PR, bounded only by shape, the
       default branch and `refused-branches`.
     required: false
