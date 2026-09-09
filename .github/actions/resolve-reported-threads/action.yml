@@ -1,0 +1,132 @@
+name: resolve-reported-threads
+description: >-
+  Consume the codex ending contract's `RESOLVED-THREADS:` line — the codex
+  counterpart of the Claude path's REVIEW_ETIQUETTE (query reviewThreads,
+  resolveReviewThread each one you addressed; never one you did not). Codex
+  cannot run gh, so its final message ends with one line naming the OPEN
+  review-thread ids (from the REVIEW THREADS section its prompt embeds) whose
+  feedback it fully addressed in code, or `none`; this action does the GraphQL
+  calls on its word, as the machine account. Guards: the caller asks for
+  resolution only after a push of real changes (a no-change or merge-only
+  round addressed nothing, whatever the line says); ids are validated by shape
+  (`PRRT_…`) and INTERSECTED with the PR's currently-open threads from a fresh
+  query, so a hallucinated or foreign id is skipped, not resolved; and the
+  whole thing is best-effort — the push already happened, so a failed query
+  or resolve logs a `::warning::` with the API's reason and never fails the
+  caller's job. The line is machine input, not summary, so the action also
+  writes the final message with it removed for the caller to post; it does
+  that on every path (a round that resolved nothing must not post the line
+  either), and tolerates the likely deviations from "exactly the form" —
+  leading whitespace, a list bullet, markdown bold/backticks around the tag
+  (closed on either side of the colon), and the ids rendered as a list on
+  the lines beneath the tag instead of on its line. Until
+  2026-09-09 codex rounds resolved nothing, so on codex PRs every thread the
+  loop ever opened stayed OPEN, and the fix and review prompts grew with
+  settled feedback nobody could tell from live (inspect_ai#428). Shared by
+  claude.yml (dev verb on a PR) and claude-auto-review.yml (fix rounds) so
+  the parse/validate/resolve logic cannot drift between them. Referenced
+  fully-qualified (meridianlabs-ai/agents/.github/actions/resolve-reported-threads@main);
+  NO post step (local composite actions with post steps break teardown on
+  the fork).
+
+inputs:
+  token:
+    description: >-
+      Token the mutations run as (MARVIN_TOKEN — the same account that posts
+      the summary; resolving a thread needs write access on the repo).
+    required: true
+  repo:
+    description: owner/name the PR lives in.
+    required: true
+  pr:
+    description: Pull-request number whose threads may be resolved.
+    required: true
+  final-message:
+    description: Path of codex's final message (the codex-action output file).
+    required: true
+  stripped:
+    description: >-
+      Path to write the final message with the `RESOLVED-THREADS:` line
+      removed. Not written when the final message is missing, so the caller's
+      "(codex produced no final message)" fallback still fires.
+    required: true
+  resolve:
+    description: >-
+      "true" to resolve the threads the line names; anything else only strips
+      the line (the round pushed no real changes, or is not on a PR).
+    required: true
+
+outputs:
+  resolved:
+    description: Number of threads actually resolved (0 when `resolve` was not "true").
+    value: ${{ steps.resolve.outputs.resolved }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+        FINAL: ${{ inputs.final-message }}
+        STRIPPED: ${{ inputs.stripped }}
+        RESOLVE: ${{ inputs.resolve }}
+      run: |
+        # No -e: every path below is best-effort by design (see description).
+        set -uo pipefail
+        # One awk pass does both the parse and the strip, so they cannot
+        # disagree about what the line is. The tag may be indented, bulleted,
+        # or wrapped in markdown bold/backticks — closed either side of the
+        # colon (`**RESOLVED-THREADS:**` and `**RESOLVED-THREADS**:` are both
+        # likely renderings). The ids may follow on the tag's own line or as
+        # a list beneath it: after a tag line, lines that are blank or hold
+        # nothing but a bullet/number and `PRRT_…` tokens belong to the block
+        # (parsed and stripped); the first other line ends it and is kept,
+        # with any blank lines held back before it. The last tag block wins.
+        # The id filter below already tolerates any decoration on the ids.
+        ids=
+        if [ -f "$FINAL" ]; then
+          ids=$(awk -v out="$STRIPPED" '
+            function flush() { for (; held > 0; held--) print "" > out }
+            BEGIN { printf "" > out }
+            /^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/ {
+              inblock = 1; held = 0; ids = $0
+              sub(/^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/, "", ids); next }
+            inblock && /^[[:space:]]*$/ { held++; next }
+            inblock && /^[[:space:]]*([-*+]|[0-9]+[.)])?[[:space:]]*(`?PRRT_[A-Za-z0-9_-]+`?[[:space:],;]*)+$/ {
+              held = 0; ids = ids " " $0; next }
+            { if (inblock) { flush(); inblock = 0 }; print > out }
+            END { print ids }
+          ' "$FINAL" | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
+                  | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
+        fi
+        resolved=0
+        if [ "$RESOLVE" = "true" ]; then
+          if [ -z "$ids" ]; then
+            echo "RESOLVED-THREADS: no thread ids reported; nothing to resolve."
+          else
+            owner="${REPO%/*}"; name="${REPO##*/}"
+            # A failed query must not read as "codex hallucinated N ids": skip
+            # the loop with one warning naming the real cause.
+            if open=$(gh api graphql -F owner="$owner" -F name="$name" -F number="$PR" \
+                        -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){nodes{id isResolved}}}}}' \
+                        --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not) | .id' 2>"$RUNNER_TEMP/resolve-threads.err"); then
+              for id in $ids; do
+                if ! grep -qx -- "$id" <<<"$open"; then
+                  echo "RESOLVED-THREADS: skipping $id — not an open review thread of #$PR"; continue
+                fi
+                if err=$(gh api graphql -F id="$id" -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' --silent 2>&1); then
+                  resolved=$((resolved+1)); echo "resolved review thread $id"
+                else
+                  echo "::warning::resolveReviewThread failed for $id (left open): $(tr '\n' ' ' <<<"$err")"
+                fi
+              done
+            else
+              echo "::warning::open-threads query for #$PR failed; skipping thread resolution (the RESOLVED-THREADS line named $(wc -l <<<"$ids") id(s)): $(tr '\n' ' ' <"$RUNNER_TEMP/resolve-threads.err")"
+            fi
+            rm -f "$RUNNER_TEMP/resolve-threads.err"
+          fi
+        fi
+        echo "resolved=$resolved" >>"$GITHUB_OUTPUT"

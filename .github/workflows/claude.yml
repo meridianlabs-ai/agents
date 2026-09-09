@@ -1156,7 +1156,7 @@ jobs:
               echo "BASE MERGE NOTE: a workflow step already merged origin/$BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before the task below, and fix it in the working tree if it is off:"
               echo "$SYNC_APPEND"
             fi
-            echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the change (it becomes the commit subject), then a blank line, then a body explaining what you did and why (it is posted as a comment on #$NUM). If you cannot or should not make a change, leave the tree untouched and explain why in the final message."
+            echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the change (it becomes the commit subject), then a blank line, then a body explaining what you did and why (it is posted as a comment on #$NUM). If you cannot or should not make a change, leave the tree untouched and explain why in the final message. If the prompt has a REVIEW THREADS section, end the body with ONE final line of exactly the form RESOLVED-THREADS: <thread-id> <thread-id> ... (all ids on that same line, space-separated) naming the OPEN threads (their thread-id values from that section) whose feedback you FULLY addressed in code this round — or RESOLVED-THREADS: none. Never list a thread you declined, only partly addressed, or answered with rationale instead of a change: a workflow step resolves exactly the threads on that line, on your word, and only if your changes were pushed."
             [ -n "$EXTRA" ] && printf 'REPO GUIDANCE: %s\n' "$EXTRA"
             echo "TASK:"
             if [ -n "$COMMENT" ]; then
@@ -1447,14 +1447,11 @@ jobs:
         id: codexland
         if: steps.codexguard.outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BRANCH: ${{ steps.codexprep.outputs.branch }}
           START_SHA: ${{ steps.codexprep.outputs.sha }}
           OUT: ${{ runner.temp }}/codex/codex-final.md
-          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           GIT_DIR: ${{ github.workspace }}/.git
           GIT_COMMON_DIR: ${{ github.workspace }}/.git
@@ -1521,12 +1518,56 @@ jobs:
           else
             echo "codex made no changes; nothing to push."
           fi
-          # Post the final message (de-fanged: it posts from a write-access
-          # account, so bare trigger tokens would fire workflows, and the
-          # @auto loops match their verdict/handoff markers with plain
-          # substring contains() — codex QUOTING a marker would forge a
-          # verdict or suppress an owed hand-back, so break those substrings
-          # too).
+          # The two steps below (thread resolution, summary comment) run no
+          # git: they key on these outputs instead of re-deriving them.
+          echo "pushed=$pushed" >>"$GITHUB_OUTPUT"
+          echo "merge_only=$merge_only" >>"$GITHUB_OUTPUT"
+
+      # Codex cannot run gh, so the review threads it reports as fully
+      # addressed (the RESOLVED-THREADS: line of its final message) are
+      # resolved here on its word — rationale, guards and format tolerance
+      # in the composite. Only on a PR, and only after a push of real
+      # changes: a no-change or merge-only run addressed nothing, whatever
+      # the line says. Also writes the final message with the line stripped,
+      # on every path: it is machine input, not summary. Best-effort — never
+      # fails the job.
+      - name: Resolve review threads codex reported as addressed
+        id: codexthreads
+        if: steps.codexland.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/resolve-reported-threads@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ github.event.issue.number || github.event.pull_request.number }}
+          final-message: ${{ runner.temp }}/codex/codex-final.md
+          stripped: ${{ runner.temp }}/codex/codex-final.stripped.md
+          resolve: >-
+            ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') &&
+                steps.codexland.outputs.pushed == '1' && steps.codexland.outputs.merge_only != '1' }}
+
+      # Post the final message (de-fanged: it posts from a write-access
+      # account, so bare trigger tokens would fire workflows, and the
+      # @auto loops match their verdict/handoff markers with plain
+      # substring contains() — codex QUOTING a marker would forge a
+      # verdict or suppress an owed hand-back, so break those substrings
+      # too). Gated on the resolve step (which is gated on the landing):
+      # the summary states the resolved count, and OUT is the stripped copy
+      # it wrote. Runs no git, so it carries no git env or credential.
+      - name: Post codex summary
+        id: codexpost
+        if: steps.codexthreads.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          OUT: ${{ runner.temp }}/codex/codex-final.stripped.md
+          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+          PUSHED: ${{ steps.codexland.outputs.pushed }}
+          MERGE_ONLY: ${{ steps.codexland.outputs.merge_only }}
+          RESOLVED: ${{ steps.codexthreads.outputs.resolved }}
+        run: |
+          set -euo pipefail
           {
             printf '🤖 codex (dev agent):\n\n'
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
@@ -1534,8 +1575,9 @@ jobs:
                    -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
-            [ -z "$pushed" ] && printf '\n\n_No code changes were made._'
-            [ -n "$merge_only" ] && printf '\n\n_No code changes were made; the base-branch merge from the workflow was pushed._'
+            [ -z "$PUSHED" ] && printf '\n\n_No code changes were made._'
+            [ -n "$MERGE_ONLY" ] && printf '\n\n_No code changes were made; the base-branch merge from the workflow was pushed._'
+            [ "${RESOLVED:-0}" -gt 0 ] && printf '\n\n_Resolved %s review thread(s) codex reported as fully addressed._' "$RESOLVED"
           } >"$RUNNER_TEMP/codex-comment.md"
           # GitHub caps comment bodies at 65,536 characters and codex's final
           # message is unbounded; here the post failing lands AFTER the push,
@@ -1552,7 +1594,7 @@ jobs:
           # Mirrors the Claude path's REQUEST_REVIEW prompt rule,
           # deterministically: an @auto push to an existing PR owes a
           # re-review (the reviewer does not run on push).
-          if [ "$IS_PR" = "true" ] && [ -n "$pushed" ] && [ "$TRIGGER_PHRASE" = "@auto" ]; then
+          if [ "$IS_PR" = "true" ] && [ -n "$PUSHED" ] && [ "$TRIGGER_PHRASE" = "@auto" ]; then
             gh pr comment "$NUM" --repo "$REPO" --body '@review'
           fi
       # ---- end Codex engine --------------------------------------------------
@@ -1826,6 +1868,7 @@ jobs:
           CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
+          CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -1903,6 +1946,13 @@ jobs:
           if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
             err="codex finished but its landing step failed — the work may not have reached the branch (see the job logs)."
           fi
+          # The landing succeeded but the summary never posted (the thread
+          # resolution composite is best-effort and cannot fail, so a skipped
+          # post means a failed post): the branch has the work, the thread
+          # has no comment about it — and on an @auto PR run no @review.
+          if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "success" ] && [ "${CODEXPOST_OUTCOME:-}" != "success" ]; then
+            err="codex finished and its work was landed, but its summary comment could not be posted (post step outcome: ${CODEXPOST_OUTCOME:-unknown}; see the job logs for the final message). If this was an auto run on a PR, request the re-review by hand."
+          fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Claude run did not complete: $err"
           if [ -n "${NUM:-}" ]; then
@@ -1959,7 +2009,7 @@ jobs:
         if: >-
           always() && steps.trig.outputs.ok == 'true' && !(
             inputs.trigger_phrase == '@auto' &&
-            (steps.claude.outcome == 'success' || steps.codexland.outcome == 'success') &&
+            (steps.claude.outcome == 'success' || steps.codexpost.outcome == 'success') &&
             steps.surface.outcome == 'success' &&
             (github.event.issue.pull_request != '' ||
              github.event.pull_request != '' ||
