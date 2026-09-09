@@ -24,7 +24,11 @@ runs:
         SERVER_URL: ${{ github.server_url }}
       run: |
         set -uo pipefail
-        if git config --get-all "http.$SERVER_URL/.extraheader"; then
+        # Exit status only: on the failure path --get-all would print the
+        # header (AUTHORIZATION: basic <base64>) into the job log. checkout
+        # registers that string with setSecret, but this check's own failure
+        # mode should not depend on another action's masking.
+        if git config --get-all "http.$SERVER_URL/.extraheader" >/dev/null; then
           echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
           exit 1
         fi

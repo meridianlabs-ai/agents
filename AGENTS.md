@@ -100,14 +100,19 @@ take effect on every repo's next run.
   `reclaim-codex-workspace` step runs unconditionally right after codex
   (`if: always() && steps.codexuser.outcome == 'success'`): it kills any
   process still running as codex, refuses a redirected git dir
-  (`.git/commondir`, symlinked `.git`), takes `.git` back and revokes the
-  codex group's write grant on it, and restores the pre-codex `.git/config`
-  — so keep every later git-running
-  step gated on its success (guard, landing, the loops' hand-back fetch) and
-  put nothing that runs git between codex and it. The guard and landing
-  steps additionally pin `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` and
+  (`.git/commondir`, symlinked `.git`) and any embedded repository codex
+  added (a nested `.git/config` is executed by the landing step's `git
+  status`/`git add` and no restore or pin reaches it — compared against the
+  list `Create codex user` snapshots, so a caller's provisioning may leave
+  one), takes `.git` back and revokes the codex group's write grant on it
+  and on the workspace root, and restores the pre-codex `.git/config` — so
+  keep every later git-running step gated on its success (guard, landing,
+  the loops' hand-back fetch) and put nothing that runs git between codex
+  and it. The guard and landing steps additionally pin
+  `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` and
   `core.hooksPath`/`core.fsmonitor` by env (hooks and the index are files a
-  config restore cannot cover); keep all of that when touching them. See
+  config restore cannot cover), and every post-codex `git status` passes
+  `--ignore-submodules=dirty`; keep all of that when touching them. See
   design/architecture.md → No persisted git credentials and
   design/codex-engine.md → Hook-safe landing.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat

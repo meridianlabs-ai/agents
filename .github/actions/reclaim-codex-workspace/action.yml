@@ -11,15 +11,16 @@ description: >-
   errors) then reads a clean config instead of each step defending itself;
   before this existed the loops' `Ensure hand-back after push` ran `git
   fetch` against the un-restored, codex-writable .git whenever the guard or
-  the landing failed (review finding on #73). Five things, in order:
+  the landing failed (review finding on #73). Seven things, in order:
 
   1. Kill every process still running as the codex user (`pkill -KILL -u
-     codex`). codex-action's step is over and nothing legitimate runs as
-     codex after it, but the runner does not reap orphans between steps, so
-     a background process a prompt-injected codex left behind (`setsid
-     nohup … &`) would otherwise outlive this step — and could rewrite the
-     restored config below before the landing step's credentialed push
-     (review round 4 of #73).
+     codex`, repeated until a pass finds nothing — one pass scans /proc
+     once, and a forking survivor can slip it). codex-action's step is over
+     and nothing legitimate runs as codex after it, but the runner does not
+     reap orphans between steps, so a background process a prompt-injected
+     codex left behind (`setsid nohup … &`) would otherwise outlive this
+     step — and could rewrite the restored config below before the landing
+     step's credentialed push (review round 4 of #73).
   2. Refuse a redirected git dir: fail if `.git` is a symlink, not a
      directory, or contains a `commondir` file. gitrepository-layout(5): a
      `commondir` file sets `$GIT_COMMON_DIR` unless the env already does,
@@ -29,19 +30,42 @@ description: >-
      reads. This step runs no git, so the check needs no pin; every later
      git-running step pins `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` too,
      and this refusal makes a codex that tried it fail loudly instead.
-  3. `chown -R runner .git` — object fan-out dirs codex created are
+  3. Refuse an embedded repository codex left in the tree: fail if the set
+     of `.git` entries below the top level (directories, gitfiles or
+     symlinks — `find -mindepth 2 -name .git`) differs from the list
+     `Create codex user` snapshotted before the grant. A nested repo has its
+     OWN `.git/config`, which neither the restore nor the env pins reach:
+     once codex stages the directory as a gitlink, the landing step's `git
+     status` / `git add -A` spawn `git status --porcelain=2` inside it
+     (`is_submodule_modified`), the child refreshes the nested index, and a
+     tracked file whose mtime changed re-hashes through the nested
+     `filter.*.clean` driver — as `runner`, with the machine-account token
+     in the environment (review round 5 of #73). Compared against a
+     snapshot rather than refused outright so a caller's provisioning that
+     legitimately leaves one (an editable `git+` install under `src/`)
+     keeps working; codex itself has no network and no reason to create one.
+  4. `chown -R runner .git` — object fan-out dirs codex created are
      codex-owned, and the runner's codex-group membership is inert within
      the job, so runner-side object writes would otherwise fail
      intermittently.
-  4. `chmod -R g-w .git` — revoke the group grant `Create codex user` put on
+  5. `chmod -R g-w .git` — revoke the group grant `Create codex user` put on
      the tree (`g+rwX` plus setgid on every directory). The chown alone
      leaves `.git/` `drwxrwsr-x runner codex`, a directory the codex user
      can still unlink from and create in, so a survivor of the kill would
      have a write path to the restored config; without the group bit it
      has none (codex is also in the `runner` group, so a `chgrp` would not
-     do). The working tree keeps its grant — runner owns the directories
-     and reads codex's files fine.
-  5. Restore the config `Create codex user` snapshotted right before the
+     do). Symbolic `g-w` keeps the setgid bit, so `.git` reads
+     `drwxr-sr-x` afterwards — harmless, runner's umask gives new files no
+     group write.
+  6. `chmod g-w $GITHUB_WORKSPACE` (the root only, not recursive) — a
+     same-parent rename needs write on the PARENT only, so with the
+     workspace root still `drwxrwsr-x runner codex` a survivor could `mv
+     .git .git.x && cp -a .git.x .git` and own the whole git dir; the
+     landing step's `GIT_DIR` pin follows the path, so it would then read a
+     config codex owns (review round 5 of #73). The rest of the working
+     tree keeps its grant — runner owns the directories and reads codex's
+     files fine.
+  7. Restore the config `Create codex user` snapshotted right before the
      group grant, with `cp --remove-destination` — codex could have
      replaced the file with a symlink, and a plain cp would follow it and
      write elsewhere.
@@ -65,6 +89,15 @@ inputs:
       needs no context.
     required: false
     default: ""
+  embedded-snapshot:
+    description: >-
+      Path of the pre-codex list of embedded `.git` entries (sorted `find
+      $GITHUB_WORKSPACE -mindepth 2 -name .git` output, one path per line;
+      empty on a plain checkout). Defaults to
+      `$RUNNER_TEMP/embedded-git.pre-codex`, where `Create codex user` writes
+      it. Any difference after codex fails the step.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -72,23 +105,46 @@ runs:
     - shell: bash
       env:
         SNAPSHOT: ${{ inputs.config-snapshot }}
+        EMBEDDED_SNAPSHOT: ${{ inputs.embedded-snapshot }}
       run: |
         set -euo pipefail
         SNAPSHOT="${SNAPSHOT:-$RUNNER_TEMP/git-config.pre-codex}"
+        EMBEDDED_SNAPSHOT="${EMBEDDED_SNAPSHOT:-$RUNNER_TEMP/embedded-git.pre-codex}"
         gitdir="$GITHUB_WORKSPACE/.git"
-        # The snapshot is the runner's own file from before the grant; if it
-        # is missing the restore below would leave codex's config in place
-        # for every later step, so fail closed rather than fall through.
+        # The snapshots are the runner's own files from before the grant; if
+        # one is missing the checks below would either leave codex's config
+        # in place for every later step or wave a nested repo through, so
+        # fail closed rather than fall through.
         if [ ! -f "$SNAPSHOT" ]; then
           echo "::error::pre-codex git config snapshot not found at $SNAPSHOT — refusing to reuse the codex-written .git/config."
+          exit 1
+        fi
+        if [ ! -f "$EMBEDDED_SNAPSHOT" ]; then
+          echo "::error::pre-codex embedded-repository snapshot not found at $EMBEDDED_SNAPSHOT — refusing to run git over a tree that may hold a nested .git."
           exit 1
         fi
         # First: nothing may still be running as codex while .git is put
         # back — a lingering background process could re-tamper the config
         # after the restore below and before the landing step's credentialed
-        # push. `|| true`: pkill exits 1 when there is nothing to kill, the
-        # normal case.
-        sudo pkill -KILL -u codex || true
+        # push. pkill scans /proc once per call and exits 1 when it found
+        # nothing to kill (0 = killed something, 2/3 = pkill itself failed),
+        # so repeat until a pass comes up empty — bounded: a survivor that
+        # keeps forking faster than that is a red step, not a silent one.
+        clear=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          rc=0
+          sudo pkill -KILL -u codex || rc=$?
+          if [ "$rc" -eq 1 ]; then clear=1; break; fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::pkill -u codex failed (exit $rc) — cannot tell whether codex processes survive; refusing to reclaim the workspace."
+            exit 1
+          fi
+          sleep 0.2
+        done
+        if [ "$clear" -ne 1 ]; then
+          echo "::error::processes were still running as codex after repeated kills — refusing to reclaim the workspace under them."
+          exit 1
+        fi
         # Refuse BEFORE the chown: a .git that codex turned into a symlink
         # would otherwise have its target re-owned first. -L on commondir
         # too — -e is false for a dangling symlink.
@@ -96,10 +152,28 @@ runs:
           echo "::error::codex left a redirected git dir (.git is not a plain directory, or .git/commondir exists) — refusing to run git through it."
           exit 1
         fi
+        # Refuse an embedded repository too: a nested .git/config is executed
+        # by the landing step's git status / git add (is_submodule_modified
+        # spawns a child git inside it) and is not covered by the restore or
+        # the env pins. `find` runs as root so a directory codex made
+        # unreadable to runner cannot hide one; -P (the default) does not
+        # follow symlinks, and -name matches a gitfile or symlink named .git
+        # as well as a directory. Same find, same sort as the snapshot.
+        sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.post-codex"
+        if ! cmp -s "$EMBEDDED_SNAPSHOT" "$RUNNER_TEMP/embedded-git.post-codex"; then
+          echo "::error::codex left an embedded git repository in the tree — refusing to run git over it (a nested .git/config is executed by the landing step and is not covered by the restore):"
+          diff "$EMBEDDED_SNAPSHOT" "$RUNNER_TEMP/embedded-git.post-codex" || true
+          exit 1
+        fi
         sudo chown -R runner "$gitdir"
         # Revoke the codex group's write grant on .git so a survivor of the
         # kill has no write path into it either (chown -R does not follow
-        # symlinks under .git — GNU default -P — and neither does chmod -R).
+        # symlinks under .git — GNU default -P — and neither does chmod -R),
+        # and on the workspace root so it cannot rename .git away and
+        # replace it wholesale (a same-parent rename needs write on the
+        # parent only). Root only, not recursive: runner owns it, nothing
+        # runner-side changes, and the tree keeps its grant.
         sudo chmod -R g-w "$gitdir"
+        sudo chmod g-w "$GITHUB_WORKSPACE"
         cp --remove-destination "$SNAPSHOT" "$gitdir/config"
-        echo "reclaimed .git from codex (codex processes killed, group write revoked) and restored the pre-codex config."
+        echo "reclaimed .git from codex (codex processes killed, no embedded repository, group write revoked on .git and the workspace root) and restored the pre-codex config."

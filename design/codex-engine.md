@@ -177,13 +177,22 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   the runner does not reap orphans between steps, so a background process a
   prompt-injected codex left behind would otherwise outlive the step and
   could rewrite the restored config before the landing step's credentialed
-  push; review round 4 of #73), refuses if `.git/commondir` exists or `.git`
-  is no longer a plain directory (below), takes `.git` back (`chown -R
+  push; review round 4 of #73 — the kill is repeated until a pass finds
+  nothing, since one `pkill` scans `/proc` once and a forking survivor can
+  slip it), refuses if `.git/commondir` exists or `.git` is no longer a
+  plain directory (below), refuses if codex left an *embedded repository*
+  in the tree (below — the list of nested `.git` entries is compared with
+  the one `Create codex user` snapshotted, so a caller's provisioning that
+  legitimately leaves one keeps working), takes `.git` back (`chown -R
   runner`), revokes the group grant on it (`chmod -R g-w` — the chown alone
   leaves `.git/` group-writable by codex, and a `chgrp` would not do since
-  codex is in the `runner` group too; the working tree keeps its grant), and
-  restores the snapshot with `cp --remove-destination`, so a config codex
-  replaced with a symlink cannot redirect the write. It runs no git itself.
+  codex is in the `runner` group too) and on the workspace root (`chmod
+  g-w`, not recursive: a same-parent rename needs write on the parent only,
+  so a survivor could otherwise `mv .git .git.x && cp -a .git.x .git` and
+  own a git dir the `GIT_DIR` pin then follows by path; review round 5 of
+  #73 — the rest of the working tree keeps its grant), and restores the
+  snapshot with `cp --remove-destination`, so a config codex replaced with a
+  symlink cannot redirect the write. It runs no git itself.
   Everything downstream —
   the guard, the landing, the loops' hand-back and unlanded-work fetches —
   is either gated on that step's success or (Surface) sets its error and
@@ -217,17 +226,31 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   since hooks are files and the fsmonitor extension lives in the index. The
   `unresolved-merge-guard` pins `core.fsmonitor=false` and the git dir the
   same way (lower exposure — `ls-files` runs no drivers — but it reads the
-  index, which the restore does not touch). The env pin, not the restore,
-  is also what covers a *nested* repository: codex can leave an embedded
-  repo in the tree with `core.fsmonitor=<cmd>` in *its* `.git/config`, and
-  the landing step's `git status --porcelain` then spawns `git status
-  --porcelain=2` inside it (`is_submodule_modified`). That child gets
-  `GIT_DIR`/`GIT_COMMON_DIR` cleared and reads the nested config, which the
-  restore never touched — but git's `sanitize_repo_env` (run-command.c)
-  deliberately keeps `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, so the
-  `core.fsmonitor=false` and `core.hooksPath` pins still apply there. Keep
-  the pins on every git command in the step, not just the ones that
-  obviously execute config.
+  index, which the restore does not touch). Keep the pins on every git
+  command in the step, not just the ones that obviously execute config;
+- a *nested* repository is refused, not pinned. Codex can leave an embedded
+  repo in the tree with its *own* `.git/config` and stage the directory as
+  a gitlink (`git add evil` — all local git); the landing step's `git status
+  --porcelain` then spawns `git status --porcelain=2` inside it
+  (`is_submodule_modified`), and `git add -A` can do the same for an
+  unchanged-HEAD gitlink. That child gets `GIT_DIR`/`GIT_COMMON_DIR` cleared and reads the
+  nested config, which the restore never touched. Git's `sanitize_repo_env`
+  (run-command.c) keeps `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, so the
+  `core.fsmonitor=false` and `core.hooksPath` pins do carry into the child —
+  but the pins cover only those two keys, and the child *refreshes its
+  index*: a tracked file whose mtime changed but whose size did not is
+  re-hashed through `convert_to_git` → the `filter.*.clean` driver named by
+  the nested `.gitattributes` and nested config, as `runner`, with the
+  machine-account token in the environment (review round 5 of #73; env
+  config cannot wildcard a filter name away). So the reclaim step compares
+  `find $GITHUB_WORKSPACE -mindepth 2 -name .git` (as root, so an unreadable
+  directory cannot hide one; matches gitfiles and symlinks too) against the
+  pre-codex snapshot and fails on any difference — git-free, and every
+  downstream git user is already gated on the step. Belt and braces: every
+  post-codex `git status` passes `--ignore-submodules=dirty`, which is what
+  suppresses the `is_submodule_modified` spawn while (unlike `all`) still
+  reporting a changed gitlink pointer; `git add`/`git commit` have no such
+  flag, which is why the refusal is the primary defence.
 
 Verification for a change here, all cases prompted to codex (any verb):
 
@@ -249,9 +272,20 @@ Verification for a change here, all cases prompted to codex (any verb):
 4. the survivor path: have codex start `setsid nohup sh -c 'while :; do
    git config core.sshCommand "sh -c \"echo SURVIVOR-RAN >&2\""; sleep 0.1;
    done' &` and leave the tree otherwise clean — the reclaim step's log must
-   show the kill, `.git` must be `drwxr-xr-x` afterwards (`stat` it in a
-   scratch step), and the landing step's push must go out with no
-   `SURVIVOR-RAN` in any log.
+   show the kill, `.git` and the workspace root must both be `drwxr-sr-x`
+   afterwards (`stat` them in a scratch step; symbolic `g-w` keeps the
+   setgid bit `Create codex user` set, so `drwxr-xr-x` would be wrong, not
+   better), and the landing step's push must go out with no `SURVIVOR-RAN`
+   in any log;
+5. the embedded-repository path: `git init evil && git -C evil config
+   filter.x.clean "echo FILTER-RAN >&2"`, `echo "* filter=x"
+   >evil/.gitattributes`, commit a file inside `evil`, `touch` it, then `git
+   add evil` in the outer repo — the reclaim step must fail on its
+   embedded-repository check (its log names the `evil/.git` path), the guard
+   and landing must be skipped, and no later step's log (hand-back, Surface)
+   may contain `FILTER-RAN`. Control: a run on a caller whose provisioning
+   leaves a nested `.git` before codex (an editable `git+` install under
+   `src/`) must NOT be refused — the snapshot covers it.
 
 ## v1 limitations (deliberate)
 
