@@ -74,7 +74,11 @@ runs:
         STRIPPED: ${{ inputs.stripped }}
         RESOLVE: ${{ inputs.resolve }}
       run: |
-        # No -e: every path below is best-effort by design (see description).
+        # GitHub runs `shell: bash` as `bash -eo pipefail`; -e is dropped
+        # deliberately — every path below is best-effort by design (see the
+        # action description): a failure must log a warning, not fail the
+        # caller's job, and an unguarded command added later must not either.
+        set +e
         set -uo pipefail
         # One awk pass does both the parse and the strip, so they cannot
         # disagree about what the line is. The tag may be indented, bulleted,
