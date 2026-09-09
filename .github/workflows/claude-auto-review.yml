@@ -472,11 +472,15 @@ jobs:
       # per-PR-lifetime tally, so after a cap escalation "re-add it to let me
       # keep iterating" would otherwise re-escalate on the very next review
       # with suggestions (round 11 > 10) — a human re-labeling has decided
-      # the loop deserves another full budget. The head marker is kept so
-      # the no-progress check keeps its reference tip; with rounds at 0 that
-      # check is skipped for the first fresh round anyway (it needs
-      # prev >= 1), so re-adding the label without pushing does not trip it.
-      # Best-effort (|| true): the comment and label removal are what matter.
+      # the loop deserves another full budget. The reset body carries no
+      # head marker: the no-progress check needs prev >= 1 to compare tips,
+      # so a fresh budget's first round skips it (re-adding the label without
+      # pushing does not trip it), and that round's Record round writes a
+      # fresh tip before anything reads one. The reset is best-effort — the
+      # comment and label removal are what matter — but it runs FIRST so the
+      # hand-off can tell the truth about it: a failed PATCH leaves the
+      # exhausted counter in place, and promising a fresh budget then would
+      # be exactly the false "re-add it" this reset exists to fix.
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
         env:
@@ -484,7 +488,6 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           CID: ${{ steps.gate.outputs.cid }}
-          HEAD: ${{ steps.gate.outputs.head }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
           MARKER: "<!-- auto-review-rounds -->"
@@ -492,6 +495,18 @@ jobs:
           STALLED: ${{ steps.gate.outputs.stalled }}
         run: |
           set -euo pipefail
+          # No counter comment means nothing to reset: the next round starts at 1.
+          reset=1
+          if [ -n "$CID" ]; then
+            body="$MARKER
+          🤖 auto review rounds: 0 (cap $CAP). (counter reset on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget)"
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || reset=0
+          fi
+          if [ "$reset" = 1 ]; then
+            relabel="Re-add it to let me keep iterating — the round counter is reset, so that starts a fresh budget of $CAP."
+          else
+            relabel="Re-add it to let me keep iterating — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment to read 0, or I'll escalate again on sight."
+          fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
           if [ "${STALLED:-}" = "1" ]; then
             reason="my last fix round pushed no new changes, so I'm not making progress on the reviewer's remaining feedback"
@@ -499,14 +514,8 @@ jobs:
             reason="the reviewer still has feedback after $CAP review rounds and I haven't converged"
           fi
           gh pr comment "$PR" --repo "$REPO" --body \
-            "${ping}🤖 auto: $reason. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating — the round counter is reset, so that starts a fresh budget of $CAP."
+            "${ping}🤖 auto: $reason. Removing the \`$AUTO_LABEL\` label and handing this to a human. $relabel"
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
-          if [ -n "$CID" ]; then
-            body="$MARKER
-          🤖 auto review rounds: 0 (cap $CAP). (counter reset on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget)
-          <!-- auto-review-head:$HEAD -->"
-            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || true
-          fi
 
       # Check out the PR head (derived above); authenticate as the machine
       # account so the agent's fix push re-triggers CI and its `@review` comment

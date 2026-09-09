@@ -165,9 +165,14 @@ re-read the exhausted counter and escalated again on sight, no fix attempted
 provisioned environment, attempt 3 was spent 70 minutes and five green pushes
 before the failure that escalated). So escalation now rewrites the counter to
 0 as part of the hand-off, in both loops — a human re-labeling is an explicit
-decision that the loop deserves another full budget. The review loop keeps its
-head marker across the reset; the no-progress check needs a prior round to
-compare against, so a fresh budget's first round is never mis-read as a stall.
+decision that the loop deserves another full budget. The reset runs *before*
+the hand-off comment is composed, and the comment only promises a fresh budget
+if it succeeded; if the PATCH failed it says so and tells the human to edit the
+counter to 0 by hand first (otherwise the hand-off would repeat the false
+promise it exists to fix). The review loop's reset body drops the head marker:
+the no-progress check needs a prior round to compare against, so a fresh
+budget's first round is never mis-read as a stall, and that round records a
+fresh tip before anything reads one.
 Removing the label by hand (the manual kill switch) does NOT reset anything —
 re-adding it continues the old tally, which is the right default for "pause,
 then resume".

@@ -281,8 +281,11 @@ jobs:
       # 2026-09-09: two of the three attempts had been burned by rounds that
       # ran without a provisioned environment, and the third was 70 minutes
       # and five green pushes earlier). Re-labeling is an explicit human
-      # decision; it buys a fresh budget. The reset is best-effort (|| true):
-      # the hand-off comment and label removal are the load-bearing part.
+      # decision; it buys a fresh budget. The reset is best-effort — the
+      # hand-off comment and label removal are the load-bearing part — but it
+      # runs FIRST so the hand-off can tell the truth about it: a failed PATCH
+      # leaves the exhausted counter in place, and promising a fresh budget
+      # then would be exactly the false "re-add it" this reset exists to fix.
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
         env:
@@ -296,14 +299,21 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
         run: |
           set -euo pipefail
-          gh pr comment "$PR" --repo "$REPO" --body \
-            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again — the attempt counter is reset, so that starts a fresh budget of $CAP."
-          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+          # No counter comment means nothing to reset: the next attempt starts at 1.
+          reset=1
           if [ -n "$CID" ]; then
             body="$MARKER
           🤖 auto CI-fix attempts: 0 (cap $CAP). (counter reset on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget)"
-            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || true
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || reset=0
           fi
+          if [ "$reset" = 1 ]; then
+            relabel="Re-add the label to let me try again — the attempt counter is reset, so that starts a fresh budget of $CAP."
+          else
+            relabel="Re-add the label to let me try again — but I could not reset the attempt counter (API error), so first edit my sticky \"auto CI-fix attempts\" comment to read 0, or I'll escalate again on sight."
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. $relabel"
+          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
 
       # Capture the branch tip and a timestamp before the agent runs so later
       # steps can tell whether the agent's fix landed and what it posted.
