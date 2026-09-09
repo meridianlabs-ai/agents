@@ -1,0 +1,175 @@
+name: codex-usage
+description: >-
+  Report the token split and the model that served a codex run in the job
+  summary. The codex CLI's step-log footer is a single "tokens used" number
+  (its blended_total: non-cached input + output), which cannot be priced —
+  input, cached input and output bill at different rates. codex persists a
+  session rollout (JSONL) per thread under CODEX_HOME/sessions/YYYY/MM/DD/
+  unless run with --ephemeral; its token_count events carry the thread's
+  cumulative split and its turn_context items name the model actually used,
+  so this reads every rollout of the run (one, unless codex spawned subagent
+  threads), sums them, and writes a "Codex usage" table — the codex
+  counterpart of the model-provenance action. Tokens only: pricing is not
+  encoded here (apply the model's published rates, or read the OpenAI usage
+  dashboard). Nothing leaves the runner — the rollout is the full transcript,
+  the same reason the Claude path stopped uploading its execution log (#65).
+  Best-effort by design: every path exits 0 — usage reporting must never
+  fail the agent's real work, and it runs BEFORE the landing step, whose
+  implicit success() gate would otherwise skip the landing and strand the
+  agent's edits. Callers add continue-on-error: true as well, so the
+  guarantee is structural, not script discipline. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/codex-usage@main) so it works
+  regardless of what the job checked out; NO post step (local composite
+  actions with post steps break teardown on the fork).
+
+inputs:
+  codex-home:
+    description: >-
+      CODEX_HOME the codex step ran with. codex-action resolves it to the
+      codex user's ~/.codex under safety-strategy unprivileged-user; the
+      files are codex-owned, so they are read via sudo.
+    required: false
+    default: "/home/codex/.codex"
+  requested-model:
+    description: The workflow's codex_model input (empty = the codex CLI default).
+    required: false
+    default: ""
+  requested-effort:
+    description: The workflow's codex_effort input (empty = the codex CLI default).
+    required: false
+    default: ""
+
+outputs:
+  model:
+    description: >-
+      Model(s) named by the rollouts' turn_context items, distinct, comma
+      separated (empty if unknown). One model unless a subagent thread ran
+      on a different one.
+    value: ${{ steps.usage.outputs.model }}
+  input-tokens:
+    description: Cumulative input tokens (includes the cached ones), summed over threads.
+    value: ${{ steps.usage.outputs.input }}
+  cached-input-tokens:
+    description: Cumulative cached input tokens, summed over threads.
+    value: ${{ steps.usage.outputs.cached }}
+  output-tokens:
+    description: Cumulative output tokens (includes reasoning), summed over threads.
+    value: ${{ steps.usage.outputs.output }}
+  reasoning-output-tokens:
+    description: Cumulative reasoning tokens (a subset of output), summed over threads.
+    value: ${{ steps.usage.outputs.reasoning }}
+  total-tokens:
+    description: Cumulative total tokens as reported by the API, summed over threads.
+    value: ${{ steps.usage.outputs.total }}
+  blended-tokens:
+    description: Non-cached input + output — the CLI's "tokens used" figure.
+    value: ${{ steps.usage.outputs.blended }}
+  threads:
+    description: Number of rollouts (threads) that reported usage.
+    value: ${{ steps.usage.outputs.threads }}
+
+runs:
+  using: composite
+  steps:
+    - id: usage
+      shell: bash
+      env:
+        CODEX_HOME_DIR: ${{ inputs.codex-home }}
+        REQ_MODEL: ${{ inputs.requested-model }}
+        REQ_EFFORT: ${{ inputs.requested-effort }}
+      run: |
+        # GitHub runs `shell: bash` as `bash -eo pipefail`; -e is dropped
+        # deliberately — a failure anywhere below must log and exit 0, not
+        # fail the step (see the action description).
+        set +e
+        set -o pipefail
+        dir="$CODEX_HOME_DIR/sessions"
+        if ! sudo test -d "$dir"; then
+          echo "codex-usage: no sessions dir at $dir (codex never launched, or ran --ephemeral); nothing to report."
+          exit 0
+        fi
+        # `Create codex user` makes CODEX_HOME fresh in every job, so every
+        # rollout under it belongs to this run: the main thread's, plus one
+        # per subagent thread if codex spawned any. Each thread's
+        # token_count is cumulative for THAT thread, so the run's total is
+        # the sum of each file's last token_count.
+        files=$(sudo find "$dir" -type f -name 'rollout-*.jsonl' 2>/dev/null | sort)
+        [ -n "$files" ] || { echo "codex-usage: no rollout file under $dir; nothing to report."; exit 0; }
+        # One privileged read per file: copy each rollout (codex-owned) to a
+        # runner-owned scratch dir, parse the copies, delete them on exit.
+        tmp=$(mktemp -d) || { echo "codex-usage: mktemp failed; nothing to report."; exit 0; }
+        trap 'rm -rf "$tmp"' EXIT
+        i=0
+        while IFS= read -r f; do
+          [ -n "$f" ] || continue
+          i=$((i + 1))
+          sudo cat "$f" >"$tmp/$i.jsonl" 2>/dev/null || echo "codex-usage: could not read $f; skipping it."
+        done <<<"$files"
+        # Rollout lines: {"timestamp","type","payload"}. `fromjson?` skips a
+        # torn final line (codex killed mid-write) instead of aborting jq. A
+        # token_count with null info is a rate-limit-only update and carries
+        # no usage. Per file: the LAST token_count's total_token_usage and
+        # the LAST turn_context's model and effort, as one JSON line.
+        per_file=$(for c in "$tmp"/*.jsonl; do
+          jq -c -n -R '[inputs | fromjson?]
+            | { usage: ([.[] | select(.type=="event_msg" and .payload.type=="token_count" and .payload.info != null) | .payload.info.total_token_usage] | last),
+                model: ([.[] | select(.type=="turn_context") | .payload.model // empty] | last // ""),
+                effort: ([.[] | select(.type=="turn_context") | .payload.effort // empty] | last // "") }
+            | select(.usage != null)' "$c" 2>/dev/null
+        done)
+        if [ -z "$per_file" ]; then
+          n=$(printf '%s\n' "$files" | grep -c .)
+          echo "codex-usage: no token_count event in $n rollout file(s) under $dir (the run ended before its first model response?); nothing to report."
+          exit 0
+        fi
+        # Sum the split over threads; list the distinct models / efforts.
+        # (f | tonumber)? // 0 keeps a missing or malformed field — even a
+        # non-object usage — from producing anything but an integer for the
+        # shell arithmetic below.
+        summary=$(jq -s -r '
+          def sum(f): map((f | tonumber)? // 0) | add // 0 | floor;
+          def distinct(f): [.[] | f | select(. != "")] | unique | join(",");
+          [ length,
+            sum(.usage.input_tokens), sum(.usage.cached_input_tokens), sum(.usage.output_tokens),
+            sum(.usage.reasoning_output_tokens), sum(.usage.total_tokens),
+            distinct(.model), distinct(.effort) ]
+          | map(tostring) | join("\u001f")' <<<"$per_file" 2>/dev/null)
+        [ -n "$summary" ] || { echo "codex-usage: could not aggregate the token_count events; nothing to report."; exit 0; }
+        # Unit separator, not tab: tab is IFS whitespace, so an empty model
+        # field would collapse into its neighbour and shift the columns.
+        IFS=$'\x1f' read -r threads input cached output reasoning total model effort <<<"$summary"
+        # Counts must be integers before they reach $(( )).
+        for v in threads input cached output reasoning total; do
+          [[ "${!v:-}" =~ ^[0-9]+$ ]] || printf -v "$v" '%s' 0
+        done
+        # The rollout is codex's own record, not agent prose, but the values
+        # land in markdown: keep them to identifier characters.
+        model=$(printf '%s' "${model:-}" | tr -cd 'A-Za-z0-9._:/,-' | head -c 160)
+        effort=$(printf '%s' "${effort:-}" | tr -cd 'A-Za-z0-9_,-' | head -c 40)
+        noncached=$(( input - cached )); [ "$noncached" -ge 0 ] || noncached=0
+        blended=$(( noncached + output ))
+        [ "$threads" -eq 1 ] && scope="the run's one thread" || scope="summed over $threads threads (codex spawned subagents)"
+        echo "codex-usage: model='${model:-?}' (requested '${REQ_MODEL:-<CLI default>}') effort='${effort:-?}' (requested '${REQ_EFFORT:-<CLI default>}') — $scope"
+        echo "codex-usage: input=$input cached_input=$cached output=$output reasoning_output=$reasoning total=$total blended(tokens used)=$blended"
+        {
+          echo "### Codex usage"
+          echo ""
+          echo "Model: \`${model:-?}\` (requested: \`${REQ_MODEL:-<codex CLI default>}\`), reasoning effort: \`${effort:-?}\` (requested: \`${REQ_EFFORT:-<codex CLI default>}\`)"
+          echo ""
+          echo "| input tokens | of which cached | output tokens | of which reasoning | total | blended (\"tokens used\") |"
+          echo "|---:|---:|---:|---:|---:|---:|"
+          echo "| $input | $cached | $output | $reasoning | $total | $blended |"
+          echo ""
+          echo "Cumulative for the run ($scope), from the session rollout(s). Cost = non-cached input × input rate + cached input × cached rate + output × output rate at the model's published prices."
+        } >>"$GITHUB_STEP_SUMMARY"
+        {
+          echo "model=$model"
+          echo "input=$input"
+          echo "cached=$cached"
+          echo "output=$output"
+          echo "reasoning=$reasoning"
+          echo "total=$total"
+          echo "blended=$blended"
+          echo "threads=$threads"
+        } >>"$GITHUB_OUTPUT"
+        exit 0

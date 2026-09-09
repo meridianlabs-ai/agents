@@ -1007,6 +1007,23 @@ jobs:
             review text — the workflow posts the verdict comment for you, and
             an echoed marker would be read by the automation as a verdict.
 
+      # Token split for the codex run: the CLI's step-log "tokens used" is one
+      # blended number (non-cached input + output), so this reads the session
+      # rollout codex wrote under its CODEX_HOME and puts input / cached /
+      # output / reasoning counts and the model that served in the job
+      # summary — the codex counterpart of Model provenance below. Runs right
+      # after codex, before landing, so a landing failure can't hide the
+      # spend. Best-effort: the script exits 0 on every path, and
+      # continue-on-error makes that structural — a failure here must never
+      # trip the posting step's implicit success() gate and strand the review.
+      - name: Codex usage
+        if: always() && steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
+        continue-on-error: true
+        uses: meridianlabs-ai/agents/.github/actions/codex-usage@main
+        with:
+          requested-model: ${{ inputs.codex_model }}
+          requested-effort: ${{ inputs.codex_effort }}
+
       # Post the codex review with the loop's marker contract: the summary
       # comment, then the marked verdict comment. Posted as the machine
       # account so the verdict actually triggers the review-fix stub
@@ -1128,7 +1145,7 @@ jobs:
       # --fallback-model fires, so this parses modelUsage and posts a note on
       # the PR when a non-requested model served tokens or the result
       # reads like a classifier refusal. Best-effort, always exits 0. Codex
-      # runs have no execution file and a pinned model — nothing to report.
+      # runs have no execution file — the Codex usage step above covers them.
       # The note carries a `<!-- model-provenance -->` first line so "Verify
       # the review was posted" below can tell it from review output.
       - name: Model provenance

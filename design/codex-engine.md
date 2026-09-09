@@ -215,6 +215,32 @@ workaround when #103's does).
   `model_reasoning_effort` config: reviews run at `xhigh` — correctness
   over turnaround — and implementation runs (dev agent, both loops) at
   `high` (implementation took the CLI default before 2026-09-08).
+- **Token split in the job summary** (2026-09-09): the codex CLI's
+  step-log footer is a single "tokens used" number — its `blended_total`,
+  non-cached input + output — so the `codex-usage` composite action runs
+  right after every codex step and reads the session rollouts codex
+  persisted under its CODEX_HOME (`sessions/YYYY/MM/DD/rollout-*.jsonl`;
+  `codex exec` persists unless `--ephemeral`). Each rollout is one
+  thread; its last `token_count` event's `total_token_usage` carries that
+  thread's cumulative input / cached-input / output / reasoning-output /
+  total counts, and its last `turn_context` names the model and effort
+  that actually served. CODEX_HOME is fresh per job, so every rollout
+  belongs to the run: the action sums the split over all of them (one
+  file today; subagent threads, should codex ever spawn any, get their
+  own) and lists the distinct models. A "Codex usage" table lands in the
+  job summary (the codex counterpart of Model provenance) and the same
+  numbers go to the step log. Tokens only — pricing is not encoded; apply
+  the model's published rates, or read the OpenAI usage dashboard, for
+  dollars. Best-effort: the script exits 0 on every path (a missing or
+  unparsable rollout logs why and moves on) and the step carries
+  `continue-on-error`, because it runs before the landing step, whose
+  implicit `success()` gate would otherwise skip the landing and strand
+  the agent's work. Reads each file once via sudo (they are codex-owned
+  under /home/codex; the runner's codex-group grant is inert within the
+  job — see the `Create codex user` step comments) into a scratch copy
+  deleted on exit, and copies nothing off the runner: rollouts hold the
+  whole transcript, the same reason the Claude path stopped uploading its
+  execution log (#65).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
 
@@ -225,4 +251,5 @@ Create the label per repo (`gh label create engine:codex -c 8250DF -d
 exercise verbs exactly like the Claude paths (AGENTS.md → Testing a
 change): @claude on a labeled issue, @review on a labeled PR, the auto
 loop on a labeled PR. The codex-action step log replaces the Claude path's
-job summary as the run forensics on codex runs.
+model-provenance job summary as the run forensics on codex runs, and the
+job summary's "Codex usage" table has the model and token split.
