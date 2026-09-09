@@ -1443,9 +1443,11 @@ jobs:
                 echo "::notice::unpushed local edits, but a hand-off comment posted this round explains them; not flagging."
               else
                 # Strip the @ from trigger tokens in agent-authored text: this
-                # summary is embedded in a MARVIN-authored comment below, and a
-                # bare @review/@claude/@auto in it would trigger that workflow
-                # (marvin is a write-access human account to every gate).
+                # summary is embedded in a MARVIN-authored comment below. The
+                # stubs' machine-account guard should already drop that
+                # comment, but stripping is defense in depth (a caller repo
+                # may carry an older stub) — a bare @review/@claude/@auto
+                # must not be what that guard is protecting against.
                 summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
                 err="the agent finished but left edits to tracked files (or unpushed commits) that never landed on the branch — whatever its summary reports, no code change reached the PR."
                 [ -n "$summary" ] && err="$err Agent summary: $summary"
@@ -1469,8 +1471,13 @@ jobs:
             # hand-back — so the loop resumes where it stopped (Ransom,
             # 2026-09-09; design/atlas-tracking.md → standing review). Bare
             # `@review` stays the right call only when no usable review
-            # exists. The token is backticked here: a bare @auto in a
-            # marvin-authored comment would itself fire the kickoff.
+            # exists. The tokens are backticked as defense in depth: the
+            # stubs' machine-account guard (actor != i-am-marvin and not a
+            # [bot]) should already drop this comment before any gate reads
+            # it, and claude.yml's trigger regex wants whitespace before the
+            # token anyway — but a caller repo may carry an older stub, and a
+            # bare token here must not be what that guard is protecting
+            # against.
             gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto review-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), resume with an `@auto` comment (e.g. `@auto address the review feedback`) — that re-runs the fix against the review already posted and resets the round budget; a fresh `@review` would only repeat the review. Otherwise it likely needs a human.%s' "$err" "$cc")" || true
           fi
           exit 1
