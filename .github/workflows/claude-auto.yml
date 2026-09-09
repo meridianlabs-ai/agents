@@ -354,8 +354,10 @@ jobs:
           ok=""
           for i in 1 2 3 4 5; do
             if gh pr comment "$PR" --repo "$REPO" --body "$body"; then ok=1; break; fi
-            echo "hand-off post failed (attempt $i); retrying"
-            sleep $((i * 15))
+            if [ "$i" -lt 5 ]; then
+              echo "hand-off post failed (attempt $i); retrying"
+              sleep $((i * 15))
+            fi
           done
           if [ -z "$ok" ]; then
             echo "::error::escalation hand-off comment on #$PR failed after 5 attempts — the disarm (disarmed=$DISARMED) and reset (ok=${RESET_OK:-skipped}) above have already run, so nobody was told; post the hand-off by hand."

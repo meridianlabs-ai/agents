@@ -542,11 +542,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$DISARMED" != "1" ]; then
-            label="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its round counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me keep iterating with a fresh budget, re-engage me with an @-mention comment (that re-applies the label, resets both counters and requests a fresh review)."
+            label="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its round counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me keep iterating with a fresh budget, re-engage me with an @-mention comment (that re-applies the label, resets both counters and, if it pushes a fix, requests a fresh review)."
           elif [ "$RESET_OK" = "1" ]; then
             label="Removing the \`$AUTO_LABEL\` label. Re-add it AND request a fresh review to let me keep iterating — I only act on the reviewer's next verdict, so the label alone does nothing. The round counter is reset, so that starts a fresh budget of $CAP."
           else
-            label="Removing the \`$AUTO_LABEL\` label. Re-add it AND request a fresh review to let me keep iterating (I only act on the reviewer's next verdict) — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label, resets both counters and requests a fresh review); otherwise I'll escalate again on sight."
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it AND request a fresh review to let me keep iterating (I only act on the reviewer's next verdict) — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label, resets both counters and, if it pushes a fix, requests a fresh review); otherwise I'll escalate again on sight."
           fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
           if [ "${STALLED:-}" = "1" ]; then
@@ -558,8 +558,10 @@ jobs:
           ok=""
           for i in 1 2 3 4 5; do
             if gh pr comment "$PR" --repo "$REPO" --body "$body"; then ok=1; break; fi
-            echo "hand-off post failed (attempt $i); retrying"
-            sleep $((i * 15))
+            if [ "$i" -lt 5 ]; then
+              echo "hand-off post failed (attempt $i); retrying"
+              sleep $((i * 15))
+            fi
           done
           if [ -z "$ok" ]; then
             echo "::error::escalation hand-off comment on #$PR failed after 5 attempts — the disarm (disarmed=$DISARMED) and reset (ok=${RESET_OK:-skipped}) above have already run, so nobody was told; post the hand-off by hand."
