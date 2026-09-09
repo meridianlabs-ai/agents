@@ -17,7 +17,8 @@ description: >-
   writes the final message with it removed for the caller to post; it does
   that on every path (a round that resolved nothing must not post the line
   either), and tolerates the likely deviations from "exactly the form" —
-  leading whitespace, markdown bold/backticks around the tag. Until
+  leading whitespace, a list bullet, markdown bold/backticks around the tag
+  (closed on either side of the colon). Until
   2026-09-09 codex rounds resolved nothing, so on codex PRs every thread the
   loop ever opened stayed OPEN, and the fix and review prompts grew with
   settled feedback nobody could tell from live (inspect_ai#428). Shared by
@@ -74,10 +75,12 @@ runs:
       run: |
         # No -e: every path below is best-effort by design (see description).
         set -uo pipefail
-        # One pattern for the parse and the strip: the tag may be indented or
-        # wrapped in markdown bold/backticks. The id filter below already
-        # tolerates any decoration on the ids themselves.
-        tag='^[[:space:]]*[*_`]*RESOLVED-THREADS:'
+        # One pattern for the parse and the strip: the tag may be indented,
+        # bulleted, or wrapped in markdown bold/backticks — closed either side
+        # of the colon (`**RESOLVED-THREADS:**` and `**RESOLVED-THREADS**:`
+        # are both likely renderings). The id filter below already tolerates
+        # any decoration on the ids themselves.
+        tag='^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:'
         if [ -f "$FINAL" ]; then
           sed -E "/${tag}/d" "$FINAL" >"$STRIPPED"
         fi

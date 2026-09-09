@@ -442,8 +442,9 @@ Verification for a change here, all cases prompted to codex (any verb):
   best-effort so a failed resolve never reddens a landed round (a failed
   query or mutation logs a `::warning::` carrying the API's reason rather
   than reading as "codex hallucinated N ids"). The tag is matched
-  tolerantly (indent, markdown bold/backticks) because the fail-safe
-  miss would otherwise be silent. The composite also writes the final
+  tolerantly (indent, list bullet, markdown bold/backticks closed on
+  either side of the colon) because the fail-safe miss would otherwise be
+  silent. The composite also writes the final
   message with the line stripped, and the post step publishes that copy
   with a header stating how many threads were resolved. Same rule as the
   Claude path's REVIEW_ETIQUETTE: never resolve what was declined or only
