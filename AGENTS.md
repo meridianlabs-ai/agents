@@ -20,8 +20,9 @@ take effect on every repo's next run.
   taken by the reusable definitions; keep them in sync with `examples/`. No CI
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
-  reusable workflows (`set-stage`, `sync-branch`, `unresolved-merge-guard`,
-  `push-base-merge`, `provision-fallback`). Referenced fully-qualified
+  reusable workflows (`set-stage`, `sync-branch`, `reclaim-codex-workspace`,
+  `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`).
+  Referenced fully-qualified
   (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
   regardless of what the job checked out; put step bodies that would otherwise
   be copied between `claude.yml`, `claude-auto.yml` and `claude-auto-review.yml`
@@ -87,12 +88,16 @@ take effect on every repo's next run.
   token is the job token for reads, `MARVIN_TOKEN` for pushes that must
   trigger CI. When adding a git network call to a workflow or composite,
   give its step that env — never rely on `.git/config`, and never put a
-  token in a URL or an `http.*.extraheader`. The codex landing steps
-  additionally pin `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` (a
-  codex-written `.git/commondir` would otherwise redirect git to a config
-  codex owns), refuse if that file exists, restore the pre-codex
-  `.git/config`, and pin `core.hooksPath`/`core.fsmonitor`; keep all of that
-  when touching them. See
+  token in a URL or an `http.*.extraheader`. On the codex path, the
+  `reclaim-codex-workspace` step runs unconditionally right after codex
+  (`if: always() && steps.codexuser.outcome == 'success'`): it takes `.git`
+  back, refuses a redirected git dir (`.git/commondir`, symlinked `.git`),
+  and restores the pre-codex `.git/config` — so keep every later git-running
+  step gated on its success (guard, landing, the loops' hand-back fetch) and
+  put nothing that runs git between codex and it. The guard and landing
+  steps additionally pin `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` and
+  `core.hooksPath`/`core.fsmonitor` by env (hooks and the index are files a
+  config restore cannot cover); keep all of that when touching them. See
   design/architecture.md → No persisted git credentials and
   design/codex-engine.md → Hook-safe landing.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat

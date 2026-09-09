@@ -231,8 +231,9 @@ leaves the push identity with the Claude App.
 Two things this does not change. The action's URL rewrite still leaves *its*
 token in `.git/config` for the remainder of a Claude run — the action's
 behavior, noted as a residual risk under Untrusted checkouts — but the codex
-path, where the exposure was, never runs the action. And the codex landing
-steps now trust nothing under `.git` at all: see design/codex-engine.md →
+path, where the exposure was, never runs the action. And on the codex path
+no runner-side git command trusts anything under `.git` until the
+`reclaim-codex-workspace` step has restored it: see design/codex-engine.md →
 Hook-safe landing.
 
 ## Model selection: prefer Fable, fall back gracefully

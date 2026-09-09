@@ -933,21 +933,22 @@ jobs:
       # spawned from a Runner.Worker that predates the usermod. Landing
       # codex's edits works anyway — runner still owns the pre-existing
       # workspace directories, codex's files are world-readable under its
-      # umask, and the land step reclaims .git — the one place codex-owned
-      # dirs (objects/ fan-out) would block runner's writes. (Group kept as
-      # a faithful copy of the example; if codex ever drops a 600 file, the
-      # land step needs a chmod -R a+rX sweep, not this group.)
+      # umask, and the reclaim step takes .git back — the one place
+      # codex-owned dirs (objects/ fan-out) would block runner's writes.
+      # (Group kept as a faithful copy of the example; if codex ever drops a
+      # 600 file, the reclaim step needs a chmod -R a+rX sweep, not this
+      # group.)
       - name: Create codex user
         id: codexuser
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
         run: |
           set -euo pipefail
           # Last runner-only moment for the tree: snapshot the repo config
-          # for the landing step to restore. The group grant below makes
+          # for the reclaim step to restore. The group grant below makes
           # .git/config codex-writable, and git executes configuration —
           # core.hooksPath, core.fsmonitor, filter drivers, credential
-          # helpers, remote URLs — so the credentialed landing step must not
-          # trust anything codex could have written there. RUNNER_TEMP itself
+          # helpers, remote URLs — so no runner-side git may run against
+          # anything codex could have written there. RUNNER_TEMP itself
           # stays runner-only (755 runner:runner; see below).
           cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
           sudo adduser --system --home /home/codex --shell /bin/bash --group codex
@@ -985,6 +986,22 @@ jobs:
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
+      # FIRST step after codex had write access to the tree, on every path
+      # (always(): success, failure, cancelled): take .git back from the
+      # codex user, refuse a redirected git dir (.git/commondir, symlinked
+      # .git), and restore the pre-codex .git/config that `Create codex user`
+      # snapshotted (design/codex-engine.md → Hook-safe landing). Runs BEFORE
+      # the guard and the landing so that every later step — guard, landing,
+      # the hand-back fetch, Surface — reads a clean config regardless of how
+      # codex, the guard or the landing ended; when this lived inside the
+      # landing step, a failed guard or a landing refusal left the hand-back
+      # step's `git fetch` running through codex's config (remote URL,
+      # core.sshCommand) with MARVIN_TOKEN in its env. Runs no git itself.
+      - name: Reclaim workspace from codex
+        id: codexreclaim
+        if: always() && steps.codexuser.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+
       # Token split for the codex run: the CLI's step-log "tokens used" is one
       # blended number (non-cached input + output), so this reads the session
       # rollout codex wrote under its CODEX_HOME and puts input / cached /
@@ -1007,31 +1024,32 @@ jobs:
       # produce a valid merge commit containing them, so this check is the
       # only thing between a half-resolved merge and the PR branch. A separate
       # step so the landing step below is skipped, not entered, on failure;
-      # the Surface step reads this step's outcome.
+      # the Surface step reads this step's outcome. Also gated on the reclaim:
+      # a refused (redirected) git dir must not be read at all.
       - name: Guard against an unresolved merge (codex)
         id: codexguard
-        if: steps.codexfix.outcome == 'success'
+        if: steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/unresolved-merge-guard@main
         with:
           conflicts: ${{ steps.sync.outputs.conflicts }}
 
-      # This is the first credentialed step after codex had write access to
-      # the workspace, so it trusts nothing under .git that codex could
-      # have configured (design/codex-engine.md → hook-safe landing): the
-      # git dir is pinned by env (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a
-      # codex-written .git/commondir cannot redirect git to a config it owns
-      # (gitrepository-layout(5): that file sets GIT_COMMON_DIR unless the
-      # env already does) — and the step refuses outright if one exists; the
-      # pre-codex .git/config is restored (remote URLs, credential/http keys,
-      # filter drivers, fsmonitor, hooksPath — anything codex wrote there is
-      # gone), and the GIT_CONFIG_* env below pins the two things a config
-      # restore cannot: hooks live as FILES in .git/hooks, so hooksPath points
-      # at an empty, runner-only path; and the index may carry the fsmonitor
-      # extension, so fsmonitor is off. The credential helper is the
-      # machine account — the push must re-trigger CI, and the gate above
-      # already exited on a missing MARVIN_TOKEN, so there is no job-token
-      # fallback here — it is scoped to this server's URL, and it lives only
-      # in this step's environment.
+      # First credentialed step after codex had write access to the
+      # workspace. The reclaim step above already took .git back and restored
+      # the pre-codex .git/config (remote URLs, credential/http keys, filter
+      # drivers, fsmonitor, hooksPath — anything codex wrote there is gone),
+      # and this step trusts nothing else under .git (design/codex-engine.md
+      # → hook-safe landing): the git dir is pinned by env
+      # (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a .git/commondir file
+      # could not redirect git to a config codex owns even if the reclaim's
+      # refusal had missed it (gitrepository-layout(5): that file sets
+      # GIT_COMMON_DIR unless the env already does), and the GIT_CONFIG_* env
+      # below pins the two things a config restore cannot: hooks live as
+      # FILES in .git/hooks, so hooksPath points at an empty, runner-only
+      # path; and the index may carry the fsmonitor extension, so fsmonitor
+      # is off. The credential helper is the machine account — the push must
+      # re-trigger CI, and the gate above already exited on a missing
+      # MARVIN_TOKEN, so there is no job-token fallback here — it is scoped
+      # to this server's URL, and it lives only in this step's environment.
       - name: Land codex fix
         id: codexland
         if: steps.codexguard.outcome == 'success'
@@ -1060,25 +1078,6 @@ jobs:
           GIT_CONFIG_VALUE_3: "false"
         run: |
           set -euo pipefail
-          # Reclaim .git before writing objects as runner: any objects/XX
-          # fan-out dir codex created (any object-writing git command) is
-          # codex-owned, and runner's codex-group membership is inert this
-          # job — the commit below (or the hand-back backstop's fetch)
-          # would intermittently fail with "insufficient permission for
-          # adding an object".
-          sudo chown -R runner "$GITHUB_WORKSPACE/.git"
-          # Refuse a redirected git dir rather than land through it: the env
-          # pin above already makes git ignore a .git/commondir file (and a
-          # .git that became a symlink or gitfile), but a codex that wrote
-          # one was aiming at this step, so fail loudly instead of quietly.
-          if [ -L "$GITHUB_WORKSPACE/.git" ] || [ ! -d "$GITHUB_WORKSPACE/.git" ] || [ -e "$GITHUB_WORKSPACE/.git/commondir" ]; then
-            echo "::error::codex left a redirected git dir (.git is not a plain directory, or .git/commondir exists) — refusing to land."
-            exit 1
-          fi
-          # Restore the config snapshotted before codex got write access.
-          # --remove-destination: codex could have replaced the file with a
-          # symlink, and a plain cp would follow it and write elsewhere.
-          cp --remove-destination "$RUNNER_TEMP/git-config.pre-codex" "$GITHUB_WORKSPACE/.git/config"
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge
           # is still in progress — commit anyway so the merge completes,
@@ -1165,13 +1164,20 @@ jobs:
       # neither hand-back was posted, post the re-review request as the
       # machine account — a redundant review round is the safe completion
       # (word-boundary gate + newest-wins concurrency make duplicates cheap).
-      # Codex gate is codexfix, not codexland: a landing that pushed and then
-      # died posting its comment still owes the @review — this step detects
-      # the push itself, so gating on the earlier step closes that gap.
+      # Codex gate is codexfix + codexreclaim, not codexland: a landing that
+      # pushed and then died posting its comment still owes the @review —
+      # this step detects the push itself, so gating on the earlier steps
+      # closes that gap. The reclaim half is what makes the fetch below safe
+      # to run: it is the step that restored the pre-codex .git/config, and
+      # it precedes the landing, so a landing that pushed always passes it;
+      # a reclaim that refused (redirected git dir) means nothing pushed and
+      # nothing is owed, and this step must not run git through codex's
+      # config with the machine-account token in its env.
       - name: Ensure hand-back after push
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
-          (steps.claude.outcome == 'success' || steps.codexfix.outcome == 'success')
+          (steps.claude.outcome == 'success' ||
+           (steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'))
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -1292,6 +1298,7 @@ jobs:
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
+          CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
           # Step-scoped credential for the unlanded-work fetch below (nothing
@@ -1360,6 +1367,14 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
+          fi
+          # A failed reclaim SKIPS the guard and the landing. Checked before
+          # the git commands below on purpose: on this path .git is still the
+          # codex-written one (a redirected git dir was refused, or the config
+          # restore failed), so this step must not run git through it — a
+          # non-empty err skips every git call below.
+          if [ -z "$err" ] && [ "${CODEXRECLAIM_OUTCOME:-}" = "failure" ]; then
+            err="codex finished but the workspace could not be reclaimed from it — .git is not a plain directory, a .git/commondir redirect exists, or the pre-codex git config could not be restored (see the job logs); nothing was pushed this round. Inspect the codex run's transcript before re-triggering."
           fi
           # A failed guard SKIPS the landing step, so it needs its own check.
           if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then

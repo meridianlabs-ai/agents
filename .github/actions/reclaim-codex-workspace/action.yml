@@ -1,0 +1,80 @@
+name: reclaim-codex-workspace
+description: >-
+  Take .git back from the codex user and put the pre-codex .git/config back
+  before ANY runner-side git command runs (design/codex-engine.md →
+  Hook-safe landing). Runs unconditionally right after the codex step in
+  claude.yml, claude-auto.yml and claude-auto-review.yml — `if: always() &&
+  steps.codexuser.outcome == 'success'` — so it is the FIRST step after codex
+  had write access to the tree, regardless of how codex ended (success,
+  failure, cancelled). Everything downstream (the unresolved-merge guard,
+  the landing step, the hand-back / unlanded-work fetches, Surface agent
+  errors) then reads a clean config instead of each step defending itself;
+  before this existed the loops' `Ensure hand-back after push` ran `git
+  fetch` against the un-restored, codex-writable .git whenever the guard or
+  the landing failed (review finding on #73). Three things, in order:
+
+  1. `chown -R runner .git` — object fan-out dirs codex created are
+     codex-owned, and the runner's codex-group membership is inert within
+     the job, so runner-side object writes would otherwise fail
+     intermittently.
+  2. Refuse a redirected git dir: fail if `.git` is a symlink, not a
+     directory, or contains a `commondir` file. gitrepository-layout(5): a
+     `commondir` file sets `$GIT_COMMON_DIR` unless the env already does,
+     and `config` is then read from THERE — so codex could copy .git
+     somewhere it owns, add a filter driver or repoint remote.origin.url,
+     and a restore of `.git/config` would land on a file git no longer
+     reads. This step runs no git, so the check needs no pin; every later
+     git-running step pins `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` too,
+     and this refusal makes a codex that tried it fail loudly instead.
+  3. Restore the config `Create codex user` snapshotted right before the
+     group grant, with `cp --remove-destination` — codex could have
+     replaced the file with a symlink, and a plain cp would follow it and
+     write elsewhere.
+
+  A restore covers configuration; it cannot cover hooks (files in
+  .git/hooks) or the index's fsmonitor extension, so the guard and landing
+  steps still pin `core.hooksPath` / `core.fsmonitor` by env. Runs no git
+  command itself. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main); NO
+  post step (local composite actions with post steps break teardown on the
+  fork).
+
+inputs:
+  config-snapshot:
+    description: >-
+      Path of the pre-codex `.git/config` copy to restore. Defaults to
+      `$RUNNER_TEMP/git-config.pre-codex`, where `Create codex user` writes
+      it (runner-only: RUNNER_TEMP stays 755 runner:runner, so codex can
+      read but not replace it, and it contains no credential). Resolved in
+      the shell rather than as a runner.temp-context default so the metadata
+      needs no context.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SNAPSHOT: ${{ inputs.config-snapshot }}
+      run: |
+        set -euo pipefail
+        SNAPSHOT="${SNAPSHOT:-$RUNNER_TEMP/git-config.pre-codex}"
+        gitdir="$GITHUB_WORKSPACE/.git"
+        # The snapshot is the runner's own file from before the grant; if it
+        # is missing the restore below would leave codex's config in place
+        # for every later step, so fail closed rather than fall through.
+        if [ ! -f "$SNAPSHOT" ]; then
+          echo "::error::pre-codex git config snapshot not found at $SNAPSHOT — refusing to reuse the codex-written .git/config."
+          exit 1
+        fi
+        # Refuse BEFORE the chown: a .git that codex turned into a symlink
+        # would otherwise have its target re-owned first. -L on commondir
+        # too — -e is false for a dangling symlink.
+        if [ -L "$gitdir" ] || [ ! -d "$gitdir" ] || [ -e "$gitdir/commondir" ] || [ -L "$gitdir/commondir" ]; then
+          echo "::error::codex left a redirected git dir (.git is not a plain directory, or .git/commondir exists) — refusing to run git through it."
+          exit 1
+        fi
+        sudo chown -R runner "$gitdir"
+        cp --remove-destination "$SNAPSHOT" "$gitdir/config"
+        echo "reclaimed .git from codex and restored the pre-codex config."
