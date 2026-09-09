@@ -392,11 +392,10 @@ jobs:
       # prompt. The codex sandbox holds no credentials and is told not to fetch,
       # so it cannot be asked to merge (instruction, not structure, since its
       # sandbox gained network on 2026-09-09; the in-progress hand-off means it
-      # never needs to), and a
-      # prompted merge is advisory, so branches drifted anyway: inspect_ai#392
-      # sat 11 commits behind main across 20 commits, and because GitHub cannot
-      # compute a merge ref for a conflicted PR, CI never ran and every fix
-      # round was written against stale code.
+      # never needs to), and a prompted merge is advisory, so branches drifted
+      # anyway: inspect_ai#392 sat 11 commits behind main across 20 commits,
+      # and because GitHub cannot compute a merge ref for a conflicted PR, CI
+      # never ran and every fix round was written against stale code.
       #
       # A CONFLICTED merge is handed on differently per engine: the Claude path
       # gets a CLEAN index and re-merges inside the agent (it has network and
@@ -786,7 +785,9 @@ jobs:
       # output / reasoning counts and the model that served in the job
       # summary — the codex counterpart of Model provenance below. Runs right
       # after codex, before landing, so a landing failure can't hide the
-      # spend. Best-effort: the script exits 0 on every path, and
+      # spend. Also warns if codex-action's config rewrite dropped the
+      # sandbox's `network_access = true` (design/codex-engine.md → Network).
+      # Best-effort: the script exits 0 on every path, and
       # continue-on-error makes that structural — a failure here must never
       # trip the landing step's implicit success() gate and strand the work.
       - name: Codex usage

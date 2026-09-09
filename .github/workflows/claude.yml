@@ -531,11 +531,11 @@ jobs:
       # told not to fetch, so it cannot be asked to merge (instruction, not
       # structure, since its sandbox gained network on 2026-09-09; the
       # in-progress hand-off means it never needs to); and a prompted merge
-      # is advisory, so branches drifted
-      # anyway (inspect_ai#392 sat 11 commits behind main across 20 commits —
-      # GitHub cannot compute a merge ref for a conflicted PR, so CI never ran
-      # and every review round read stale code). PR-context runs only: a fresh
-      # issue run branches off the hourly-synced base, so nothing to merge.
+      # is advisory, so branches drifted anyway (inspect_ai#392 sat 11
+      # commits behind main across 20 commits — GitHub cannot compute a merge
+      # ref for a conflicted PR, so CI never ran and every review round read
+      # stale code). PR-context runs only: a fresh issue run branches off the
+      # hourly-synced base, so nothing to merge.
       #
       # The step body is the shared sync-branch composite (one copy for all
       # three workflows; the per-engine conflict split is documented there).
@@ -593,19 +593,18 @@ jobs:
       # Fallback where claude-setup is absent — the shared provision-fallback
       # composite the reviewer and both loops already use (the recipe, uv
       # version, retry, extras/`--group dev` and the .git/info/exclude
-      # entries live there). The dev agent was the
-      # last path without it: on the inspect_ai fork every PR branch is cut
-      # from pristine main and carries no claude-setup, so a dev-verb run
-      # on a PR there — `@auto fix review feedback` on inspect_ai#428,
-      # 2026-09-09 — ran with no pytest/ruff/mypy at all. Claude installs
-      # its own so the gap only showed on codex, which (sandbox network
-      # still off at the time) tried an install, failed, pushed unformatted
-      # code with two
-      # mypy errors, and CI caught what the agent could not. Same trigger
-      # gate as the shim step: never on a refused run. Same conflicted-round
-      # tolerance as above — this is the step that actually runs on the
-      # fork's PR heads, where a conflicted dependency file would otherwise
-      # fail every re-trigger identically.
+      # entries live there). The dev agent was the last path without it: on
+      # the inspect_ai fork every PR branch is cut from pristine main and
+      # carries no claude-setup, so a dev-verb run on a PR there — `@auto fix
+      # review feedback` on inspect_ai#428, 2026-09-09 — ran with no
+      # pytest/ruff/mypy at all. Claude installs its own so the gap only
+      # showed on codex, which (sandbox network still off at the time) tried
+      # an install, failed, pushed unformatted code with two mypy errors, and
+      # CI caught what the agent could not. Same trigger gate as the shim
+      # step: never on a refused run. Same conflicted-round tolerance as
+      # above — this is the step that actually runs on the fork's PR heads,
+      # where a conflicted dependency file would otherwise fail every
+      # re-trigger identically.
       - name: Provision project environment (fallback)
         id: setupfb
         timeout-minutes: 10
@@ -1359,7 +1358,9 @@ jobs:
       # output / reasoning counts and the model that served in the job
       # summary — the codex counterpart of Model provenance below. Runs right
       # after codex, before landing, so a landing failure can't hide the
-      # spend. Best-effort: the script exits 0 on every path, and
+      # spend. Also warns if codex-action's config rewrite dropped the
+      # sandbox's `network_access = true` (design/codex-engine.md → Network).
+      # Best-effort: the script exits 0 on every path, and
       # continue-on-error makes that structural — a failure here must never
       # trip the landing step's implicit success() gate and strand the work.
       - name: Codex usage

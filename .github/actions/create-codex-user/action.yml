@@ -66,7 +66,10 @@ description: >-
      block, and REJECTS the same key via `codex-args` — so the file is the
      only route. Home and `.codex` are 755 and the file 644 because the
      action reads the file back runner-side before appending; a 700 home
-     would make it read "" and silently drop the block. Trust argument:
+     would make it read "" and silently drop the block. The key's survival
+     rides on the action appending rather than overwriting (`@v1` is a
+     moving tag), so the `codex-usage` composite re-reads the file after
+     codex and warns if the key is gone. Trust argument:
      every codex run here is a same-repo tree (the reviewer routes fork
      heads to Claude, the dev agent refuses them, the loops gate on
      isCrossRepository) and codex holds NO credentials — the API key sits

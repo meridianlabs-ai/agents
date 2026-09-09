@@ -503,7 +503,15 @@ all four codex steps) before codex-action runs (the action keeps a
 pre-existing config and appends its provider block; the same key is
 rejected through `codex-args`). The home and `.codex` are 755 so the
 runner-side action can read the file back — a 700 home would make it read
-"" and drop the block silently.
+"" and drop the block silently. The key's survival rides on the action
+APPENDING to the existing file (`writeProxyConfig.ts` today), and `@v1` is
+a moving tag, so a revision that overwrote instead would turn network back
+off with no symptom but trio tests failing again — the one setting whose
+loss would be silent. So the `codex-usage` composite, the one post-codex
+step every codex path runs (the review path has no reclaim step), re-reads
+the `config.toml` codex ran with and posts a `::warning::` if the key is
+gone (review round 4 of #87): a future silent revert becomes a loud one on
+every run, not only on the first live check after merge.
 
 Pre-creating `.codex` has one side effect the step must compensate for
 (caught in review round 1 of #87): codex-action's `resolve-codex-home`
