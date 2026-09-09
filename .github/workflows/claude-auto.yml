@@ -372,10 +372,17 @@ jobs:
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: ./.github/actions/claude-setup
 
-      # Fallback where claude-setup is absent (fork PR heads cut from pristine
-      # main; Python caller repos that never added the action): the
-      # reviewer's recipe verbatim — see claude-review.yml for the uv
-      # version, retry, extras/`--group dev` and PATH reasoning. Same
+      # Fallback where claude-setup is absent (PR heads on the inspect_ai
+      # fork, whose branches are cut from pristine main; Python caller repos
+      # that never added the action — NOT cross-repository fork heads, which
+      # never reach this step: the CI-fix stub filters on
+      # `head_repository.full_name == github.repository`): the reviewer's
+      # recipe — see claude-review.yml for the uv version, retry,
+      # extras/`--group dev` and PATH reasoning — plus one line the reviewer
+      # never needed: it excludes the `.venv/` it creates, because unlike the
+      # reviewer the Claude-engine agent commits and pushes from this tree and
+      # only the caller's .gitignore would otherwise keep the venv out (the
+      # codex path re-excludes it in its prep step regardless). Same
       # conflicted-round tolerance as above.
       - name: Provision project environment (fallback)
         id: setupfb
@@ -396,6 +403,7 @@ jobs:
             sleep $((attempt * 10))
           done
           export PATH="$HOME/.local/bin:$PATH"
+          printf '%s\n' .venv/ >>.git/info/exclude
           uv venv
           if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
             uv pip install -e ".[dev]" --group dev

@@ -161,8 +161,10 @@ workaround when #103's does).
   network still means no installs by the AGENT — but the reviewer
   workflow provisions a fallback venv (uv dev-install, as the runner,
   which has network) when claude-setup is absent and a pyproject.toml
-  exists, so fork PR heads cut from pristine main — and Python caller
-  repos that never added claude-setup — get test-verified reviews too.
+  exists, so PR heads on the inspect_ai fork (cut from pristine main;
+  cross-repository fork heads are deliberately never provisioned, issue
+  #59) — and Python caller repos that never added claude-setup — get
+  test-verified reviews too.
   Only repos that are not Python projects (or whose dev-install fails,
   loudly) degrade to static review.
 - **Loop fix rounds run tests since 2026-09-09**: `claude-auto.yml` and
