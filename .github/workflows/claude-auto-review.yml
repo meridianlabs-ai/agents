@@ -1318,7 +1318,19 @@ jobs:
             # error reports on agent-authored PRs email nobody.
             cc=""
             [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto review-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), re-trigger with `@review`; otherwise it likely needs a human.%s' "$err" "$cc")" || true
+            # Re-trigger advice is `@auto`, NOT `@review`: the review that
+            # started this round is already posted, so a fresh `@review`
+            # would spend a whole review pass re-deriving the same findings
+            # before the loop could act. An `@auto` comment on the PR runs
+            # the dev agent straight at the standing review (claude.yml's
+            # kickoff-on-existing-PR path), re-applies the label, resets both
+            # sticky budgets, and its ending contract posts the `@review`
+            # hand-back — so the loop resumes where it stopped (Ransom,
+            # 2026-09-09; design/atlas-tracking.md → standing review). Bare
+            # `@review` stays the right call only when no usable review
+            # exists. The token is backticked here: a bare @auto in a
+            # marvin-authored comment would itself fire the kickoff.
+            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto review-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), resume with an `@auto` comment (e.g. `@auto address the review feedback`) — that re-runs the fix against the review already posted and resets the round budget; a fresh `@review` would only repeat the review. Otherwise it likely needs a human.%s' "$err" "$cc")" || true
           fi
           exit 1
 
