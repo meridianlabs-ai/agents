@@ -15,10 +15,12 @@ description: >-
   current index first" whenever the index holds unmerged entries — so the
   Claude path must be handed a CLEAN index (the merge is aborted and
   `agent_merge=1` tells the caller to splice the merge instruction into the
-  prompt; the agent has network and the git allow-list). Codex cannot fetch,
-  so it is handed the merge still IN PROGRESS and resolves the markers in the
-  working tree; the unresolved-merge-guard action refuses to land while any
-  survive.
+  prompt; the agent has network and the git allow-list). Codex holds no
+  credentials and is told not to fetch (instruction, not structure, since its
+  sandbox gained network on 2026-09-09; a private caller's fetch would fail
+  regardless), so it is handed the merge still IN PROGRESS and resolves the
+  markers in the working tree; the unresolved-merge-guard action refuses to
+  land while any survive.
 
 inputs:
   pr:

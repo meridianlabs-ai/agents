@@ -13,6 +13,12 @@ description: >-
   encoded here (apply the model's published rates, or read the OpenAI usage
   dashboard). Nothing leaves the runner — the rollout is the full transcript,
   the same reason the Claude path stopped uploading its execution log (#65).
+  A second, unrelated-looking check rides along because this is the one
+  post-codex step every codex path runs (the review path has no reclaim
+  step): it re-reads the `config.toml` codex ran with and warns if
+  codex-action's provider-config rewrite dropped the `network_access = true`
+  that `create-codex-user` wrote — the one sandbox setting whose loss would
+  be silent (design/codex-engine.md → Network inside the codex sandbox).
   Best-effort by design: every path exits 0 — usage reporting must never
   fail the agent's real work, and it runs BEFORE the landing step, whose
   implicit success() gate would otherwise skip the landing and strand the
@@ -71,6 +77,33 @@ outputs:
 runs:
   using: composite
   steps:
+    # Detector for the one codex setting whose loss would be silent (review
+    # round 4 of #87): `create-codex-user` writes `network_access = true`
+    # into CODEX_HOME/config.toml and relies on codex-action APPENDING its
+    # provider block to the existing file (writeProxyConfig.ts today). `@v1`
+    # is a moving tag, so a revision that overwrote the file instead would
+    # turn the sandbox's network back off with no symptom but trio tests
+    # failing again. Reads the file codex actually ran with; warns, never
+    # fails. Its own step so the usage step's early `exit 0`s (no rollout,
+    # no token_count) cannot skip it.
+    - id: network
+      shell: bash
+      env:
+        CODEX_HOME_DIR: ${{ inputs.codex-home }}
+      run: |
+        set +e
+        cfg="$CODEX_HOME_DIR/config.toml"
+        if ! sudo test -f "$cfg"; then
+          echo "codex-usage: no $cfg (codex user never provisioned); network check skipped."
+          exit 0
+        fi
+        if sudo grep -qE '^network_access *= *true *$' "$cfg"; then
+          echo "codex-usage: $cfg still carries 'network_access = true' (codex-action appended its provider block rather than overwriting)."
+        else
+          echo "::warning::codex-usage: $cfg lost 'network_access = true' — codex ran with its sandbox network OFF. Did codex-action change how it writes its provider config? See design/codex-engine.md → Network inside the codex sandbox."
+        fi
+        exit 0
+
     - id: usage
       shell: bash
       env:

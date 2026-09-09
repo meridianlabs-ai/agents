@@ -21,13 +21,14 @@ take effect on every repo's next run.
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
-  `reset-origin-url`, `reclaim-codex-workspace`, `unresolved-merge-guard`,
-  `push-base-merge`, `provision-fallback`, `reset-auto-counters`,
-  `disarm-auto-loop`, `post-pr-comment`, `emit-landing`, `land`). Referenced
-  fully-qualified (`meridianlabs-ai/agents/.github/actions/<name>@main`) so
-  they resolve regardless of what the job checked out; put step bodies that
-  would otherwise be copied between `claude.yml`, `claude-auto.yml` and
-  `claude-auto-review.yml` here rather than letting the copies drift.
+  `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
+  `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
+  `reset-auto-counters`, `disarm-auto-loop`, `post-pr-comment`,
+  `emit-landing`, `land`). Referenced fully-qualified
+  (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
+  regardless of what the job checked out; put step bodies that would otherwise
+  be copied between `claude.yml`, `claude-auto.yml` and `claude-auto-review.yml`
+  here rather than letting the copies drift.
   `emit-landing` (end of the untrusted agent job: bundle + manifest →
   artifact) and `land` (the trusted land job's body: validate, push, post,
   stage) are the landing plumbing from #79 — design/architecture.md → Landing

@@ -1,0 +1,134 @@
+name: create-codex-user
+description: >-
+  Create the unprivileged `codex` user codex-action runs as
+  (`safety-strategy: unprivileged-user`, `codex-user: codex`) and prepare
+  everything it needs before the action starts. The step body every codex
+  step in claude.yml, claude-auto.yml, claude-auto-review.yml and
+  claude-review.yml used to carry verbatim (four copies, review round 2 of
+  #87); the workflows keep the step name `Create codex user` and id
+  `codexuser`, which the reclaim step's gate and the Surface steps read.
+  In order:
+
+  1. Snapshot `.git/config` and the list of embedded `.git` entries to
+     `$RUNNER_TEMP` — the last runner-only moment for the tree, since the
+     group grant below makes `.git/config` codex-writable and git executes
+     configuration (core.hooksPath, core.fsmonitor, filter drivers,
+     credential helpers, remote URLs), so no runner-side git may run
+     against anything codex could have written there. The
+     `reclaim-codex-workspace` step restores the first and compares the
+     second (it refuses to run git over the tree if codex added a nested
+     repo, whose own `.git/config` no restore or pin reaches). Both scans
+     run as root so they see the same tree: this one runs before the chown
+     below, and a root-owned unreadable directory a caller's provisioning
+     left would otherwise fail this step or read as a codex addition in the
+     reclaim. `$RUNNER_TEMP` itself stays runner-only (755 runner:runner),
+     so codex can read the snapshots but not replace them. The review
+     path has no reclaim step and never reads them; harmless there.
+  2. Create the `codex` system user and cross-enrol the groups, then
+     `chown -R runner:codex` + `chmod -R g+rwX` + setgid on every directory
+     of the workspace — the action's `examples/unprivileged-user.yml`
+     recipe; the group grant is what lets codex (primary group codex) write
+     the runner-owned checkout. NB the runner->codex grant is inert within
+     the job: supplementary groups are fixed at process start, and every
+     step is spawned from a Runner.Worker that predates the usermod.
+     Landing codex's edits works anyway — runner still owns the
+     pre-existing workspace directories, codex's files are world-readable
+     under its umask, and the reclaim step takes `.git` back (the one place
+     codex-owned dirs, objects/ fan-out, would block runner's writes).
+     Group kept as a faithful copy of the example; if codex ever drops a
+     600 file, the reclaim step needs a `chmod -R a+rX` sweep, not this
+     group.
+  3. A codex-owned `$RUNNER_TEMP/codex` dir (755) for the explicit
+     `output-file` — codex itself (via `sudo -u`) writes it and the action
+     re-reads it as codex, but `$RUNNER_TEMP` is 755 runner:runner on the
+     hosted image. NOT `g+w` on the temp root: codex's runner-group
+     membership IS effective (its processes start post-usermod), so that
+     would hand it rename/delete over the runner's step scripts and the
+     per-step GITHUB_ENV/OUTPUT/PATH files. 755 keeps the output readable
+     for the runner-side landing / posting step.
+  4. `safe.directory` for the checkout in the codex user's global git
+     config — the checkout stays runner-owned, so git run as codex hits the
+     dubious-ownership refusal, and no profile sandbox lets the agent add
+     the exemption itself.
+  5. Network ON inside codex's sandbox (decision: Ransom, 2026-09-09;
+     design/codex-engine.md → Network inside the codex sandbox). With
+     network off, codex's Linux sandbox installs a seccomp filter that
+     allows AF_UNIX socket/socketpair but denies setsockopt, getsockopt,
+     getsockname, shutdown, bind and connect unconditionally (seccomp
+     cannot see an fd's family) — so trio's event loop dies creating its
+     wakeup socketpair (it sets SO_SNDBUF), inspect_ai's control server
+     cannot bind, asyncio thread wake-ups stall, and nothing can download
+     a tokenizer; inspect_ai#428's codex reviews (2026-09-09) lost every
+     trio test and half the asyncio suite to this. `network_access = true`
+     on the builtin `:workspace` profile skips the filter entirely. codex
+     reads it from `[sandbox_workspace_write]` in `CODEX_HOME/config.toml`;
+     codex-action keeps a pre-existing config.toml and appends its provider
+     block, and REJECTS the same key via `codex-args` — so the file is the
+     only route. Home and `.codex` are 755 and the file 644 because the
+     action reads the file back runner-side before appending; a 700 home
+     would make it read "" and silently drop the block. The key's survival
+     rides on the action appending rather than overwriting (`@v1` is a
+     moving tag), so the `codex-usage` composite re-reads the file after
+     codex and warns if the key is gone. Trust argument:
+     every codex run here is a same-repo tree (the reviewer routes fork
+     heads to Claude, the dev agent refuses them, the loops gate on
+     isCrossRepository) and codex holds NO credentials — the API key sits
+     behind the action's proxy, no GitHub token reaches it, and its env
+     carries no OIDC request token — so network buys installs and test
+     fixtures, not a push path or an exfiltration channel beyond what the
+     Claude engine already has (it runs pytest unsandboxed with full
+     network AND a token).
+  6. Pre-touch `$CODEX_HOME/$GITHUB_RUN_ID.json`, root-owned and 666.
+     Pre-creating `.codex` makes codex-action's `resolve-codex-home` take
+     its "already exists, assume it's correctly permissioned" branch and
+     skip its own bootstrap — which is also where it pre-touches this
+     world-writable file that `codex-responses-api-proxy` (run as
+     `runner`, no sudo) writes its server info into. Without it the proxy
+     gets EACCES in the codex-owned 755 dir and the action fails at "Wait
+     for Responses API proxy" before codex ever runs (review round 1 of
+     #87). This mirrors the action's create path exactly: the action
+     chmods it 444 / chowns root once the proxy is up, and its `-s` probe
+     reads the empty file as "not running yet", as today. Anyone adding
+     another file under `.codex` here should check what else the skipped
+     bootstrap would have done.
+
+  Runs no git command against the checkout. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
+  step (local composite actions with post steps break teardown on the
+  fork). No inputs: the user name, home and the snapshot paths
+  (`$RUNNER_TEMP/git-config.pre-codex`, `$RUNNER_TEMP/embedded-git.pre-codex`)
+  are the convention the codex-action steps and `reclaim-codex-workspace`
+  are written against.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        # 1. Pre-codex snapshots (see description) — before any grant.
+        cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
+        sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
+        # 2. User, groups, workspace grant.
+        sudo adduser --system --home /home/codex --shell /bin/bash --group codex
+        sudo usermod -a -G codex runner
+        sudo usermod -a -G runner codex
+        sudo chown -R runner:codex "$GITHUB_WORKSPACE"
+        sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
+        sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
+        # 3. Output dir — a codex-owned subdir, never g+w on the temp root.
+        sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
+        # 4. Dubious-ownership exemption for the runner-owned checkout.
+        sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        # 5. Network on: 755 home and .codex so the runner-side action can
+        #    read config.toml back before appending its provider block.
+        sudo chmod 755 /home/codex
+        sudo install -d -o codex -g codex -m 755 /home/codex/.codex
+        # 6. The server-info file the action's skipped bootstrap would have
+        #    pre-touched for the proxy (root-owned, 666 until the action
+        #    locks it down).
+        sudo touch "/home/codex/.codex/$GITHUB_RUN_ID.json"
+        sudo chmod 666 "/home/codex/.codex/$GITHUB_RUN_ID.json"
+        printf '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).\n[sandbox_workspace_write]\nnetwork_access = true\n' \
+          | sudo -u codex tee /home/codex/.codex/config.toml >/dev/null
+        sudo chmod 644 /home/codex/.codex/config.toml
