@@ -27,11 +27,12 @@ description: >-
   flaked repeatedly on 2026-08-12; uv's own HTTP retries internally. Both
   bin dirs go on GITHUB_PATH so pytest/ruff/mypy resolve for the Claude
   engine and for the runner-side steps. NOT for codex's own tool calls:
-  codex-action forwards the runner PATH, but codex runs commands through
-  `bash -lc` as the codex user and the login shell's /etc/profile resets
-  PATH for non-root users, so the codex prompts name these tools by
-  absolute path, discovered by the compose steps (which run as the runner
-  with this PATH in effect). Fatal on
+  under the unprivileged-user strategy codex-action launches codex via
+  `sudo -u codex` (no -E), and sudo's env_reset/secure_path replaces PATH
+  before codex starts (the drop-sudo strategy would forward the runner
+  PATH; this repo does not use it), so the codex prompts name these tools
+  by absolute path, discovered by the compose steps (which run as the
+  runner with this PATH in effect). Fatal on
   failure, exactly like claude-setup: a repo whose pyproject exists but
   cannot dev-install is a loud signal, not a silent static-only run — the
   callers' Surface steps report a failed outcome. No plain `-e .` fallback:

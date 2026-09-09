@@ -932,20 +932,20 @@ jobs:
           # failure is tolerated rather than fatal (see the provisioning
           # steps) — so the verification instruction says which case it is
           # instead of asserting a venv that may not exist. The tools go in
-          # by ABSOLUTE path: codex-action forwards the runner PATH, but
-          # codex runs its tool calls through `bash -lc` as the codex user
-          # and the login shell's /etc/profile resets PATH to the system
-          # default, so the venv does NOT resolve as bare names there
-          # (inspect_flow#818 dev run, 2026-09-09; the reviewer prompt has
-          # used absolute paths since 2026-09-01). This step runs as the
-          # runner with the provisioned PATH in effect, so discover here.
+          # by ABSOLUTE path: under the unprivileged-user strategy
+          # codex-action launches codex via `sudo -u codex` (no -E), and
+          # sudo's env_reset/secure_path replaces PATH before codex starts,
+          # so the venv does NOT resolve as bare names there (inspect_flow#818
+          # dev run, 2026-09-09; the reviewer's Create codex user step has
+          # said as much since 2026-09-01). This step runs as the runner with
+          # the provisioned PATH in effect, so discover here.
           if [ "${SETUP_OUTCOME:-}" = "success" ] || [ "${SETUPFB_OUTCOME:-}" = "success" ]; then
             tools=""
             for t in pytest ruff mypy pyright python3; do
               path=$(command -v "$t" 2>/dev/null || true)
               [ -n "$path" ] && tools="$tools$t=$path "
             done
-            verify="Verify your changes with the locally provisioned tools where relevant. Your process runs under a login shell with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
+            verify="Verify your changes with the locally provisioned tools where relevant. Your process runs under sudo with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
           elif [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             verify="NOTE: environment provisioning FAILED before you started (on this conflicted round the likely cause is a conflicted dependency file — pyproject.toml or a lockfile — see the merge conflict task below), so pytest and the project's dependencies are probably NOT installed and you cannot install them (no network). Resolve the merge conflict first; verify as far as the bare runner allows (py_compile, reading the code), and state plainly in your final message that verification was static-only this round — the next round provisions normally once the resolved branch is pushed."
           else

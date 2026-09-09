@@ -400,19 +400,21 @@ against the docs, not assumed):
 
 The step is **fatal on failure** (no `continue-on-error`): a broken setup config
 should surface loudly rather than silently degrade every run to static-only
-review. One deliberate exception, in the two `@auto` loops only: on the **codex
-conflict path** the sync step hands codex the base merge still in progress,
-with conflict markers in the tree, and provisioning runs over that tree — so a
-conflicted `pyproject.toml` or lockfile fails the install *deterministically*,
-and a fatal failure would skip the very round that exists to resolve the
-markers (every re-trigger failing identically). There the loops set
-`continue-on-error` to "the sync left conflicts" (non-empty only on the codex
-path; the Claude path aborts its conflicted merge), the round runs static-only
-with the failure spelled out in codex's prompt, and the next round — on the
-resolved branch — provisions normally. The error-surfacing step reads the
-conflict list too, so it never advises "re-trigger to retry" for that case.
-`claude.yml` keeps the fatal stance on its codex conflict path but names the
-conflicted files in its error comment.
+review. One deliberate exception, in the two `@auto` loops and (since
+2026-09-09) the dev agent: on the **codex conflict path** the sync step hands
+codex the base merge still in progress, with conflict markers in the tree, and
+provisioning runs over that tree — so a conflicted `pyproject.toml` or lockfile
+fails the install *deterministically*, and a fatal failure would skip the very
+round that exists to resolve the markers (every re-trigger failing
+identically). There both provisioning steps set `continue-on-error` to "the
+sync left conflicts" (non-empty only on the codex path; the Claude path aborts
+its conflicted merge), the round runs static-only with the failure spelled out
+in codex's prompt, and the next round — on the resolved branch — provisions
+normally. The error-surfacing steps read the conflict list too, so they never
+advise "re-trigger to retry" for that case (a log warning instead). The dev
+agent kept the fatal stance until 2026-09-09; with the fallback added there,
+a fork PR whose conflicted dependency file failed the install would have
+failed every re-trigger, so it adopted the loops' tolerance on both steps.
 
 **Fork asymmetry.** What's in the workspace — not which branch the workflow was
 *resolved* from — decides whether the shim is found, and the two agents check
@@ -437,7 +439,8 @@ out different things on the inspect_ai fork:
   mirroring the fork's claude-setup recipe. The recipe lives once, in the
   `.github/actions/provision-fallback` composite (referenced `@main` like the
   other shared step bodies); each workflow keeps only its own gate, timeout
-  and — in the loops — the conflicted-round tolerance above. The earlier
+  and — in the loops and the dev agent — the conflicted-round tolerance
+  above. The earlier
   alternative — an extra checkout of `meridian`'s `.github/actions` into a
   fixed subdir — remains not done; the generic fallback needed no
   fork-specific wiring. Like the shim, the fallback is fatal on failure, with
@@ -457,15 +460,16 @@ out different things on the inspect_ai fork:
   total on codex, which tried an offline install, failed, and pushed
   unformatted code with two mypy errors that CI then caught. In the same
   change every codex prompt (dev verb, both loops; the reviewer since
-  2026-09-01) names the provisioned tools by **absolute path**: codex-action
-  forwards the runner PATH, but codex runs its tool calls through `bash -lc`
-  as the codex user and the login shell's `/etc/profile` resets PATH to the
-  system default for non-root users, so a venv on `GITHUB_PATH` does not
-  resolve as bare names there (inspect_flow#818's codex dev run: `command -v
-  pytest ruff mypy` printed nothing while the venv was on the runner PATH).
-  The prompts had asserted "the venv is on PATH"; the compose steps now run
-  the discovery as the runner, where that PATH is in effect, and splice the
-  paths in.
+  2026-09-01) names the provisioned tools by **absolute path**: under the
+  `unprivileged-user` safety strategy codex-action launches codex via `sudo
+  -u codex` (no `-E`), and sudo's `env_reset`/`secure_path` replaces PATH
+  before codex starts, so a venv on `GITHUB_PATH` does not resolve as bare
+  names there (inspect_flow#818's codex dev run: `command -v pytest ruff
+  mypy` printed nothing while the venv was on the runner PATH). Only the
+  `drop-sudo` strategy, which this repo does not use, forwards the runner
+  PATH. The prompts had asserted "the venv is on PATH"; the compose steps
+  now run the discovery as the runner, where that PATH is in effect, and
+  splice the paths in.
 
   Two details of a **fatal provisioning failure in the loops** are worth
   knowing when reading a "stalled" loop. The agent is skipped and the

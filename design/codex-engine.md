@@ -392,14 +392,22 @@ Verification for a change here, all cases prompted to codex (any verb):
   settled unless the current code contradicts it — and hands codex a
   prompt file (same retry-then-fail fetches, source-bounded slices, 120 KB
   cap on the finished file, marker/trigger de-fang as the other preps).
+  The cap trims from the end, so the threads go in BEFORE the top-level
+  comments and every embedded comment body is cut to 8 KB at the source
+  (the PR body is left whole — it is the piece #428 most needed); a
+  failed compose step has its own clause in the Surface step. The de-fang
+  also runs over the `review_prompt` text, which reached codex verbatim
+  before — harmless, the codex adjustments restate both rules.
 - **Tools are named by absolute path in every codex prompt** (reviewer
-  since 2026-09-01; dev verb and loops since 2026-09-09): codex-action
-  forwards the runner PATH, but codex runs tool calls through `bash -lc`
-  as the codex user and `/etc/profile` resets PATH for non-root logins, so
-  a venv on `GITHUB_PATH` does not resolve as bare names (inspect_flow#818:
-  `command -v pytest ruff mypy` printed nothing). The compose steps run as
-  the runner with the provisioned PATH, discover the paths there, and
-  splice them into the verification instruction.
+  since 2026-09-01; dev verb and loops since 2026-09-09): under the
+  `unprivileged-user` strategy codex-action launches codex via `sudo -u
+  codex` (no `-E`), and sudo's `env_reset`/`secure_path` replaces PATH
+  before codex starts, so a venv on `GITHUB_PATH` does not resolve as bare
+  names (inspect_flow#818: `command -v pytest ruff mypy` printed nothing;
+  only the `drop-sudo` strategy forwards the runner PATH). The compose
+  steps run as the runner with the provisioned PATH, discover the paths
+  there (`pytest ruff mypy pyright python3`, the same list in all four
+  workflows), and splice them into the verification instruction.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which

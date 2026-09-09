@@ -565,11 +565,26 @@ jobs:
       # Gated on the trigger check too (issue #59): this executes whatever the
       # checked-out tree supplies, so it must never run on a refused (fork-
       # head) run — hashFiles alone would happily find a fork's action.
+      #
+      # ONE exception, the same one the loops make: the codex conflict path.
+      # sync-branch hands codex the base merge still IN PROGRESS, with
+      # conflict markers in the tree, and provisioning runs over that tree —
+      # so when pyproject.toml or the lockfile is among the conflicted files
+      # the install fails DETERMINISTICALLY, and a fatal failure here would
+      # skip the very run that exists to resolve the markers (every
+      # re-trigger failing the same way). So when the sync left conflicts
+      # (non-empty only on the codex path — the Claude path aborts its
+      # conflicted merge) a provisioning failure is tolerated: codex runs
+      # static-only, its prompt says so, and the next run — on the resolved
+      # branch — provisions normally. `outcome` still reads `failure` on the
+      # tolerated path (only `conclusion` is neutralized), which is what the
+      # prompt composer and the Surface step key on.
       - name: Provision project environment
         id: setup
         if: >-
           steps.trig.outputs.ok == 'true' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: ./.github/actions/claude-setup
 
       # Fallback where claude-setup is absent — the shared provision-fallback
@@ -583,7 +598,10 @@ jobs:
       # its own (it has network) so the gap only showed on codex, which
       # tried an offline install, failed, pushed unformatted code with two
       # mypy errors, and CI caught what the agent could not. Same trigger
-      # gate as the shim step: never on a refused run.
+      # gate as the shim step: never on a refused run. Same conflicted-round
+      # tolerance as above — this is the step that actually runs on the
+      # fork's PR heads, where a conflicted dependency file would otherwise
+      # fail every re-trigger identically.
       - name: Provision project environment (fallback)
         id: setupfb
         timeout-minutes: 10
@@ -591,6 +609,7 @@ jobs:
           steps.trig.outputs.ok == 'true' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
 
       # Compose the appended-system-prompt sources into ONE value, so we emit a
@@ -1112,8 +1131,12 @@ jobs:
           # issue runs, where no merge happened.
           echo "sha=${SYNC_START_SHA:-$(git rev-parse HEAD)}" >>"$GITHUB_OUTPUT"
 
-      # The prompt travels as a git-excluded workspace file (prompt-file must
-      # be inside the repo root). The ending contract makes codex's final
+      # The prompt travels as a git-excluded workspace file. codex-action
+      # reads prompt-file itself, runner-side, before dropping to the codex
+      # user, so the location is free — the reviewer's lives in RUNNER_TEMP;
+      # here and in the loops it stays in the workspace, where the
+      # `.git/info/exclude` entry below keeps the landing step's `git add
+      # -A` from committing it. The ending contract makes codex's final
       # message double as the commit subject + the posted comment.
       - name: Compose codex prompt
         id: codexcompose
@@ -1138,24 +1161,28 @@ jobs:
         run: |
           set -euo pipefail
           # Verification instruction keyed on what provisioning did, with the
-          # tools' ABSOLUTE paths: codex's tool calls run through `bash -lc`
-          # as the codex user, and the login shell's /etc/profile resets PATH
-          # to the system default — so GITHUB_PATH additions (the venv) do
-          # NOT resolve as bare names there, whatever PATH codex-action
-          # forwarded (inspect_flow#818 dev run, 2026-09-09: `command -v
-          # pytest ruff mypy` printed nothing under codex while the venv was
-          # on the runner PATH; the reviewer prompt has said as much since
-          # 2026-09-01). This compose step runs as the runner, where the
-          # provisioned PATH is in effect, so discovery happens here.
+          # tools' ABSOLUTE paths: under the unprivileged-user strategy
+          # codex-action launches codex via `sudo -u codex` (no -E), and
+          # sudo's env_reset/secure_path replaces PATH before codex starts —
+          # so GITHUB_PATH additions (the venv) do NOT resolve as bare names
+          # there (inspect_flow#818 dev run, 2026-09-09: `command -v pytest
+          # ruff mypy` printed nothing under codex while the venv was on the
+          # runner PATH; the reviewer's Create codex user step has said as
+          # much since 2026-09-01). This compose step runs as the runner,
+          # where the provisioned PATH is in effect, so discovery happens
+          # here. A provisioning failure reaches this branch only on the
+          # tolerated codex conflict path (fatal otherwise — the agent is
+          # skipped), so that text names the conflicted dependency file as
+          # the likely cause.
           if [ "${SETUP_OUTCOME:-}" = "success" ] || [ "${SETUPFB_OUTCOME:-}" = "success" ]; then
             tools=""
             for t in pytest ruff mypy pyright python3; do
               path=$(command -v "$t" 2>/dev/null || true)
               [ -n "$path" ] && tools="$tools$t=$path "
             done
-            verify="Verify your work with the locally provisioned tools where relevant. Your process runs under a login shell with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
+            verify="Verify your work with the locally provisioned tools where relevant. Your process runs under sudo with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
           elif [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            verify="NOTE: environment provisioning FAILED before you started, so pytest and the project's dependencies are probably NOT installed and you cannot install them (no network). Verify as far as the bare runner allows (py_compile, reading the code) and state plainly in your final message that verification was static-only."
+            verify="NOTE: environment provisioning FAILED before you started (on this conflicted run the likely cause is a conflicted dependency file — pyproject.toml or a lockfile — see the merge conflict task below), so pytest and the project's dependencies are probably NOT installed and you cannot install them (no network). Resolve the merge conflict first; verify as far as the bare runner allows (py_compile, reading the code), and state plainly in your final message that verification was static-only — the next run provisions normally once the resolved branch is pushed."
           else
             verify="No project environment was provisioned for this checkout (no claude-setup action and no pyproject.toml); verify with whatever the bare runner offers and say what you could not run."
           fi
@@ -1825,18 +1852,22 @@ jobs:
           # Provisioning died before the agent started (observed: a transient
           # curl failure downloading uv) — without this, the issue gets no
           # comment at all because the agent step was skipped, not failed.
-          # Provisioning runs against the PR head AFTER the sync step, so on
-          # the codex conflict path it sees the in-progress merge: a conflict
-          # in pyproject.toml / a lockfile is a plausible cause, not the
-          # transient network error the default text suggests — name it.
-          if [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
-            err="environment provisioning (claude-setup) failed before the agent started — usually a transient dependency-download/network error; re-trigger to retry."
-            if [ -n "${SYNC_CONFLICTS:-}" ]; then
-              err="environment provisioning (claude-setup) failed before the agent started — the base-branch merge left conflicts in $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//'), so if one of those is a dependency file the provisioning ran over conflict markers (see the sync step's warning); otherwise usually a transient dependency-download/network error. Resolve the conflict or re-trigger to retry."
+          # EXCEPT on the codex conflict path (SYNC_CONFLICTS non-empty):
+          # there both provisioning steps are continue-on-error, the agent
+          # ran static-only with the failure spelled out in its prompt, and
+          # the later clauses judge what it did — so a failure there is a
+          # log warning, not an error, and "re-trigger to retry" (wrong
+          # advice for a conflicted dependency file, which fails identically
+          # every time) is never given for it. Mirrors the loops' Surface
+          # steps.
+          if [ -n "${SYNC_CONFLICTS:-}" ]; then
+            if [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+              echo "::warning::environment provisioning failed on a conflicted run (conflicts in: $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//')); the agent ran static-only and was told so."
             fi
-          fi
-          if [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            err="fallback environment provisioning (uv dev-install) failed before the agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); re-trigger if it looks transient."
+          elif [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+            err="environment provisioning (claude-setup) failed before the agent started — usually a transient dependency-download/network error; re-trigger to retry."
+          elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+            err="fallback environment provisioning (uv dev-install) failed before the agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (that one fails identically on every trigger: check the job logs and fix it by hand); re-trigger if it looks transient."
           fi
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
