@@ -1,0 +1,81 @@
+name: provision-fallback
+description: >-
+  Fallback provisioning where the caller repo has no `claude-setup` shim
+  (design/architecture.md → "Provisioning the environment for the verify
+  loop"): bootstrap uv and dev-install the checkout so the agent's pytest/
+  ruff/mypy actually resolve. Shared by claude-review.yml, claude-auto.yml
+  and claude-auto-review.yml, which keep their own `if:` (the hashFiles
+  guards and each workflow's trigger gate), `timeout-minutes` and
+  `continue-on-error` — only the recipe lives here, so a tweak to the uv
+  version, the retry or the extras/group detection is made once. Referenced
+  fully-qualified (meridianlabs-ai/agents/.github/actions/provision-fallback@main);
+  NO post step (local composite actions with post steps break teardown on
+  the fork).
+
+  Who it serves: PR heads on the inspect_ai fork, whose branches are cut
+  from pristine main and carry no meridian files, and Python caller repos
+  that never added the action. NEVER a cross-repository fork head (issue
+  #59): `uv pip install -e` runs the checkout's build backend as `runner`
+  with sudo, unrestricted egress and the job token present — every caller
+  excludes those before this step (the reviewer's fork_head gate, the
+  CI-fix stub's `head_repository.full_name == github.repository` filter,
+  the review-fix gate's `isCrossRepository` skip).
+
+  The recipe (decision: Ransom, 2026-09-01), mirroring the fork's
+  claude-setup: the uv installer curl is retried — its tarball download
+  flaked repeatedly on 2026-08-12; uv's own HTTP retries internally. Both
+  bin dirs go on GITHUB_PATH so pytest/ruff/mypy resolve for either engine
+  (codex-action forwards the runner PATH into its sandbox). Fatal on
+  failure, exactly like claude-setup: a repo whose pyproject exists but
+  cannot dev-install is a loud signal, not a silent static-only run — the
+  callers' Surface steps report a failed outcome. No plain `-e .` fallback:
+  uv (verified on 0.9.4), like pip, only WARNS on an unknown extra, so the
+  `[dev]` install already succeeds on repos without one — a fallback could
+  only mask real failures as a silent static degrade. Dev tools may instead
+  live in PEP 735 `[dependency-groups]` (uv-native layouts: inspect_sandboxes
+  has NO optional-dependencies at all), where the extras warning would mean
+  a green step with a toolless venv — so when that table exists, `--group
+  dev` is added; unlike an unknown extra, an absent group ERRORS, which is
+  the loud failure this step wants. The table is detected with tomllib
+  (runner python3 is ≥3.11), not grep: TOML allows whitespace in/before the
+  header, and a formatting variant silently taking the extras-only branch is
+  the exact toolless-venv outcome the group branch exists to prevent. Parity
+  gap, accepted: claude-setup pins `--python 3.11` to the fork's CI, while
+  bare `uv venv` resolves the runner's default (3.12 today, drifting with
+  the image) — a generic fallback can't hardcode any one minor; repos that
+  care can ship a `.python-version`, which uv honors.
+
+  The `.venv/` it creates — and the `<pkg>.egg-info/` a setuptools PEP 660
+  editable install writes INTO the source tree (verified: `pip install -e .`
+  on a src-layout project leaves `src/<pkg>.egg-info/` behind; hatchling
+  and other backends write nothing) — are added to `.git/info/exclude`
+  unconditionally: the two loops' Claude-engine agents commit and push from
+  this tree, the codex landing step stages with a blanket `git add -A`, and
+  only the caller's .gitignore would otherwise keep either out (the codex
+  path re-excludes both in its prep step regardless); for the reviewer,
+  which never commits, the line is harmless.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        for attempt in 1 2 3; do
+          curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh && break
+          if [ "$attempt" = 3 ]; then
+            echo "uv install failed after 3 attempts" >&2; exit 1
+          fi
+          echo "uv install attempt $attempt failed; retrying..." >&2
+          sleep $((attempt * 10))
+        done
+        export PATH="$HOME/.local/bin:$PATH"
+        printf '%s\n' .venv/ '*.egg-info/' >>.git/info/exclude
+        uv venv
+        if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
+          uv pip install -e ".[dev]" --group dev
+        else
+          uv pip install -e ".[dev]"
+        fi
+        echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+        echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
