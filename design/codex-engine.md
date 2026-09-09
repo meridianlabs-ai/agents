@@ -151,7 +151,10 @@ workaround when #103's does).
 
 The group grant that lets codex edit the tree also makes `.git`
 codex-writable, and git *executes* configuration: `core.hooksPath` and the
-files in `.git/hooks/` (run by `git commit`), `core.fsmonitor` (run whenever
+files in `.git/hooks/` (run by `git commit`, but also by `git fetch` —
+`reference-transaction` fires on every ref update, the remote-tracking ref
+included — and by `git status`, which runs `post-index-change` whenever it
+writes the refreshed index), `core.fsmonitor` (run whenever
 an index carrying the fsmonitor extension is read — `git status`, even
 `ls-files`), `filter.*.clean` drivers (run by `git add`), plus
 `credential.helper`, `http.*`, `url.*.insteadOf` and `remote.origin.url`,
@@ -190,9 +193,14 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   g-w`, not recursive: a same-parent rename needs write on the parent only,
   so a survivor could otherwise `mv .git .git.x && cp -a .git.x .git` and
   own a git dir the `GIT_DIR` pin then follows by path; review round 5 of
-  #73 — the rest of the working tree keeps its grant), and restores the
+  #73 — the rest of the working tree keeps its grant), restores the
   snapshot with `cp --remove-destination`, so a config codex replaced with a
-  symlink cannot redirect the write. It runs no git itself.
+  symlink cannot redirect the write, **moves `.git/hooks` aside** (to
+  `$RUNNER_TEMP`, non-sample names logged — hooks are files, so the restore
+  never reached them and the chown left codex's runner-owned and executable;
+  review round 6 of #73) and **appends `core.hooksPath` / `core.fsmonitor =
+  false` to the restored config**, so every later git in the job is
+  hook-free without each step carrying an env pin. It runs no git itself.
   Everything downstream —
   the guard, the landing, the loops' hand-back and unlanded-work fetches —
   is either gated on that step's success or (Surface) sets its error and
@@ -220,14 +228,29 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   The reclaim step's refusal is the primary defence — nothing runs git
   through a redirected dir — and the pins are belt and braces for the two
   steps that write;
-- the landing step runs every git command with `GIT_CONFIG_*` env pinning
-  `core.hooksPath` to a non-existent runner-only path and
-  `core.fsmonitor=false` — the two things a config restore cannot cover,
-  since hooks are files and the fsmonitor extension lives in the index. The
+- hooks and fsmonitor are neutralized for *every* post-codex step at the
+  reclaim, not per step: the two things a config restore cannot cover are
+  hooks (files in `.git/hooks`) and the fsmonitor extension (in the index),
+  and the steps that run git after codex are not only the landing — the
+  loops' `Ensure hand-back after push` and `Surface agent errors` and
+  `claude.yml`'s `Open or adopt PR` run `git fetch` (which runs
+  `reference-transaction` when it updates the remote-tracking ref — and
+  codex, owning `.git` during its step, can delete the local one so the
+  next fetch deterministically does) and `git status` (which runs
+  `post-index-change` when it writes the refreshed index — always, after
+  codex touched tracked files), with `MARVIN_TOKEN` in their env. Until
+  round 6 of #73 only the landing pinned `core.hooksPath` by env, so a
+  codex-written hook in `.git/hooks` — runner-owned and executable after the
+  chown — ran as `runner` in those steps. The reclaim now moves `.git/hooks`
+  aside and appends `core.hooksPath = $RUNNER_TEMP/no-hooks` and
+  `core.fsmonitor = false` to the restored config, so a git-running step
+  added later cannot drift out of the pin. The landing step still runs every
+  git command with the same two keys in `GIT_CONFIG_*` env, and the
   `unresolved-merge-guard` pins `core.fsmonitor=false` and the git dir the
   same way (lower exposure — `ls-files` runs no drivers — but it reads the
-  index, which the restore does not touch). Keep the pins on every git
-  command in the step, not just the ones that obviously execute config;
+  index, which the restore does not touch): belt and braces on the two
+  steps that write. Keep the env pins on every git command in those steps,
+  not just the ones that obviously execute config;
 - a *nested* repository is refused, not pinned. Codex can leave an embedded
   repo in the tree with its *own* `.git/config` and stage the directory as
   a gitlink (`git add evil` — all local git); the landing step's `git status
@@ -250,7 +273,12 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   post-codex `git status` passes `--ignore-submodules=dirty`, which is what
   suppresses the `is_submodule_modified` spawn while (unlike `all`) still
   reporting a changed gitlink pointer; `git add`/`git commit` have no such
-  flag, which is why the refusal is the primary defence.
+  flag, which is why the refusal is the primary defence. Recognizing the
+  refusal when it is a false alarm: a codex run that `git init`s a fixture
+  or `git worktree add`s under the checkout (rather than `/tmp`) goes red on
+  `Reclaim workspace from codex` with the nested `.git` path in the log and
+  the Surface comment naming the step; the fix is the prompt (create
+  scratch repos outside the workspace), not a weaker check.
 
 Verification for a change here, all cases prompted to codex (any verb):
 
@@ -285,7 +313,16 @@ Verification for a change here, all cases prompted to codex (any verb):
    and landing must be skipped, and no later step's log (hand-back, Surface)
    may contain `FILTER-RAN`. Control: a run on a caller whose provisioning
    leaves a nested `.git` before codex (an editable `git+` install under
-   `src/`) must NOT be refused — the snapshot covers it.
+   `src/`) must NOT be refused — the snapshot covers it;
+6. the unpinned-step hooks path: on a loop run, write
+   `.git/hooks/reference-transaction` and `.git/hooks/post-index-change`
+   that print `HOOK-RAN` to stderr, `chmod +x` them, `git update-ref -d
+   refs/remotes/origin/<head branch>` so the hand-back's fetch must recreate
+   the tracking ref, and `touch` a tracked file so `git status` rewrites the
+   index — the reclaim step's log must list both hooks as moved aside,
+   `git config --get core.hooksPath` in a scratch step must print
+   `$RUNNER_TEMP/no-hooks`, and no later step's log (landing, hand-back,
+   Surface) may contain `HOOK-RAN`.
 
 ## v1 limitations (deliberate)
 

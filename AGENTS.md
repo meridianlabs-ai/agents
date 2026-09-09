@@ -105,13 +105,15 @@ take effect on every repo's next run.
   status`/`git add` and no restore or pin reaches it — compared against the
   list `Create codex user` snapshots, so a caller's provisioning may leave
   one), takes `.git` back and revokes the codex group's write grant on it
-  and on the workspace root, and restores the pre-codex `.git/config` — so
-  keep every later git-running step gated on its success (guard, landing,
-  the loops' hand-back fetch) and put nothing that runs git between codex
-  and it. The guard and landing steps additionally pin
-  `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` and
-  `core.hooksPath`/`core.fsmonitor` by env (hooks and the index are files a
-  config restore cannot cover), and every post-codex `git status` passes
+  and on the workspace root, restores the pre-codex `.git/config`, moves
+  `.git/hooks` aside and appends `core.hooksPath`/`core.fsmonitor=false`
+  to the restored config (hooks and the index are files a restore cannot
+  cover, and `git fetch`/`git status` run hooks too, not just `git
+  commit`) — so keep every later git-running step gated on its success
+  (guard, landing, the loops' hand-back fetch) and put nothing that runs
+  git between codex and it. The guard and landing steps additionally pin
+  `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` and the same two `core.*`
+  keys by env as belt and braces, and every post-codex `git status` passes
   `--ignore-submodules=dirty`; keep all of that when touching them. See
   design/architecture.md → No persisted git credentials and
   design/codex-engine.md → Hook-safe landing.

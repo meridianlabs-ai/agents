@@ -953,8 +953,12 @@ jobs:
           # provisioning may leave one); the reclaim step refuses to run git
           # over the tree if codex added one, since a nested .git/config is
           # executed by the landing step and no restore or pin covers it.
+          # Both scans run as root so they see the same tree: this one runs
+          # before the chown below, and a root-owned unreadable directory a
+          # caller's provisioning left would otherwise fail this step or
+          # read as a codex addition in the reclaim.
           cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
-          find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
+          sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
           sudo adduser --system --home /home/codex --shell /bin/bash --group codex
           sudo usermod -a -G codex runner
           sudo usermod -a -G runner codex
@@ -1047,10 +1051,13 @@ jobs:
       # could not redirect git to a config codex owns even if the reclaim's
       # refusal had missed it (gitrepository-layout(5): that file sets
       # GIT_COMMON_DIR unless the env already does), and the GIT_CONFIG_* env
-      # below pins the two things a config restore cannot: hooks live as
+      # below re-pins the two things a config restore cannot: hooks live as
       # FILES in .git/hooks, so hooksPath points at an empty, runner-only
       # path; and the index may carry the fsmonitor extension, so fsmonitor
-      # is off. The credential helper is the machine account — the push must
+      # is off. The reclaim already moved .git/hooks aside and appended the
+      # same two keys to the restored config for every later step; the env
+      # pin here is belt and braces on the step that pushes. The credential
+      # helper is the machine account — the push must
       # re-trigger CI, and the gate above already exited on a missing
       # MARVIN_TOKEN, so there is no job-token fallback here — it is scoped
       # to this server's URL, and it lives only in this step's environment.

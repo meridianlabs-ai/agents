@@ -11,7 +11,7 @@ description: >-
   errors) then reads a clean config instead of each step defending itself;
   before this existed the loops' `Ensure hand-back after push` ran `git
   fetch` against the un-restored, codex-writable .git whenever the guard or
-  the landing failed (review finding on #73). Seven things, in order:
+  the landing failed (review finding on #73). Nine things, in order:
 
   1. Kill every process still running as the codex user (`pkill -KILL -u
      codex`, repeated until a pass finds nothing — one pass scans /proc
@@ -27,9 +27,11 @@ description: >-
      and `config` is then read from THERE — so codex could copy .git
      somewhere it owns, add a filter driver or repoint remote.origin.url,
      and a restore of `.git/config` would land on a file git no longer
-     reads. This step runs no git, so the check needs no pin; every later
-     git-running step pins `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` too,
-     and this refusal makes a codex that tried it fail loudly instead.
+     reads. This step runs no git, so the check needs no pin; the guard and
+     landing steps (the two that write) pin
+     `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` too as belt and braces, the
+     other post-codex git users rely on this refusal, and it makes a codex
+     that tried it fail loudly instead.
   3. Refuse an embedded repository codex left in the tree: fail if the set
      of `.git` entries below the top level (directories, gitfiles or
      symlinks — `find -mindepth 2 -name .git`) differs from the list
@@ -69,11 +71,25 @@ description: >-
      group grant, with `cp --remove-destination` — codex could have
      replaced the file with a symlink, and a plain cp would follow it and
      write elsewhere.
+  8. Move `.git/hooks` aside (to `$RUNNER_TEMP/git-hooks.post-codex`, names
+     of anything non-sample logged). A restore covers configuration, not
+     files, and the chown leaves codex-written hooks runner-owned and
+     executable; `git commit` is not the only runner — `git fetch` runs
+     `reference-transaction` when it updates the remote-tracking ref (codex
+     can delete the local one, so the next fetch deterministically does)
+     and `git status` runs `post-index-change` whenever it writes the
+     refreshed index — and the loops' hand-back and Surface fetches and
+     claude.yml's open-PR fetch run both with the machine-account token in
+     their env (review round 6 of #73). Nothing runner-side relies on
+     hooks.
+  9. Append `core.hooksPath = $RUNNER_TEMP/no-hooks` and `core.fsmonitor =
+     false` to the restored config — the two keys a restore cannot cover
+     (hooks are files, the fsmonitor extension lives in the index), pinned
+     at this choke point so EVERY later git in the job is hook-free without
+     each step carrying an env pin; the guard and landing steps keep their
+     env pins as belt and braces.
 
-  A restore covers configuration; it cannot cover hooks (files in
-  .git/hooks) or the index's fsmonitor extension, so the guard and landing
-  steps still pin `core.hooksPath` / `core.fsmonitor` by env. Runs no git
-  command itself. Referenced fully-qualified
+  Runs no git command itself. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main); NO
   post step (local composite actions with post steps break teardown on the
   fork).
@@ -176,4 +192,30 @@ runs:
         sudo chmod -R g-w "$gitdir"
         sudo chmod g-w "$GITHUB_WORKSPACE"
         cp --remove-destination "$SNAPSHOT" "$gitdir/config"
-        echo "reclaimed .git from codex (codex processes killed, no embedded repository, group write revoked on .git and the workspace root) and restored the pre-codex config."
+        # Hooks are FILES, so the restore does not reach them, and the chown
+        # above leaves anything codex wrote in .git/hooks runner-owned and
+        # executable. Not only `git commit` runs them: `git fetch` runs
+        # reference-transaction when it updates a tracking ref (codex can
+        # delete the local one so the next fetch deterministically does),
+        # and `git status` runs post-index-change whenever it writes the
+        # refreshed index — both in steps that carry the machine-account
+        # token. Move the whole directory aside (mv moves a symlink, not its
+        # target; nothing runner-side relies on hooks — the landing step
+        # already points hooksPath at a non-existent path) and list what
+        # codex left there, names only, for the log.
+        if [ -e "$gitdir/hooks" ] || [ -L "$gitdir/hooks" ]; then
+          rm -rf "$RUNNER_TEMP/git-hooks.post-codex"
+          mv -T "$gitdir/hooks" "$RUNNER_TEMP/git-hooks.post-codex"
+          if [ -d "$RUNNER_TEMP/git-hooks.post-codex" ] && [ ! -L "$RUNNER_TEMP/git-hooks.post-codex" ]; then
+            find "$RUNNER_TEMP/git-hooks.post-codex" -mindepth 1 ! -name '*.sample' -printf '::warning::.git/hooks/%P found after codex, moved aside (hooks are never run after codex)\n'
+          fi
+        fi
+        # And pin the two keys a config restore cannot cover into the
+        # restored config itself, so EVERY later git in the job — the loops'
+        # hand-back and Surface fetches, claude.yml's open-PR fetch, not just
+        # the guard and landing steps that also pin them by env — runs
+        # hook-free and never consults an fsmonitor command the index's
+        # extension might name. Appended after the cp so the snapshot stays
+        # a faithful copy of checkout's config.
+        printf '[core]\n\thooksPath = %s\n\tfsmonitor = false\n' "$RUNNER_TEMP/no-hooks" >>"$gitdir/config"
+        echo "reclaimed .git from codex (codex processes killed, no embedded repository, group write revoked on .git and the workspace root, hooks moved aside) and restored the pre-codex config with core.hooksPath/core.fsmonitor pinned."
