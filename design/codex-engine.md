@@ -31,8 +31,10 @@ battle and scale badly with token count. So:
 
 ## The structural difference: Codex cannot post or push
 
-`openai/codex-action` runs the Codex CLI in a sandbox with **no network
-access and no GitHub credentials** (permission profile `:workspace`).
+`openai/codex-action` runs the Codex CLI in a sandbox with **no GitHub
+credentials** (permission profile `:workspace`; network inside the sandbox
+is ON since 2026-09-09 — see "Network" below — but nothing codex can reach
+carries a token).
 Claude Code posts its own comments and pushes its own
 branches; Codex cannot. Every GitHub side effect on the codex path
 therefore moves into deterministic workflow steps:
@@ -143,7 +145,10 @@ temp root would expose the runner's step scripts and per-step
 checkout added to the codex user's git `safe.directory` (the repo stays
 runner-owned, so git run as codex otherwise refuses with "dubious
 ownership", and no profile sandbox lets the agent add the exemption
-itself). One deliberate divergence from a four-way copy: on the write
+itself). The recipe is the `create-codex-user` composite — one body for
+the four `Create codex user` steps (it was a four-way verbatim copy until
+#87's review asked for the composite AGENTS.md prescribes). One
+deliberate divergence between the paths: on the write
 paths the `reclaim-codex-workspace` step (Hook-safe landing, below) runs
 `chown -R runner` on `.git` right after codex (object fan-out dirs codex
 creates are codex-owned, and the runner's codex-group membership never
@@ -152,10 +157,12 @@ fail intermittently). One more
 unprivileged-user consequence, reviewer-only: the action's inline
 `output-schema` input is broken under this strategy at `@v1`
 (openai/codex-action#103 — the schema temp dir is mktemp'd as codex, mode
-700, then written as the runner, EACCES; fix #147 unmerged), so the setup
-step writes the review schema to a runner-owned file and the codex step
-passes `output-schema-file` instead — the explicit-path branch creates no
-temp dir. Revisit when #160's fixes land upstream (and drop the schema
+700, then written as the runner, EACCES; fix #147 unmerged), so the
+reviewer's `Prepare codex review inputs` step (right after the composite;
+it also discovers the absolute tool paths for the prompt) writes the
+review schema to a runner-owned file and the codex step passes
+`output-schema-file` instead — the explicit-path branch creates no temp
+dir. Revisit when #160's fixes land upstream (and drop the schema
 workaround when #103's does).
 
 ### Hook-safe landing
@@ -352,12 +359,12 @@ Verification for a change here, all cases prompted to codex (any verb):
   claude-setup provisioning, so codex can verify findings with
   pytest/ruff/mypy like the Claude reviewer. Read-only-ness of the
   review is enforced by instruction plus structure — the review path
-  has no landing step, no push credentials, and no network, so stray
+  has no landing step and no push credentials, so stray
   writes die with the runner (decided after inspect_ai#392's review
-  produced four static "blocking" findings of uncertain reality). No
-  network still means no installs by the AGENT — but the reviewer
-  workflow provisions a fallback venv (uv dev-install, as the runner,
-  which has network) when claude-setup is absent and a pyproject.toml
+  produced four static "blocking" findings of uncertain reality). The
+  reviewer
+  workflow provisions a fallback venv (uv dev-install, as the runner)
+  when claude-setup is absent and a pyproject.toml
   exists, so PR heads on the inspect_ai fork (cut from pristine main;
   cross-repository fork heads are deliberately never provisioned, issue
   #59) — and Python caller repos that never added claude-setup — get
@@ -367,8 +374,8 @@ Verification for a change here, all cases prompted to codex (any verb):
 - **Loop fix rounds run tests since 2026-09-09**: `claude-auto.yml` and
   `claude-auto-review.yml` had no provisioning step at all — neither
   claude-setup nor the reviewer's uv fallback. On Claude that was
-  invisible (the agent installs what it needs; it has network); on codex
-  it was total: inspect_flow#824's two review-fix rounds and two CI-fix
+  invisible (the agent installs what it needs); on codex — sandbox network
+  still off at the time — it was total: inspect_flow#824's two review-fix rounds and two CI-fix
   attempts all ran in a bare checkout (`No module named inspect_ai /
   pytest / ruff / pyright`), the rounds that pushed were verified only by
   tests that import nothing (which is how a broken test reached CI), and
@@ -564,6 +571,100 @@ Verification for a change here, all cases prompted to codex (any verb):
   execution log (#65).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
+
+## Network inside the codex sandbox
+
+ON since 2026-09-09 (decision: Ransom), via `network_access = true` under
+`[sandbox_workspace_write]` in the codex user's `config.toml`, written by
+the `Create codex user` step (the `create-codex-user` composite, shared by
+all four codex steps) before codex-action runs (the action keeps a
+pre-existing config and appends its provider block; the same key is
+rejected through `codex-args`). The home and `.codex` are 755 so the
+runner-side action can read the file back — a 700 home would make it read
+"" and drop the block silently. The key's survival rides on the action
+APPENDING to the existing file (`writeProxyConfig.ts` today), and `@v1` is
+a moving tag, so a revision that overwrote instead would turn network back
+off with no symptom but trio tests failing again — the one setting whose
+loss would be silent. So the `codex-usage` composite, the one post-codex
+step every codex path runs (the review path has no reclaim step), re-reads
+the `config.toml` codex ran with and posts a `::warning::` if the key is
+gone (review round 4 of #87): a future silent revert becomes a loud one on
+every run, not only on the first live check after merge.
+
+Pre-creating `.codex` has one side effect the step must compensate for
+(caught in review round 1 of #87): codex-action's `resolve-codex-home`
+returns early when `~codex/.codex` already exists ("assume it's correctly
+permissioned"), and only its create path pre-touches the world-writable
+`$CODEX_HOME/$GITHUB_RUN_ID.json` that `codex-responses-api-proxy` —
+launched as `runner`, no sudo — writes its server info into. Without that
+file the proxy gets EACCES in the codex-owned 755 dir and the action fails
+at "Wait for Responses API proxy" before codex runs. So the step mirrors
+the action: `sudo touch` + `chmod 666` on that path (the action's `-s`
+probe treats the empty file as "not running yet" and locks it to
+`444`/root once the proxy is up). Anyone adding another file under
+`.codex` before the action runs should check what else the skipped
+bootstrap would have done.
+
+Why: with network off, codex's Linux sandbox installs a seccomp filter
+(`linux-sandbox/src/landlock.rs`, `Restricted` mode) that allows AF_UNIX
+`socket`/`socketpair` but denies `setsockopt`, `getsockopt`,
+`getsockname`, `shutdown`, `bind` and `connect` unconditionally — seccomp
+cannot see an fd's address family. Trio's event loop dies creating its
+wakeup socketpair (it sets `SO_SNDBUF`), inspect_ai's control server
+cannot bind, asyncio thread wake-ups stall, and nothing downloads a
+tokenizer. inspect_ai#428's codex reviews (2026-09-09) lost every trio
+test and half the asyncio suite to this and fell back to timers and
+stubs. `network_access = true` on the builtin `:workspace` profile skips
+the filter entirely.
+
+Trust argument: every codex run here is a same-repo tree — the reviewer
+routes fork heads to Claude, the dev agent refuses them, the loops gate on
+`isCrossRepository` — and codex holds NO credentials: the API key sits
+behind the action's proxy, no GitHub token reaches it, and its curated env
+carries no OIDC request token. Network therefore buys installs and test
+fixtures, not a push path or an exfiltration channel beyond what the
+Claude engine already has (it runs pytest unsandboxed with full network
+AND a token). Read-only-ness of reviews and the deterministic landing of
+fix rounds never rested on the network being off. The prompts now say
+network is available for installs and fixtures and that nothing codex runs
+can push to or post on GitHub. One thing network does newly expose
+(review round 2 of #87, accepted): codex-action's
+`codex-responses-api-proxy` listens on loopback, so anything codex runs —
+tests, installed packages — can `connect()` to it and `POST /v1/responses`
+(billed to the org key, which never leaves the proxy) or, because the
+action starts it with `--http-shutdown`, hit an unauthenticated
+`GET /shutdown` that kills the proxy and fails the codex run mid-way.
+Same-repo trust covers it as it covers the Claude engine's unsandboxed
+test runs; the shutdown case fails loudly rather than silently.
+
+What DID shift is the "codex cannot fetch" rationale scattered through the
+sync comments: checkout runs `persist-credentials: false`, so origin is a
+plain tokenless URL and an anonymous `git fetch` from a public caller (the
+inspect_ai fork) would now succeed. The prompts therefore say "must NOT"
+rather than "cannot" — a "cannot" invites the agent to test it and trust
+its own finding — and the in-progress merge hand-off means codex never
+needs to fetch. The guarantee is instruction, not structure; the
+unresolved-merge-guard and the landing step never depended on it.
+
+Two install caveats the prompts carry, both regressions accepted in #87's
+review: `reclaim-codex-workspace` refuses any nested `.git` codex added
+(compared against the pre-codex snapshot), and a `pip install -e git+…`
+into a workspace venv creates exactly that (pip's default `--src` is
+`<venv>/src`) — so the prompts forbid installing from a `git+` URL (a
+local `pip install -e '.[dev]'`, which the provisioning-failed text
+suggests, clones nothing and is fine), and the guard fails the run loudly
+if one slips through. And on the landing paths a
+`uv add`-style install rewrites `pyproject.toml`/`uv.lock`, which the
+landing step would commit — so the prompts also say not to edit dependency
+files the task does not call for. Where provisioning FAILED on a
+conflicted round, the prompt now tells codex it may provision the venv
+itself after resolving the dependency file (`.venv/` and `*.egg-info/`
+are already in `.git/info/exclude` from the prep step), instead of the
+former "cannot install (no network)".
+
+The alternatives considered — a runner-side test sidecar with an
+allow-list, or an upstream AF_UNIX-complete restricted mode — remain
+options if the posture ever needs to tighten.
 
 ## Testing
 

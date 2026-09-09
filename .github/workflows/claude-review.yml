@@ -457,7 +457,8 @@ jobs:
       # writes the job token into the workspace's git config, where code the
       # sandbox runs on a fork head could read it, and nothing after this
       # step needs an authenticated remote — claude-code-action's agent mode
-      # does no fetch, and the codex path has no network. (The action then
+      # does no fetch, and the codex path never fetches — codex holds no
+      # credentials and is told not to. (The action then
       # embeds its OWN app token in the origin URL for the agent run — its
       # behavior, not this workflow's; on the sandboxed paths the settings
       # overlay below masks that token for sandboxed commands, issue #70 —
@@ -965,8 +966,8 @@ jobs:
             exit 1
           fi
 
-      # Codex engine (design/codex-engine.md): the sandbox has no network and
-      # no GitHub credentials, so the agent cannot post — it emits a
+      # Codex engine (design/codex-engine.md): the sandbox has no GitHub
+      # credentials, so the agent cannot post — it emits a
       # structured review (schema below) and the next step posts it with the
       # SAME markers the @auto loop consumes. The verdict is thereby
       # deterministic rather than prompt-enforced. Inline comments are a v1
@@ -980,42 +981,29 @@ jobs:
       # dedicated unprivileged user — the README's other blessed strategy for
       # permission profiles: containment is the user boundary plus the
       # profile sandbox, and the API key stays out of reach (codex has no
-      # sudo). Setup mirrors the sibling workflows' full recipe (the
-      # action's examples/unprivileged-user.yml): the profile here is
+      # sudo). The user/grant recipe is the shared create-codex-user
+      # composite (same as the three landing workflows; its description
+      # carries the rationale for each step): the profile here is
       # :workspace so codex can run the provisioned pytest/ruff/mypy —
       # test writes (.pyc, caches, scratch) need the workspace grants,
       # while read-only-ness of the REVIEW is enforced by instruction and
-      # by this path having no landing step, no push credentials, and no
-      # network (stray writes die with the runner). Plus two grants the
-      # example never needs (it passes no explicit output-file and its
-      # demo prompt never runs git) and a schema-file workaround for an
-      # upstream bug, all commented inline: a codex-owned output dir under
-      # RUNNER_TEMP, git safe.directory, and the review schema written to
-      # a runner-owned file.
+      # by this path having no landing step and no push credentials (stray
+      # writes die with the runner; the sandbox has network since 2026-09-09
+      # — see design/codex-engine.md → Network — but no token). The
+      # composite's pre-codex snapshots go unused here (no reclaim step).
+      # Two reviewer-only preparations follow in their own step: the
+      # absolute tool paths for the prompt and the schema-file workaround
+      # for an upstream bug.
       - name: Create codex user
         id: codexuser
         if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
+        uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
+
+      - name: Prepare codex review inputs
+        id: codexinputs
+        if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
         run: |
           set -euo pipefail
-          sudo adduser --system --home /home/codex --shell /bin/bash --group codex
-          sudo usermod -a -G codex runner
-          sudo usermod -a -G runner codex
-          sudo chown -R runner:codex "$GITHUB_WORKSPACE"
-          sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
-          sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
-          # codex itself (via sudo -u) writes the explicit output-file and
-          # the action re-reads it as codex, but RUNNER_TEMP is 755
-          # runner:runner on the hosted image. Not g+w on the temp root:
-          # codex's runner-group membership IS effective (its processes
-          # start post-usermod), so that would hand it rename/delete over
-          # the runner's step scripts and the per-step GITHUB_ENV/OUTPUT/
-          # PATH files. A codex-owned subdir grants only the output-file
-          # write; 755 keeps $OUT readable for the runner-side post step.
-          sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
-          # The checkout stays runner-owned, so git commands running as
-          # codex hit the dubious-ownership refusal, and no profile sandbox
-          # lets the agent add the exemption itself.
-          sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
           # The action's inline output-schema input is broken with
           # unprivileged-user at @v1 (openai/codex-action#103: it mktemps
           # the schema dir as codex, mode 700, then writes schema.json as
@@ -1031,7 +1019,8 @@ jobs:
           # there (observed: inspect_ai#392's review reported pytest/ruff/
           # mypy unavailable and degraded to static). Discover the ABSOLUTE
           # paths here, where PATH is intact, and hand them to the prompt;
-          # group perms from the workspace grants above make them runnable.
+          # group perms from the composite's workspace grants make them
+          # runnable.
           # Same list as the dev-verb and loop compose steps discover, so
           # every codex prompt describes one toolset.
           tools=""
@@ -1053,7 +1042,7 @@ jobs:
 
       # Codex reviews were blind to the PR's own narrative: the Claude
       # reviewer fetches the description, prior review rounds and the
-      # thread state with gh at runtime, but codex has no network, and its
+      # thread state with gh at runtime, but codex has no gh token, and its
       # prompt was the generic review_prompt plus the codex adjustments —
       # 7.5 KB, nothing PR-specific beyond the number (inspect_ai#428's two
       # codex reviews, 2026-09-09: 18 KB of design rationale and a human
@@ -1090,7 +1079,7 @@ jobs:
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           REVIEW_PROMPT: ${{ steps.reviewprompt.outputs.value }}
-          TOOLS: ${{ steps.codexuser.outputs.tools || 'none — the environment is unprovisioned' }}
+          TOOLS: ${{ steps.codexinputs.outputs.tools || 'none — the environment is unprovisioned' }}
         run: |
           set -euo pipefail
           fetch() { # fetch <outfile> <gh args...>
@@ -1113,7 +1102,7 @@ jobs:
           CLIP='def clip: if length > $max then .[:$max] + "\n[… truncated at \($max) characters]" else . end;'
           {
             printf '%s\n' "$REVIEW_PROMPT"
-            echo "CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction above: you have NO network access and NO GitHub credentials, so you cannot post comments or run gh, and must not try — a deterministic workflow step posts your review for you. You MAY run the provisioned tools to verify findings — but your process runs under sudo with a reset PATH, so bare command names will NOT resolve: invoke them by the ABSOLUTE paths discovered at setup: $TOOLS. You have no network, so you cannot install anything; if a tool you need is not in that list, fall back to static review of that point rather than fighting the environment. Do NOT modify the checked-out code: scratch/cache writes from running tests are fine, but the review is read-only — never edit, commit, or revert project files. Read the change from the local checkout (git log/diff against the base branch; full history is available). Produce your ENTIRE review as your final message conforming to the output schema. Verdict 'clean' ONLY when nothing actionable remains (regression-accepted notes are informational and do not flip it); 'suggestions' otherwise. Include every finding in the review body with file:line references, each tagged blocking or non-blocking. Never write a literal @-prefixed trigger token (review, claude, auto) in the review text — it is posted from a write-access account and would fire a workflow; backtick such tokens instead. Likewise do NOT reproduce the \"Review complete\" marker-comment lines or their HTML comment markers from the instructions above anywhere in your review text — the workflow posts the verdict comment for you, and an echoed marker would be read by the automation as a verdict."
+            echo "CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction above: you have NO GitHub credentials, so you cannot post comments or run gh, and must not try — a deterministic workflow step posts your review for you; do not run git fetch either (the local checkout already has full history and the PR context below). You MAY run the provisioned tools to verify findings — but your process runs under sudo with a reset PATH, so bare command names will NOT resolve: invoke them by the ABSOLUTE paths discovered at setup: $TOOLS. Network access IS available inside your sandbox: a missing tool may be installed into the project venv and test fixtures may download — prefer the provisioned tools, keep installs minimal, and never install from a git+ URL (an editable VCS install clones a repo into the venv, and a nested checkout would fail a landing run); if something still cannot run, fall back to static review of that point rather than fighting the environment. Do NOT modify the checked-out code: scratch/cache writes from running tests are fine, but the review is read-only — never edit, commit, or revert project files. Read the change from the local checkout (git log/diff against the base branch; full history is available). Produce your ENTIRE review as your final message conforming to the output schema. Verdict 'clean' ONLY when nothing actionable remains (regression-accepted notes are informational and do not flip it); 'suggestions' otherwise. Include every finding in the review body with file:line references, each tagged blocking or non-blocking. Never write a literal @-prefixed trigger token (review, claude, auto) in the review text — it is posted from a write-access account and would fire a workflow; backtick such tokens instead. Likewise do NOT reproduce the \"Review complete\" marker-comment lines or their HTML comment markers from the instructions above anywhere in your review text — the workflow posts the verdict comment for you, and an echoed marker would be read by the automation as a verdict."
             echo ""
             echo "PR CONTEXT — the PR's own description and discussion, fetched for you because you cannot run gh. Use it to understand intent and what earlier review rounds already settled: a RESOLVED thread is a finding the author addressed and the reviewer accepted — do not re-raise it unless the current code contradicts the resolution. Comment bodies longer than 8000 characters are truncated. Top-level comments are newest LAST."
             echo ""
@@ -1173,7 +1162,9 @@ jobs:
       # output / reasoning counts and the model that served in the job
       # summary — the codex counterpart of Model provenance below. Runs right
       # after codex, before landing, so a landing failure can't hide the
-      # spend. Best-effort: the script exits 0 on every path, and
+      # spend. Also warns if codex-action's config rewrite dropped the
+      # sandbox's `network_access = true` (design/codex-engine.md → Network).
+      # Best-effort: the script exits 0 on every path, and
       # continue-on-error makes that structural — a failure here must never
       # trip the posting step's implicit success() gate and strand the review.
       - name: Codex usage
@@ -1342,6 +1333,7 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MENTION: ${{ steps.who.outputs.mention }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
+          CODEXINPUTS_OUTCOME: ${{ steps.codexinputs.outcome }}
           CODEXCTX_OUTCOME: ${{ steps.codexctx.outcome }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
@@ -1373,6 +1365,9 @@ jobs:
           # own check or the failure is a silent red job.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
             err="the codex user setup failed before the reviewer started (a runner-image change breaking adduser/usermod? — see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEXINPUTS_OUTCOME:-}" = "failure" ]; then
+            err="preparing the codex review inputs (tool discovery, the review schema file) failed before the reviewer started — see the job logs."
           fi
           if [ -z "$err" ] && [ "${CODEXCTX_OUTCOME:-}" = "failure" ]; then
             err="composing the codex review context (the PR thread fetch) failed before the reviewer started — usually a transient GitHub API error (see the job logs); re-trigger to retry."
