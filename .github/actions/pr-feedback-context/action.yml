@@ -1,0 +1,162 @@
+name: pr-feedback-context
+description: >-
+  Write the PR-thread sections of a codex fix prompt — RECENT PR COMMENTS
+  (top-level comments filtered and anchored on the newest review round) and
+  REVIEW THREADS (GraphQL `reviewThreads` by state: OPEN in full with the
+  thread id, RESOLVED as a one-line index, resolved-and-outdated dropped) —
+  to a file for the caller's compose step to `cat`. Codex cannot read the PR
+  thread the way the Claude path does (gh at runtime), so the prompt embeds
+  it; until 2026-09-09 the embed was the last 12 top-level and last 40
+  inline comments as flat REST lists, which on inspect_ai#428 was bare
+  triggers, verdict markers, the sticky counter and stale fix summaries
+  around the one review that mattered, with 36 of the 40 inline entries
+  threads resolved days earlier and nothing marking them settled. Fetches
+  are retry-then-fail (three attempts, then the step fails with gh's real
+  stderr in the log) — never swallowed, because the embedded context is
+  load-bearing and a swallowed transient burns the round on inference (PR
+  #392, 2026-09-01) or silently degrades the prompt. The caller decides what
+  an empty comments section means (the review-fix loop fails the round; the
+  dev verb on a PR proceeds) and applies its own head cap and marker de-fang
+  over the finished prompt. Shared by claude.yml (dev verb on a PR) and
+  claude-auto-review.yml (review-fix rounds) so the two jq programs cannot
+  drift. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/pr-feedback-context@main); NO post
+  step (local composite actions with post steps break teardown on the fork).
+
+inputs:
+  token:
+    description: >-
+      Token gh reads the PR with (the job token, or MARVIN_TOKEN where the
+      caller already has it in hand — reads only, either works).
+    required: true
+  repo:
+    description: owner/name the PR lives in.
+    required: true
+  pr:
+    description: Pull-request number whose thread is embedded.
+    required: true
+  out:
+    description: >-
+      Path to write the two sections to (overwritten). The caller cats it
+      into its prompt scratch file; nothing else is written there.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+        OUT: ${{ inputs.out }}
+      run: |
+        set -euo pipefail
+        # Retry-then-fail on context fetches — never swallow (see the
+        # action description). Exhaustion fails the step, which the callers'
+        # Surface steps name as a pre-agent failure.
+        fetch() { # fetch <outfile> <gh args...>
+          local out="$1"; shift
+          local n=0
+          until gh "$@" >"$out"; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              # >&2: call sites sit inside a stdout-redirected group, so a
+              # plain echo would land in the abandoned output file; the
+              # runner parses workflow commands on stderr too.
+              echo "::error::context fetch failed after 3 attempts: gh $*" >&2
+              return 1
+            fi
+            sleep $((n * 5))
+          done
+        }
+        owner="${REPO%%/*}"; name="${REPO##*/}"
+        {
+          # --slurp is incompatible with gh's own --jq (gh rejects the
+          # combination outright), so standalone jq over the fetched file.
+          # `add // []` keeps a legitimately empty comment set an empty
+          # section (add of no pages is null) — only the FETCH may fail.
+          # Top-level comments: filtered and anchored, not "last 12 of
+          # anything". Drop machine comments (counters, convergence notes,
+          # provenance, tracking comments; verdict comments only when they
+          # are the BARE verdict line — under 200 chars once the HTML markers
+          # are stripped — so a reviewer run that folds its summary into the
+          # verdict comment against its prompt still has its review embedded
+          # rather than filtered out; and BARE triggers — the token followed
+          # by nothing but whitespace or punctuation; a short human
+          # instruction that opens with the token is an adjudication and
+          # stays), find the newest review round (Claude's comments carry the
+          # claude-review-comment marker, codex's the engine footer) and keep
+          # it plus everything after it, plus the last 5 HUMAN comments
+          # before it (an adjudication that preceded the review is context;
+          # older review rounds are stale by construction — their findings
+          # are fixed or live on as threads). The anchor is the round's FIRST
+          # marker-bearing comment, not its last: the reviewer stamps every
+          # top-level comment it posts, so a round can be several (a
+          # regression note, then the summary), and anchoring on the last
+          # would drop the earlier ones as pre-anchor bot comments. "The
+          # round" is everything after the newest verdict comment that
+          # precedes the last marker-bearing comment (verdicts are per round,
+          # posted after the round's comments; found on the unfiltered list,
+          # since the filter drops them). Anchors are taken from machine
+          # authors only (the Bot type — claude[bot] — or the marvin account
+          # the codex reviewer posts as): the Claude fix prompt forbids
+          # echoing either pattern and the codex landing de-fangs them, but a
+          # caller's human commenters are under no such rule, and one quoting
+          # the footer would otherwise demote the real review to pre-anchor.
+          # The post-anchor tail is bounded too — over 30 comments, keep the
+          # round's marker-bearing comments (the review itself) plus the last
+          # 25 others — so a long discussion after the review cannot push the
+          # REVIEW THREADS section that follows past the caller's head cap
+          # (which keeps the START of the prompt, so the threads at the end
+          # are what it trims first; the bounds here keep the cap a backstop,
+          # not the working limit). No review found: last 8 substantive
+          # comments.
+          echo "RECENT PR COMMENTS (newest last; the review feedback is here):"
+          fetch "$RUNNER_TEMP/pr-feedback-comments.json" api "repos/$REPO/issues/$PR/comments" --paginate --slurp
+          jq -r '(add // []) | . as $raw
+            | map(select(
+                (.body | test("<!-- (auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head|model-provenance) -->") | not)
+                and (((.body | test("<!-- claude-review-summary -->")) and ((.body | gsub("<!--[^>]*-->"; "") | length) <= 200)) | not)
+                and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
+                and (.body | test("^\\*\\*Claude finished") | not)))
+            | . as $all
+            | ([ $all | to_entries[] | select(((.value.user.type // "") == "Bot" or .value.user.login == "i-am-marvin") and (.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex"))) ]) as $marks
+            | (if ($marks | length) == 0 then []
+               else ([ $raw[] | select((.body | test("<!-- claude-review-summary -->")) and .created_at < $marks[-1].value.created_at) | .created_at ] | last // "") as $pv
+                  | ($marks | map(select(.value.created_at > $pv)) | map(.key)) end) as $rk
+            | (if ($rk | length) == 0 then $all[-8:]
+               else ($all[:$rk[0]] | map(select((.user.type // "") != "Bot" and .user.login != "i-am-marvin")) | .[-5:])
+                    + ($all | to_entries | .[$rk[0]:]
+                       | if length > 30 then (map(select(.key as $k | $rk | index($k))) + (map(select(.key as $k | ($rk | index($k)) | not)) | .[-25:]) | sort_by(.key)) else . end
+                       | map(.value)) end)
+            | .[] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/pr-feedback-comments.json"
+          # Review threads BY STATE via GraphQL instead of the flat REST list
+          # of the last 40 inline comments, which carried no resolution state.
+          # OPEN threads in full, each with its thread id (the deterministic
+          # handle the RESOLVED-THREADS: ending-contract line names for the
+          # resolve-reported-threads composite); RESOLVED threads as a
+          # one-line index (header included only when there is one) so the
+          # agent knows they exist without re-reading them; resolved AND
+          # outdated threads dropped entirely. The page bounds (newest 100
+          # threads, first 20 comments of each) are announced when hit — a
+          # one-line note at the top of the section, one under the thread —
+          # so a truncation is visible to the agent and in the log rather
+          # than silently absent.
+          echo "REVIEW THREADS (OPEN threads are this round's inline feedback; each comment oldest first):"
+          fetch "$RUNNER_TEMP/pr-feedback-threads.json" api graphql \
+            -F owner="$owner" -F name="$name" -F number="$PR" \
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){pageInfo{hasPreviousPage} nodes{id isResolved isOutdated path line originalLine comments(first:20){pageInfo{hasNextPage} nodes{author{login} createdAt body}}}}}}}'
+          jq -r '.data.repository.pullRequest.reviewThreads
+            | (if .pageInfo.hasPreviousPage then "(this PR has more than 100 review threads; only the newest 100 are shown — older threads may still be open)" else empty end),
+              (.nodes
+                | map(select((.isResolved and .isOutdated) | not))
+                | (map(select(.isResolved | not)) | .[]
+                    | "--- \(.path):\(.line // .originalLine // "?") [OPEN\(if .isOutdated then ", outdated" else "" end)] thread-id \(.id)"
+                      + ([.comments.nodes[] | "\n  \(.author.login // "?") at \(.createdAt):\n  \(.body | gsub("\n"; "\n  "))"] | join("\n"))
+                      + (if .comments.pageInfo.hasNextPage then "\n  (… further replies not shown: this thread has more than 20 comments)" else "" end) + "\n"),
+                  (map(select(.isResolved)) | select(length > 0)
+                    | "SETTLED THREADS (resolved in earlier rounds — addressed and accepted; do not re-open unless the current code contradicts the resolution):",
+                      (.[] | "  \(.path):\(.line // .originalLine // "?") — \((.comments.nodes[0].body // "") | gsub("\n"; " ") | .[:100])")))' "$RUNNER_TEMP/pr-feedback-threads.json"
+        } >"$OUT"
+        rm -f "$RUNNER_TEMP/pr-feedback-comments.json" "$RUNNER_TEMP/pr-feedback-threads.json"

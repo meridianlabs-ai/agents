@@ -413,14 +413,20 @@ Verification for a change here, all cases prompted to codex (any verb):
   `resolve-reported-threads` composite), RESOLVED as a one-line index (only
   when there are any), resolved-and-outdated dropped; the query's page
   bounds (newest 100 threads, first 20 comments each) print a note when
-  hit rather than truncating silently. Both anchor
+  hit rather than truncating silently. Both sections are written by the
+  shared `.github/actions/pr-feedback-context` composite (a step ahead of
+  each compose step; the compose cats its file), so the dev verb and the
+  review-fix loop run one jq program rather than two copies; its fetches
+  are retry-then-fail, and a failure is surfaced as a pre-agent error
+  (and refunded, in the loop) like a failed prep. Both anchor
   patterns — the Claude marker and the codex reviewer's `engine: codex`
   footer — join the de-fanged substrings on both the prompt and the
-  output side, so a codex summary echoing either cannot become a false
-  anchor (the reviewer's own footer is printed after its sed, so it is
-  unaffected), and the Claude fix prompt's forbidden-substring list names
-  them too; the author restriction covers a caller's human commenters,
-  who are under neither rule. The
+  output side (every codex summary that posts as marvin, the CI-fix
+  loop's included), so a codex summary echoing either cannot become a
+  false anchor (the reviewer's own footer is printed after its sed, so it
+  is unaffected), and the Claude fix prompt's forbidden-substring list
+  names them too; the author restriction covers a caller's human
+  commenters, who are under neither rule. The
   reviewer is also told not to restate regression-accepted notes an
   earlier round already posted.
 - **Codex reviews get the PR thread since 2026-09-09**: the Claude

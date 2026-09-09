@@ -904,8 +904,26 @@ jobs:
       # deterministic. The existing backstops then close the loop: a push with
       # no hand-back gets the @review from "Ensure hand-back after push"; a
       # no-change round posts the auto-handoff marker the selfhandoff detector
-      # stages. Review-thread resolution needs gh and is a v1 non-goal — the
-      # handoff notes threads are left for the human.
+      # stages. Review-thread resolution runs on codex's word after the push
+      # (the resolve-reported-threads composite below).
+      #
+      # The PR-thread sections of the codex prompt (top-level comments
+      # filtered and anchored on the newest review round, review threads by
+      # state) come from the shared composite — the same jq the dev verb
+      # embeds, so the two cannot drift — written to a file the prep step
+      # cats. A failed fetch fails this step (retry-then-fail inside), which
+      # skips the prep and the agent: the Surface step names it and the
+      # infra-crash refund treats it like a failed prep.
+      - name: Fetch PR thread for codex prompt
+        id: codexfeedback
+        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        uses: meridianlabs-ai/agents/.github/actions/pr-feedback-context@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          out: ${{ runner.temp }}/codex-feedback.md
+
       - name: Prepare codex fix context
         id: codexprep
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
@@ -951,29 +969,6 @@ jobs:
           else
             verify="Verify your changes locally (pytest/ruff/mypy) where relevant and available — no project environment was provisioned for this checkout (no claude-setup action and no pyproject.toml)."
           fi
-          # Retry-then-fail on context fetches — never swallow: the embedded
-          # context is load-bearing, so a swallowed transient either burns
-          # the round on inference (PR #392, 2026-09-01: the emptiness guard
-          # fired "empty — transient?" with the real gh error discarded) or
-          # silently degrades the prompt where no emptiness invariant exists
-          # (the inline-comments section). Three attempts absorb blips;
-          # exhaustion fails the step with gh's real stderr in the log,
-          # routing into the prep-failure surfacing and the round refund.
-          fetch() { # fetch <outfile> <gh args...>
-            local out="$1"; shift
-            local n=0
-            until gh "$@" >"$out"; do
-              n=$((n+1))
-              if [ "$n" -ge 3 ]; then
-                # >&2: call sites sit inside a stdout-redirected group, so a
-                # plain echo would land in the abandoned scratch file; the
-                # runner parses workflow commands on stderr too.
-                echo "::error::context fetch failed after 3 attempts: gh $*" >&2
-                return 1
-              fi
-              sleep $((n * 5))
-            done
-          }
           {
             echo "You are auto, addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP), running on the Codex engine in a local checkout of the PR's head branch."
             # Same continuation note as the Claude fix prompt: the codex
@@ -998,99 +993,18 @@ jobs:
             echo "Address the feedback thoroughly — including minor and explicitly non-blocking suggestions. Leave unaddressed only what you genuinely disagree with or is out of scope, and say why in your final message."
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for your changes (it becomes the commit subject), then a blank line, then a body listing what you addressed and anything you deliberately declined with rationale (it is posted as a comment). If nothing needs changing, leave the tree untouched and explain why. If the prompt has a REVIEW THREADS section, end the body with ONE final line of exactly the form RESOLVED-THREADS: <thread-id> <thread-id> ... (all ids on that same line, space-separated) naming the OPEN threads (their thread-id values from that section) whose feedback you FULLY addressed in code this round — or RESOLVED-THREADS: none. Never list a thread you declined, only partly addressed, or answered with rationale instead of a change: a workflow step resolves exactly the threads on that line, on your word, and only if your changes were pushed."
             echo ""
-            # --slurp is incompatible with gh's own --jq (gh rejects the
-            # combination outright), so standalone jq over the fetched file.
-            # `add // []` keeps a legitimately empty comment set an empty
-            # section (add of no pages is null) — only the FETCH may fail.
-            # Top-level comments: filtered and anchored, not "last 12 of anything"
-            # (inspect_ai#428, 2026-09-09: the slice was bare triggers, verdict
-            # marker comments, the sticky counter and stale fix summaries around the
-            # one review that mattered). Drop machine comments (counters,
-            # convergence notes, provenance, tracking comments; verdict
-            # comments only when they are the BARE verdict line — under 200
-            # chars once the HTML markers are stripped — so a reviewer run that
-            # folds its summary into the verdict comment against its prompt
-            # still has its review embedded rather than filtered out; and BARE
-            # triggers — the token followed by nothing but whitespace or
-            # punctuation; a short human instruction that opens with the token
-            # is an adjudication and stays), find the newest review round
-            # (Claude's comments carry the claude-review-comment marker, codex's
-            # the engine footer) and keep it plus everything after it, plus the
-            # last 5 HUMAN comments before it (an adjudication that preceded the
-            # review is context; older review rounds are stale by construction —
-            # their findings are fixed or live on as threads). The anchor is the
-            # round's FIRST marker-bearing comment, not its last: the reviewer
-            # stamps every top-level comment it posts, so a round can be several
-            # (a regression note, then the summary), and anchoring on the last
-            # would drop the earlier ones as pre-anchor bot comments. "The round"
-            # is everything after the newest verdict comment that precedes the
-            # last marker-bearing comment (verdicts are per round, posted after
-            # the round's comments; found on the unfiltered list, since the
-            # filter drops them). Anchors are taken from machine authors only
-            # (the Bot type — claude[bot] — or the marvin account the codex
-            # reviewer posts as): the Claude fix prompt forbids echoing either
-            # pattern and the codex landing de-fangs them, but a caller's
-            # human commenters are under no such rule, and one quoting the
-            # footer would otherwise demote the real review to pre-anchor.
-            # The post-anchor tail is bounded too — over 30 comments, keep the
-            # round's marker-bearing comments (the review itself) plus the
-            # last 25 others — so a long discussion after the review cannot
-            # push the REVIEW THREADS section that follows past the head cap.
-            # No review found: last 8 substantive comments.
-            echo "RECENT PR COMMENTS (newest last; the review feedback is here):"
-            fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$PR/comments" --paginate --slurp
-            jq -r '(add // []) | . as $raw
-                | map(select(
-                    (.body | test("<!-- (auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head|model-provenance) -->") | not)
-                    and (((.body | test("<!-- claude-review-summary -->")) and ((.body | gsub("<!--[^>]*-->"; "") | length) <= 200)) | not)
-                    and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
-                    and (.body | test("^\\*\\*Claude finished") | not)))
-                | . as $all
-                | ([ $all | to_entries[] | select(((.value.user.type // "") == "Bot" or .value.user.login == "i-am-marvin") and (.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex"))) ]) as $marks
-                | (if ($marks | length) == 0 then []
-                   else ([ $raw[] | select((.body | test("<!-- claude-review-summary -->")) and .created_at < $marks[-1].value.created_at) | .created_at ] | last // "") as $pv
-                      | ($marks | map(select(.value.created_at > $pv)) | map(.key)) end) as $rk
-                | (if ($rk | length) == 0 then $all[-8:]
-                   else ($all[:$rk[0]] | map(select((.user.type // "") != "Bot" and .user.login != "i-am-marvin")) | .[-5:])
-                        + ($all | to_entries | .[$rk[0]:]
-                           | if length > 30 then (map(select(.key as $k | $rk | index($k))) + (map(select(.key as $k | ($rk | index($k)) | not)) | .[-25:]) | sort_by(.key)) else . end
-                           | map(.value)) end)
-                | .[] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/codex-prc.json"
-            # Review threads BY STATE via GraphQL instead of the flat REST list of
-            # the last 40 inline comments, which carried no resolution state (on
-            # #428, 36 of 40 were threads settled days earlier, indistinguishable
-            # from the open ones). OPEN threads in full, each with its thread id
-            # (the deterministic handle for resolving it); RESOLVED threads as a
-            # one-line index (header included only when there is one) so the
-            # agent knows they exist without re-reading them; resolved AND
-            # outdated threads dropped entirely. The page bounds (newest 100
-            # threads, first 20 comments of each) are announced when hit —
-            # a one-line note at the top of the section, one under the
-            # thread — so a truncation is visible to the agent and in the
-            # log rather than silently absent.
-            echo "REVIEW THREADS (OPEN threads are this round's inline feedback; each comment oldest first):"
-            owner="${REPO%%/*}"; name="${REPO##*/}"
-            fetch "$RUNNER_TEMP/codex-threads.json" api graphql \
-              -F owner="$owner" -F name="$name" -F number="$PR" \
-              -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){pageInfo{hasPreviousPage} nodes{id isResolved isOutdated path line originalLine comments(first:20){pageInfo{hasNextPage} nodes{author{login} createdAt body}}}}}}}'
-            jq -r '.data.repository.pullRequest.reviewThreads
-                | (if .pageInfo.hasPreviousPage then "(this PR has more than 100 review threads; only the newest 100 are shown — older threads may still be open)" else empty end),
-                  (.nodes
-                    | map(select((.isResolved and .isOutdated) | not))
-                    | (map(select(.isResolved | not)) | .[]
-                        | "--- \(.path):\(.line // .originalLine // "?") [OPEN\(if .isOutdated then ", outdated" else "" end)] thread-id \(.id)"
-                          + ([.comments.nodes[] | "\n  \(.author.login // "?") at \(.createdAt):\n  \(.body | gsub("\n"; "\n  "))"] | join("\n"))
-                          + (if .comments.pageInfo.hasNextPage then "\n  (… further replies not shown: this thread has more than 20 comments)" else "" end) + "\n"),
-                      (map(select(.isResolved)) | select(length > 0)
-                        | "SETTLED THREADS (resolved in earlier rounds — addressed and accepted; do not re-open unless the current code contradicts the resolution):",
-                          (.[] | "  \(.path):\(.line // .originalLine // "?") — \((.comments.nodes[0].body // "") | gsub("\n"; " ") | .[:100])")))' "$RUNNER_TEMP/codex-threads.json"
+            # RECENT PR COMMENTS (filtered, anchored on the newest review
+            # round, bounded tail) and REVIEW THREADS (by state, OPEN with
+            # thread ids) — written by the pr-feedback-context composite
+            # step above; the filter and renderer rationale lives there.
+            cat "$RUNNER_TEMP/codex-feedback.md"
           } >"$RUNNER_TEMP/codex-context.md"
           # The review feedback IS this round's task, and the verdict
           # comment that triggered the run guarantees at least one PR
           # comment exists — so with outright fetch failures failing the
-          # step with the real error in the log (here and in the dev-verb
-          # compose alike), an empty feedback section can only be a fetch
-          # that returned wrong data while exiting 0. Proceeding
+          # composite step with the real error in the log (here and in the
+          # dev-verb compose alike), an empty feedback section can only be a
+          # fetch that returned wrong data while exiting 0. Proceeding
           # would spend the round on a feedback-less prompt and conclude the
           # loop on missing context; fail loud instead — a codexprep failure
           # routes into the existing error surfacing and the round refund.
@@ -1106,7 +1020,7 @@ jobs:
           sed -n '/^RECENT PR COMMENTS/,/^REVIEW THREADS/p' \
               "$RUNNER_TEMP/codex-context.md" >"$RUNNER_TEMP/codex-feedback-section.md"
           if ! grep -q '^--- ' "$RUNNER_TEMP/codex-feedback-section.md"; then
-            echo "::error::review-feedback section is empty — either the fetch returned no comments (transient gh/API failure?) or the machine-comment filter removed every one (a review posted in a shape the filter drops? see the jq in this step) — failing the round rather than running codex without the feedback"
+            echo "::error::review-feedback section is empty — either the fetch returned no comments (transient gh/API failure?) or the machine-comment filter removed every one (a review posted in a shape the filter drops? see the jq in the pr-feedback-context composite) — failing the round rather than running codex without the feedback"
             exit 1
           fi
           # Cap + de-fang from the completed scratch file, NOT in one pipeline
@@ -1120,9 +1034,9 @@ jobs:
           # verdict comments, and a marker substring codex never sees is one
           # it cannot echo; the substitutions are length-neutral. The
           # review-comment anchor marker and the codex reviewer's engine
-          # footer are in the list too: the jq above has already anchored on
-          # them, and a fix summary that echoed either would be a false
-          # anchor for a later round on this PR.)
+          # footer are in the list too: the pr-feedback-context composite has
+          # already anchored on them, and a fix summary that echoed either
+          # would be a false anchor for a later round on this PR.)
           head -c 120000 "$RUNNER_TEMP/codex-context.md" \
             | sed -E -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
                      -e 's/engine: codex/engine  codex/g' \
@@ -1584,6 +1498,7 @@ jobs:
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
           BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
+          CODEXFEEDBACK_OUTCOME: ${{ steps.codexfeedback.outcome }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
@@ -1647,6 +1562,9 @@ jobs:
             err="fallback environment provisioning (uv dev-install) failed before the fix agent started — a transient dependency-download/network error, the project not dev-installing on a bare runner, or this PR's own dependency change no longer installing (either of those fails identically on every trigger: fix it by hand — check the job logs); no fix was attempted this round, though on the Claude engine the runner's clean base merge, if there was one, was still pushed to the branch. Re-trigger if it looks transient."
           fi
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          if [ -z "$err" ] && [ "${CODEXFEEDBACK_OUTCOME:-}" = "failure" ]; then
+            err="fetching the PR thread for the codex prompt failed before the agent started (a gh/API error that outlasted three attempts — see the job logs); no fix was attempted this round, and the round was refunded. Re-trigger to retry."
+          fi
           if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
             err="the codex context-preparation step failed before the agent started — no fix was attempted this round (see the job logs)."
           fi
@@ -1792,7 +1710,8 @@ jobs:
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
           (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure' ||
-           steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure')
+           steps.codexfeedback.outcome == 'failure' || steps.codexprep.outcome == 'failure' ||
+           steps.codexuser.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}

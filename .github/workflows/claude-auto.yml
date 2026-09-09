@@ -952,8 +952,12 @@ jobs:
           # a write-access account, and the loops match their verdict/handoff
           # markers with plain substring contains() — codex QUOTING a marker
           # would forge a verdict or suppress an owed hand-back, so break
-          # those substrings too. On a push, the backstop below posts the
-          # owed @review.
+          # those substrings too. The review-comment anchor marker and the
+          # codex reviewer's engine footer are in the list as well: this
+          # summary posts as marvin, a machine author the review-fix rounds'
+          # anchor selection trusts, so a CI-fix summary echoing either would
+          # be taken for the newest review by the next fix round on the same
+          # PR. On a push, the backstop below posts the owed @review.
           {
             if [ -n "$merge_only" ]; then
               printf '🤖 auto (codex, CI-fix attempt %s): base merge pushed; no fix this attempt — details below.\n\n' "$ATTEMPT"
@@ -963,7 +967,8 @@ jobs:
               printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"
             fi
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
-                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                   -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
           } >"$RUNNER_TEMP/codex-comment.md"
