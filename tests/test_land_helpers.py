@@ -148,9 +148,73 @@ def test_open_or_adopt_pr_adopts_after_a_lost_create_response(tmp_path):
     assert "retrying" in r.stderr
 
 
+# A stub `gh api repos/o/r/branches/<b>` for remote_branch_exists: `exists`
+# answers 200, `missing` answers gh's 404 line, `flaky` fails with a 502 on
+# its first call and 200 afterwards (the transient blip `retry` must absorb).
+BRANCH_STUB = r"""
+sleep() { :; }
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$2" in
+    repos/o/r/branches/exists) return 0 ;;
+    repos/o/r/branches/missing) echo "gh: Branch not found (HTTP 404)" >&2; return 1 ;;
+    repos/o/r/branches/flaky)
+      if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo "gh: Server Error (HTTP 502)" >&2; return 1; fi
+      return 0 ;;
+    *) echo "unexpected gh $*" >&2; return 2 ;;
+  esac
+}
+"""
+
+
+def branch_exists(tmp_path, branch, attempts=3):
+    state = tmp_path / "state"
+    state.mkdir()
+    r = sh(
+        "bash", "-c",
+        f". '{LIB}'\n{BRANCH_STUB}\nout=$(retry {attempts} what remote_branch_exists o/r {branch}); echo \"rc=$? out=$out\"",
+        check=False, env={"STATE": str(state)},
+    )
+    calls = (state / "calls").read_text().splitlines() if (state / "calls").exists() else []
+    return r, calls
+
+
+def test_remote_branch_exists_yes(tmp_path):
+    r, calls = branch_exists(tmp_path, "exists")
+    assert r.stdout.strip() == "rc=0 out=yes"
+    assert len(calls) == 1
+
+
+def test_remote_branch_exists_treats_404_as_a_definite_no(tmp_path):
+    # A 404 is an answer, not a failure: no retry, `no` on stdout, exit 0.
+    r, calls = branch_exists(tmp_path, "missing")
+    assert r.stdout.strip() == "rc=0 out=no"
+    assert len(calls) == 1
+    assert "retrying" not in r.stderr
+
+
+def test_remote_branch_exists_retries_a_transient_error(tmp_path):
+    r, calls = branch_exists(tmp_path, "flaky")
+    assert r.stdout.strip() == "rc=0 out=yes"
+    assert len(calls) == 2
+    assert "HTTP 502" in r.stderr and "retrying" in r.stderr
+
+
+def test_remote_branch_exists_fails_when_the_error_persists(tmp_path):
+    # One attempt only: the 502 is not absorbed, and the caller can tell it
+    # from a missing branch (non-zero exit, nothing on stdout).
+    r, calls = branch_exists(tmp_path, "flaky", attempts=1)
+    assert r.stdout.strip() == "rc=1 out="
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     "failed,pushed,expected",
     [
+        ("validate", "",
+         "The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted."),
+        ("download", "",
+         "The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted."),
         ("push", "", "The agent's commits were **not** pushed."),
         ("fetch", "", "The agent's commits were **not** pushed."),
         ("post (comment on #79 failed after 5 attempts; issue create in o/r failed)", "1",

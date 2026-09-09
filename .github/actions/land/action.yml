@@ -18,7 +18,10 @@ description: >-
   by then the push has landed and withholding the hand-back or the stage
   move over one lost comment would strand the board at Agent. The final
   Report step always runs, names every step that failed, posts a short note
-  about it on the PR/issue, and fails the run.
+  about it on the PR/issue — the manifest's once it validated, else the one
+  the caller's `pr-number` / `issue-number` inputs name from the event
+  payload, so a refused manifest or a missing artifact reaches the requester
+  and not just the run log — and fails the run.
 
   Two tokens: `read-token` (the job token) for the artifact-adjacent reads —
   the PR head-ref and default-branch lookups, the start-SHA fetch, the
@@ -72,6 +75,24 @@ inputs:
       the caller. Empty: this action looks it up itself with `read-token`
       (reading ONLY `pr_number`, integer-checked, from the unvalidated
       manifest).
+    required: false
+    default: ""
+  pr-number:
+    description: >-
+      The PR the caller's EVENT names (`github.event.pull_request.number`, or
+      `github.event.issue.number` on a PR comment): the Report step's
+      fallback target when the manifest never validated (missing artifact,
+      tampered or malformed manifest), so the refusal is posted where the
+      run was requested and not only logged. Trusted because it comes from
+      the event payload — never read from the unvalidated manifest, whose
+      number could steer the note to an arbitrary issue. Digits only;
+      anything else is ignored.
+    required: false
+    default: ""
+  issue-number:
+    description: >-
+      The issue the caller's event names (`github.event.issue.number` on
+      issue runs); the same fallback target when there is no PR.
     required: false
     default: ""
 
@@ -307,7 +328,13 @@ runs:
         m="$DIR/manifest.json"
         number="$PR_NUMBER"
         if [ -z "$number" ] && [ "$PR_OPEN" = "true" ]; then
-          if ! gh api "repos/$REPO/branches/$BRANCH" --silent >/dev/null 2>&1; then
+          # remote_branch_exists (lib.sh) answers yes/no and fails only on a
+          # non-404 error, so a transient API blip is retried rather than
+          # reported as a missing branch (which would fail this step, and
+          # with it the hand-back and the stage move, after the push landed).
+          exists=$(retry 3 "branch check for $BRANCH" remote_branch_exists "$REPO" "$BRANCH") \
+            || { echo "::error::land: could not check whether $BRANCH is on origin (API error, not a missing branch)."; exit 1; }
+          if [ "$exists" != "yes" ]; then
             echo "::error::land: pr.open is set but $BRANCH is not on origin (no bundle was pushed); cannot open a PR."
             exit 1
           fi
@@ -535,6 +562,9 @@ runs:
     # errors" text), post both on the PR or issue — the agent job can no
     # longer post, so without this a landing that broke after the push is
     # visible only in the run log — and fail the run when either says so.
+    # The target is the manifest's PR/issue once it validated; before that
+    # (download, validate or plan failed — the refusals this design exists
+    # for) only the caller's event-payload numbers are trusted to name one.
     - id: report
       if: always()
       shell: bash
@@ -548,6 +578,8 @@ runs:
         FAIL_RUN: ${{ steps.plan.outputs.fail_run }}
         PR_NUMBER: ${{ steps.pr.outputs.number || steps.plan.outputs.pr_number }}
         ISSUE_NUMBER: ${{ steps.plan.outputs.issue_number }}
+        EVENT_PR_NUMBER: ${{ inputs.pr-number }}
+        EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         PUSHED: ${{ steps.push.outputs.pushed }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -594,8 +626,17 @@ runs:
           [ "$FAIL_RUN" = "true" ] && rc=1
         fi
         target="${PR_NUMBER:-$ISSUE_NUMBER}"
-        if [ -s "$RUNNER_TEMP/report.md" ] && [ -n "$target" ]; then
-          retry 3 "report on #$target" post_comment_file "$REPO" "$target" "$RUNNER_TEMP/report.md" \
-            || echo "::warning::land: could not post the report on #$target"
+        if [ -z "$target" ]; then
+          for n in "$EVENT_PR_NUMBER" "$EVENT_ISSUE_NUMBER"; do
+            if [[ "$n" =~ ^[1-9][0-9]{0,9}$ ]]; then target="$n"; break; fi
+          done
+        fi
+        if [ -s "$RUNNER_TEMP/report.md" ]; then
+          if [ -n "$target" ]; then
+            retry 3 "report on #$target" post_comment_file "$REPO" "$target" "$RUNNER_TEMP/report.md" \
+              || echo "::warning::land: could not post the report on #$target"
+          else
+            echo "::warning::land: no PR or issue to post the report on (pass pr-number / issue-number from the event); it is in this log only."
+          fi
         fi
         exit "$rc"

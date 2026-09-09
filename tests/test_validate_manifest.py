@@ -291,6 +291,17 @@ def test_body_file_charset(tmp_path, name):
     assert any("has characters outside" in e for e in errs), errs
 
 
+@pytest.mark.parametrize("name", [".handoff.md", ".bodies/c1.md", "bodies/.c1.md"])
+def test_hidden_body_file_is_refused(tmp_path, name):
+    # upload-artifact drops dot-named paths (include-hidden-files: false), so
+    # the reference is refused by name even though the file exists here.
+    m = base_manifest(tmp_path)
+    m["comments"][0]["body_file"] = write(tmp_path, name)
+    errs = run(tmp_path, m)
+    assert any("starting with '.'" in e for e in errs), errs
+    assert not any("does not exist" in e for e in errs)
+
+
 def test_missing_body_file(tmp_path):
     m = base_manifest(tmp_path)
     m["comments"][0]["body_file"] = "nope.md"

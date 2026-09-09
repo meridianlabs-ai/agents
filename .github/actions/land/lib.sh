@@ -56,6 +56,24 @@ post_comment_file() {
   gh api "repos/$repo/issues/$number/comments" -F body=@"$file" --silent
 }
 
+# remote_branch_exists REPO BRANCH — prints `yes` or `no` and returns 0 when
+# the API gave a definite answer (200, or 404 = no such branch); returns 1 on
+# anything else (5xx, rate limit, network) so that, under `retry`, a
+# transient blip is re-asked rather than reported as "branch is not on
+# origin". The 404 is recognised by gh's own `(HTTP 404)` suffix.
+remote_branch_exists() {
+  local repo="$1" branch="$2" err
+  if err=$(gh api "repos/$repo/branches/$branch" --silent 2>&1); then
+    echo yes
+    return 0
+  fi
+  case "$err" in
+    *"(HTTP 404)"*) echo no; return 0 ;;
+  esac
+  printf '%s\n' "$err" >&2
+  return 1
+}
+
 # open_or_adopt_pr REPO BRANCH BASE TITLE BODY_FILE — adopt the open PR for
 # BRANCH if there is one (the agent may have opened it itself — the fork's
 # prompt mandates it), else create one; prints `adopted|opened <number> <url>`.
@@ -86,6 +104,8 @@ landing_failure_hint() {
   # Report joins with ", "; match on step names with the spaces removed.
   list=",${failed// /},"
   case "$list" in
+    *,download,*|*,validate,*|*,plan,*)
+      hint="The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted." ;;
     *,fetch,*|*,push,*) hint="The agent's commits were **not** pushed." ;;
     *) [ -z "$pushed" ] || hint="The agent's commits were pushed; only what follows the push is affected." ;;
   esac

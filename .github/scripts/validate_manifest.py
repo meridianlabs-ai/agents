@@ -172,6 +172,14 @@ class Validator:
         if any(part in ("", ".", "..") for part in parts):
             self.err(f"{label} must not contain '..', '.' or empty path components")
             return
+        # emit-landing uploads with include-hidden-files false, so a
+        # dot-named file or directory never reaches the land job; refuse the
+        # reference here, where the cause is visible, rather than let the
+        # existence check below report "does not exist" for a file the
+        # workflow did write.
+        if any(part.startswith(".") for part in parts):
+            self.err(f"{label} must not have a path component starting with '.' (hidden files are not uploaded)")
+            return
         # Walk the components with lstat so a symlink ANYWHERE in the path is
         # caught — not just at the leaf — without following it.
         current = self.dir

@@ -139,7 +139,10 @@ take effect on every repo's next run.
 
 ## Testing a change
 
-There is no unit-test suite — changes are validated by triggering the agents:
+The only unit tests are in `tests/` — `python3 -m pytest` from the root
+covers the land job's manifest validator and the `land` composite's `lib.sh`
+helpers and git contract; run it when touching either. Everything else (the
+workflows and the other composites) is validated by triggering the agents:
 
 - Comment `@claude …` (or add the `claude` label) on an issue/PR in the
   inspect_ai fork to exercise the dev agent; `@review` on a PR for the reviewer.

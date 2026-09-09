@@ -78,23 +78,31 @@ to this document together.
 | `stage` | workflow | one of `Contributor`, `Agent`, `Review`, `Sign-off`, `Merge`, or absent |
 | `handback` | workflow | boolean; posts exactly `@review` on the PR (needs `pr_number` or `pr.open`) |
 | `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line |
-| `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move) and posts that on the PR/issue too |
+| `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move) and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
 
-File references: relative, `^[A-Za-z0-9._/-]{1,200}$`, no `..`, no symlink
-anywhere in the path, a regular file inside the landing directory, under
-64 KiB. `manifest.json` itself must be a regular file under 1 MiB.
+File references: relative, `^[A-Za-z0-9._/-]{1,200}$`, no `..`, no path
+component starting with `.` (emit-landing uploads with
+`include-hidden-files: false`, so a dot-named file or directory would be
+silently dropped from the artifact — the validator refuses the name instead
+of reporting a missing file), no symlink anywhere in the path, a regular file
+inside the landing directory, under 64 KiB. `manifest.json` itself must be a
+regular file under 1 MiB.
 
 Core fields (everything emit-landing sets) **win** over the workflow's
 `manifest-extra`: the extra supplies only what the core does not define.
 
 ## Using the pair
 
-Agent job, last step:
+Agent job, last step. It runs git in the workspace, so on the codex path it
+is gated on the reclaim step having **succeeded** — `== 'success'`, never
+`!= 'failure'`: a reclaim cancelled mid-run must skip every later git call
+(AGENTS.md → the codex path). The Claude path has no reclaim step, hence the
+path-aware condition (`codexuser` / `codexreclaim` are claude.yml's step ids):
 
 ```yaml
       - name: Emit landing manifest
-        if: always() && steps.reclaim.outcome != 'failure'
+        if: always() && (steps.codexuser.outcome != 'success' || steps.codexreclaim.outcome == 'success')
         uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
         with:
           start-sha: ${{ steps.sync.outputs.start_sha || steps.base.outputs.sha }}
@@ -111,6 +119,11 @@ Land job (`needs: agent`, `if: always()`, a fresh runner, **no checkout**):
         with:
           token: <MARVIN_TOKEN — the land job is the only job that names it>
           allowed-issue-repos: ${{ github.repository }}
+          # Trusted fallback target for the final report when the manifest
+          # never validated (missing artifact, tampered manifest): from the
+          # EVENT payload, never from the manifest.
+          pr-number: ${{ github.event.pull_request.number }}
+          issue-number: ${{ github.event.issue.number }}
 ```
 
 (The token expression is spelled out in `examples/landing-smoke.yml`; it is

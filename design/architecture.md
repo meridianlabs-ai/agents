@@ -329,7 +329,12 @@ Three rules define the shape:
   the hand-back or the stage move (that would strand the board at Agent with
   the PR head moved — the failure post-pr-comment exists to prevent); the
   final report names what failed on the PR/issue as well as in the log,
-  since the agent job can no longer post. Every agent-authored body passes through
+  since the agent job can no longer post. When the refusal came *before*
+  the manifest validated (no artifact, a tampered or malformed manifest),
+  the report's target is the PR/issue number the caller passed from the
+  **event payload** (`pr-number` / `issue-number` inputs) — trusted, unlike
+  a number read from the unvalidated manifest, which could steer the note
+  anywhere. Every agent-authored body passes through
   the de-fang sed (triggers lose their `@`, loop markers are split,
   case-insensitively, capped under the comment limit) before posting; the
   one exception is the hand-back, posted verbatim as exactly `@review`.

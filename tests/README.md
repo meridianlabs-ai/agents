@@ -7,7 +7,8 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   (`.github/scripts/validate_manifest.py`): one valid manifest, one failing
   case per rule.
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
-  retry, open-or-adopt PR against a stub `gh`, the landing-failure hint) and
+  retry, open-or-adopt PR and the branch-existence probe against a stub
+  `gh`, the landing-failure hint) and
   the git sequence its fetch/push steps rely on (bundle above the start SHA;
   unbundle into an empty bare repo; refuse a moved branch; push without
   `--force`), run against local repos.

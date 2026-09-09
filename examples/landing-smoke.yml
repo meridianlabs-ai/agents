@@ -11,7 +11,9 @@
 # authenticates as marvin (check the branch's commit pusher / the run log);
 # a second run against a branch someone pushed to in between refuses with
 # "moved during the run"; and `tamper: main` shows a manifest naming `main`
-# as branch is rejected by the validator before any network call.
+# as branch is rejected by the validator before any network call — with the
+# refusal reported on `issue` (the land job's trusted `issue-number` input),
+# not only in the run log.
 
 name: landing smoke
 
@@ -122,6 +124,9 @@ jobs:
         with:
           token: ${{ secrets.MARVIN_TOKEN }}
           allowed-issue-repos: ${{ github.repository }}
+          # From the (trusted) dispatch input, not the manifest: where the
+          # final report goes when the validator refused the manifest.
+          issue-number: ${{ inputs.issue }}
       - name: Confirm the pushed tip is head_sha
         if: steps.land.outputs.pushed == '1'
         env:
