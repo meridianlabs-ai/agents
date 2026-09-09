@@ -453,10 +453,11 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   mask-without-`tlsTerminate` state at startup; a report, not a setup
   failure). The entry deliberately carries no `injectHosts`, and a mask entry
   *without* `injectHosts` is substituted on requests to **every** host in
-  `network.allowedDomains` — so `tlsTerminate` must never be added to this
-  overlay while the mask lacks an explicit host restriction, or contributor
-  code could read the sentinel and have the proxy inject the real token into
-  a request to a PyPI host. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
+  `network.allowedDomains` — so neither `network.tlsTerminate` nor
+  `credentials.allowPlaintextInject` may ever be added to this overlay while
+  the mask lacks an explicit host restriction, or contributor code could read
+  the sentinel and have the proxy inject the real token into a request to a
+  PyPI host. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
   credential helper) get plain `deny` entries — nothing sandboxed needs
   them, and the agent's `gh` is excluded from the sandbox. Two gotchas
   encoded in the workflow: the path must be **absolute** (the action writes

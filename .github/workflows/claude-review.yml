@@ -938,6 +938,8 @@ jobs:
           always() && steps.trig.outputs.ok == 'true' &&
           steps.claude.outcome != 'skipped' &&
           (steps.trig.outputs.mode == 'external' || steps.trig.outputs.fork_head == 'true')
+        env:
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
         run: |
           set -uo pipefail
           need=2.1.221
@@ -949,8 +951,15 @@ jobs:
           if [ -z "$have" ]; then
             # always() reaches this step even when the agent step failed before
             # the action's install phase (auth/actor failure): no binary, and
-            # Claude never launched, so the mask question is moot.
-            echo "::error::claude is not on PATH — the agent step likely failed before installing it (see its log); cannot confirm the sandbox overlay's .git/config mask (needs Claude Code >= $need)"
+            # Claude never launched, so the mask question is moot — the job is
+            # already red from the agent step and `Surface agent errors` posts
+            # the ⚠️ for it; a second red step here would be noise. Only a
+            # SUCCESSFUL agent step with no binary is a real anomaly.
+            if [ "$CLAUDE_OUTCOME" != "success" ]; then
+              echo "::notice::claude is not on PATH and the agent step outcome was '$CLAUDE_OUTCOME' — Claude never launched, so the sandbox overlay's .git/config mask is moot for this run; nothing to check"
+              exit 0
+            fi
+            echo "::error::claude is not on PATH after a successful agent step — cannot confirm the sandbox overlay's .git/config mask was in effect (needs Claude Code >= $need); check whether the action still installs the CLI to a GITHUB_PATH directory"
             exit 1
           fi
           if [ "$(printf '%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
