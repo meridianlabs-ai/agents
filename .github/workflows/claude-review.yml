@@ -1144,7 +1144,7 @@ jobs:
           {
             jq -r '.review // "codex returned no review body."' "$OUT" \
               | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
-                       -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                       -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
                        -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g'
             printf '\n\n🤖 engine: codex\n'
           } >"$RUNNER_TEMP/codex-review-body.md"
