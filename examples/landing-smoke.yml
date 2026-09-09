@@ -11,9 +11,11 @@
 # authenticates as marvin (check the branch's commit pusher / the run log);
 # a second run against a branch someone pushed to in between refuses with
 # "moved during the run"; and `tamper: main` shows a manifest naming `main`
-# as branch is rejected by the validator before any network call — with the
-# refusal reported on `issue` (the land job's trusted `issue-number` input),
-# not only in the run log.
+# as branch is rejected by the validator before any network call — on every
+# repo, whether `main` is the default branch or (the inspect_ai fork) the
+# pristine non-default one, since `main` is on the land job's default
+# `refused-branches` — with the refusal reported on `issue` (the land job's
+# trusted `issue-number` input), not only in the run log.
 
 name: landing smoke
 

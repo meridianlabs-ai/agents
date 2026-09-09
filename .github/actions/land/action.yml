@@ -12,16 +12,19 @@ description: >-
   Atlas, post the `@review` hand-back or the escalation hand-off, move the
   board stage, post the model-provenance note, and finally report the
   manifest's error (failing the run when it says so — after everything else
-  ran). Steps run in this order and stop at the first failure, with one
-  deliberate exception: the Post step (comments, replies, thread
-  resolutions, follow-up issues) records what failed and carries on, because
-  by then the push has landed and withholding the hand-back or the stage
-  move over one lost comment would strand the board at Agent. The final
-  Report step always runs, names every step that failed, posts a short note
-  about it on the PR/issue — the manifest's once it validated, else the one
-  the caller's `pr-number` / `issue-number` inputs name from the event
-  payload, so a refused manifest or a missing artifact reaches the requester
-  and not just the run log — and fails the run.
+  ran). Steps run in this order and stop at the first failure, with two
+  deliberate exceptions, both for the same reason — by then the push has
+  landed, and stranding the board at Agent over one lost comment is the
+  failure post-pr-comment exists to prevent: the Post step (comments,
+  replies, thread resolutions, follow-up issues) records what failed and
+  carries on, and the stage move runs even when the hand-back or the
+  hand-off failed (it is gated on the PR step, which succeeding implies the
+  push did). The final Report step always runs, names every step that
+  failed and a stage move that was withheld, posts a short note about it on
+  the PR/issue — the manifest's once it validated, else the one the caller's
+  `pr-number` / `issue-number` inputs name from the event payload, so a
+  refused manifest or a missing artifact reaches the requester and not just
+  the run log — and fails the run.
 
   Two tokens: `read-token` (the job token) for the artifact-adjacent reads —
   the PR head-ref and default-branch lookups, the start-SHA fetch, the
@@ -63,6 +66,16 @@ inputs:
       skip the rule when neither source yields one.
     required: false
     default: ${{ github.event.repository.default_branch }}
+  refused-branches:
+    description: >-
+      Comma-separated branch names a manifest may never name as `branch`, on
+      top of the default branch. Defaults to `main`, so a pristine mirror
+      that is NOT the default branch (the inspect_ai fork: `main` pristine,
+      `meridian` default — design/architecture.md → Branch layout) is refused
+      by this layer before any network call, not only by its server-side
+      ruleset. Empty disables the list; the default-branch rule still holds.
+    required: false
+    default: main
   allowed-issue-repos:
     description: >-
       Comma-separated owner/name list `issues[].repo` may name. Empty means
@@ -160,14 +173,15 @@ runs:
         DIR: ${{ runner.temp }}/landing
         REPO: ${{ inputs.repo }}
         DEFAULT_BRANCH: ${{ inputs.default-branch || steps.lookup.outputs.default_branch }}
+        REFUSED: ${{ inputs.refused-branches }}
         ALLOWED: ${{ inputs.allowed-issue-repos }}
         PR_HEAD_REF: ${{ inputs.pr-head-ref || steps.lookup.outputs.ref }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
         python3 "$VALIDATOR" --dir "$DIR" --repo "$REPO" --run-id "$GITHUB_RUN_ID" \
-          --default-branch "$DEFAULT_BRANCH" --allowed-issue-repos "$ALLOWED" \
-          --pr-head-ref "$PR_HEAD_REF" \
+          --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
+          --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.
@@ -521,8 +535,15 @@ runs:
           || { echo "::error::land: the escalation hand-off on #$target failed after 5 attempts — post it by hand."; exit 1; }
         echo "land: posted the hand-off on #$target."
 
+    # Runs even when the hand-back or the hand-off failed (post-pr-comment
+    # and the step above exit 1 after their retries): a lost comment is no
+    # reason to withhold the board move — the Post step's rationale — and the
+    # reviewer's own "Stage - Review" recovers a hand-back once a human
+    # re-posts it, but nothing recovers a skipped stage. Gated on the PR
+    # step succeeding, which implies validation and the push did too; when
+    # it is skipped with a stage planned, Report says the move was withheld.
     - id: stage
-      if: steps.plan.outputs.stage != ''
+      if: always() && steps.pr.outcome == 'success' && steps.plan.outputs.stage != ''
       uses: meridianlabs-ai/agents/.github/actions/set-stage@main
       with:
         stage: ${{ steps.plan.outputs.stage }}
@@ -558,10 +579,12 @@ runs:
         exit 0
 
     # Always last: name any landing step that failed (and what the Post step
-    # recorded), report the manifest's error (the agent job's "Surface agent
-    # errors" text), post both on the PR or issue — the agent job can no
-    # longer post, so without this a landing that broke after the push is
-    # visible only in the run log — and fail the run when either says so.
+    # recorded), say when a planned stage move was withheld (the stage step
+    # skipped because the PR step did not succeed), report the manifest's
+    # error (the agent job's "Surface agent errors" text), post all of it on
+    # the PR or issue — the agent job can no longer post, so without this a
+    # landing that broke after the push is visible only in the run log — and
+    # fail the run when a step failed or the error says so.
     # The target is the manifest's PR/issue once it validated; before that
     # (download, validate or plan failed — the refusals this design exists
     # for) only the caller's event-payload numbers are trusted to name one.
@@ -582,6 +605,9 @@ runs:
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         PUSHED: ${{ steps.push.outputs.pushed }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
+        # A stage the manifest planned that never ran: `stage` is skipped
+        # (not failed) when an earlier step stopped the composite.
+        STAGE_WITHHELD: ${{ steps.plan.outputs.stage != '' && steps.stage.outcome == 'skipped' && '1' || '' }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         OUTCOMES: >-
           download=${{ steps.download.outcome }}
@@ -611,7 +637,7 @@ runs:
         # The landing-failure note is our own text (lib.sh), so it needs no
         # de-fang — and it names no trigger token either.
         if [ -n "$failed" ]; then
-          hint=$(landing_failure_hint "$failed" "$PUSHED")
+          hint=$(landing_failure_hint "$failed" "$PUSHED" "$STAGE_WITHHELD")
           {
             printf '⚠️ **Landing failed** at step(s): %s — see the [run log](%s).\n' "$failed" "$RUN_URL"
             [ -z "$hint" ] || printf '\n%s\n' "$hint"

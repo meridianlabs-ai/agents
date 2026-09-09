@@ -235,6 +235,39 @@ def test_landing_failure_hint(failed, pushed, expected):
     assert "@" not in r.stdout
 
 
+@pytest.mark.parametrize(
+    "failed,pushed,expected",
+    [
+        # The PR step failed after the push, so the stage step was skipped
+        # (not failed) with a stage planned: the move is owed all the same.
+        ("pr", "1",
+         "The agent's commits were pushed; only what follows the push is affected. Move the Atlas stage by hand."),
+        # A failed hand-back and a withheld stage coincide: both are named.
+        ("handback", "1",
+         ("The agent's commits were pushed; only what follows the push is affected. "
+          "Post the re-review request by hand. Move the Atlas stage by hand.")),
+        # Withheld AND failed never both apply, but the line must not double.
+        ("stage", "1",
+         "The agent's commits were pushed; only what follows the push is affected. Move the Atlas stage by hand."),
+    ],
+)
+def test_landing_failure_hint_names_a_withheld_stage(failed, pushed, expected):
+    r = bash_lib(f"landing_failure_hint '{failed}' '{pushed}' 1")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == expected
+    assert "@" not in r.stdout
+
+
+def test_stage_step_runs_after_a_failed_hand_back():
+    # The stage move must not be withheld by a failed hand-back or hand-off
+    # (that strands the board at Agent with the PR head moved); it is gated
+    # on the PR step instead, which succeeding implies the push did.
+    text = LAND.read_text()
+    stage = text[text.index("    - id: stage\n"):]
+    cond = stage.splitlines()[1].strip()
+    assert cond == "if: always() && steps.pr.outcome == 'success' && steps.plan.outputs.stage != ''"
+
+
 # --- the git contract ------------------------------------------------------
 
 

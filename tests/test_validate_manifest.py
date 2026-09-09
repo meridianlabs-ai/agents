@@ -23,6 +23,8 @@ spec.loader.exec_module(vm)
 REPO = "meridianlabs-ai/agents"
 RUN_ID = "123456"
 DEFAULT_BRANCH = "main"
+# The land composite's `refused-branches` default.
+REFUSED = ["main"]
 ALLOWED = ["meridianlabs-ai/agents", "meridianlabs-ai/inspect_ai"]
 START = "a" * 40
 HEAD = "b" * 40
@@ -78,7 +80,9 @@ def base_manifest(d: Path, **overrides) -> dict:
     return m
 
 
-def run(d: Path, manifest, *, pr_head_ref=BRANCH, default_branch=DEFAULT_BRANCH, repo=REPO, run_id=RUN_ID, allowed=None):
+def run(
+    d: Path, manifest, *, pr_head_ref=BRANCH, default_branch=DEFAULT_BRANCH, repo=REPO, run_id=RUN_ID, allowed=None, refused=None
+):
     return vm.validate(
         manifest,
         artifact_dir=d,
@@ -87,6 +91,7 @@ def run(d: Path, manifest, *, pr_head_ref=BRANCH, default_branch=DEFAULT_BRANCH,
         default_branch=default_branch,
         allowed_issue_repos=ALLOWED if allowed is None else allowed,
         pr_head_ref=pr_head_ref,
+        refused_branches=REFUSED if refused is None else refused,
     )
 
 
@@ -166,9 +171,31 @@ def test_bad_branch(tmp_path, branch, needle):
 
 
 def test_branch_is_default_branch(tmp_path):
-    errs = run(tmp_path, base_manifest(tmp_path, branch="main"), pr_head_ref="main")
+    errs = run(tmp_path, base_manifest(tmp_path, branch="main"), pr_head_ref="main", refused=[])
     assert any("must not be the default branch" in e for e in errs)
     assert any("must not equal pr.base" in e for e in errs)
+
+
+def test_refused_branch_that_is_not_the_default(tmp_path):
+    # The inspect_ai fork: `main` is the pristine mirror but `meridian` is the
+    # default branch, so the default-branch rule alone would let `main` pass.
+    m = base_manifest(tmp_path, branch="main")
+    m["pr"]["base"] = "meridian"
+    errs = run(tmp_path, m, pr_head_ref="main", default_branch="meridian")
+    assert errs == ["manifest: branch 'main' is on the land job's refused list (main)"]
+    # Exact, case-sensitive names: a branch merely resembling one is fine …
+    m = base_manifest(tmp_path, branch="Main")
+    assert run(tmp_path, m, pr_head_ref="Main", default_branch="meridian") == []
+    # … and `main` as pr.base stays legitimate (fork PRs base on it).
+    assert run(tmp_path, base_manifest(tmp_path), default_branch="meridian") == []
+
+
+def test_refused_branches_list_is_trimmed_and_may_be_empty(tmp_path):
+    m = base_manifest(tmp_path, branch="release")
+    m["pr"]["base"] = "meridian"
+    errs = run(tmp_path, m, pr_head_ref="release", default_branch="meridian", refused=[" main", "release ", ""])
+    assert any("'release' is on the land job's refused list (main, release)" in e for e in errs)
+    assert run(tmp_path, m, pr_head_ref="release", default_branch="meridian", refused=[""]) == []
 
 
 def test_empty_default_branch_fails_closed(tmp_path):
@@ -451,6 +478,7 @@ def cli(d: Path, *extra, pr_head_ref=BRANCH):
         "--repo", REPO,
         "--run-id", RUN_ID,
         "--default-branch", DEFAULT_BRANCH,
+        "--refused-branches", ",".join(REFUSED),
         "--allowed-issue-repos", ",".join(ALLOWED),
         "--pr-head-ref", pr_head_ref,
         *extra,
@@ -480,6 +508,17 @@ def test_cli_empty_default_branch_refuses(tmp_path, capsys):
     (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
     assert cli(tmp_path, "--default-branch", "") == 1
     assert "no default branch was supplied" in capsys.readouterr().out
+
+
+def test_cli_refused_branches(tmp_path, capsys):
+    m = base_manifest(tmp_path, branch="main")
+    m["pr"]["base"] = "meridian"
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    # Later flags override the fixture's: the fork shape, `main` refused.
+    assert cli(tmp_path, "--default-branch", "meridian", "--refused-branches", "main", pr_head_ref="main") == 1
+    assert "is on the land job's refused list (main)" in capsys.readouterr().out
+    # An empty list (the flag's own default) leaves only the default-branch rule.
+    assert cli(tmp_path, "--default-branch", "meridian", "--refused-branches", "", pr_head_ref="main") == 0
 
 
 def test_cli_missing_manifest(tmp_path, capsys):

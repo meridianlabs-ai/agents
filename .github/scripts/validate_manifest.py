@@ -16,7 +16,8 @@ to stdout and exits 1 when there is at least one; exits 0 on a clean
 manifest. Usage:
 
     validate_manifest.py --dir "$RUNNER_TEMP/landing" \
-        --repo owner/name --run-id "$GITHUB_RUN_ID" --default-branch main \
+        --repo owner/name --run-id "$GITHUB_RUN_ID" --default-branch meridian \
+        --refused-branches main \
         --allowed-issue-repos owner/name,owner/other \
         [--pr-head-ref <headRefName of manifest.pr_number, from the API>]
 
@@ -99,12 +100,15 @@ class Validator:
         default_branch: str,
         allowed_issue_repos,
         pr_head_ref: str = "",
+        refused_branches=(),
     ) -> None:
         self.m = manifest
         self.dir = Path(artifact_dir)
         self.repo = repo
         self.run_id = str(run_id)
         self.default_branch = default_branch
+        # Branch names are case-sensitive refs: compared exactly, unlike repos.
+        self.refused_branches = {b.strip() for b in refused_branches if b.strip()}
         self.allowed_issue_repos = {r.strip().lower() for r in allowed_issue_repos if r.strip()}
         self.pr_head_ref = pr_head_ref
         self.errors: list[str] = []
@@ -262,6 +266,13 @@ class Validator:
                 self.err("manifest: branch must not start or end with '/' or end with '.lock'")
             if branch == self.default_branch:
                 self.err(f"manifest: branch must not be the default branch ({self.default_branch!r})")
+            # Beyond the default branch: names the land job refuses outright
+            # (`main` by default), so a pristine mirror that is not the
+            # default — the inspect_ai fork's `main` under `meridian` — is
+            # refused here, before any network call, and not only by its
+            # server-side ruleset.
+            if branch in self.refused_branches:
+                self.err(f"manifest: branch {branch!r} is on the land job's refused list ({', '.join(sorted(self.refused_branches))})")
 
         pr_number = self._positive_int(m, "pr_number", "manifest", required=False)
         if pr_number is not None:
@@ -419,6 +430,11 @@ def main(argv=None) -> int:
     ap.add_argument("--run-id", required=True, help="$GITHUB_RUN_ID")
     ap.add_argument("--default-branch", required=True, help="the repo's default branch (empty refuses the manifest)")
     ap.add_argument(
+        "--refused-branches",
+        default="",
+        help="comma-separated branch names refused as `branch` on top of the default branch (the land job passes `main`)",
+    )
+    ap.add_argument(
         "--allowed-issue-repos",
         default="",
         help="comma-separated owner/name list issues[] may target",
@@ -440,6 +456,7 @@ def main(argv=None) -> int:
             default_branch=args.default_branch,
             allowed_issue_repos=args.allowed_issue_repos.split(","),
             pr_head_ref=args.pr_head_ref,
+            refused_branches=args.refused_branches.split(","),
         )
     for line in errors:
         print(f"manifest violation: {line}")

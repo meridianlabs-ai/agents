@@ -94,13 +94,16 @@ open_or_adopt_pr() {
   echo "opened ${url##*/} $url"
 }
 
-# landing_failure_hint FAILED PUSHED — the one-line consequence the Report
-# step adds under "Landing failed at step(s): FAILED" (a comma-separated list
-# of step names, `post (…)` included): whether the agent's commits reached
-# the branch, and which hand-back / hand-off / stage move a human now owes.
-# Our own text, so it names no live trigger token.
+# landing_failure_hint FAILED PUSHED [STAGE_WITHHELD] — the one-line
+# consequence the Report step adds under "Landing failed at step(s): FAILED"
+# (a comma-separated list of step names, `post (…)` included): whether the
+# agent's commits reached the branch, and which hand-back / hand-off / stage
+# move a human now owes. STAGE_WITHHELD non-empty means the manifest planned
+# a stage move that never ran (the step was skipped, not failed, because an
+# earlier step stopped the composite) — owed just like a failed one. Our own
+# text, so it names no live trigger token.
 landing_failure_hint() {
-  local failed="$1" pushed="$2" hint="" list
+  local failed="$1" pushed="$2" stage_withheld="${3:-}" hint="" list
   # Report joins with ", "; match on step names with the spaces removed.
   list=",${failed// /},"
   case "$list" in
@@ -109,10 +112,11 @@ landing_failure_hint() {
     *,fetch,*|*,push,*) hint="The agent's commits were **not** pushed." ;;
     *) [ -z "$pushed" ] || hint="The agent's commits were pushed; only what follows the push is affected." ;;
   esac
-  case "$list" in
-    *,handback,*) hint="${hint:+$hint }Post the re-review request by hand." ;;
-    *,handoff,*) hint="${hint:+$hint }Post the hand-off by hand." ;;
-    *,stage,*) hint="${hint:+$hint }Move the Atlas stage by hand." ;;
-  esac
+  # Each owed action independently: a failed hand-back and a withheld stage
+  # can coincide, and the human must hear about both.
+  case "$list" in *,handback,*) hint="${hint:+$hint }Post the re-review request by hand." ;; esac
+  case "$list" in *,handoff,*) hint="${hint:+$hint }Post the hand-off by hand." ;; esac
+  case "$list" in *,stage,*) stage_withheld=1 ;; esac
+  [ -z "$stage_withheld" ] || hint="${hint:+$hint }Move the Atlas stage by hand."
   printf '%s' "$hint"
 }
