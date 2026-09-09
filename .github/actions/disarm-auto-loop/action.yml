@@ -1,0 +1,53 @@
+name: disarm-auto-loop
+description: >-
+  Remove the @auto label from a PR — the loops' escalation disarm, and the
+  same thing a human does to stop the loop by hand. This is the load-bearing
+  step of an escalation (design/auto-agent.md → Autonomy ceiling): the
+  counter reset is gated on its success and the hand-off comment phrases
+  itself on the outcome, so it never fails the caller's job; it reports
+  through the `disarmed` output instead. A failed removal is self-limiting
+  on its own — the label stays on but the counter stays exhausted, so the
+  next event re-escalates (and retries the removal) rather than running a
+  fresh budget nobody granted. Shared by claude-auto.yml and
+  claude-auto-review.yml so the step cannot drift between them. Referenced
+  fully-qualified (meridianlabs-ai/agents/.github/actions/disarm-auto-loop@main);
+  NO post step (local composite actions with post steps break teardown on
+  the fork).
+
+inputs:
+  token:
+    description: Token that can edit the PR's labels (MARVIN_TOKEN or github.token).
+    required: true
+  repo:
+    description: owner/name the PR lives in.
+    required: true
+  pr:
+    description: Pull-request number to disarm.
+    required: true
+  label:
+    description: The loop's opt-in label to remove (the workflow's `auto_label` input).
+    required: true
+
+outputs:
+  disarmed:
+    description: '"1" when the label was removed, "0" when the removal failed.'
+    value: ${{ steps.disarm.outputs.disarmed }}
+
+runs:
+  using: composite
+  steps:
+    - id: disarm
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+        AUTO_LABEL: ${{ inputs.label }}
+      run: |
+        set -uo pipefail
+        if gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL"; then
+          echo "disarmed=1" >>"$GITHUB_OUTPUT"
+        else
+          echo "::warning::could not remove the '$AUTO_LABEL' label from #$PR; the loop stays armed with its counter exhausted."
+          echo "disarmed=0" >>"$GITHUB_OUTPUT"
+        fi

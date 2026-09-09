@@ -155,6 +155,66 @@ stage to Review — see atlas-tracking.md). The same marker covers the
 older self-handoff case (all remaining feedback declined with rationale),
 which previously ended the loop without any deterministic trace.
 
+**Both counters are per-PR-lifetime tallies, reset only by an explicit human
+decision to grant a fresh budget** (escalation reset added 2026-09-09). Neither
+a green CI run nor a clean review round decrements or resets the sticky counter
+— the cap bounds total autonomous churn on a PR, not churn per failure streak.
+Exactly two paths reset a counter, and both go through the shared
+`.github/actions/reset-auto-counters` composite so the reset body cannot drift
+between them:
+
+- **Re-engagement** — a human comments `@auto` on an existing PR (item 6 under
+  "Event-driven implementation sketch" below). claude.yml re-applies the label
+  and resets *both* counters.
+  This has existed since inspect_ai#53 and is the fastest way to continue an
+  exhausted PR without hand-editing anything.
+- **Escalation** — each loop resets its *own* counter as part of the hand-off.
+  Without this, the hand-off's "re-add the label to let me try again" was false
+  after a *cap* escalation: the next event re-read the exhausted counter and
+  escalated again on sight, no fix attempted (inspect_flow#824: CI-fix attempts
+  1–2 were burned by rounds that ran without a provisioned environment, attempt
+  3 was spent 70 minutes and five green pushes before the failure that
+  escalated). A human re-labeling after an escalation is an explicit decision
+  that the loop deserves another full budget, so the reset makes the promise
+  true. It applies to *no-progress* (stall) escalations too, not only cap ones:
+  a re-label there buys one fix round against the unchanged tree before the
+  stall check can trip again — bounded, and gated on the human both re-labeling
+  and re-triggering the reviewer.
+
+The escalation is ordered disarm → reset → hand off, and each step phrases
+itself on the earlier ones. The label removal goes first and the reset is gated
+on it: a failed removal must stay self-limiting (label on, counter exhausted,
+so the next event re-escalates and retries) rather than leave an armed loop
+with a fresh budget nobody granted. The hand-off comment only promises a fresh
+budget if the reset succeeded; if it failed it says so and offers the two ways
+out — edit the counter to 0 by hand, or re-engage (which resets both) — and if
+the removal itself failed it says the loop is still armed and how to stop it.
+(Otherwise the hand-off would repeat the false promise it exists to fix.) The
+review loop's hand-off also says that re-adding the label *alone* does nothing
+— that loop fires only on the reviewer's next verdict, so the human must request
+a fresh review too. The composite's lookup and PATCH retry with backoff (like
+the gates' own API calls), and the hand-off post retries as well: once the
+disarm and reset have run, a transiently failed comment would otherwise park the
+PR with nobody pinged and only a red job as the trace. For the same reason the
+hand-off step is gated on `!cancelled()` rather than the default success — an
+outright step failure in the disarm or reset (not the handled "could not"
+outcomes) must not skip the comment on a PR whose label may already be gone;
+empty outputs route to the conservative wording. Each of the three steps is a
+shared composite (`disarm-auto-loop`, `reset-auto-counters`, `post-pr-comment`)
+so the two loops cannot drift; `post-pr-comment` is also what the loops' "Ensure
+hand-back after push" backstop posts the `@review` with, since that comment is
+the loop's other unlosable one. The
+reset body carries no `rounds:`/`attempts:` number and, for the review loop, no
+head marker: the gates read 0 via their `${prev:-0}` default, and the
+no-progress check needs a prior round to compare against, so a fresh budget's
+first round is never mis-read as a stall and records a fresh tip before
+anything reads one.
+
+Removing the label by hand (the manual kill switch) does NOT reset anything —
+re-adding *the label* continues the old tally, which is the right default for
+"pause, then resume"; commenting `@auto` is the "continue with a fresh budget"
+path.
+
 **Counting must be deterministic, not LLM-maintained** — it gates whether the
 agent runs at all. The orchestration step counts completed review cycles for the
 PR via the API (`@review` submissions on this PR) and compares to 3 before
@@ -236,12 +296,15 @@ the dev agent authenticated as `AUTO_TOKEN`:
 4. **Converged** — CI green + review approved + no unresolved threads → enable
    auto-merge (or ping a human to merge, per repo policy).
 5. **Exhausted** — the round cap (10) is reached still unresolved, or a fix round
-   makes no progress (no new commit) → summary comment @mentioning the author,
-   remove `auto` label, stop.
+   makes no progress (no new commit) → remove the `auto` label, reset that
+   loop's counter (so re-labeling grants a fresh budget — see Autonomy
+   ceiling), summary comment @mentioning the author, stop.
 6. **Re-engaged** — a human explicitly asks `@auto` to keep going on an exhausted
    PR (an `@auto` comment). The kickoff re-applies the `auto` label *and resets
-   the sticky round/attempt counters*, so the loop gets a fresh cap (another 10
-   review rounds) rather than re-escalating on the leftover count. Without the
+   the sticky round/attempt counters* (via the shared `reset-auto-counters`
+   composite, which the escalation hand-off also uses — see Autonomy ceiling),
+   so the loop gets a fresh cap (another 10 review rounds) rather than
+   re-escalating on the leftover count. Without the
    reset, "continue" only buys the single kickoff fix, then the next review sees
    the old count (7) and immediately re-escalates (observed on inspect_ai#53).
 

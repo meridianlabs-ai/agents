@@ -1,0 +1,76 @@
+name: post-pr-comment
+description: >-
+  Post a PR comment the loop cannot afford to lose, retrying with backoff and
+  failing the caller's job loudly if it never lands. The @auto loops' only
+  stage transitions come from comments — the `@review` hand-back a fix round
+  owes after a push, and the escalation hand-off that pings a human once the
+  loop has disarmed itself — so a swallowed failure (observed: GitHub 503
+  during an outage) strands the board at Agent with nobody notified. Five
+  attempts, 15/30/45/60 s between them, no sleep after the last; a persistent
+  failure emits `::error` and exits 1 so the red job is the trace. Shared by
+  claude-auto.yml and claude-auto-review.yml (the hand-back backstop and the
+  escalation hand-off in each) so the retry loop cannot drift between the
+  four call sites. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/post-pr-comment@main); NO post step
+  (local composite actions with post steps break teardown on the fork).
+
+  The body is posted verbatim, so the caller owns its trigger discipline: a
+  bare `@review` is the hand-back (the ONLY body that should carry it), and a
+  hand-off body must stay trigger- and marker-free (design/auto-agent.md).
+
+inputs:
+  token:
+    description: >-
+      Token the comment posts as (MARVIN_TOKEN, so the machine account's
+      comments trigger the reviewer; a GITHUB_TOKEN comment would be dropped).
+    required: true
+  repo:
+    description: owner/name the PR lives in.
+    required: true
+  pr:
+    description: Pull-request number to comment on.
+    required: true
+  body:
+    description: Comment body, posted verbatim. An empty body is an error.
+    required: true
+  what:
+    description: >-
+      Short name of the comment for the log and `::error` lines, e.g.
+      "hand-back @review" or "escalation hand-off".
+    required: false
+    default: comment
+  failure-hint:
+    description: >-
+      Extra clause appended to the `::error` when every attempt fails, e.g.
+      what already ran before this post and so cannot be retried by re-running
+      the job.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+        BODY: ${{ inputs.body }}
+        WHAT: ${{ inputs.what }}
+        HINT: ${{ inputs.failure-hint }}
+      run: |
+        set -uo pipefail
+        if [ -z "$BODY" ]; then
+          echo "::error::post-pr-comment: empty body for the $WHAT comment on #$PR — nothing posted; post it by hand.${HINT:+ $HINT}"
+          exit 1
+        fi
+        # Retry with backoff; no sleep (or "retrying") after the final attempt.
+        for i in 1 2 3 4 5; do
+          if gh pr comment "$PR" --repo "$REPO" --body "$BODY"; then exit 0; fi
+          if [ "$i" -lt 5 ]; then
+            echo "$WHAT post failed (attempt $i); retrying"
+            sleep $((i * 15))
+          fi
+        done
+        echo "::error::$WHAT comment on #$PR failed after 5 attempts — post it by hand.${HINT:+ $HINT}"
+        exit 1
