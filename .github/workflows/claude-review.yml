@@ -835,6 +835,14 @@ jobs:
       # requested of anthropics/claude-code-action (drafted in #70; link the
       # issue here once filed). If the action gains it, this entry becomes
       # belt-and-braces.
+      #
+      # Merge shape: jq's `*` recurses into objects but replaces arrays
+      # wholesale, so the two credentials arrays are re-spliced as CALLER
+      # entries + overlay entries — a caller's own `files`/`envVars`
+      # protections in `inputs.settings` compose with these instead of being
+      # silently dropped (overlay entries last). Deliberately NOT done for
+      # allowedDomains / excludedCommands: those are restrictions, and a
+      # caller list concatenated onto them would widen the sandbox.
       - name: Compose settings (external sandbox overlay)
         if: >-
           steps.trig.outputs.ok == 'true' &&
@@ -865,7 +873,12 @@ jobs:
                 {"name":"ANTHROPIC_AUTH_TOKEN","mode":"deny"},
                 {"name":"CLAUDE_CODE_OAUTH_TOKEN","mode":"deny"}
               ]}}}')
-          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson o "$overlay" '. * $o')
+          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson o "$overlay" '
+            (.sandbox.credentials.files // []) as $cf
+            | (.sandbox.credentials.envVars // []) as $ce
+            | . * $o
+            | .sandbox.credentials.files = $cf + $o.sandbox.credentials.files
+            | .sandbox.credentials.envVars = $ce + $o.sandbox.credentials.envVars')
           {
             echo "value<<SETTINGS_EOF"
             printf '%s\n' "$merged"
@@ -895,9 +908,13 @@ jobs:
       # runner only AFTER the agent step — the check cannot run before it.
       # An older CLI would not have applied the mask, so a regression fails
       # the run loudly after the fact (::error + red job, the review already
-      # posted) instead of leaving a green run with the token readable.
-      # Sandboxed paths only; skipped when the agent never launched.
+      # posted) instead of leaving a green run with the token readable — and
+      # `Surface agent errors` reads this step's outcome to post a ⚠️ on the
+      # thread, since a red job under an already-complete review is the kind
+      # of red nobody opens. Sandboxed paths only; skipped when the agent
+      # never launched.
       - name: Check Claude Code version (sandbox file-mask support)
+        id: cliver
         if: >-
           always() && steps.trig.outputs.ok == 'true' &&
           steps.claude.outcome != 'skipped' &&
@@ -1242,6 +1259,7 @@ jobs:
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
+          CLIVER_OUTCOME: ${{ steps.cliver.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -1274,6 +1292,21 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEXPOST_OUTCOME:-}" = "failure" ]; then
             err="codex produced a review but posting it failed — no review or verdict reached the PR (see the job logs)."
+          fi
+          # Sandbox file-mask version check (issue #70) is a different shape
+          # of failure: the review DID post; what is in doubt is whether the
+          # .git/config token mask was in effect while sandboxed contributor
+          # code ran. Own comment — the generic "did not complete, re-trigger"
+          # text below would be wrong on both counts (not incomplete, not
+          # transient).
+          if [ -z "$err" ] && [ "${CLIVER_OUTCOME:-}" = "failure" ]; then
+            echo "::error::The sandbox file-mask version check failed after the review posted (see the job log)."
+            if [ -n "${NUM:-}" ]; then
+              cc=""
+              [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
+              gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The review posted, but the Claude Code version check guarding the sandbox token mask on `.git/config` failed: the installed CLI is below 2.1.221, or was not found after a successful agent step. The installation token claude-code-action writes into `.git/config` may therefore have been readable by sandboxed contributor code during this run. Not transient — check the pinned Claude Code version in the action (the job log has the detail).%s' "$cc")" || true
+            fi
+            exit 1
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Review did not complete: $err"

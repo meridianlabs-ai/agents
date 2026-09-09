@@ -514,7 +514,13 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   from inside its own steps), so a post-agent step fails the run loudly if
   the version ever drops below 2.1.221 (the external stage hand-back runs
   under `always()` so that failure cannot park the proxy issue at Agent
-  Working). The proper fix is an action-side
+  Working, and "Surface agent errors" reads the step's outcome to post a ⚠️
+  on the thread — the review is already there, so a red job alone would go
+  unopened). The overlay's `files` and `envVars` arrays are spliced as
+  caller entries + overlay entries (jq `*` would otherwise replace a
+  caller's own protections wholesale); the restriction arrays
+  (`allowedDomains`, `excludedCommands`) stay overlay-wins. The proper fix
+  is an action-side
   git-auth option independent of `allowed_non_write_users`; a request for
   one on `anthropics/claude-code-action` was drafted in #70 (to be filed by
   hand — the machine account cannot open issues outside the org). If the
