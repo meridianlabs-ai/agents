@@ -21,7 +21,10 @@
 # A maintainer can still review a fork PR with an @review comment, the same
 # trust decision made explicitly — the reusable's trig check enforces it
 # (fork-head @review requires a commenter with write access, checked before
-# checkout).
+# checkout), and the run then treats the fork's tree as UNTRUSTED code: no
+# runner-side provisioning, execution only inside the reviewer's OS-level
+# sandbox, project Claude Code configuration stripped from the checkout, and
+# the Claude engine even if the PR is labeled engine:codex (agents#59).
 
 name: Review
 
@@ -45,8 +48,8 @@ jobs:
     # full_name check, not head.repo.fork, keeps same-repo PRs working on
     # repos that are themselves forks), or on a PR comment containing @review. An explicit
     # @review still works on a draft, and on a fork PR when the commenter has
-    # write access (see the header). `@review` does not collide with the dev
-    # agent's `@claude` trigger.
+    # write access (see the header — sandboxed path). `@review` does not
+    # collide with the dev agent's `@claude` trigger.
     # The two comment gates exclude the reviewer's own comments: reviewing
     # files that contain the trigger token makes it routine for the review
     # summary's prose to mention that token, which passes this cheap

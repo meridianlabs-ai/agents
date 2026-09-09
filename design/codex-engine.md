@@ -174,7 +174,14 @@ workaround when #103's does).
   with file:line references in the body.
 - **No fork-head PRs on codex dev runs**: the landing step pushes to
   origin, where a fork's branch doesn't exist — the prep step declines
-  fork PRs loudly rather than failing mid-run.
+  fork PRs loudly rather than failing mid-run. Since agents#59 the dev
+  workflow's trigger gate refuses fork heads before engine detection (for
+  both engines — the fork's code would otherwise run unsandboxed), so the
+  prep step's check is defense in depth. **No codex reviews of fork-head
+  PRs** either: the `:workspace` profile is not the bubblewrap sandbox and
+  the runner-side provisioning would execute the fork's build backend, so
+  an `engine:codex` label on a fork-head PR falls through to the Claude
+  engine's sandboxed review path (logged, not commented).
 - **No review-thread resolution** in codex fix rounds (needs gh); the
   handoff notes it so humans resolve threads at sign-off.
 - **Branch sync is deterministic, not prompted** (was a limitation; fixed

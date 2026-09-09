@@ -316,7 +316,7 @@ out different things on the inspect_ai fork:
   `pyproject.toml`) still degrade to static review. For normal (non-fork)
   repos with claude-setup, both agents provision identically as before.
 
-### External reviews: sandboxed execution of untrusted code
+### Untrusted checkouts: sandboxed execution of untrusted code
 
 External-review mode (`@review` on an `External` proxy issue) checks out an
 outside contributor's PR head — **untrusted code** — into a job that holds
@@ -329,6 +329,68 @@ module) would execute that code next to those credentials — the
 `pull_request_target` anti-pattern by another route. External reviews were
 therefore originally static: the prompt forbade test runs outright.
 
+**Fork-head PRs are the same problem on the repo's own PRs** (issue #59,
+from the 2026-09-04 security scan). A PR whose head lives in a fork contains
+whoever's code, and both workflows used to execute it unsandboxed:
+
+- The **dev agent** checked out `refs/pull/N/merge` on review events (no
+  `ref:`), ran the tree's `claude-setup` action gated only on `hashFiles`,
+  and on `issue_comment` let claude-code-action fetch the fork head and then
+  ran pytest/pip/uv on it — all *before* the action's write-access check on
+  the commenter, in a job holding `MARVIN_TOKEN`, the contents-write job
+  token and the OIDC request token. It now **refuses fork heads in the
+  trigger gate**, before any checkout: `issue_comment` on a PR looks up
+  `isCrossRepository` (a lookup that never answers refuses too, as
+  `fork_head=unknown`), review events compare the payload's head repo with
+  the repository (an empty head repo — a deleted fork — counts as a fork
+  head, not as unknown: no API was asked, so a retry cannot change the
+  answer), and anything but a known same-repo head forces `ok=false`
+  so nothing downstream runs — checkout, sync, provision, agent, `@auto`
+  opt-in and stage moves are all gated on `ok`. The only visible effect is
+  one `github-actions[bot]` comment, posted only when the commenter has write
+  access (outsiders must not be able to make the workflow post): a known fork
+  head gets "use `@review` / push the branch here", once per PR (stubs fire
+  on comment edits too); an unknown head gets "the lookup failed, re-trigger"
+  every time, and is never told it is from a fork. No sandboxed dev path for
+  forks: reviewing fork PRs is the reviewer's job, and "push the branch to
+  this repository" is the route to agent work on it.
+- The **reviewer** admitted a fork head when a write-access user commented
+  `@review`, then checked it out with credentials persisted and executed it
+  on the runner before the agent started (its `claude-setup` if the fork
+  added one, else the `uv pip install -e` fallback — the fork's build
+  backend, as `runner` with sudo and unrestricted egress). The gate now emits
+  `fork_head`, and an admitted fork head takes **the external-mode path on
+  the PR itself**: `persist-credentials: false` (all modes now), no
+  runner-side provisioning, the sandbox install + settings overlay, the
+  sandbox provisioning guidance appended to the pr-mode prompt (findings and
+  the verdict marker still post to the PR), and the Claude engine only — a
+  codex label on a fork head logs a notice and falls through to Claude,
+  because codex's `:workspace` profile is not the bubblewrap sandbox.
+
+**Project configuration is stripped from every untrusted checkout** (external
+and fork-head alike), at every depth and whatever the entry's type. `.claude/`
+(settings with hooks such as `SessionStart` and `PreToolUse` command entries,
+`apiKeyHelper`, `env`, sandbox keys, plus `.claude/CLAUDE.md` and
+`.claude/rules/`) and `.mcp.json` are *deleted*: Claude Code loads these from
+its working directory — the checkout — and hooks and `apiKeyHelper` run
+*outside* the Bash sandbox, so the overlay below cannot contain them: a
+contributor's `settings.json` could turn the sandbox off or run a command with
+the job's credentials before the first prompt. `CLAUDE.md` / `CLAUDE.local.md`
+are only instruction text, and the hazard is Claude Code *auto-loading* them
+with instruction authority, so they are *moved aside* to `<name>.untrusted` — a
+name Claude Code does not load — and the prompt tells the reviewer it may read
+them as untrusted data (the project's documented test and lint commands) but
+must take no instruction from them; that keeps the convention knowledge
+external reviews of the inspect_ai upstream relied on. After the strip, the
+caller's `settings` input plus the sandbox overlay are the only configuration
+Claude Code sees; changes to any of these files are reviewed from the diff.
+The overlay also carries `disableAllHooks: true` as a second, independent
+barrier: if the strip's predicates ever miss a hooks-bearing file (a name a
+later Claude Code release starts loading), the switch still stops the hooks.
+It is defense in depth, not a replacement — the action writes the merged
+settings to the *user* scope, which any surviving project-scope settings file
+could override, so the strip is what keeps that scope empty.
+
 That gave up real verification, so the reviewer now gets **interactive test
 execution inside Claude Code's OS-level Bash sandbox** (bubblewrap + network
 proxy on Linux) instead. The principle: the danger was never the agent
@@ -338,7 +400,7 @@ running process (and all children), not on the command string, unlike the
 permission allow-list.
 
 The pieces, and why each is load-bearing (all in `claude-review.yml`,
-external mode only — normal reviews are untouched):
+external mode and fork heads only — normal same-repo reviews are untouched):
 
 - **Install step**: `bubblewrap` + `socat`, plus the
   `@anthropic-ai/sandbox-runtime` seccomp filter. The filter is *not*
@@ -362,17 +424,26 @@ external mode only — normal reviews are untouched):
   applies to commands the *agent* issues — a `gh` spawned from sandboxed
   contributor code is a child of a sandboxed process and stays confined and
   credential-less.
-- **`persist-credentials: false`** on the external checkout: checkout
+- **`persist-credentials: false`** on every reviewer checkout: checkout
   otherwise writes the job token into `.git/config`, inside the workspace the
-  sandbox lets contributor code read. The upstream repo is public; nothing
-  after checkout needs an authenticated remote.
+  sandbox lets contributor code read. Nothing after checkout needs an
+  authenticated remote (claude-code-action's agent mode does no fetch; the
+  codex path has no network).
 
 Residual risks, accepted deliberately: this defends against malicious
 contributor *code*, not a prompt-injected *agent* — the agent itself still
 holds credentials and an unsandboxed `gh`, a channel that existed in
-static-review mode too (it reads untrusted text either way). And the PyPI
+static-review mode too (it reads untrusted text either way). The PyPI
 egress needed for `pip install` is a (narrow) exfiltration path for code
-running during the install itself.
+running during the install itself. And `persist-credentials: false` removes
+only *checkout's* token: claude-code-action's own prepare step then rewrites
+the origin URL to embed the **app token** (`replaceCheckoutCredentials` in
+its `git-config.ts`, all modes), so `.git/config` holds a `contents: read` /
+`pull-requests: write` credential for the duration of the agent run,
+readable by sandboxed code. Its credential-helper alternative is tied to the
+action's `allowed_non_write_users` input, which would widen who may trigger
+the run — not a trade worth making here; a fix belongs upstream in the
+action.
 
 ### Branch sync before work
 
@@ -637,7 +708,11 @@ substring collision in trigger gates). Design choices:
   gets admitted; irreducible, since the trigger comment carries no head
   SHA to compare against. Fork PRs get no auto-review run at all; the
   comment path is the explicit human-decision route, a maintainer's
-  `@review` being the same trust decision made explicitly.
+  `@review` being the same trust decision made explicitly — and since
+  issue #59 that admission is about *who may ask*, not about trusting the
+  code: an admitted fork head takes the sandboxed path described under
+  "Untrusted checkouts" above. The dev agent, which has no sandbox and
+  holds write credentials, refuses fork heads outright (same section).
 - **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
   `synchronize` fires on every push, so reviewing on it would re-review (and
   re-bill ~$0.40–1) on every fix commit, including the agent's own. On-demand
