@@ -429,21 +429,49 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   sandbox lets contributor code read. Nothing after checkout needs an
   authenticated remote (claude-code-action's agent mode does no fetch; the
   codex path has no network).
+- **Credential file masks** (`sandbox.credentials.files`, issue #70):
+  checkout's token is not the only one that lands in `.git/config`.
+  claude-code-action's own prepare step rewrites the origin URL to embed the
+  **app installation token** (`replaceCheckoutCredentials` in its
+  `git-config.ts`, every mode) — a `contents: read` / `pull-requests: write`
+  credential, present for the whole agent step, that neither
+  `persist-credentials: false` nor the env-var denies touch because it is the
+  action's, not one this repo passes in. The action's credential-helper
+  alternative is tied to its `allowed_non_write_users` input, which would
+  widen who may trigger runs, so the overlay masks the file instead: a
+  `mask` entry on `$GITHUB_WORKSPACE/.git/config` makes sandboxed commands
+  read a sentinel copy (Linux behavior; Claude Code ≥ 2.1.221) with an
+  `extract` regex confining the replacement to the token so git still parses
+  its config — the agent's own sandboxed `git diff` / `git log` keep working
+  — and `onExtractNoMatch: deny` making the file unreadable if the action
+  ever changes the URL shape, rather than exposing the real file. No
+  `injectHosts`, so the proxy never substitutes the real token for a
+  sandboxed request. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
+  credential helper) get plain `deny` entries — nothing sandboxed needs
+  them, and the agent's `gh` is excluded from the sandbox. Two gotchas
+  encoded in the workflow: the path must be **absolute** (the action writes
+  the merged settings to `~/.claude/settings.json`, and a relative sandbox
+  path in user-scope settings resolves against `~/.claude`, not the
+  checkout), and the CLI version can only be checked *after* the agent step
+  (the action installs the pinned CLI — 2.1.266 at the time of writing —
+  from inside its own steps), so a post-agent step fails the run loudly if
+  the version ever drops below 2.1.221. The proper fix is an action-side
+  git-auth option independent of `allowed_non_write_users`; a request for
+  one on `anthropics/claude-code-action` was drafted in #70 (to be filed by
+  hand — the machine account cannot open issues outside the org). If the
+  action gains it, the mask becomes belt-and-braces.
 
 Residual risks, accepted deliberately: this defends against malicious
 contributor *code*, not a prompt-injected *agent* — the agent itself still
-holds credentials and an unsandboxed `gh`, a channel that existed in
-static-review mode too (it reads untrusted text either way). The PyPI
-egress needed for `pip install` is a (narrow) exfiltration path for code
-running during the install itself. And `persist-credentials: false` removes
-only *checkout's* token: claude-code-action's own prepare step then rewrites
-the origin URL to embed the **app token** (`replaceCheckoutCredentials` in
-its `git-config.ts`, all modes), so `.git/config` holds a `contents: read` /
-`pull-requests: write` credential for the duration of the agent run,
-readable by sandboxed code. Its credential-helper alternative is tied to the
-action's `allowed_non_write_users` input, which would widen who may trigger
-the run — not a trade worth making here; a fix belongs upstream in the
-action.
+holds credentials and an unsandboxed `gh`, and its `Read` tool is not
+sandboxed either (it sees the real `.git/config`, mask or no mask) — a
+channel that existed in static-review mode too (it reads untrusted text
+either way). The PyPI egress needed for `pip install` is a (narrow)
+exfiltration path for code running during the install itself. And the
+`.git/config` mask depends on the exact URL shape the action writes: a
+change there fails closed (`onExtractNoMatch: deny`, the file becomes
+unreadable and sandboxed git stops working — visible, not silent), but only
+an upstream option removes the token from the workspace altogether.
 
 ### Branch sync before work
 
