@@ -74,6 +74,18 @@ take effect on every repo's next run.
 - **Permissions live in the `settings` input** (inline Claude Code
   `settings.json`), not `--allowedTools`. Keep them allow-lists; the reviewer
   carries a `deny` overlay. See design/architecture.md → Permissions.
+- **No git credential is ever written to the workspace** (issue #61,
+  2026-09-09): every checkout runs `persist-credentials: false`, and every
+  runner-side `git fetch`/`push` authenticates through a step-scoped
+  credential helper defined in that step's `GIT_CONFIG_*` env (copy an
+  existing block; the token is the job token for reads, `MARVIN_TOKEN` for
+  pushes that must trigger CI). When adding a git network call to a workflow
+  or composite, give its step that env — never rely on `.git/config`, and
+  never put a token in a URL or an `http.*.extraheader`. The codex landing
+  steps additionally restore the pre-codex `.git/config` and pin
+  `core.hooksPath`/`core.fsmonitor`; keep that when touching them. See
+  design/architecture.md → No persisted git credentials and
+  design/codex-engine.md → Hook-safe landing.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat
   them as sensitive, and don't add API-key secrets; auth is Workload Identity
   Federation.

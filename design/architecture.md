@@ -159,6 +159,69 @@ failures by the `Surface agent errors` comment and the job log, cost and
 served-model by the `model-provenance` job summary. Anything more is a
 deliberate, temporary local change on a branch, not a workflow feature.
 
+### No persisted git credentials
+
+`actions/checkout` persists its token in the workspace for the rest of the
+job (an `http.<server>/.extraheader` entry in `.git/config`; since v4.3.1/v6
+a file under `RUNNER_TEMP` pulled in via `include.path`). The loop workflows
+checked out with `MARVIN_TOKEN` and leaned on that for every later
+runner-side git call — `push-base-merge` with an empty `push-token`, the
+codex landing pushes, the hand-back fetches — and `claude.yml` persisted the
+job token and had to override the header (`-c http.<origin>.extraheader=`)
+wherever the machine account was meant to authenticate instead. On the codex
+path that contradicted the engine's security model: `Create codex user`
+group-grants the whole workspace, so codex could read the PAT off disk
+(Claude Security findings 4121988/4121984; issue #61).
+
+Since #61 (decision: Ransom, 2026-09-09) **no credential is written to the
+workspace**. All three checkouts run `persist-credentials: false` with the
+job token (the fetch is a read); an assertion step right after fails the job
+if `git config --get-all http.https://github.com/.extraheader` finds anything
+(git follows includes, so the check survives checkout's layout changes); and
+every runner-side git network operation authenticates itself, scoped to its
+step, through git's environment config — `GIT_CONFIG_COUNT` /
+`GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` define a `credential.helper` that
+answers a 401 from a masked env var (`GIT_TOKEN` in the workflows, the token
+input in the composites), with an empty first entry resetting any helper the
+runner image's global config might carry. A helper rather than the base64
+`AUTHORIZATION` header #61 sketched, for two reasons: expressions have no
+base64, so a header cannot be composed in YAML `env:` (and a prior step's
+masked base64 output would be dropped by the runner's "may contain secret"
+output filter), whereas the helper form is plain YAML and works on `uses:`
+steps; and URL-embedded credentials take precedence over helpers, so wherever
+claude-code-action has rewritten the origin URL (below) the helper never
+changes who pushes. Per step:
+
+| step | token |
+| --- | --- |
+| `sync-branch` (all three workflows) | job token — fetches only |
+| `push-base-merge` (all three) | `push-token`, now required and validated: `MARVIN_TOKEN` (the push must trigger CI) |
+| codex landing steps | `MARVIN_TOKEN` (`\|\| github.token` where the caller lacks it — degrading as every marvin-less push does) |
+| hand-back, unlanded-work, open-PR and verify fetches | job token — best-effort reads that would otherwise fail silently on a private caller |
+| `unresolved-merge-guard` | none — it only reads the local index and tree |
+| the claude-code-action step | `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml`) — see below |
+
+The agent's own pushes never depended on the persisted credential:
+claude-code-action's prepare step (`configureGitAuth`, agent mode included —
+its `src/modes/agent/index.ts`) removes checkout's header and rewrites the
+origin URL to carry its `github_token`, so the agent pushes as the machine
+account either way. The action step still gets the helper env. In
+`claude.yml` it is load-bearing: tag mode's `setupBranch` runs `git fetch
+origin <branch>` (and `git ls-remote` on issue runs) *before*
+`configureGitAuth`, which rode on the persisted header and would fail on a
+private caller with nothing persisted. In the loops it is belt and braces —
+the fallback #61 named. Nothing new reaches the agent: the same token is
+already its `GITHUB_TOKEN` (what its `gh` calls use), and the URL precedence
+above means a job-token helper on a marvin-less repo leaves the push
+identity with the Claude App.
+
+Two things this does not change. The action's URL rewrite still leaves *its*
+token in `.git/config` for the remainder of a Claude run — the action's
+behavior, noted as a residual risk under Untrusted checkouts — but the codex
+path, where the exposure was, never runs the action. And the codex landing
+steps now trust nothing under `.git` at all: see design/codex-engine.md →
+Hook-safe landing.
+
 ## Model selection: prefer Fable, fall back gracefully
 
 Default is the `fable` alias with `--fallback-model default`. Claude Code's
@@ -428,7 +491,9 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   otherwise writes the job token into `.git/config`, inside the workspace the
   sandbox lets contributor code read. Nothing after checkout needs an
   authenticated remote (claude-code-action's agent mode does no fetch; the
-  codex path has no network).
+  codex path has no network). Since #61 the dev agent and both loops run
+  the same way, with their runner-side git calls authenticating per step —
+  see No persisted git credentials above.
 
 Residual risks, accepted deliberately: this defends against malicious
 contributor *code*, not a prompt-injected *agent* — the agent itself still
@@ -496,10 +561,10 @@ The step body lives once, in the `.github/actions/sync-branch` composite
 (referenced `@main` like `set-stage`); the two enforcement pieces below are
 composites too — `unresolved-merge-guard` and `push-base-merge` — so the three
 workflows differ only in their inputs (`claude.yml` passes `checkout: true`
-because its checkout is not on the PR head, a `push-token` because its
-checkout persisted `github.token`, and a `require-file` fence because its
-backstop runs `always()` — see below), never in the logic. Four details are
-load-bearing:
+because its checkout is not on the PR head and a `require-file` fence because
+its backstop runs `always()` — see below; all three pass the machine account
+as `push-token`, since #61 left nothing persisted for a push to ride on), never
+in the logic. Four details are load-bearing:
 
 - **The pre-merge tip is what gets stamped.** The landing steps treat "HEAD
   moved past the recorded SHA" as landable work. Stamped *after* the merge, a

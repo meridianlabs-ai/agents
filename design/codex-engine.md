@@ -146,6 +146,40 @@ passes `output-schema-file` instead — the explicit-path branch creates no
 temp dir. Revisit when #160's fixes land upstream (and drop the schema
 workaround when #103's does).
 
+### Hook-safe landing
+
+The group grant that lets codex edit the tree also makes `.git`
+codex-writable, and git *executes* configuration: `core.hooksPath` and the
+files in `.git/hooks/` (run by `git commit`), `core.fsmonitor` (run whenever
+an index carrying the fsmonitor extension is read — `git status`, even
+`ls-files`), `filter.*.clean` drivers (run by `git add`), plus
+`credential.helper`, `http.*`, `url.*.insteadOf` and `remote.origin.url`,
+which decide where a push goes and what authenticates it. The landing step is
+the first credentialed step after codex ran, and it runs as `runner` (sudo),
+so any of those was a route from the sandboxed codex to code execution with
+the machine-account credential — and until #61 the credential itself sat in
+`.git/config`, readable outright (Claude Security findings 4121988, 4121984,
+4122332). Since #61 (2026-09-09):
+
+- the credential never touches the workspace (design/architecture.md → No
+  persisted git credentials), so the `chown`/`chmod` exposes none;
+- `Create codex user` snapshots `.git/config` to
+  `$RUNNER_TEMP/git-config.pre-codex` (runner-only) right before the group
+  grant, and the landing step restores it after reclaiming `.git` — with `cp
+  --remove-destination`, so a config codex replaced with a symlink cannot
+  redirect the write. Everything codex could have configured is gone before
+  the first git command;
+- the landing step runs every git command with `GIT_CONFIG_*` env pinning
+  `core.hooksPath` to a non-existent runner-only path and
+  `core.fsmonitor=false` — the two things a config restore cannot cover,
+  since hooks are files and the fsmonitor extension lives in the index. The
+  `unresolved-merge-guard`, which reads the index *before* the restore, pins
+  `core.fsmonitor=false` the same way.
+
+Verification for a change here: prompt codex (any verb) to write a
+`.git/hooks/pre-commit` that prints `HOOK-RAN` and exits non-zero; the
+landing step must still commit, and its log must not contain `HOOK-RAN`.
+
 ## v1 limitations (deliberate)
 
 - **External proxy reviews stay on Claude** — their contributor-code

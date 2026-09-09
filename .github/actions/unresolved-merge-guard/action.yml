@@ -29,6 +29,16 @@ runs:
     - shell: bash
       env:
         CONFLICTS: ${{ inputs.conflicts }}
+        # This runs as `runner` on a .git the codex user could write to
+        # (the codex-user step group-grants the whole workspace), BEFORE the
+        # landing step restores the pre-codex .git/config. Reading the index
+        # is the one thing here that can execute configuration: an index
+        # carrying the fsmonitor extension makes git run the configured
+        # core.fsmonitor command on load. Env-config overrides the repo
+        # config, so a codex-written fsmonitor hook can never run here.
+        GIT_CONFIG_COUNT: "1"
+        GIT_CONFIG_KEY_0: core.fsmonitor
+        GIT_CONFIG_VALUE_0: "false"
       run: |
         set -euo pipefail
         # The index check runs BEFORE the landing step's `git add -A` on

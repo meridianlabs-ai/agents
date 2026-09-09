@@ -156,14 +156,36 @@ jobs:
       actions: read # read the failed CI run's logs
     steps:
       # Check out the PR branch so the agent fixes in place and pushes back to
-      # it. Authenticate the remote as the machine account (not the default
-      # GITHUB_TOKEN) so the agent's `git push` re-triggers CI — a GITHUB_TOKEN
-      # push would be silently dropped by the recursion guard, stalling the loop.
+      # it. persist-credentials:false (issue #61): checkout otherwise writes
+      # its token into .git/config for the rest of the job — and this job's
+      # codex path group-grants the whole workspace to the codex user, which
+      # could then read the machine account's PAT off disk. Nothing is
+      # persisted now; every later git network call authenticates itself
+      # (design/architecture.md → "No persisted git credentials"): the
+      # runner-side steps through a step-scoped credential helper, the agent
+      # through claude-code-action's own origin-URL credential (its
+      # github_token, MARVIN_TOKEN — the push re-triggers CI as before; a
+      # GITHUB_TOKEN push would be dropped by the recursion guard). The fetch
+      # itself is a read, so the job token is enough for it.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.head_branch }}
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      # Regression guard for the invariant above: the persisted-credential
+      # layout has changed across actions/checkout releases (a local
+      # extraheader, then an include.path to a file under RUNNER_TEMP), so
+      # ask git — which follows includes — rather than grepping the file.
+      - name: Assert no credential persisted in the workspace
+        run: |
+          set -uo pipefail
+          if git config --get-all http.https://github.com/.extraheader; then
+            echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
+            exit 1
+          fi
+          echo "no credential persisted in .git/config."
 
       # Resolve the PR, enforce the `auto`-label gate, and compute the attempt
       # count (deterministically, in shell — it gates whether the agent runs).
@@ -323,7 +345,9 @@ jobs:
       # already put the PR head branch in the workspace (the gate handled
       # closed and fork PRs), and "Record base SHA" above stamped its
       # PRE-merge tip — which is what makes a round whose only product is the
-      # base merge still count as landable work and push.
+      # base merge still count as landable work and push. The job token: the
+      # composite only reads (a PR lookup and fetches), and it is what its
+      # step-scoped git credential is built from.
       - name: Sync branch with base
         id: sync
         if: steps.gate.outputs.act == 'fix'
@@ -331,7 +355,7 @@ jobs:
         with:
           pr: ${{ steps.gate.outputs.pr }}
           engine: ${{ steps.gate.outputs.engine }}
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          token: ${{ github.token }}
 
       # Record the attempt (idempotent sticky comment) before invoking the
       # agent — but AFTER the sync step, matching the review loop's ordering:
@@ -391,9 +415,27 @@ jobs:
           fi
           printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until committed and pushed, and a run can NEVER resume after your final turn — background tasks do not re-invoke you and their completion notifications never arrive, so never end your turn waiting on anything (subagents, background commands, test suites): collect results in the foreground, and if a final validation is long-running, commit and push FIRST and let the PR's own CI be the gate (observed loss: a fix round ended with tests 'running in the background' and everything evaporated with the runner). ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment — they are matched by plain substring, so quoting one (e.g. when citing a reviewer comment) would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary').${merge_note}" >>"$GITHUB_OUTPUT"
 
+      # The agent's own pushes authenticate through the action: its prepare
+      # step (agent mode too — configureGitAuth in src/modes/agent/index.ts)
+      # rewrites the origin URL to carry github_token, so `git push origin`
+      # inside the agent runs as the machine account with nothing persisted
+      # by checkout. The GIT_CONFIG_* env is belt and braces for that
+      # (issue #61 asked for it as the fallback): a credential helper that
+      # answers a 401 from the same token, for any git call that does not go
+      # through the rewritten origin URL. URL credentials take precedence
+      # over helpers, so it never changes the push identity — and it adds
+      # nothing to the agent's reach: the same token is already in its
+      # environment as GITHUB_TOKEN (that is what its `gh` calls use).
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
         id: claude
+        env:
+          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
@@ -415,9 +457,10 @@ jobs:
       # — pushed, or deliberately not — is never second-guessed. always(), so a
       # failed or cancelled agent still leaves the branch current.
       # Shared push-base-merge composite (exact-SHA gate, non-fast-forward
-      # guard, push). No push-token: this job's checkout persisted
-      # MARVIN_TOKEN, so a plain push already authenticates as the machine
-      # account and re-triggers CI.
+      # guard, push). push-token is the machine account: nothing is persisted
+      # by this job's checkout, so the composite authenticates its own push
+      # (step-scoped), and it must run as marvin to re-trigger CI. The gate
+      # already guaranteed the secret is set on this path.
       # The id is for "Surface agent errors": without it a failed push here is
       # misdiagnosed — the runner's merge sits in rev-list BASE_SHA..HEAD while
       # origin still equals BASE_SHA, so the unlanded-work check would blame
@@ -431,6 +474,7 @@ jobs:
         with:
           branch: ${{ inputs.head_branch }}
           merge_sha: ${{ steps.sync.outputs.merge_sha }}
+          push-token: ${{ secrets.MARVIN_TOKEN }}
 
       # ---- Codex engine CI-fix round (design/codex-engine.md) ----------------
       # The codex sandbox has no network, so the failing CI logs are
@@ -533,6 +577,14 @@ jobs:
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
         run: |
           set -euo pipefail
+          # Last runner-only moment for the tree: snapshot the repo config
+          # for the landing step to restore. The group grant below makes
+          # .git/config codex-writable, and git executes configuration —
+          # core.hooksPath, core.fsmonitor, filter drivers, credential
+          # helpers, remote URLs — so the credentialed landing step must not
+          # trust anything codex could have written there. RUNNER_TEMP itself
+          # stays runner-only (755 runner:runner; see below).
+          cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
           sudo adduser --system --home /home/codex --shell /bin/bash --group codex
           sudo usermod -a -G codex runner
           sudo usermod -a -G runner codex
@@ -603,6 +655,17 @@ jobs:
         with:
           conflicts: ${{ steps.sync.outputs.conflicts }}
 
+      # This is the first credentialed step after codex had write access to
+      # the workspace, so it trusts nothing under .git that codex could
+      # have configured (design/codex-engine.md → hook-safe landing): the
+      # pre-codex .git/config is restored (remote URLs, credential/http keys,
+      # filter drivers, fsmonitor, hooksPath — anything codex wrote there is
+      # gone), and the GIT_CONFIG_* env below pins the two things a config
+      # restore cannot: hooks live as FILES in .git/hooks, so hooksPath points
+      # at an empty, runner-only path; and the index may carry the fsmonitor
+      # extension, so fsmonitor is off. The credential helper is the
+      # machine account — the push must re-trigger CI — and it lives only
+      # in this step's environment.
       - name: Land codex fix
         id: codexland
         if: steps.codexguard.outcome == 'success'
@@ -615,6 +678,16 @@ jobs:
           START_SHA: ${{ steps.base.outputs.sha }}
           HEAD_BRANCH: ${{ inputs.head_branch }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GIT_CONFIG_COUNT: "4"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+          GIT_CONFIG_KEY_2: core.hooksPath
+          GIT_CONFIG_VALUE_2: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_3: core.fsmonitor
+          GIT_CONFIG_VALUE_3: "false"
         run: |
           set -euo pipefail
           # Reclaim .git before writing objects as runner: any objects/XX
@@ -624,6 +697,10 @@ jobs:
           # would intermittently fail with "insufficient permission for
           # adding an object".
           sudo chown -R runner "$GITHUB_WORKSPACE/.git"
+          # Restore the config snapshotted before codex got write access.
+          # --remove-destination: codex could have replaced the file with a
+          # symlink, and a plain cp would follow it and write elsewhere.
+          cp --remove-destination "$RUNNER_TEMP/git-config.pre-codex" "$GITHUB_WORKSPACE/.git/config"
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge
           # is still in progress — commit anyway so the merge completes,
@@ -717,6 +794,15 @@ jobs:
           HEAD_BRANCH: ${{ inputs.head_branch }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
           SINCE: ${{ steps.base.outputs.ts }}
+          # Step-scoped credential for the best-effort fetch: with nothing
+          # persisted by checkout it would otherwise fail silently on a
+          # private caller and the tip would always read as unmoved.
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -uo pipefail
           git fetch --quiet origin "$HEAD_BRANCH" 2>/dev/null || true
@@ -787,6 +873,14 @@ jobs:
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
+          # Step-scoped credential for the unlanded-work fetch below (nothing
+          # is persisted by checkout; see "Ensure hand-back after push").
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"

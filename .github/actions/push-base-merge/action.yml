@@ -6,10 +6,15 @@ description: >-
   finishes, nothing else will push it, so this does. Gated on that exact SHA,
   so an agent that committed on top — pushed, or deliberately not — is never
   second-guessed. Shared by claude.yml, claude-auto.yml and
-  claude-auto-review.yml, which differ only in how the push authenticates
-  (see push-token). Referenced fully-qualified
+  claude-auto-review.yml. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/push-base-merge@main); NO post
   step (local composite actions with post steps break teardown on the fork).
+
+  Authentication is step-scoped (design/architecture.md → "No persisted git
+  credentials"): the push-token feeds a credential helper defined in this
+  step's environment (GIT_CONFIG_*), never the workspace — the callers'
+  checkouts run with persist-credentials:false, so there is no persisted
+  credential to fall back on and no http.<origin>.extraheader to override.
 
 inputs:
   branch:
@@ -20,19 +25,13 @@ inputs:
     required: true
   push-token:
     description: >-
-      Empty (the loops): a plain `git push origin`, relying on the credential
-      the job's actions/checkout persisted (MARVIN_TOKEN there, so the push
-      already runs as the machine account and re-triggers CI). Set
-      (claude.yml): push over an explicit URL credential with the persisted
-      http.<origin>.extraheader cleared — that checkout persisted
-      github.token, which preempts the URL credential, so without the reset
-      the push would run as github-actions[bot] and trigger nothing.
-    required: false
-    default: ""
-  repo:
-    description: owner/name to push to (only used with push-token).
-    required: false
-    default: ${{ github.repository }}
+      Token the push (and the pre-push fetch) authenticates with. The machine
+      account's PAT (MARVIN_TOKEN) wherever the caller has it: the push must
+      re-trigger CI, and a GITHUB_TOKEN push is dropped by the recursion
+      guard. Required — the step fails loudly on an empty value rather than
+      pushing unauthenticated (which would fail on a private repo, or as an
+      anonymous write attempt on a public one).
+    required: true
   require-file:
     description: >-
       Evidence the agent actually ran: a path that must exist and be non-empty
@@ -65,8 +64,21 @@ runs:
         BRANCH: ${{ inputs.branch }}
         MERGE_SHA: ${{ inputs.merge_sha }}
         PUSH_TOKEN: ${{ inputs.push-token }}
-        REPO: ${{ inputs.repo }}
         REQUIRE_FILE: ${{ inputs.require-file }}
+        # Step-scoped credential (design/architecture.md → "No persisted git
+        # credentials"): git reads GIT_CONFIG_* from the environment with
+        # command-line precedence, so this defines a credential helper that
+        # answers the 401 on the fetch and the push from PUSH_TOKEN — the
+        # push runs as the token's identity, and the token exists nowhere but
+        # this step's environment. The empty first entry resets any helper
+        # inherited from the runner image's global config. (A URL-embedded
+        # credential, as claude-code-action leaves on origin after a Claude
+        # run, takes precedence over helpers: same machine account there.)
+        GIT_CONFIG_COUNT: "2"
+        GIT_CONFIG_KEY_0: credential.helper
+        GIT_CONFIG_VALUE_0: ""
+        GIT_CONFIG_KEY_1: credential.helper
+        GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$PUSH_TOKEN"; }; f'
       run: |
         set -euo pipefail
         # Fence first: a run whose agent never started leaves the merge on the
@@ -79,6 +91,12 @@ runs:
         if [ "$(git rev-parse HEAD)" != "$MERGE_SHA" ]; then
           echo "agent commits sit on top of the base merge — leaving the push to it."
           exit 0
+        fi
+        # Composite inputs are not enforced as required at runtime; a missing
+        # token must not degrade into an unauthenticated push.
+        if [ -z "$PUSH_TOKEN" ]; then
+          echo "::error::push-base-merge: push-token is empty — refusing to push the base merge unauthenticated."
+          exit 1
         fi
         git fetch --quiet origin "$BRANCH"
         if [ "$(git rev-parse FETCH_HEAD)" = "$MERGE_SHA" ]; then
@@ -96,12 +114,6 @@ runs:
           echo "origin/$BRANCH moved past the runner's merge during the run — leaving it; the next run re-merges."
           exit 0
         fi
-        if [ -n "$PUSH_TOKEN" ]; then
-          git -c http.https://github.com/.extraheader= push --quiet \
-            "https://x-access-token:${PUSH_TOKEN}@github.com/$REPO.git" \
-            "HEAD:refs/heads/$BRANCH"
-        else
-          git push --quiet origin "HEAD:refs/heads/$BRANCH"
-        fi
+        git push --quiet origin "HEAD:refs/heads/$BRANCH"
         echo "pushed=1" >>"$GITHUB_OUTPUT"
         echo "pushed base merge $(git rev-parse --short HEAD) to $BRANCH"
