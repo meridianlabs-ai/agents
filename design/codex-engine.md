@@ -161,10 +161,37 @@ workaround when #103's does).
   network still means no installs by the AGENT — but the reviewer
   workflow provisions a fallback venv (uv dev-install, as the runner,
   which has network) when claude-setup is absent and a pyproject.toml
-  exists, so fork PR heads cut from pristine main — and Python caller
-  repos that never added claude-setup — get test-verified reviews too.
+  exists, so PR heads on the inspect_ai fork (cut from pristine main;
+  cross-repository fork heads are deliberately never provisioned, issue
+  #59) — and Python caller repos that never added claude-setup — get
+  test-verified reviews too.
   Only repos that are not Python projects (or whose dev-install fails,
   loudly) degrade to static review.
+- **Loop fix rounds run tests since 2026-09-09**: `claude-auto.yml` and
+  `claude-auto-review.yml` had no provisioning step at all — neither
+  claude-setup nor the reviewer's uv fallback. On Claude that was
+  invisible (the agent installs what it needs; it has network); on codex
+  it was total: inspect_flow#824's two review-fix rounds and two CI-fix
+  attempts all ran in a bare checkout (`No module named inspect_ai /
+  pytest / ruff / pyright`), the rounds that pushed were verified only by
+  tests that import nothing (which is how a broken test reached CI), and
+  CI-fix attempt 2 correctly declined to guess. Both loops now run the
+  reviewer's two provisioning steps (the uv fallback body is the shared
+  `provision-fallback` composite) after the base sync and before the
+  attempt/round is recorded, so a provisioning failure skips the agent
+  without burning a round; the Surface step names it (and, on the Claude
+  path, notes that the runner's clean base merge was still pushed by the
+  `merge_sha`-gated backstop — see design/architecture.md → Provisioning).
+  On a **conflicted**
+  codex round the failure is tolerated instead (`continue-on-error` when
+  the sync left conflicts): provisioning runs over the in-progress merge,
+  so a conflicted dependency file fails it every time, and skipping the
+  agent there would strand the branch — the round runs static-only, the
+  prompt says so and tells codex to report static-only verification, and
+  the next round provisions on the resolved branch. The codex prompt's
+  verification line is composed from the provisioning outcomes (venv on
+  PATH / provisioning failed / nothing to provision) rather than asserting
+  a venv unconditionally.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which
