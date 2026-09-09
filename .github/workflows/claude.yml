@@ -1240,11 +1240,13 @@ jobs:
             fi
             if [ "$IS_PR" = "true" ]; then
               # Codex cannot read the PR thread the way the Claude path does
-              # (gh at runtime), so embed it: title/body plus bounded
-              # newest-last slices, mirroring the review-fix prep — a trigger
-              # like "address the feedback above" needs its referent in the
-              # prompt. Sliced at the source so the head cap below cannot
-              # truncate away the newest comments on comment-heavy PRs.
+              # (gh at runtime), so embed it: title/body, the top-level
+              # comments filtered and anchored on the newest review round
+              # (bounded tail), then the review threads by state — mirroring
+              # the review-fix prep — because a trigger like "address the
+              # feedback above" needs its referent in the prompt. The bounds
+              # are applied at the source so the head cap below stays the
+              # backstop, not the working limit.
               echo ""
               echo "PR TITLE AND BODY:"
               # No --slurp here, so gh's own --jq is fine; fetch to a file
@@ -1279,7 +1281,17 @@ jobs:
               # is everything after the newest verdict comment that precedes the
               # last marker-bearing comment (verdicts are per round, posted after
               # the round's comments; found on the unfiltered list, since the
-              # filter drops them). No review found: last 8 substantive comments.
+              # filter drops them). Anchors are taken from machine authors only
+              # (the Bot type — claude[bot] — or the marvin account the codex
+              # reviewer posts as): the Claude fix prompt forbids echoing either
+              # pattern and the codex landing de-fangs them, but a caller's
+              # human commenters are under no such rule, and one quoting the
+              # footer would otherwise demote the real review to pre-anchor.
+              # The post-anchor tail is bounded too — over 30 comments, keep the
+              # round's marker-bearing comments (the review itself) plus the
+              # last 25 others — so a long discussion after the review cannot
+              # push the REVIEW THREADS section that follows past the head cap.
+              # No review found: last 8 substantive comments.
               echo "RECENT PR COMMENTS (newest last; the review feedback is here):"
               fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$NUM/comments" --paginate --slurp
               jq -r '(add // []) | . as $raw
@@ -1289,12 +1301,15 @@ jobs:
                     and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
                     and (.body | test("^\\*\\*Claude finished") | not)))
                 | . as $all
-                | ([ $all | to_entries[] | select(.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex")) ]) as $marks
-                | (if ($marks | length) == 0 then null
+                | ([ $all | to_entries[] | select(((.value.user.type // "") == "Bot" or .value.user.login == "i-am-marvin") and (.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex"))) ]) as $marks
+                | (if ($marks | length) == 0 then []
                    else ([ $raw[] | select((.body | test("<!-- claude-review-summary -->")) and .created_at < $marks[-1].value.created_at) | .created_at ] | last // "") as $pv
-                      | ($marks | map(select(.value.created_at > $pv)) | first.key) end) as $ri
-                | (if $ri == null then $all[-8:]
-                   else ($all[:$ri] | map(select((.user.type // "") != "Bot" and .user.login != "i-am-marvin")) | .[-5:]) + $all[$ri:] end)
+                      | ($marks | map(select(.value.created_at > $pv)) | map(.key)) end) as $rk
+                | (if ($rk | length) == 0 then $all[-8:]
+                   else ($all[:$rk[0]] | map(select((.user.type // "") != "Bot" and .user.login != "i-am-marvin")) | .[-5:])
+                        + ($all | to_entries | .[$rk[0]:]
+                           | if length > 30 then (map(select(.key as $k | $rk | index($k))) + (map(select(.key as $k | ($rk | index($k)) | not)) | .[-25:]) | sort_by(.key)) else . end
+                           | map(.value)) end)
                 | .[] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/codex-prc.json"
               # Review threads BY STATE via GraphQL instead of the flat REST list of
               # the last 40 inline comments, which carried no resolution state (on
@@ -1303,20 +1318,27 @@ jobs:
               # (the deterministic handle for resolving it); RESOLVED threads as a
               # one-line index (header included only when there is one) so the
               # agent knows they exist without re-reading them; resolved AND
-              # outdated threads dropped entirely.
+              # outdated threads dropped entirely. The page bounds (newest 100
+              # threads, first 20 comments of each) are announced when hit —
+              # a one-line note at the top of the section, one under the
+              # thread — so a truncation is visible to the agent and in the
+              # log rather than silently absent.
               echo "REVIEW THREADS (OPEN threads are this round's inline feedback; each comment oldest first):"
               owner="${REPO%%/*}"; name="${REPO##*/}"
               fetch "$RUNNER_TEMP/codex-threads.json" api graphql \
                 -F owner="$owner" -F name="$name" -F number="$NUM" \
-                -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){nodes{id isResolved isOutdated path line originalLine comments(first:20){nodes{author{login} createdAt body}}}}}}}'
-              jq -r '.data.repository.pullRequest.reviewThreads.nodes
-                | map(select((.isResolved and .isOutdated) | not))
-                | (map(select(.isResolved | not)) | .[]
-                    | "--- \(.path):\(.line // .originalLine // "?") [OPEN\(if .isOutdated then ", outdated" else "" end)] thread-id \(.id)"
-                      + ([.comments.nodes[] | "\n  \(.author.login // "?") at \(.createdAt):\n  \(.body | gsub("\n"; "\n  "))"] | join("\n")) + "\n"),
-                  (map(select(.isResolved)) | select(length > 0)
-                    | "SETTLED THREADS (resolved in earlier rounds — addressed and accepted; do not re-open unless the current code contradicts the resolution):",
-                      (.[] | "  \(.path):\(.line // .originalLine // "?") — \((.comments.nodes[0].body // "") | gsub("\n"; " ") | .[:100])"))' "$RUNNER_TEMP/codex-threads.json"
+                -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){pageInfo{hasPreviousPage} nodes{id isResolved isOutdated path line originalLine comments(first:20){pageInfo{hasNextPage} nodes{author{login} createdAt body}}}}}}}'
+              jq -r '.data.repository.pullRequest.reviewThreads
+                | (if .pageInfo.hasPreviousPage then "(this PR has more than 100 review threads; only the newest 100 are shown — older threads may still be open)" else empty end),
+                  (.nodes
+                    | map(select((.isResolved and .isOutdated) | not))
+                    | (map(select(.isResolved | not)) | .[]
+                        | "--- \(.path):\(.line // .originalLine // "?") [OPEN\(if .isOutdated then ", outdated" else "" end)] thread-id \(.id)"
+                          + ([.comments.nodes[] | "\n  \(.author.login // "?") at \(.createdAt):\n  \(.body | gsub("\n"; "\n  "))"] | join("\n"))
+                          + (if .comments.pageInfo.hasNextPage then "\n  (… further replies not shown: this thread has more than 20 comments)" else "" end) + "\n"),
+                      (map(select(.isResolved)) | select(length > 0)
+                        | "SETTLED THREADS (resolved in earlier rounds — addressed and accepted; do not re-open unless the current code contradicts the resolution):",
+                          (.[] | "  \(.path):\(.line // .originalLine // "?") — \((.comments.nodes[0].body // "") | gsub("\n"; " ") | .[:100])")))' "$RUNNER_TEMP/codex-threads.json"
             elif [ -n "$COMMENT" ]; then
               printf '\nFor context, the issue title/body:\n%s\n\n%s\n' "$ITITLE" "$IBODY"
             fi
@@ -1324,8 +1346,13 @@ jobs:
           # Cap + de-fang from the completed scratch file, NOT in one
           # pipeline with the writers above (SIGPIPE discipline — see the
           # loops' prep steps). The instruction header and TASK sit before
-          # the embedded thread, so the cap can never trim the trigger; the
-          # source-bounded slices keep it headroom, not the working bound.
+          # the embedded thread, so the cap can never trim the trigger. The
+          # cap keeps the START of the file, so what it trims first is the
+          # REVIEW THREADS section at the end (the inline findings) — which
+          # is why the top-level slice ahead of it is bounded at the source
+          # (five human comments before the anchor, the review round plus at
+          # most 25 comments after it): the cap is the backstop, not the
+          # working bound.
           # The sed is belt-and-braces with the landing step's output
           # de-fang: the embedded comments can include reviewer verdict
           # comments, and a marker substring codex never sees is one it

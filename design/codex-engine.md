@@ -391,18 +391,24 @@ Verification for a change here, all cases prompted to codex (any verb):
   reviewer run that folds its summary into the verdict comment is still
   embedded rather than filtered out — the prep guard's error names that
   filter as a possible cause of an empty section), the slice is
-  anchored on the newest review round (its first marker-bearing comment,
-  since the reviewer stamps every top-level comment it posts and a round
-  can be several; kept in full with everything after it, plus the last
-  five human comments before it), and review threads come from GraphQL
+  anchored on the newest review round (its first marker-bearing comment
+  from a machine author — the Bot type or the marvin account — since the
+  reviewer stamps every top-level comment it posts and a round can be
+  several; kept in full with everything after it up to a bound of the
+  round's marker comments plus 25 others, plus the last five human
+  comments before it), and review threads come from GraphQL
   `reviewThreads` by state — OPEN in full with the thread id (the handle a
   later change uses to resolve them), RESOLVED as a one-line index (only
-  when there are any), resolved-and-outdated dropped. Both anchor
+  when there are any), resolved-and-outdated dropped; the query's page
+  bounds (newest 100 threads, first 20 comments each) print a note when
+  hit rather than truncating silently. Both anchor
   patterns — the Claude marker and the codex reviewer's `engine: codex`
   footer — join the de-fanged substrings on both the prompt and the
   output side, so a codex summary echoing either cannot become a false
   anchor (the reviewer's own footer is printed after its sed, so it is
-  unaffected). The
+  unaffected), and the Claude fix prompt's forbidden-substring list names
+  them too; the author restriction covers a caller's human commenters,
+  who are under neither rule. The
   reviewer is also told not to restate regression-accepted notes an
   earlier round already posted.
 - **Codex reviews get the PR thread since 2026-09-09**: the Claude
