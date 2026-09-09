@@ -579,9 +579,12 @@ jobs:
       # output / reasoning counts and the model that served in the job
       # summary — the codex counterpart of Model provenance below. Runs right
       # after codex, before landing, so a landing failure can't hide the
-      # spend. Best-effort, always exits 0.
+      # spend. Best-effort: the script exits 0 on every path, and
+      # continue-on-error makes that structural — a failure here must never
+      # trip the landing step's implicit success() gate and strand the work.
       - name: Codex usage
         if: always() && steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        continue-on-error: true
         uses: meridianlabs-ai/agents/.github/actions/codex-usage@main
         with:
           requested-model: ${{ inputs.codex_model }}

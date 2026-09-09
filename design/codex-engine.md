@@ -211,21 +211,29 @@ workaround when #103's does).
 - **Token split in the job summary** (2026-09-09): the codex CLI's
   step-log footer is a single "tokens used" number — its `blended_total`,
   non-cached input + output — so the `codex-usage` composite action runs
-  right after every codex step and reads the session rollout codex
+  right after every codex step and reads the session rollouts codex
   persisted under its CODEX_HOME (`sessions/YYYY/MM/DD/rollout-*.jsonl`;
-  `codex exec` persists unless `--ephemeral`). The last `token_count`
-  event's `total_token_usage` carries the cumulative input / cached-input /
-  output / reasoning-output / total counts, and the last `turn_context`
-  names the model and effort that actually served; a "Codex usage" table
-  lands in the job summary (the codex counterpart of Model provenance) and
-  the same numbers go to the step log. Tokens only — pricing is not
-  encoded; apply the model's published rates, or read the OpenAI usage
-  dashboard, for dollars. Best-effort: every path exits 0, and a missing
-  or unparsable rollout logs why and moves on. Reads the file via sudo
-  (it is codex-owned under /home/codex; the runner's codex-group grant is
-  inert within the job — see the `Create codex user` step comments) and
-  copies nothing off the runner: rollouts hold the whole transcript, the
-  same reason the Claude path stopped uploading its execution log (#65).
+  `codex exec` persists unless `--ephemeral`). Each rollout is one
+  thread; its last `token_count` event's `total_token_usage` carries that
+  thread's cumulative input / cached-input / output / reasoning-output /
+  total counts, and its last `turn_context` names the model and effort
+  that actually served. CODEX_HOME is fresh per job, so every rollout
+  belongs to the run: the action sums the split over all of them (one
+  file today; subagent threads, should codex ever spawn any, get their
+  own) and lists the distinct models. A "Codex usage" table lands in the
+  job summary (the codex counterpart of Model provenance) and the same
+  numbers go to the step log. Tokens only — pricing is not encoded; apply
+  the model's published rates, or read the OpenAI usage dashboard, for
+  dollars. Best-effort: the script exits 0 on every path (a missing or
+  unparsable rollout logs why and moves on) and the step carries
+  `continue-on-error`, because it runs before the landing step, whose
+  implicit `success()` gate would otherwise skip the landing and strand
+  the agent's work. Reads each file once via sudo (they are codex-owned
+  under /home/codex; the runner's codex-group grant is inert within the
+  job — see the `Create codex user` step comments) into a scratch copy
+  deleted on exit, and copies nothing off the runner: rollouts hold the
+  whole transcript, the same reason the Claude path stopped uploading its
+  execution log (#65).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
 
