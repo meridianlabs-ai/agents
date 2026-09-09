@@ -28,8 +28,9 @@ jobs:
     # reviews the tracked upstream PR and posts findings on the proxy (external
     # mode; see the reusable workflow). An explicit @review still works on a
     # draft, and on a fork PR when the commenter has write access (enforced in
-    # the reusable's trig check before checkout). `@review` does not collide
-    # with the dev agent's `@claude` trigger.
+    # the reusable's trig check before checkout; the fork's tree is then
+    # treated as untrusted code — sandboxed path, agents#59). `@review` does
+    # not collide with the dev agent's `@claude` trigger.
     # The two comment gates exclude the reviewer's own comments: reviewing
     # files that contain the trigger token makes it routine for the review
     # summary's prose to mention that token, which passes this cheap
