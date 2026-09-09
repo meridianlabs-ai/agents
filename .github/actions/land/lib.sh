@@ -55,3 +55,44 @@ post_comment_file() {
   local repo="$1" number="$2" file="$3"
   gh api "repos/$repo/issues/$number/comments" -F body=@"$file" --silent
 }
+
+# open_or_adopt_pr REPO BRANCH BASE TITLE BODY_FILE — adopt the open PR for
+# BRANCH if there is one (the agent may have opened it itself — the fork's
+# prompt mandates it), else create one; prints `adopted|opened <number> <url>`.
+# Meant to run under `retry`: the adopt check is INSIDE the unit, so a create
+# whose response was lost (timeout / 5xx after the write) is found by the
+# next attempt's list and adopted, not re-created into "a pull request
+# already exists". Same two paths as claude.yml's "Open or adopt PR".
+open_or_adopt_pr() {
+  local repo="$1" branch="$2" base="$3" title="$4" body_file="$5" found url
+  found=$(gh pr list --repo "$repo" --head "$branch" --state open --json number,url \
+            --jq 'if length > 0 then "\(.[0].number) \(.[0].url)" else empty end') || return 1
+  if [ -n "$found" ]; then
+    echo "adopted $found"
+    return 0
+  fi
+  url=$(gh pr create --repo "$repo" --head "$branch" --base "$base" \
+          --title "$title" --body-file "$body_file") || return 1
+  echo "opened ${url##*/} $url"
+}
+
+# landing_failure_hint FAILED PUSHED — the one-line consequence the Report
+# step adds under "Landing failed at step(s): FAILED" (a comma-separated list
+# of step names, `post (…)` included): whether the agent's commits reached
+# the branch, and which hand-back / hand-off / stage move a human now owes.
+# Our own text, so it names no live trigger token.
+landing_failure_hint() {
+  local failed="$1" pushed="$2" hint="" list
+  # Report joins with ", "; match on step names with the spaces removed.
+  list=",${failed// /},"
+  case "$list" in
+    *,fetch,*|*,push,*) hint="The agent's commits were **not** pushed." ;;
+    *) [ -z "$pushed" ] || hint="The agent's commits were pushed; only what follows the push is affected." ;;
+  esac
+  case "$list" in
+    *,handback,*) hint="${hint:+$hint }Post the re-review request by hand." ;;
+    *,handoff,*) hint="${hint:+$hint }Post the hand-off by hand." ;;
+    *,stage,*) hint="${hint:+$hint }Move the Atlas stage by hand." ;;
+  esac
+  printf '%s' "$hint"
+}

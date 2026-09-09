@@ -82,7 +82,7 @@ jobs:
           mkdir -p "$DIR"
           printf 'Landing smoke run %s: this comment was posted by the land job, not the agent job. Live token: @review (must arrive de-fanged).\n' "$GITHUB_RUN_ID" >"$DIR/c1.md"
           if [ -n "$ISSUE" ]; then
-            jq -n --argjson n "$ISSUE" '{comments: [{target: "issue", number: $n, body_file: "c1.md"}]}' >"$RUNNER_TEMP/extra.json"
+            jq -n --argjson n "$ISSUE" '{comments: [{number: $n, body_file: "c1.md"}]}' >"$RUNNER_TEMP/extra.json"
           else
             echo '{}' >"$RUNNER_TEMP/extra.json"
           fi

@@ -324,7 +324,12 @@ Three rules define the shape:
   allow-listed repos and adds them to Atlas by node ID, posts the hand-back
   or the hand-off, moves the stage (`set-stage`), posts the provenance note,
   and finally reports the manifest's `error` — failing the run when it says
-  so, after every other step ran. Every agent-authored body passes through
+  so, after every other step ran. Once the push has landed, a lost comment,
+  reply or follow-up issue is recorded and reported, not allowed to withhold
+  the hand-back or the stage move (that would strand the board at Agent with
+  the PR head moved — the failure post-pr-comment exists to prevent); the
+  final report names what failed on the PR/issue as well as in the log,
+  since the agent job can no longer post. Every agent-authored body passes through
   the de-fang sed (triggers lose their `@`, loop markers are split,
   case-insensitively, capped under the comment limit) before posting; the
   one exception is the hand-back, posted verbatim as exactly `@review`.

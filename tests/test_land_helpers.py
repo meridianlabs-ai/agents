@@ -13,7 +13,6 @@ caller.
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -83,6 +82,93 @@ def test_retry_returns_last_status_and_keeps_stdout_clean():
     assert r.stdout.strip() == "rc=1"
     r = bash_lib("out=$(retry 1 what echo hello); echo \"[$out]\"")
     assert r.stdout.strip() == "[hello]"
+
+
+# A stub `gh` for open_or_adopt_pr: `pr list` reports the PR once it exists;
+# `pr create` performs the write, and when LOSE_FIRST is set its FIRST call
+# exits 1 after writing (a timeout / 5xx after the server accepted the PR).
+# Calls are logged to $STATE/calls. `sleep` is neutralised so the retry
+# backoff does not slow the suite.
+GH_STUB = r"""
+sleep() { :; }
+gh() {
+  echo "$1 $2" >>"$STATE/calls"
+  case "$1 $2" in
+    "pr list")
+      if [ -f "$STATE/pr" ]; then n=$(cat "$STATE/pr"); echo "$n https://x/pull/$n"; fi ;;
+    "pr create")
+      [ -f "$STATE/pr" ] || echo 42 >"$STATE/pr"
+      if [ -n "${LOSE_FIRST:-}" ] && [ ! -f "$STATE/lost" ]; then touch "$STATE/lost"; echo "gh: timeout" >&2; return 1; fi
+      echo "https://x/pull/$(cat "$STATE/pr")" ;;
+    *) echo "unexpected gh $*" >&2; return 2 ;;
+  esac
+}
+"""
+
+
+def open_or_adopt(tmp_path, *, lose_first=False, existing=None):
+    state = tmp_path / "state"
+    state.mkdir()
+    if existing is not None:
+        (state / "pr").write_text(str(existing))
+    body = tmp_path / "body.md"
+    body.write_text("body\n")
+    env = {"STATE": str(state), "LOSE_FIRST": "1" if lose_first else ""}
+    r = sh(
+        "bash", "-c",
+        f". '{LIB}'\n{GH_STUB}\nresult=$(retry 3 what open_or_adopt_pr o/r feat main T '{body}') || exit 9\n"
+        "read -r how number url <<<\"$result\"; echo \"$how|$number|$url\"",
+        check=False, env=env,
+    )
+    calls = (state / "calls").read_text().splitlines() if (state / "calls").exists() else []
+    return r, calls
+
+
+def test_open_or_adopt_pr_creates_when_none_exists(tmp_path):
+    r, calls = open_or_adopt(tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "opened|42|https://x/pull/42"
+    assert calls == ["pr list", "pr create"]
+
+
+def test_open_or_adopt_pr_adopts_an_agent_opened_pr(tmp_path):
+    r, calls = open_or_adopt(tmp_path, existing=7)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "adopted|7|https://x/pull/7"
+    assert "pr create" not in calls
+
+
+def test_open_or_adopt_pr_adopts_after_a_lost_create_response(tmp_path):
+    # Attempt 1 created the PR but its response was lost; attempt 2 must
+    # find and adopt it rather than fail on "a pull request already exists".
+    r, calls = open_or_adopt(tmp_path, lose_first=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "adopted|42|https://x/pull/42"
+    assert calls.count("pr create") == 1
+    assert "retrying" in r.stderr
+
+
+@pytest.mark.parametrize(
+    "failed,pushed,expected",
+    [
+        ("push", "", "The agent's commits were **not** pushed."),
+        ("fetch", "", "The agent's commits were **not** pushed."),
+        ("post (comment on #79 failed after 5 attempts; issue create in o/r failed)", "1",
+         "The agent's commits were pushed; only what follows the push is affected."),
+        ("handback", "1",
+         "The agent's commits were pushed; only what follows the push is affected. Post the re-review request by hand."),
+        ("pr, stage", "1",
+         "The agent's commits were pushed; only what follows the push is affected. Move the Atlas stage by hand."),
+        ("handoff", "", "Post the hand-off by hand."),
+        ("pr", "", ""),
+    ],
+)
+def test_landing_failure_hint(failed, pushed, expected):
+    r = bash_lib(f"landing_failure_hint '{failed}' '{pushed}'")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == expected
+    # The note is posted un-de-fanged: it must never carry a live trigger.
+    assert "@" not in r.stdout
 
 
 # --- the git contract ------------------------------------------------------

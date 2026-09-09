@@ -12,11 +12,17 @@ description: >-
   Atlas, post the `@review` hand-back or the escalation hand-off, move the
   board stage, post the model-provenance note, and finally report the
   manifest's error (failing the run when it says so — after everything else
-  ran). Steps run in this order and stop at the first failure; the final
-  Report step always runs and names the step that failed.
+  ran). Steps run in this order and stop at the first failure, with one
+  deliberate exception: the Post step (comments, replies, thread
+  resolutions, follow-up issues) records what failed and carries on, because
+  by then the push has landed and withholding the hand-back or the stage
+  move over one lost comment would strand the board at Agent. The final
+  Report step always runs, names every step that failed, posts a short note
+  about it on the PR/issue, and fails the run.
 
   Two tokens: `read-token` (the job token) for the artifact-adjacent reads —
-  the PR head-ref lookup, the start-SHA fetch, the remote-tip check — and
+  the PR head-ref and default-branch lookups, the start-SHA fetch, the
+  remote-tip check — and
   `token` (MARVIN_TOKEN in Phase 1) for every write, so pushes and comments
   come from a real identity that triggers CI and the reviewer. Both are
   step-scoped: git authenticates through a GIT_CONFIG_* credential helper
@@ -47,7 +53,11 @@ inputs:
     default: ${{ github.repository }}
   default-branch:
     description: >-
-      The repo's default branch; a manifest naming it as `branch` is refused.
+      The repo's default branch; a manifest naming it as `branch` is refused,
+      and it is the base of a PR whose manifest sets none. Empty (events
+      without a `repository` payload, e.g. `schedule`): this action looks it
+      up with `read-token`; the validator refuses the manifest rather than
+      skip the rule when neither source yields one.
     required: false
     default: ${{ github.event.repository.default_branch }}
   allowed-issue-repos:
@@ -88,34 +98,49 @@ runs:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/landing
 
-    # The validator needs the PR's live head ref to compare the manifest's
-    # branch against. Read ONLY pr_number from the unvalidated manifest, and
-    # only as an integer — everything else waits for the validator.
-    - id: headref
-      if: inputs.pr-head-ref == ''
+    # The validator needs two facts the caller may not have supplied: the
+    # PR's live head ref to compare the manifest's branch against, and the
+    # repo's default branch (absent from the event payload on `schedule`).
+    # Read ONLY pr_number from the unvalidated manifest, and only as an
+    # integer — everything else waits for the validator. Either lookup
+    # failing leaves its value empty, which the validator refuses.
+    - id: lookup
+      if: inputs.pr-head-ref == '' || inputs.default-branch == ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.read-token }}
         REPO: ${{ inputs.repo }}
         DIR: ${{ runner.temp }}/landing
+        PR_HEAD_REF: ${{ inputs.pr-head-ref }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
       run: |
         set -uo pipefail
-        n=$(jq -r 'if type=="object" and (.pr_number|type)=="number" then .pr_number else "" end' "$DIR/manifest.json" 2>/dev/null || true)
         ref=""
-        if [[ "$n" =~ ^[1-9][0-9]{0,9}$ ]]; then
-          ref=$(gh pr view "$n" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null) || ref=""
-          [ -n "$ref" ] || echo "::warning::land: could not read PR #$n's head ref; the validator will refuse the manifest."
+        if [ -z "$PR_HEAD_REF" ]; then
+          n=$(jq -r 'if type=="object" and (.pr_number|type)=="number" then .pr_number else "" end' "$DIR/manifest.json" 2>/dev/null || true)
+          if [[ "$n" =~ ^[1-9][0-9]{0,9}$ ]]; then
+            ref=$(gh pr view "$n" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null) || ref=""
+            [ -n "$ref" ] || echo "::warning::land: could not read PR #$n's head ref; the validator will refuse the manifest."
+          fi
         fi
-        echo "ref=$ref" >>"$GITHUB_OUTPUT"
+        default=""
+        if [ -z "$DEFAULT_BRANCH" ]; then
+          default=$(gh repo view "$REPO" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null) || default=""
+          [ -n "$default" ] || echo "::warning::land: could not read $REPO's default branch; the validator will refuse the manifest."
+        fi
+        {
+          echo "ref=$ref"
+          echo "default_branch=$default"
+        } >>"$GITHUB_OUTPUT"
 
     - id: validate
       shell: bash
       env:
         DIR: ${{ runner.temp }}/landing
         REPO: ${{ inputs.repo }}
-        DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch || steps.lookup.outputs.default_branch }}
         ALLOWED: ${{ inputs.allowed-issue-repos }}
-        PR_HEAD_REF: ${{ inputs.pr-head-ref || steps.headref.outputs.ref }}
+        PR_HEAD_REF: ${{ inputs.pr-head-ref || steps.lookup.outputs.ref }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
@@ -272,6 +297,9 @@ runs:
         PR_NUMBER: ${{ steps.plan.outputs.pr_number }}
         PR_OPEN: ${{ steps.plan.outputs.pr_open }}
         PUSHED: ${{ steps.push.outputs.pushed }}
+        # Base of a PR whose manifest sets none — what `gh pr create` would
+        # default to anyway, resolved here so no converting workflow has to.
+        DEFAULT_BRANCH: ${{ inputs.default-branch || steps.lookup.outputs.default_branch }}
       run: |
         set -euo pipefail
         . "$LIB"
@@ -283,34 +311,37 @@ runs:
             echo "::error::land: pr.open is set but $BRANCH is not on origin (no bundle was pushed); cannot open a PR."
             exit 1
           fi
-          existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
-          if [ -n "$existing" ]; then
-            echo "land: PR #$existing already exists for $BRANCH; adopting it."
-            number="$existing"
-          else
-            title=$(defang_str "$(jq -r '.pr.title' "$m")")
-            defang "$DIR/$(jq -r '.pr.body_file' "$m")" "$RUNNER_TEMP/pr-body.md"
-            base=$(jq -r '.pr.base' "$m")
-            url=$(retry 3 "gh pr create" gh pr create --repo "$REPO" --head "$BRANCH" --base "$base" \
-                    --title "$title" --body-file "$RUNNER_TEMP/pr-body.md")
-            number="${url##*/}"
-            [[ "$number" =~ ^[0-9]+$ ]] || { echo "::error::land: gh pr create returned '$url'."; exit 1; }
-            echo "land: opened PR #$number ($url) for $BRANCH."
-            # Labels first (the `auto` label opts the PR into the loop, and
-            # the reviewer's first run must already see it), then the link
-            # on the originating issue — only when WE opened it, like
-            # claude.yml: an agent-opened PR already linked itself.
-            while IFS= read -r lbl; do
-              [ -n "$lbl" ] || continue
-              gh pr edit "$number" --repo "$REPO" --add-label "$lbl" \
-                || echo "::warning::land: could not add label '$lbl' to #$number"
-            done <<<"$(jq -r '.pr.labels // [] | .[]' "$m")"
-            issue=$(jq -r '.pr.issue // ""' "$m")
-            if [ -n "$issue" ]; then
-              printf '✅ Opened a pull request for this issue: %s\n' "$url" >"$RUNNER_TEMP/opened.md"
-              post_comment_file "$REPO" "$issue" "$RUNNER_TEMP/opened.md" \
-                || echo "::warning::land: could not post the PR link on #$issue"
-            fi
+          title=$(defang_str "$(jq -r '.pr.title' "$m")")
+          defang "$DIR/$(jq -r '.pr.body_file' "$m")" "$RUNNER_TEMP/pr-body.md"
+          base=$(jq -r '.pr.base // ""' "$m")
+          base="${base:-$DEFAULT_BRANCH}"
+          [ -n "$base" ] || { echo "::error::land: no base branch for the PR (pr.base unset and no default branch known)."; exit 1; }
+          # open_or_adopt_pr (lib.sh) under retry: the adopt check is inside
+          # the retried unit, so a create whose response was lost is adopted
+          # by the next attempt, not re-created. Prints `adopted|opened N URL`.
+          result=$(retry 3 "open or adopt PR for $BRANCH" \
+                     open_or_adopt_pr "$REPO" "$BRANCH" "$base" "$title" "$RUNNER_TEMP/pr-body.md") \
+            || { echo "::error::land: could not open or adopt a PR for $BRANCH."; exit 1; }
+          read -r how number url <<<"$result"
+          [[ "$number" =~ ^[0-9]+$ ]] || { echo "::error::land: open-or-adopt returned '$result'."; exit 1; }
+          echo "land: $how PR #$number ($url) for $BRANCH."
+          # Labels on BOTH paths, like claude.yml: the `auto` label opts the
+          # PR into the loop and engine:* selects the engine, and an
+          # agent-opened (adopted) PR would otherwise never get them — the
+          # loop never engages, an issue-selected engine reverts to Claude.
+          # Before the hand-back below, so the reviewer's first run sees them.
+          while IFS= read -r lbl; do
+            [ -n "$lbl" ] || continue
+            gh pr edit "$number" --repo "$REPO" --add-label "$lbl" \
+              || echo "::warning::land: could not add label '$lbl' to #$number"
+          done <<<"$(jq -r '.pr.labels // [] | .[]' "$m")"
+          # The link on the originating issue only when WE opened the PR,
+          # like claude.yml: an agent-opened PR already linked itself.
+          issue=$(jq -r '.pr.issue // ""' "$m")
+          if [ "$how" = "opened" ] && [ -n "$issue" ]; then
+            printf '✅ Opened a pull request for this issue: %s\n' "$url" >"$RUNNER_TEMP/opened.md"
+            post_comment_file "$REPO" "$issue" "$RUNNER_TEMP/opened.md" \
+              || echo "::warning::land: could not post the PR link on #$issue"
           fi
         fi
         echo "number=$number" >>"$GITHUB_OUTPUT"
@@ -320,6 +351,14 @@ runs:
     # write-access account. Thread IDs are checked against the PR's own
     # threads before any resolve, so a manifest cannot resolve a thread on
     # another PR.
+    #
+    # Never exits non-zero: the push has already landed, and a lost comment
+    # or follow-up issue is a far weaker reason to withhold the hand-back,
+    # the hand-off and the stage move than the hand-back itself failing —
+    # skipping them here would strand the board at Agent with the PR head
+    # moved, which is exactly what post-pr-comment exists to prevent. What
+    # failed is recorded in the `failed` output; Report names it on the
+    # PR/issue and fails the run at the end.
     - id: post
       shell: bash
       env:
@@ -330,10 +369,11 @@ runs:
         PR_NUMBER: ${{ steps.pr.outputs.number }}
         PROJECT: PVT_kwDOC7YMCM4BU68p
       run: |
-        set -euo pipefail
+        set -uo pipefail
         . "$LIB"
         m="$DIR/manifest.json"
-        failed=0
+        failed=""
+        note() { failed="${failed:+$failed; }$1"; echo "::error::land: $1"; }
         # -- comments
         i=0
         while IFS= read -r number && IFS= read -r file; do
@@ -341,7 +381,7 @@ runs:
           if retry 5 "comment on #$number" post_comment_file "$REPO" "$number" "$RUNNER_TEMP/comment-$i.md"; then
             echo "land: commented on #$number."
           else
-            echo "::error::land: comment on #$number failed after 5 attempts."; failed=1
+            note "comment on #$number failed after 5 attempts"
           fi
           i=$((i + 1))
         done < <(jq -r '.comments // [] | .[] | (.number|tostring), .body_file' "$m")
@@ -353,7 +393,7 @@ runs:
                gh api "repos/$REPO/pulls/$PR_NUMBER/comments/$id/replies" -F body=@"$RUNNER_TEMP/reply-$i.md" --silent; then
             echo "land: replied to review comment $id on #$PR_NUMBER."
           else
-            echo "::error::land: reply to review comment $id failed."; failed=1
+            note "reply to review comment $id failed"
           fi
           i=$((i + 1))
         done < <(jq -r '.replies // [] | .[] | (.review_comment_id|tostring), .body_file' "$m")
@@ -364,7 +404,7 @@ runs:
                   -f query='query($o:String!,$r:String!,$n:Int!,$endCursor:String){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100,after:$endCursor){nodes{id} pageInfo{hasNextPage endCursor}}}}}' \
                   -f o="${REPO%/*}" -f r="${REPO#*/}" -F n="$PR_NUMBER" \
                   --jq '.data.repository.pullRequest.reviewThreads.nodes[].id') \
-            || { echo "::error::land: could not list #$PR_NUMBER's review threads; resolving none."; own=""; failed=1; }
+            || { own=""; note "could not list #$PR_NUMBER's review threads; resolved none"; }
           while IFS= read -r tid; do
             [ -n "$tid" ] || continue
             if ! grep -qxF "$tid" <<<"$own"; then
@@ -390,7 +430,7 @@ runs:
             if retry 3 "comment on $irepo#$comment_on" post_comment_file "$irepo" "$comment_on" "$RUNNER_TEMP/issue-$k.md"; then
               echo "land: commented on $irepo#$comment_on."
             else
-              echo "::error::land: comment on $irepo#$comment_on failed."; failed=1
+              note "comment on $irepo#$comment_on failed"
             fi
             continue
           fi
@@ -410,10 +450,11 @@ runs:
               echo "::warning::land: could not add $irepo#$inum to Atlas (token lacks project scope?)."
             fi
           else
-            echo "::error::land: issue create in $irepo failed."; failed=1
+            note "issue create in $irepo failed"
           fi
         done
-        exit "$failed"
+        echo "failed=$failed" >>"$GITHUB_OUTPUT"
+        exit 0
 
     # Hand-back: exactly `@review`, verbatim — the ONLY body that carries a
     # live trigger. Through post-pr-comment so the retry loop is the one the
@@ -489,9 +530,11 @@ runs:
           || echo "::warning::land: could not post the provenance note on #$target."
         exit 0
 
-    # Always last: report the manifest's error (the agent job's "Surface
-    # agent errors" text) on the PR or issue, name any landing step that
-    # failed, and fail the run when either says so.
+    # Always last: name any landing step that failed (and what the Post step
+    # recorded), report the manifest's error (the agent job's "Surface agent
+    # errors" text), post both on the PR or issue — the agent job can no
+    # longer post, so without this a landing that broke after the push is
+    # visible only in the run log — and fail the run when either says so.
     - id: report
       if: always()
       shell: bash
@@ -505,9 +548,12 @@ runs:
         FAIL_RUN: ${{ steps.plan.outputs.fail_run }}
         PR_NUMBER: ${{ steps.pr.outputs.number || steps.plan.outputs.pr_number }}
         ISSUE_NUMBER: ${{ steps.plan.outputs.issue_number }}
+        PUSHED: ${{ steps.push.outputs.pushed }}
+        POST_FAILED: ${{ steps.post.outputs.failed }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         OUTCOMES: >-
           download=${{ steps.download.outcome }}
-          headref=${{ steps.headref.outcome }}
+          lookup=${{ steps.lookup.outcome }}
           validate=${{ steps.validate.outcome }}
           plan=${{ steps.plan.outcome }}
           fetch=${{ steps.fetch.outcome }}
@@ -525,18 +571,31 @@ runs:
         for kv in $OUTCOMES; do
           case "$kv" in *=failure) failed="${failed:+$failed, }${kv%=failure}" ;; esac
         done
+        [ -z "$POST_FAILED" ] || failed="${failed:+$failed, }post ($POST_FAILED)"
         [ -z "$failed" ] || echo "::error::land: step(s) failed: $failed"
         rc=0
         [ -z "$failed" ] || rc=1
+        : >"$RUNNER_TEMP/report.md"
+        # The landing-failure note is our own text (lib.sh), so it needs no
+        # de-fang — and it names no trigger token either.
+        if [ -n "$failed" ]; then
+          hint=$(landing_failure_hint "$failed" "$PUSHED")
+          {
+            printf '⚠️ **Landing failed** at step(s): %s — see the [run log](%s).\n' "$failed" "$RUN_URL"
+            [ -z "$hint" ] || printf '\n%s\n' "$hint"
+          } >"$RUNNER_TEMP/report.md"
+        fi
         if [ "$VALIDATED" = "success" ] && [ "$HAS_ERROR" = "true" ]; then
           jq -r '.error.message' "$DIR/manifest.json" >"$RUNNER_TEMP/err-raw.md"
           defang "$RUNNER_TEMP/err-raw.md" "$RUNNER_TEMP/err.md"
-          target="${PR_NUMBER:-$ISSUE_NUMBER}"
-          if [ -n "$target" ]; then
-            retry 3 "error report on #$target" post_comment_file "$REPO" "$target" "$RUNNER_TEMP/err.md" \
-              || echo "::warning::land: could not post the error report on #$target"
-          fi
+          [ ! -s "$RUNNER_TEMP/report.md" ] || printf '\n---\n\n' >>"$RUNNER_TEMP/report.md"
+          cat "$RUNNER_TEMP/err.md" >>"$RUNNER_TEMP/report.md"
           echo "::error::agent run reported: $(head -c 2000 "$RUNNER_TEMP/err.md" | tr '\n' ' ')"
           [ "$FAIL_RUN" = "true" ] && rc=1
+        fi
+        target="${PR_NUMBER:-$ISSUE_NUMBER}"
+        if [ -s "$RUNNER_TEMP/report.md" ] && [ -n "$target" ]; then
+          retry 3 "report on #$target" post_comment_file "$REPO" "$target" "$RUNNER_TEMP/report.md" \
+            || echo "::warning::land: could not post the report on #$target"
         fi
         exit "$rc"

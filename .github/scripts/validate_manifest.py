@@ -71,7 +71,9 @@ KNOWN_TOP_LEVEL = {
     "provenance_comment_file",
 }
 KNOWN_PR = {"open", "title", "body_file", "base", "labels", "issue"}
-KNOWN_COMMENT = {"target", "number", "body_file"}
+# No `target`: the issues endpoint serves PRs and issues alike, so `number`
+# is all the land job needs; a field it never reads would only mislead.
+KNOWN_COMMENT = {"number", "body_file"}
 KNOWN_REPLY = {"review_comment_id", "body_file"}
 KNOWN_ISSUE = {"repo", "title", "body_file", "labels", "comment_on"}
 KNOWN_ERROR = {"message", "fail_run"}
@@ -228,6 +230,12 @@ class Validator:
         if not _is_positive_int(run_id) or str(run_id) != self.run_id:
             self.err(f"manifest: run_id {run_id!r} does not match this run ({self.run_id})")
 
+        # The default branch is what the branch rule compares against; an
+        # empty value (a caller event without a `repository` payload, and no
+        # lookup) would silently skip that rule, so it fails closed instead.
+        if not self.default_branch:
+            self.err("manifest: no default branch was supplied to compare against (--default-branch is empty)")
+
         branch = self._str(m, "branch", "manifest", required=True)
         pr = m.get("pr")
         pr_base = None
@@ -244,7 +252,7 @@ class Validator:
                 self.err("manifest: branch must be a bare branch name, not a ref (starts with 'refs/')")
             if branch.startswith("/") or branch.endswith("/") or branch.endswith(".lock"):
                 self.err("manifest: branch must not start or end with '/' or end with '.lock'")
-            if self.default_branch and branch == self.default_branch:
+            if branch == self.default_branch:
                 self.err(f"manifest: branch must not be the default branch ({self.default_branch!r})")
 
         pr_number = self._positive_int(m, "pr_number", "manifest", required=False)
@@ -277,11 +285,15 @@ class Validator:
             self._bool(pr, "open", "pr", required=True)
             self._str(pr, "title", "pr", required=True, max_len=MAX_TITLE_CHARS)
             self._file_ref(pr, "body_file", "pr", required=True)
-            pr_base = self._str(pr, "base", "pr", required=True)
-            if pr_base is not None and not BRANCH_RE.match(pr_base):
-                self.err("pr: base has characters outside [A-Za-z0-9._/-] or is longer than 200")
-            if pr_base is not None and branch is not None and pr_base == branch:
-                self.err("manifest: branch must not equal pr.base")
+            # Optional: absent or empty means the land job's default branch
+            # (which `branch` already may not equal), as `gh pr create`
+            # defaults when claude.yml passes no --base.
+            pr_base = self._str(pr, "base", "pr", required=False) or None
+            if pr_base is not None:
+                if not BRANCH_RE.match(pr_base):
+                    self.err("pr: base has characters outside [A-Za-z0-9._/-] or is longer than 200")
+                if branch is not None and pr_base == branch:
+                    self.err("manifest: branch must not equal pr.base")
             self._labels(pr, "pr")
             self._positive_int(pr, "issue", "pr", required=False)
 
@@ -296,9 +308,6 @@ class Validator:
                         self.err(f"{where}: must be an object")
                         continue
                     self._unknown_keys(c, KNOWN_COMMENT, where)
-                    target = self._str(c, "target", where, required=True)
-                    if target is not None and target not in ("pr", "issue"):
-                        self.err(f"{where}: target must be 'pr' or 'issue'")
                     self._positive_int(c, "number", where, required=True)
                     self._file_ref(c, "body_file", where, required=True)
 
@@ -400,7 +409,7 @@ def main(argv=None) -> int:
     ap.add_argument("--dir", required=True, help="artifact directory holding manifest.json")
     ap.add_argument("--repo", required=True, help="owner/name the land job operates on")
     ap.add_argument("--run-id", required=True, help="$GITHUB_RUN_ID")
-    ap.add_argument("--default-branch", required=True, help="the repo's default branch")
+    ap.add_argument("--default-branch", required=True, help="the repo's default branch (empty refuses the manifest)")
     ap.add_argument(
         "--allowed-issue-repos",
         default="",

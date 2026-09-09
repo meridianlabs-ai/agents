@@ -56,7 +56,7 @@ def base_manifest(d: Path, **overrides) -> dict:
             "labels": ["auto"],
             "issue": 79,
         },
-        "comments": [{"target": "issue", "number": 79, "body_file": write(d, "c1.md")}],
+        "comments": [{"number": 79, "body_file": write(d, "c1.md")}],
         "replies": [{"review_comment_id": 789, "body_file": write(d, "r1.md")}],
         "resolve_threads": ["PRRT_kwDOC7YMCM5abc-123_x"],
         "issues": [
@@ -171,11 +171,38 @@ def test_branch_is_default_branch(tmp_path):
     assert any("must not equal pr.base" in e for e in errs)
 
 
+def test_empty_default_branch_fails_closed(tmp_path):
+    # A caller event without a `repository` payload and a failed lookup must
+    # not silently skip the default-branch rule.
+    errs = run(tmp_path, base_manifest(tmp_path), default_branch="")
+    assert any("no default branch was supplied" in e for e in errs)
+    errs = run(tmp_path, base_manifest(tmp_path, branch="main"), pr_head_ref="main", default_branch="")
+    assert any("no default branch was supplied" in e for e in errs)
+
+
 def test_branch_equals_pr_base(tmp_path):
     m = base_manifest(tmp_path)
     m["pr"]["base"] = BRANCH
     errs = run(tmp_path, m)
     assert any("must not equal pr.base" in e for e in errs)
+
+
+@pytest.mark.parametrize("base", [None, ""])
+def test_pr_base_is_optional(tmp_path, base):
+    # Absent or empty: the land job uses its default branch, as gh would.
+    m = base_manifest(tmp_path)
+    if base is None:
+        del m["pr"]["base"]
+    else:
+        m["pr"]["base"] = base
+    assert run(tmp_path, m) == []
+
+
+def test_pr_base_shape(tmp_path):
+    m = base_manifest(tmp_path)
+    m["pr"]["base"] = "has space"
+    errs = run(tmp_path, m)
+    assert any("pr: base has characters outside" in e for e in errs)
 
 
 def test_branch_must_match_pr_head_ref(tmp_path):
@@ -322,11 +349,14 @@ def test_comment_number_must_be_positive_int(tmp_path, value):
     assert any("comments[0]: number" in e for e in errs), errs
 
 
-def test_comment_target(tmp_path):
+def test_comment_target_was_dropped(tmp_path):
+    # `target` was removed from the schema (the land job never read it — the
+    # issues endpoint serves PRs and issues alike); a manifest still carrying
+    # it is refused like any other unknown key.
     m = base_manifest(tmp_path)
-    m["comments"][0]["target"] = "discussion"
+    m["comments"][0]["target"] = "issue"
     errs = run(tmp_path, m)
-    assert any("target must be 'pr' or 'issue'" in e for e in errs)
+    assert any("comments[0]: unknown key 'target'" in e for e in errs)
 
 
 @pytest.mark.parametrize("value", [0, "789", None])
@@ -428,10 +458,17 @@ def test_cli_prints_one_line_per_violation(tmp_path, capsys):
     (tmp_path / "manifest.json").write_text(json.dumps(m))
     assert cli(tmp_path, pr_head_ref="refs/heads/main") == 1
     out = capsys.readouterr().out
-    lines = [l for l in out.splitlines() if l.startswith("manifest violation: ")]
+    lines = [line for line in out.splitlines() if line.startswith("manifest violation: ")]
     assert len(lines) >= 2
-    assert any("refs/" in l for l in lines)
-    assert any("schema" in l for l in lines)
+    assert any("refs/" in line for line in lines)
+    assert any("schema" in line for line in lines)
+
+
+def test_cli_empty_default_branch_refuses(tmp_path, capsys):
+    # argparse accepts "" for a required flag; the validator must not.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path, "--default-branch", "") == 1
+    assert "no default branch was supplied" in capsys.readouterr().out
 
 
 def test_cli_missing_manifest(tmp_path, capsys):
