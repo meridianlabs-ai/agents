@@ -1133,8 +1133,10 @@ jobs:
           # The landing step stages with a blanket `git add -A` (new source
           # files are legitimate output), so exclude the prompt file and the
           # scratch that codex's verification runs leave behind on repos
-          # whose .gitignore doesn't already cover it (caches, venvs).
-          printf '%s\n' .codex-prompt.md .venv/ venv/ __pycache__/ \
+          # whose .gitignore doesn't already cover it (caches, venvs, the
+          # egg-info a setuptools editable install writes into the source
+          # tree).
+          printf '%s\n' .codex-prompt.md .venv/ venv/ '*.egg-info/' __pycache__/ \
             .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
             >>.git/info/exclude
 

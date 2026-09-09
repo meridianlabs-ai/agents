@@ -578,8 +578,10 @@ jobs:
           } >.codex-prompt.md
           # The landing step stages with a blanket `git add -A`, so exclude
           # the prompt file and the scratch codex's verification runs leave
-          # behind on repos whose .gitignore doesn't cover it (caches, venvs).
-          printf '%s\n' .codex-prompt.md .venv/ venv/ __pycache__/ \
+          # behind on repos whose .gitignore doesn't cover it (caches, venvs,
+          # the egg-info a setuptools editable install — claude-setup's or
+          # the fallback's — writes into the source tree).
+          printf '%s\n' .codex-prompt.md .venv/ venv/ '*.egg-info/' __pycache__/ \
             .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
             >>.git/info/exclude
 
@@ -882,24 +884,39 @@ jobs:
             err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); no fix was attempted. Re-trigger to retry."
           fi
           # Provisioning died before the agent started: same shape as the sync
-          # failure above — every downstream step is SKIPPED (the attempt was
-          # not recorded, so no refund applies) and without this the job is a
-          # silent red with the board parked at Agent. EXCEPT on the codex
-          # conflict path (SYNC_CONFLICTS non-empty): there the provisioning
-          # steps are continue-on-error, the round ran static-only with the
-          # failure spelled out in codex's prompt, and the later clauses
-          # judge what it did — so a failure there is a log warning, not an
-          # error, and "re-trigger to retry" (wrong advice for a conflicted
-          # dependency file, which fails identically every time) is never
-          # given for it.
+          # failure above — the agent and landing steps are SKIPPED (the
+          # attempt was not recorded, so no refund applies) and without this
+          # the job is a silent red with the board parked at Agent. Unlike the
+          # sync failure (which exits before merge_sha is written), ONE
+          # downstream step still fires here on the Claude path: `Push base
+          # merge if unpushed` is always()-gated on merge_sha alone, so the
+          # runner's clean base merge is pushed — re-running CI — even though
+          # no fix was attempted. That is the right outcome (the branch stays
+          # current, and the re-run finds nothing left to merge, so a
+          # deterministic failure repeats this comment at most once more and
+          # then stops rather than looping), but the wording below says so
+          # instead of claiming nothing moved. A DETERMINISTIC cause is named
+          # too: on this loop, red CI can be caused by the PR's own dependency
+          # change (a pyproject.toml that no longer installs), which now fails
+          # provisioning on every trigger — before 2026-09-09 the Claude engine
+          # would have attempted that class of fix; accepted, it mirrors the
+          # dev agent's and reviewer's fatal stance, but "re-trigger" is wrong
+          # advice for it, so the message says to fix it by hand. EXCEPT on the
+          # codex conflict path (SYNC_CONFLICTS non-empty): there the
+          # provisioning steps are continue-on-error, the round ran
+          # static-only with the failure spelled out in codex's prompt, and
+          # the later clauses judge what it did — so a failure there is a log
+          # warning, not an error, and "re-trigger to retry" (wrong advice for
+          # a conflicted dependency file, which fails identically every time)
+          # is never given for it.
           if [ -n "${SYNC_CONFLICTS:-}" ]; then
             if [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
               echo "::warning::environment provisioning failed on a conflicted round (conflicts in: $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//')); the fix agent ran static-only and was told so."
             fi
           elif [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
-            err="environment provisioning (claude-setup) failed before the fix agent started — usually a transient dependency-download/network error, or a dependency file the base merge touched; no fix was attempted. Re-trigger to retry."
+            err="environment provisioning (claude-setup) failed before the fix agent started — a transient dependency-download/network error, a dependency file the base merge touched, or this PR's own dependency change no longer installing (that one fails identically on every trigger: fix it by hand); no fix was attempted, though on the Claude engine the runner's clean base merge, if there was one, was still pushed to the branch. Re-trigger if it looks transient."
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            err="fallback environment provisioning (uv dev-install) failed before the fix agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); no fix was attempted. Re-trigger if it looks transient."
+            err="fallback environment provisioning (uv dev-install) failed before the fix agent started — a transient dependency-download/network error, the project not dev-installing on a bare runner, or this PR's own dependency change no longer installing (either of those fails identically on every trigger: fix it by hand — check the job logs); no fix was attempted, though on the Claude engine the runner's clean base merge, if there was one, was still pushed to the branch. Re-trigger if it looks transient."
           fi
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then

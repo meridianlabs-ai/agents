@@ -339,7 +339,28 @@ out different things on the inspect_ai fork:
   fork-specific wiring. Like the shim, the fallback is fatal on failure, with
   its own clause in each error-surfacing step. Non-Python repos (no
   `pyproject.toml`) still degrade to static review. For normal (non-fork)
-  repos with claude-setup, all three provision identically as before.
+  repos with claude-setup, all three provision identically as before. The
+  fallback also excludes what it writes into the tree — `.venv/` and the
+  `<pkg>.egg-info/` a setuptools editable install leaves in the source tree
+  — via `.git/info/exclude`, because the loops' Claude-engine agent commits
+  from that tree and the codex landing step stages with `git add -A` (the
+  codex prep steps re-exclude both regardless).
+
+  Two details of a **fatal provisioning failure in the loops** are worth
+  knowing when reading a "stalled" loop. The agent is skipped and the
+  round/attempt is never recorded, but on the Claude path the
+  `Push base merge if unpushed` backstop (below) is gated on the sync's
+  `merge_sha` alone, so the runner's clean base merge is still pushed and CI
+  re-runs — the branch stays current, no hand-back is owed (that step is gated
+  on the agent having succeeded), and a re-triggered round finds nothing left
+  to merge, so a deterministic failure repeats the error comment at most once
+  more and stops. And the failure *can* be deterministic without a conflict:
+  the PR's own dependency change (a `pyproject.toml` that no longer installs)
+  now fails provisioning on every trigger, where the Claude engine used to
+  attempt that class of fix from inside the agent. Accepted — it is the
+  reviewer's and dev agent's fatal stance applied consistently, and loud — but
+  the error comment names the case and says to fix it by hand rather than
+  re-trigger.
 
 ### Untrusted checkouts: sandboxed execution of untrusted code
 

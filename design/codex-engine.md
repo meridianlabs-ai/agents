@@ -179,7 +179,10 @@ workaround when #103's does).
   reviewer's two provisioning steps (the uv fallback body is the shared
   `provision-fallback` composite) after the base sync and before the
   attempt/round is recorded, so a provisioning failure skips the agent
-  without burning a round; the Surface step names it. On a **conflicted**
+  without burning a round; the Surface step names it (and, on the Claude
+  path, notes that the runner's clean base merge was still pushed by the
+  `merge_sha`-gated backstop — see design/architecture.md → Provisioning).
+  On a **conflicted**
   codex round the failure is tolerated instead (`continue-on-error` when
   the sync left conflicts): provisioning runs over the in-progress merge,
   so a conflicted dependency file fails it every time, and skipping the

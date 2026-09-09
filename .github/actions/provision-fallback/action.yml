@@ -45,11 +45,15 @@ description: >-
   the image) — a generic fallback can't hardcode any one minor; repos that
   care can ship a `.python-version`, which uv honors.
 
-  The `.venv/` it creates is added to `.git/info/exclude` unconditionally:
-  the two loops' Claude-engine agents commit and push from this tree, and
-  only the caller's .gitignore would otherwise keep the venv out (the codex
-  path re-excludes it in its prep step regardless); for the reviewer, which
-  never commits, the line is harmless.
+  The `.venv/` it creates — and the `<pkg>.egg-info/` a setuptools PEP 660
+  editable install writes INTO the source tree (verified: `pip install -e .`
+  on a src-layout project leaves `src/<pkg>.egg-info/` behind; hatchling
+  and other backends write nothing) — are added to `.git/info/exclude`
+  unconditionally: the two loops' Claude-engine agents commit and push from
+  this tree, the codex landing step stages with a blanket `git add -A`, and
+  only the caller's .gitignore would otherwise keep either out (the codex
+  path re-excludes both in its prep step regardless); for the reviewer,
+  which never commits, the line is harmless.
 
 runs:
   using: composite
@@ -66,7 +70,7 @@ runs:
           sleep $((attempt * 10))
         done
         export PATH="$HOME/.local/bin:$PATH"
-        printf '%s\n' .venv/ >>.git/info/exclude
+        printf '%s\n' .venv/ '*.egg-info/' >>.git/info/exclude
         uv venv
         if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
           uv pip install -e ".[dev]" --group dev
