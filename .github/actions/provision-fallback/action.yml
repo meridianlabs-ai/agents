@@ -62,6 +62,11 @@ description: >-
   path re-excludes both in its prep step regardless); for the reviewer,
   which never commits, the line is harmless.
 
+  After the install it warms network-fetched caches the tests need
+  (2026-09-09): tiktoken's BPE files into its default /tmp cache, readable
+  by the codex user. Evidence-driven — add an entry when a run reports a
+  blocked download; a failed warm only costs a slower first test.
+
 runs:
   using: composite
   steps:
@@ -86,3 +91,25 @@ runs:
         fi
         echo "$HOME/.local/bin" >>"$GITHUB_PATH"
         echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
+        # Warm network-fetched caches the agents' tests need, from the runner
+        # (which has network) into a place the agent reads from. Evidence-
+        # driven list — extend it when a run reports another blocked
+        # download. tiktoken: inspect_ai's token-counting tests fetch BPE
+        # files on first use and the codex reviewer on inspect_ai#428
+        # (2026-09-09) stopped "on an unavailable tokenizer download"; the
+        # cache dir is tiktoken's default (TIKTOKEN_CACHE_DIR unset in the
+        # agents' env → tempfile.gettempdir()/data-gym-cache, i.e. /tmp on
+        # the runner and under codex, whose curated env sets no TMPDIR and
+        # whose bubblewrap sandbox binds the host /tmp). World-readable so
+        # the codex user can read what the runner wrote. Best-effort: a
+        # failed warm is a slower first test, never a failed provisioning.
+        if .venv/bin/python -c 'import tiktoken' 2>/dev/null; then
+          if .venv/bin/python - <<'PY'
+        import tiktoken
+        for name in ("cl100k_base", "o200k_base"):
+            tiktoken.get_encoding(name)
+        print("warmed tiktoken encodings: cl100k_base o200k_base")
+        PY
+          then chmod -R a+rX /tmp/data-gym-cache 2>/dev/null || true
+          else echo "::warning::tiktoken cache warm failed (tests needing it will try to download at run time)"; fi
+        fi
