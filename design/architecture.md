@@ -503,7 +503,14 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   `credentials.allowPlaintextInject` may ever be added to this overlay while
   the mask lacks an explicit host restriction, or contributor code could read
   the sentinel and have the proxy inject the real token into a request to a
-  PyPI host. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
+  PyPI host. The caller's `settings` input is the other door — a caller using
+  its own `mask` entries in normal mode has `tlsTerminate` set, and the
+  recursive merge would carry it through — so the compose step **deletes both
+  keys** from the merged result; the invariant is structural, not a comment.
+  On these paths a caller's mask entries still hide their credentials from
+  sandboxed commands, they just cannot inject them (the docs'
+  fail-without-exposing state), which is the right trade where contributor
+  code runs. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
   credential helper) get plain `deny` entries — nothing sandboxed needs
   them, and the agent's `gh` is excluded from the sandbox. Two gotchas
   encoded in the workflow: the path must be **absolute** (the action writes
@@ -519,7 +526,9 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   unopened). The overlay's `files` and `envVars` arrays are spliced as
   caller entries + overlay entries (jq `*` would otherwise replace a
   caller's own protections wholesale); the restriction arrays
-  (`allowedDomains`, `excludedCommands`) stay overlay-wins. The proper fix
+  (`allowedDomains`, `excludedCommands`) stay overlay-wins, and
+  `network.tlsTerminate` / `credentials.allowPlaintextInject` are deleted
+  whatever the caller passed. The proper fix
   is an action-side
   git-auth option independent of `allowed_non_write_users`; a request for
   one on `anthropics/claude-code-action` was drafted in #70 (to be filed by

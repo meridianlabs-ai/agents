@@ -814,9 +814,18 @@ jobs:
       # substituted on requests to EVERY host in network.allowedDomains — so
       # neither tlsTerminate nor allowPlaintextInject may ever be added to
       # this overlay, or contributor code could read the sentinel and have the
-      # proxy inject the real token into a request to a PyPI host. (Whether an
-      # explicit empty injectHosts:[] means "no hosts" is undocumented, so it
-      # is not relied on.) ~/.config/gh and ~/.gitconfig are the other
+      # proxy inject the real token into a request to a PyPI host. The
+      # caller's `inputs.settings` is the other door: a caller using its own
+      # mask entries in normal mode has tlsTerminate set, and jq's recursive
+      # merge would carry it (and allowPlaintextInject) straight through. The
+      # merge therefore DELETES both keys from the merged result, making the
+      # invariant structural rather than a comment — on these paths a caller
+      # mask entry still hides its credential from sandboxed commands, it just
+      # cannot inject it (the docs' fail-without-exposing state), which is the
+      # right trade on paths that run contributor code. `del` rather than
+      # setting a false value: the docs only show tlsTerminate as an object.
+      # (Whether an explicit empty injectHosts:[] means "no hosts" is
+      # undocumented, so it is not relied on.) ~/.config/gh and ~/.gitconfig are the other
       # places a GitHub credential could sit on the runner (gh's own store, a
       # credential helper) — nothing sandboxed needs them, so plain deny. The
       # agent's gh is in excludedCommands and reads the real files. The
@@ -842,7 +851,10 @@ jobs:
       # protections in `inputs.settings` compose with these instead of being
       # silently dropped (overlay entries last). Deliberately NOT done for
       # allowedDomains / excludedCommands: those are restrictions, and a
-      # caller list concatenated onto them would widen the sandbox.
+      # caller list concatenated onto them would widen the sandbox. The two
+      # `del`s at the end strip network.tlsTerminate and
+      # credentials.allowPlaintextInject from whatever the caller passed —
+      # see the credentials.files paragraph above for why.
       - name: Compose settings (external sandbox overlay)
         if: >-
           steps.trig.outputs.ok == 'true' &&
@@ -878,7 +890,9 @@ jobs:
             | (.sandbox.credentials.envVars // []) as $ce
             | . * $o
             | .sandbox.credentials.files = $cf + $o.sandbox.credentials.files
-            | .sandbox.credentials.envVars = $ce + $o.sandbox.credentials.envVars')
+            | .sandbox.credentials.envVars = $ce + $o.sandbox.credentials.envVars
+            | del(.sandbox.network.tlsTerminate)
+            | del(.sandbox.credentials.allowPlaintextInject)')
           {
             echo "value<<SETTINGS_EOF"
             printf '%s\n' "$merged"
