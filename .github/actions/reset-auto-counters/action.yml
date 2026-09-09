@@ -28,7 +28,10 @@ description: >-
   fails the caller's job — the callers' hand-off comment and label handling
   are the load-bearing part, and they phrase themselves on `ok`. A missing
   counter comment is not a failure (nothing to reset: the next round already
-  starts at 1).
+  starts at 1). The lookup and the PATCH retry with backoff (same shape as
+  the gates' `ghr`) so a transient 5xx / rate-limit HTML page does not turn
+  into a hand-off asking the human to hand-edit the counter; `ok=0` is
+  reserved for the persistent case.
 
 inputs:
   token:
@@ -75,6 +78,21 @@ runs:
         REASON: ${{ inputs.reason }}
       run: |
         set -uo pipefail
+        # Retry with backoff, same shape as the gates' ghr(): a 5xx or
+        # secondary-rate-limit response is an HTML page that makes `--jq`
+        # fail with "invalid character '<'" (observed, per the gate comments).
+        # Each attempt's stdout is captured and emitted only on overall
+        # success, so a fail-then-succeed retry cannot prefix the captured
+        # comment id with an error body.
+        ghr() {
+          local n=0 out
+          until out=$("$@"); do
+            n=$((n+1))
+            if [ "$n" -ge 4 ]; then return 1; fi
+            sleep $((n*3))
+          done
+          printf '%s' "$out"
+        }
         ok=1
         for counter in $COUNTERS; do
           case "$counter" in
@@ -84,11 +102,12 @@ runs:
           esac
           # Same lookup the gates use: the LAST comment carrying the marker.
           # Gate on the exit code, not the output: an empty result means no
-          # counter comment exists (nothing to reset), a failed call means we
-          # don't know — report that as not-ok rather than claiming a reset.
-          if ! cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          # counter comment exists (nothing to reset), a persistently failed
+          # call means we don't know — report that as not-ok rather than
+          # claiming a reset.
+          if ! cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
                        --jq 'map(select(.body|contains("'"$marker"'"))) | last | .id // empty'); then
-            echo "::warning::reset-auto-counters: could not look up the $label comment on #$PR."
+            echo "::warning::reset-auto-counters: could not look up the $label comment on #$PR (after retries)."
             ok=0; continue
           fi
           if [ -z "$cid" ]; then
@@ -97,10 +116,11 @@ runs:
           fi
           body="$marker
         🤖 $label reset ($REASON) — the next $unit starts at 1 with the full cap."
-          if gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent; then
+          # The PATCH is idempotent, so retrying it is safe.
+          if ghr gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent; then
             echo "reset-auto-counters: reset $label on #$PR (comment $cid)."
           else
-            echo "::warning::reset-auto-counters: could not reset $label on #$PR (comment $cid); it keeps its old value."
+            echo "::warning::reset-auto-counters: could not reset $label on #$PR (comment $cid) after retries; it keeps its old value."
             ok=0
           fi
         done

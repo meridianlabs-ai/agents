@@ -164,7 +164,8 @@ Exactly two paths reset a counter, and both go through the shared
 between them:
 
 - **Re-engagement** — a human comments `@auto` on an existing PR (item 6 under
-  "Turns" below). claude.yml re-applies the label and resets *both* counters.
+  "Event-driven implementation sketch" below). claude.yml re-applies the label
+  and resets *both* counters.
   This has existed since inspect_ai#53 and is the fastest way to continue an
   exhausted PR without hand-editing anything.
 - **Escalation** — each loop resets its *own* counter as part of the hand-off.
@@ -189,6 +190,12 @@ budget if the reset succeeded; if it failed it says so and offers the two ways
 out — edit the counter to 0 by hand, or re-engage (which resets both) — and if
 the removal itself failed it says the loop is still armed and how to stop it.
 (Otherwise the hand-off would repeat the false promise it exists to fix.) The
+review loop's hand-off also says that re-adding the label *alone* does nothing
+— that loop fires only on the reviewer's next verdict, so the human must request
+a fresh review too. The composite's lookup and PATCH retry with backoff (like
+the gates' own API calls), and the hand-off post retries as well: once the
+disarm and reset have run, a transiently failed comment would otherwise park the
+PR with nobody pinged and only a red job as the trace. The
 reset body carries no `rounds:`/`attempts:` number and, for the review loop, no
 head marker: the gates read 0 via their `${prev:-0}` default, and the
 no-progress check needs a prior round to compare against, so a fresh budget's
@@ -281,8 +288,9 @@ the dev agent authenticated as `AUTO_TOKEN`:
 4. **Converged** — CI green + review approved + no unresolved threads → enable
    auto-merge (or ping a human to merge, per repo policy).
 5. **Exhausted** — the round cap (10) is reached still unresolved, or a fix round
-   makes no progress (no new commit) → summary comment @mentioning the author,
-   remove `auto` label, stop.
+   makes no progress (no new commit) → remove the `auto` label, reset that
+   loop's counter (so re-labeling grants a fresh budget — see Autonomy
+   ceiling), summary comment @mentioning the author, stop.
 6. **Re-engaged** — a human explicitly asks `@auto` to keep going on an exhausted
    PR (an `@auto` comment). The kickoff re-applies the `auto` label *and resets
    the sticky round/attempt counters* (via the shared `reset-auto-counters`

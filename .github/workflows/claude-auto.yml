@@ -296,7 +296,10 @@ jobs:
       #      leaves the exhausted counter in place, and promising a fresh
       #      budget then would be exactly the false "re-add it" the reset
       #      exists to fix; a failed disarm is the one case where "re-add it"
-      #      is wrong because it was never removed.
+      #      is wrong because it was never removed. The post retries: by this
+      #      point the loop is already disarmed and reset, so a transiently
+      #      failed comment would leave the PR silently parked with nobody
+      #      pinged and only a red job as the trace.
       - name: Disarm the loop (escalation)
         if: steps.gate.outputs.act == 'escalate'
         id: disarm
@@ -343,12 +346,21 @@ jobs:
           if [ "$DISARMED" != "1" ]; then
             label="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its attempt counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me try again with a fresh budget, re-engage me with an @-mention comment (that re-applies the label and resets both counters)."
           elif [ "$RESET_OK" = "1" ]; then
-            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again — the attempt counter is reset, so that starts a fresh budget of $CAP."
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again on the next red CI run — the attempt counter is reset, so that starts a fresh budget of $CAP."
           else
-            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again — but I could not reset the attempt counter (API error), so first edit my sticky \"auto CI-fix attempts\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label and resets both counters); otherwise I'll escalate again on sight."
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again on the next red CI run — but I could not reset the attempt counter (API error), so first edit my sticky \"auto CI-fix attempts\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label and resets both counters); otherwise I'll escalate again on sight."
           fi
-          gh pr comment "$PR" --repo "$REPO" --body \
-            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Handing this to a human. $label"
+          body="🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Handing this to a human. $label"
+          ok=""
+          for i in 1 2 3 4 5; do
+            if gh pr comment "$PR" --repo "$REPO" --body "$body"; then ok=1; break; fi
+            echo "hand-off post failed (attempt $i); retrying"
+            sleep $((i * 15))
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::escalation hand-off comment on #$PR failed after 5 attempts — the disarm (disarmed=$DISARMED) and reset (ok=${RESET_OK:-skipped}) above have already run, so nobody was told; post the hand-off by hand."
+            exit 1
+          fi
 
       # Capture the branch tip and a timestamp before the agent runs so later
       # steps can tell whether the agent's fix landed and what it posted.

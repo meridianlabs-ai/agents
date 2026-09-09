@@ -489,7 +489,14 @@ jobs:
       #      leaves the exhausted counter in place, and promising a fresh
       #      budget then would be exactly the false "re-add it" the reset
       #      exists to fix; a failed disarm is the one case where "re-add it"
-      #      is wrong because it was never removed.
+      #      is wrong because it was never removed. It also says that re-adding
+      #      the label ALONE does nothing here: this loop only fires on the
+      #      reviewer's next verdict, so the human must request a fresh review
+      #      too (the CI-fix loop needs no such clause — a red run is its
+      #      trigger). The post retries: by this point the loop is already
+      #      disarmed and reset, so a transiently failed comment would leave
+      #      the PR silently parked with nobody pinged and only a red job as
+      #      the trace.
       - name: Disarm the loop (escalation)
         if: steps.gate.outputs.act == 'escalate'
         id: disarm
@@ -535,11 +542,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$DISARMED" != "1" ]; then
-            label="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its round counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me keep iterating with a fresh budget, re-engage me with an @-mention comment (that re-applies the label and resets both counters)."
+            label="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its round counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me keep iterating with a fresh budget, re-engage me with an @-mention comment (that re-applies the label, resets both counters and requests a fresh review)."
           elif [ "$RESET_OK" = "1" ]; then
-            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me keep iterating — the round counter is reset, so that starts a fresh budget of $CAP."
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it AND request a fresh review to let me keep iterating — I only act on the reviewer's next verdict, so the label alone does nothing. The round counter is reset, so that starts a fresh budget of $CAP."
           else
-            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me keep iterating — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label and resets both counters); otherwise I'll escalate again on sight."
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it AND request a fresh review to let me keep iterating (I only act on the reviewer's next verdict) — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label, resets both counters and requests a fresh review); otherwise I'll escalate again on sight."
           fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
           if [ "${STALLED:-}" = "1" ]; then
@@ -547,8 +554,17 @@ jobs:
           else
             reason="the reviewer still has feedback after $CAP review rounds and I haven't converged"
           fi
-          gh pr comment "$PR" --repo "$REPO" --body \
-            "${ping}🤖 auto: $reason. Handing this to a human. $label"
+          body="${ping}🤖 auto: $reason. Handing this to a human. $label"
+          ok=""
+          for i in 1 2 3 4 5; do
+            if gh pr comment "$PR" --repo "$REPO" --body "$body"; then ok=1; break; fi
+            echo "hand-off post failed (attempt $i); retrying"
+            sleep $((i * 15))
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::escalation hand-off comment on #$PR failed after 5 attempts — the disarm (disarmed=$DISARMED) and reset (ok=${RESET_OK:-skipped}) above have already run, so nobody was told; post the hand-off by hand."
+            exit 1
+          fi
 
       # Check out the PR head (derived above); authenticate as the machine
       # account so the agent's fix push re-triggers CI and its `@review` comment
