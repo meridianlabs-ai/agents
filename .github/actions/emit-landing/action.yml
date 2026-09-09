@@ -41,6 +41,9 @@ inputs:
       Pull-request number the run operates on; empty on issue runs. The SAME
       expression the workflow passes to `land`'s `pr-number`: the validator
       refuses a manifest whose pr_number differs from the land job's input.
+      On a PR comment the number is `github.event.issue.number`, not
+      `github.event.pull_request.number` — README.md → "Using the pair" has
+      the one expression that covers both shapes.
     required: false
     default: ""
   issue-number:

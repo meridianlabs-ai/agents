@@ -305,10 +305,14 @@ Three rules define the shape:
   default — the fork's pristine `main` is not its default branch, and its
   ruleset should be the second line, not the only one), `pr_number` and
   `issue_number` to the numbers the caller's trusted context names
-  (`pr-number` / `issue-number` inputs, from the event payload — so the
-  agent job cannot steer the push, replies, thread resolutions and
-  hand-back at a PR of its choosing) and the branch to that PR's live head
-  ref, the SHAs to 40 hex with `has_bundle` ⇔
+  (`pr-number` / `issue-number` inputs, from the event payload — so on a
+  PR run the agent job cannot steer the push, replies, thread resolutions
+  and hand-back at a PR of its choosing) and the branch to that PR's live
+  head ref; on a run that names no PR, the branch to the land job's
+  `branch-prefix` (an issue run's `claude/issue-N-`, composed from the
+  trusted issue number — without it the branch is agent-chosen there, and
+  the agent job could fast-forward another open PR's branch and have
+  `pr.open` adopt that PR), the SHAs to 40 hex with `has_bundle` ⇔
   `head_sha != start_sha`, every `*_file` reference to a regular,
   non-symlinked file inside the artifact under 64 KiB, `issues[].repo` to
   an allow-list, thread IDs and numbers to their shapes, `stage` to the

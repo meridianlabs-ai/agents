@@ -65,10 +65,10 @@ to this document together.
 | `schema` | emit-landing | must be `1` |
 | `repo` | emit-landing (`$GITHUB_REPOSITORY`) | must equal the repo the land job operates on (case-insensitive) |
 | `run_id` | emit-landing (`$GITHUB_RUN_ID`) | must equal the land job's `$GITHUB_RUN_ID` — an artifact from another run cannot be replayed |
-| `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName` |
+| `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName`; when the run names no PR and the land job's `branch-prefix` is set, must start with it (an issue run's `claude/issue-N-`) — with no PR and no prefix the branch is agent-chosen within the bounds above |
 | `start_sha`, `head_sha` | emit-landing | 40 lowercase hex; equal iff `has_bundle` is false |
 | `has_bundle` | emit-landing | boolean; when true `commits.bundle` must exist and its tip must be `head_sha` and descend from `start_sha` (checked by `land`, in an empty repo) |
-| `pr_number` | emit-landing (`pr-number` input) | positive integer or null; **must equal the land job's `pr-number` input** (null when that is empty) — the PR the run's trusted context names, so an agent job cannot steer the push, replies, thread resolutions and hand-back at a PR of its choosing, nor drop the number on a PR run to skip the head-ref rule and let `pr.open` adopt another PR. Required by `replies` and `resolve_threads` |
+| `pr_number` | emit-landing (`pr-number` input) | positive integer or null; **must equal the land job's `pr-number` input** (null when that is empty) — the PR the run's trusted context names, so on a PR run an agent job cannot steer the push, replies, thread resolutions and hand-back at a PR of its choosing, nor drop the number to skip the head-ref rule and let `pr.open` adopt another PR (on a run that names no PR, `branch-prefix` is what keeps the push off other PRs' branches). Required by `replies` and `resolve_threads` |
 | `issue_number` | emit-landing (`issue-number` input) | positive integer or null; **must equal the land job's `issue-number` input** the same way; where `land` posts the error report / hand-off / provenance when there is no PR |
 | `pr` | workflow | `open` (bool), `title` (≤ 256 chars), `body_file`; optional `base` (branch name; absent or empty means the land job's default branch, as `gh pr create` would default), `labels` (strings, applied whether `land` opened the PR or adopted an agent-opened one — the `auto` and `engine:*` labels must reach both) and `issue` (the originating issue, gets a "✅ Opened a pull request" comment only when `land` opened the PR). Skipped when `pr_number` is already set; an existing open PR for `branch` is adopted, and the adopt check runs inside the create retry so a create whose response was lost is adopted on the next attempt, not duplicated |
 | `comments[]` | workflow | `number` (positive integer — an issue or a PR; the issues endpoint serves both), `body_file` |
@@ -101,6 +101,22 @@ copies them into the manifest, and `land`'s validator refuses a manifest
 whose numbers differ from its own inputs. That is what ties the landing to
 the PR/issue the run is actually for.
 
+Mind the PR-comment shape: on `issue_comment` events for a PR (the
+`@claude`-on-a-PR and auto-loop runs) `github.event.pull_request.number` is
+**empty** and the PR number is `github.event.issue.number`, so a snippet that
+reads only the former passes an empty `pr-number` there, the validator forces
+`pr_number: null`, and every manifest with `replies`, `resolve_threads` or
+`handback` is refused ("need pr_number"). `github.event.issue.pull_request`
+is present in the payload exactly when the issue is a PR — a trusted, API-free
+discriminator — so one expression covers `pull_request*`,
+`pull_request_review*` and PR-comment events, and its complement yields the
+issue number only on a real issue:
+
+```yaml
+pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
+issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
+```
+
 Agent job, last step. It runs git in the workspace, so on the codex path it
 is gated on the reclaim step having **succeeded** — `== 'success'`, never
 `!= 'failure'`: a reclaim cancelled mid-run must skip every later git call
@@ -114,8 +130,8 @@ path-aware condition (`codexuser` / `codexreclaim` are claude.yml's step ids):
         with:
           start-sha: ${{ steps.sync.outputs.start_sha || steps.base.outputs.sha }}
           branch: ${{ steps.sync.outputs.branch || steps.claude.outputs.branch_name }}
-          pr-number: ${{ github.event.pull_request.number }}
-          issue-number: ${{ github.event.issue.number }}
+          pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
+          issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json   # composed by an earlier step
 ```
 
@@ -131,8 +147,13 @@ Land job (`needs: agent`, `if: always()`, a fresh runner, **no checkout**):
           # fallback target for the final report when the manifest never
           # validated (missing artifact, tampered manifest) — from the EVENT
           # payload, never from the manifest.
-          pr-number: ${{ github.event.pull_request.number }}
-          issue-number: ${{ github.event.issue.number }}
+          pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
+          issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
+          # Issue runs have no PR head ref to pin the branch to; the prefix
+          # claude-code-action gives issue branches, composed from the
+          # trusted issue number, keeps the push off other PRs' branches.
+          # Ignored on PR runs.
+          branch-prefix: ${{ !github.event.issue.pull_request && github.event.issue.number && format('claude/issue-{0}-', github.event.issue.number) || '' }}
 ```
 
 (The token expression is spelled out in `examples/landing-smoke.yml`; it is

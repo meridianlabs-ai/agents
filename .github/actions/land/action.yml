@@ -30,8 +30,12 @@ description: >-
   The manifest's `pr_number` / `issue_number` are pinned to the `pr-number`
   / `issue-number` inputs by the validator (equal, or null when the input is
   empty), so the run's trusted context — not the agent job — decides which
-  PR is pushed to, replied on, thread-resolved and handed back. Callers pass
-  the same expressions to `emit-landing` and here.
+  PR is pushed to, replied on, thread-resolved and handed back; on a PR run
+  the manifest's `branch` must be that PR's live head ref. On a run that
+  names no PR, `branch-prefix` (composed from trusted context, e.g. the
+  issue run's `claude/issue-N-`) is what keeps the push off other PRs'
+  branches — without it the branch is agent-chosen there. Callers pass the
+  same expressions to `emit-landing` and here.
 
   Two tokens: `read-token` (the job token) for the artifact-adjacent reads —
   the PR head-ref and default-branch lookups, the start-SHA fetch, the
@@ -99,12 +103,25 @@ inputs:
       of the PR the run is actually for.
     required: false
     default: ""
+  branch-prefix:
+    description: >-
+      Prefix the manifest's `branch` must carry when `pr-number` is empty
+      (an issue run has no PR head ref to pin the branch to). Composed from
+      trusted context — claude-code-action's issue branches are
+      `claude/issue-${{ github.event.issue.number }}-` — so an agent job
+      cannot name another open PR's head as `branch` and fast-forward it.
+      Ignored on PR runs (the head-ref pin is stricter); empty leaves the
+      branch agent-chosen on runs that name no PR, bounded only by shape, the
+      default branch and `refused-branches`.
+    required: false
+    default: ""
   pr-number:
     description: >-
       The PR the caller's TRUSTED context names (`github.event.pull_request.number`,
-      `github.event.issue.number` on a PR comment, or a gate-job output
-      computed before any untrusted code ran) — the SAME expression the
-      caller passes to `emit-landing`. Two roles: the validator refuses a
+      `github.event.issue.number` on a PR comment — see the README's "Using
+      the pair" for the one expression that covers both — or a gate-job
+      output computed before any untrusted code ran) — the SAME expression
+      the caller passes to `emit-landing`. Two roles: the validator refuses a
       manifest whose `pr_number` differs from it (or is set when this is
       empty, or null when this is not), and it is the Report step's fallback
       target when the manifest never validated (missing artifact, tampered
@@ -191,6 +208,7 @@ runs:
         PR_HEAD_REF: ${{ inputs.pr-head-ref || steps.lookup.outputs.ref }}
         EVENT_PR_NUMBER: ${{ inputs.pr-number }}
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
+        BRANCH_PREFIX: ${{ inputs.branch-prefix }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
@@ -198,6 +216,7 @@ runs:
           --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
           --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
+          --branch-prefix "$BRANCH_PREFIX" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.

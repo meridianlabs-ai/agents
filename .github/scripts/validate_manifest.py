@@ -20,14 +20,19 @@ manifest. Usage:
         --refused-branches main \
         --allowed-issue-repos owner/name,owner/other \
         --event-pr-number "$EVENT_PR" --event-issue-number "$EVENT_ISSUE" \
-        [--pr-head-ref <headRefName of that PR, from the API>]
+        [--pr-head-ref <headRefName of that PR, from the API>] \
+        [--branch-prefix "claude/issue-$EVENT_ISSUE-"]
 
 `--event-pr-number` / `--event-issue-number` are the numbers the run's
 TRUSTED context names (the event payload, or a gate-job output computed
 before any untrusted code ran); the manifest's `pr_number` / `issue_number`
 must equal them exactly — null when the event names none — so an agent job
 cannot steer the landing (push, replies, thread resolutions, hand-back) at a
-PR of its choosing.
+PR of its choosing. On a PR run that also pins `branch` to that PR's live
+head ref. On a run that names no PR, `branch` is agent-chosen unless
+`--branch-prefix` is set: then it must start with the prefix (the caller
+composes it from trusted context — an issue run's `claude/issue-N-`), which
+keeps the push off every other open PR's branch.
 
 The schema is documented in .github/actions/emit-landing/README.md; keep
 the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
@@ -115,6 +120,7 @@ class Validator:
         refused_branches=(),
         event_pr_number: str = "",
         event_issue_number: str = "",
+        branch_prefix: str = "",
     ) -> None:
         self.m = manifest
         self.dir = Path(artifact_dir)
@@ -127,6 +133,7 @@ class Validator:
         self.pr_head_ref = pr_head_ref
         self.event_pr_number = event_pr_number.strip()
         self.event_issue_number = event_issue_number.strip()
+        self.branch_prefix = branch_prefix.strip()
         self.errors: list[str] = []
 
     def err(self, msg: str) -> None:
@@ -321,6 +328,14 @@ class Validator:
                 self.err("manifest: pr_number is set but no PR head ref was supplied to compare against (--pr-head-ref)")
             elif branch is not None and branch != self.pr_head_ref:
                 self.err(f"manifest: branch {branch!r} is not PR #{pr_number}'s head ref ({self.pr_head_ref!r})")
+        elif self.branch_prefix and branch is not None and not branch.startswith(self.branch_prefix):
+            # No PR to pin the branch to (an issue run): without this the
+            # agent job could name another open PR's head, bundle on its tip
+            # and fast-forward it — the push is non-force and never the
+            # default branch, but it would land on a PR of the agent's
+            # choosing and `pr.open` would adopt it. The caller composes the
+            # prefix from trusted context (`claude/issue-N-` for issue N).
+            self.err(f"manifest: branch {branch!r} does not start with the prefix this run's branches must carry ({self.branch_prefix!r}; --branch-prefix)")
 
         issue_number = self._positive_int(m, "issue_number", "manifest", required=False)
         self._tie_to_event("issue_number", issue_number, self.event_issue_number, "issue", "--event-issue-number")
@@ -496,6 +511,11 @@ def main(argv=None) -> int:
         default="",
         help="the issue the run's event names (trusted); manifest.issue_number must equal it, and be null when it is empty",
     )
+    ap.add_argument(
+        "--branch-prefix",
+        default="",
+        help="when --event-pr-number is empty, manifest.branch must start with this (e.g. claude/issue-N-); empty leaves the branch agent-chosen on such runs",
+    )
     args = ap.parse_args(argv)
 
     manifest, errors = load_manifest(Path(args.dir))
@@ -511,6 +531,7 @@ def main(argv=None) -> int:
             refused_branches=args.refused_branches.split(","),
             event_pr_number=args.event_pr_number,
             event_issue_number=args.event_issue_number,
+            branch_prefix=args.branch_prefix,
         )
     for line in errors:
         print(f"manifest violation: {line}")

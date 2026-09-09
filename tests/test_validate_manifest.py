@@ -97,6 +97,7 @@ def run(
     refused=None,
     event_pr=EVENT_PR,
     event_issue=EVENT_ISSUE,
+    branch_prefix="",
 ):
     return vm.validate(
         manifest,
@@ -109,6 +110,7 @@ def run(
         refused_branches=REFUSED if refused is None else refused,
         event_pr_number=event_pr,
         event_issue_number=event_issue,
+        branch_prefix=branch_prefix,
     )
 
 
@@ -259,6 +261,60 @@ def test_branch_must_match_pr_head_ref(tmp_path):
 def test_pr_number_without_head_ref_fails_closed(tmp_path):
     errs = run(tmp_path, base_manifest(tmp_path), pr_head_ref="")
     assert any("no PR head ref was supplied" in e for e in errs)
+
+
+# --- branch prefix: the no-PR run's substitute for the head-ref pin ----------
+
+
+def issue_run_manifest(d: Path, **overrides) -> dict:
+    # An `issues` run: the event names issue 79 and no PR, so pr_number is
+    # null, and nothing that needs a PR is in the manifest.
+    m = base_manifest(d, pr_number=None, replies=[], resolve_threads=[], handback=False, **overrides)
+    return m
+
+
+PREFIX = "claude/issue-79-"
+
+
+def test_branch_prefix_accepts_the_issues_branch(tmp_path):
+    m = issue_run_manifest(tmp_path)
+    assert run(tmp_path, m, pr_head_ref="", event_pr="", branch_prefix=PREFIX) == []
+
+
+def test_branch_prefix_refuses_another_prs_head(tmp_path):
+    # With no PR to pin the branch to, the agent job could name another
+    # open PR's head (claude/issue-80-…), bundle on its tip and have the land
+    # job fast-forward that PR and adopt it; the prefix from the trusted
+    # issue number closes that.
+    m = issue_run_manifest(tmp_path, branch="claude/issue-80-other")
+    errs = run(tmp_path, m, pr_head_ref="", event_pr="", branch_prefix=PREFIX)
+    assert errs == [
+        "manifest: branch 'claude/issue-80-other' does not start with the prefix this run's branches must carry ('claude/issue-79-'; --branch-prefix)"
+    ]
+
+
+def test_branch_prefix_is_a_prefix_not_a_substring(tmp_path):
+    m = issue_run_manifest(tmp_path, branch="scratch/claude/issue-79-x")
+    errs = run(tmp_path, m, pr_head_ref="", event_pr="", branch_prefix=PREFIX)
+    assert any("does not start with the prefix" in e for e in errs)
+
+
+def test_branch_prefix_is_trimmed_and_empty_disables_it(tmp_path):
+    m = issue_run_manifest(tmp_path, branch="claude/issue-80-other")
+    assert any("does not start with the prefix" in e for e in run(tmp_path, m, pr_head_ref="", event_pr="", branch_prefix=f" {PREFIX}\n"))
+    # No prefix: the branch is agent-chosen within the other bounds (documented residual).
+    assert run(tmp_path, m, pr_head_ref="", event_pr="", branch_prefix="  ") == []
+
+
+def test_branch_prefix_is_ignored_on_a_pr_run(tmp_path):
+    # The head-ref pin governs PR runs; a caller that passes a prefix there
+    # (one expression for both shapes) must not have its PR landings refused.
+    m = base_manifest(tmp_path, branch="fix/typo")
+    assert run(tmp_path, m, pr_head_ref="fix/typo", branch_prefix=PREFIX) == []
+    # …and the pin still holds regardless of the prefix.
+    errs = run(tmp_path, m, pr_head_ref="some/other-branch", branch_prefix="fix/")
+    assert any("is not PR #456's head ref" in e for e in errs)
+    assert not any("does not start with the prefix" in e for e in errs)
 
 
 # --- the event tie: pr_number / issue_number are the run's, not the agent's --
@@ -625,6 +681,15 @@ def test_cli_refused_branches(tmp_path, capsys):
     assert "is on the land job's refused list (main)" in capsys.readouterr().out
     # An empty list (the flag's own default) leaves only the default-branch rule.
     assert cli(tmp_path, "--default-branch", "meridian", "--refused-branches", "", pr_head_ref="main") == 0
+
+
+def test_cli_branch_prefix(tmp_path, capsys):
+    m = issue_run_manifest(tmp_path, branch="claude/issue-80-other")
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path, "--branch-prefix", PREFIX, pr_head_ref="", event_pr="") == 1
+    assert "does not start with the prefix this run's branches must carry ('claude/issue-79-'" in capsys.readouterr().out
+    # The flag's own default: no prefix rule on a no-PR run.
+    assert cli(tmp_path, pr_head_ref="", event_pr="") == 0
 
 
 def test_cli_missing_manifest(tmp_path, capsys):
