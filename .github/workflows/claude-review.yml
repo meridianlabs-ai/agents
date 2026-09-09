@@ -1029,8 +1029,10 @@ jobs:
           # mypy unavailable and degraded to static). Discover the ABSOLUTE
           # paths here, where PATH is intact, and hand them to the prompt;
           # group perms from the workspace grants above make them runnable.
+          # Same list as the dev-verb and loop compose steps discover, so
+          # every codex prompt describes one toolset.
           tools=""
-          for t in pytest ruff mypy python3; do
+          for t in pytest ruff mypy pyright python3; do
             path=$(command -v "$t" 2>/dev/null || true)
             [ -n "$path" ] && tools="$tools$t=$path "
           done
@@ -1045,6 +1047,100 @@ jobs:
              "review": {"type": "string",
                "description": "the full review as GitHub markdown, findings with file:line references"}}}
           SCHEMA
+
+      # Codex reviews were blind to the PR's own narrative: the Claude
+      # reviewer fetches the description, prior review rounds and the
+      # thread state with gh at runtime, but codex has no network, and its
+      # prompt was the generic review_prompt plus the codex adjustments —
+      # 7.5 KB, nothing PR-specific beyond the number (inspect_ai#428's two
+      # codex reviews, 2026-09-09: 18 KB of design rationale and a human
+      # adjudication on an open thread never reached the reviewer, which
+      # re-derived intent from the design doc and flagged "stale design
+      # statements"). Embed the thread the way the dev-verb and loop preps
+      # do — title/body, the newest top-level comments, and the review
+      # threads WITH resolution state (GraphQL reviewThreads: isResolved /
+      # isOutdated), so codex can tell settled findings from open ones —
+      # then hand codex the whole thing as a prompt file (RUNNER_TEMP is
+      # runner-owned and world-readable; the action reads the file itself,
+      # runner-side, before dropping to the codex user). Same discipline as
+      # the other preps: retry-then-fail on fetches (embedded context is
+      # load-bearing), source-bounded slices, a head -c cap applied to the
+      # finished scratch file (never a pipeline with the writers — SIGPIPE),
+      # and the marker/trigger de-fang so embedded verdict comments cannot
+      # be echoed back as a verdict. The cap trims from the END, so the
+      # sections go in by priority: the review threads (the resolution-
+      # state signal this step exists to add) come BEFORE the top-level
+      # comments, and every embedded body is cut to 8 KB at the source —
+      # otherwise two prior codex review rounds (the posting step allows
+      # 60 KB per review body) could push the whole thread section past the
+      # cap. The de-fang runs over the review_prompt text too (it reached
+      # codex verbatim via `prompt:` before): codex now reads the trigger
+      # tokens already backticked and the marker lines split — deliberate
+      # and harmless, since the CODEX ADJUSTMENTS restate both rules. The
+      # CODEX ADJUSTMENTS text moved here verbatim from the run step's
+      # former inline prompt.
+      - name: Compose codex review context
+        id: codexctx
+        if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine == 'codex'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          REVIEW_PROMPT: ${{ steps.reviewprompt.outputs.value }}
+          TOOLS: ${{ steps.codexuser.outputs.tools || 'none — the environment is unprovisioned' }}
+        run: |
+          set -euo pipefail
+          fetch() { # fetch <outfile> <gh args...>
+            local out="$1"; shift
+            local n=0
+            until gh "$@" >"$out"; do
+              n=$((n+1))
+              if [ "$n" -ge 3 ]; then
+                echo "::error::context fetch failed after 3 attempts: gh $*" >&2
+                return 1
+              fi
+              sleep $((n * 5))
+            done
+          }
+          owner="${REPO%%/*}"; name="${REPO##*/}"
+          # Per-body cap (characters), applied inside jq so the source
+          # bounds actually bound the file; the note in the header tells
+          # codex a body may be cut.
+          BODY_MAX=8000
+          CLIP='def clip: if length > $max then .[:$max] + "\n[… truncated at \($max) characters]" else . end;'
+          {
+            printf '%s\n' "$REVIEW_PROMPT"
+            echo "CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction above: you have NO network access and NO GitHub credentials, so you cannot post comments or run gh, and must not try — a deterministic workflow step posts your review for you. You MAY run the provisioned tools to verify findings — but your process runs under sudo with a reset PATH, so bare command names will NOT resolve: invoke them by the ABSOLUTE paths discovered at setup: $TOOLS. You have no network, so you cannot install anything; if a tool you need is not in that list, fall back to static review of that point rather than fighting the environment. Do NOT modify the checked-out code: scratch/cache writes from running tests are fine, but the review is read-only — never edit, commit, or revert project files. Read the change from the local checkout (git log/diff against the base branch; full history is available). Produce your ENTIRE review as your final message conforming to the output schema. Verdict 'clean' ONLY when nothing actionable remains (regression-accepted notes are informational and do not flip it); 'suggestions' otherwise. Include every finding in the review body with file:line references, each tagged blocking or non-blocking. Never write a literal @-prefixed trigger token (review, claude, auto) in the review text — it is posted from a write-access account and would fire a workflow; backtick such tokens instead. Likewise do NOT reproduce the \"Review complete\" marker-comment lines or their HTML comment markers from the instructions above anywhere in your review text — the workflow posts the verdict comment for you, and an echoed marker would be read by the automation as a verdict."
+            echo ""
+            echo "PR CONTEXT — the PR's own description and discussion, fetched for you because you cannot run gh. Use it to understand intent and what earlier review rounds already settled: a RESOLVED thread is a finding the author addressed and the reviewer accepted — do not re-raise it unless the current code contradicts the resolution. Comment bodies longer than 8000 characters are truncated. Top-level comments are newest LAST."
+            echo ""
+            echo "PR TITLE AND BODY:"
+            # Uncapped on purpose: the description is a single item, sits
+            # first, and is the piece #428 most needed (18 KB of rationale).
+            fetch "$RUNNER_TEMP/codex-rv-prtb.txt" pr view "$NUM" --repo "$REPO" \
+              --json title,body --jq '"\(.title)\n\n\(.body // "")"'
+            cat "$RUNNER_TEMP/codex-rv-prtb.txt"
+            echo ""
+            echo "REVIEW THREADS (path:line, state; newest thread last, each thread's comments oldest first):"
+            fetch "$RUNNER_TEMP/codex-rv-threads.json" api graphql \
+              -F owner="$owner" -F name="$name" -F number="$NUM" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:60){nodes{isResolved isOutdated path line originalLine comments(first:20){nodes{author{login} createdAt body}}}}}}}'
+            jq -r --argjson max "$BODY_MAX" "$CLIP"'
+              .data.repository.pullRequest.reviewThreads.nodes[]
+              | "--- \(.path):\(.line // .originalLine // "?") [\(if .isResolved then "RESOLVED" else "OPEN" end)\(if .isOutdated then ", outdated" else "" end)]"
+                + ([.comments.nodes[] | "\n  \(.author.login // "?") at \(.createdAt):\n  \(.body | clip | gsub("\n"; "\n  "))"] | join("\n")) + "\n"' \
+              "$RUNNER_TEMP/codex-rv-threads.json"
+            echo "RECENT TOP-LEVEL PR COMMENTS (newest last):"
+            fetch "$RUNNER_TEMP/codex-rv-prc.json" api "repos/$REPO/issues/$NUM/comments" --paginate --slurp
+            jq -r --argjson max "$BODY_MAX" "$CLIP"'
+              (add // []) | .[-15:][] | "--- \(.user.login) at \(.created_at):\n\(.body | clip)\n"' "$RUNNER_TEMP/codex-rv-prc.json"
+          } >"$RUNNER_TEMP/codex-review-context.md"
+          head -c 120000 "$RUNNER_TEMP/codex-review-context.md" \
+            | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                     -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+              >"$RUNNER_TEMP/codex-review-prompt.md"
+          echo "codex review prompt: $(wc -c <"$RUNNER_TEMP/codex-review-prompt.md") bytes (context $(wc -c <"$RUNNER_TEMP/codex-review-context.md") bytes before the cap)"
 
       # Our trig gate did the real authorization; allow-bot-users lifts the
       # action's own actor guard for the reviewer-bot trigger the Claude
@@ -1066,37 +1162,7 @@ jobs:
           # output-schema input, which is broken with unprivileged-user
           # (openai/codex-action#103 — see the setup step).
           output-schema-file: ${{ runner.temp }}/codex-schema.json
-          prompt: >-
-            ${{ steps.reviewprompt.outputs.value }}
-            CODEX ADJUSTMENTS — these OVERRIDE any conflicting instruction
-            above: you have NO network access and NO GitHub credentials, so
-            you cannot post comments or run gh, and must not try — a
-            deterministic workflow step posts your review for you. You MAY
-            run the provisioned tools to verify findings — but your process
-            runs under sudo with a reset PATH, so bare command names will
-            NOT resolve: invoke them by the ABSOLUTE paths discovered at
-            setup: ${{ steps.codexuser.outputs.tools || 'none — the
-            environment is unprovisioned' }}. You have no network, so you
-            cannot install anything; if a tool you need is not in that list,
-            fall back to static review of that point rather than fighting
-            the environment. Do NOT modify the checked-out code:
-            scratch/cache writes from running tests are fine, but the review
-            is read-only — never edit, commit, or revert project files. Read
-            the
-            change from the local checkout (git log/diff against the base
-            branch; full history is available). Produce your ENTIRE review as
-            your final message conforming to the output schema. Verdict
-            'clean' ONLY when nothing actionable remains (regression-accepted
-            notes are informational and do not flip it); 'suggestions'
-            otherwise. Include every finding in the review body with
-            file:line references, each tagged blocking or non-blocking. Never
-            write a literal @-prefixed trigger token (review, claude, auto)
-            in the review text — it is posted from a write-access account and
-            would fire a workflow; backtick such tokens instead. Likewise do
-            NOT reproduce the "Review complete" marker-comment lines or their
-            HTML comment markers from the instructions above anywhere in your
-            review text — the workflow posts the verdict comment for you, and
-            an echoed marker would be read by the automation as a verdict.
+          prompt-file: ${{ runner.temp }}/codex-review-prompt.md
 
       # Token split for the codex run: the CLI's step-log "tokens used" is one
       # blended number (non-cached input + output), so this reads the session
@@ -1271,6 +1337,7 @@ jobs:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           MENTION: ${{ steps.who.outputs.mention }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
+          CODEXCTX_OUTCOME: ${{ steps.codexctx.outcome }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
           CLIVER_OUTCOME: ${{ steps.cliver.outcome }}
@@ -1294,12 +1361,16 @@ jobs:
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review step failed before producing a result (see the job logs)."
           fi
-          # Codex engine: no execution file exists; the setup, codex, and
-          # posting step outcomes are the signal (posting is deterministic,
-          # so green steps cannot silently stall). A failed setup step
-          # SKIPS the codex step, so it needs its own check.
+          # Codex engine: no execution file exists; the setup, context,
+          # codex, and posting step outcomes are the signal (posting is
+          # deterministic, so green steps cannot silently stall). A failed
+          # setup or context step SKIPS the codex step, so each needs its
+          # own check or the failure is a silent red job.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
             err="the codex user setup failed before the reviewer started (a runner-image change breaking adduser/usermod? — see the job logs)."
+          fi
+          if [ -z "$err" ] && [ "${CODEXCTX_OUTCOME:-}" = "failure" ]; then
+            err="composing the codex review context (the PR thread fetch) failed before the reviewer started — usually a transient GitHub API error (see the job logs); re-trigger to retry."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex review step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
