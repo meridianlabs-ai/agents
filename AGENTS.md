@@ -77,13 +77,22 @@ take effect on every repo's next run.
 - **No git credential is ever written to the workspace** (issue #61,
   2026-09-09): every checkout runs `persist-credentials: false`, and every
   runner-side `git fetch`/`push` authenticates through a step-scoped
-  credential helper defined in that step's `GIT_CONFIG_*` env (copy an
-  existing block; the token is the job token for reads, `MARVIN_TOKEN` for
-  pushes that must trigger CI). When adding a git network call to a workflow
-  or composite, give its step that env — never rely on `.git/config`, and
-  never put a token in a URL or an `http.*.extraheader`. The codex landing
-  steps additionally restore the pre-codex `.git/config` and pin
-  `core.hooksPath`/`core.fsmonitor`; keep that when touching them. See
+  credential helper defined in that step's `GIT_CONFIG_*` env. Copy an
+  existing block verbatim: every copy reads the token from the ONE variable
+  name `GIT_TOKEN` (composites set `GIT_TOKEN: ${{ inputs.<token> }}`; the
+  helper runs under `sh` without `set -u`, so a block that names a variable
+  the step never set fails silently with an empty password), and the helper
+  key is `credential.${{ github.server_url }}.helper`, not the generic
+  `credential.helper`, so no other host is ever answered with the token. The
+  token is the job token for reads, `MARVIN_TOKEN` for pushes that must
+  trigger CI. When adding a git network call to a workflow or composite,
+  give its step that env — never rely on `.git/config`, and never put a
+  token in a URL or an `http.*.extraheader`. The codex landing steps
+  additionally pin `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` (a
+  codex-written `.git/commondir` would otherwise redirect git to a config
+  codex owns), refuse if that file exists, restore the pre-codex
+  `.git/config`, and pin `core.hooksPath`/`core.fsmonitor`; keep all of that
+  when touching them. See
   design/architecture.md → No persisted git credentials and
   design/codex-engine.md → Hook-safe landing.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat

@@ -63,22 +63,26 @@ runs:
       env:
         BRANCH: ${{ inputs.branch }}
         MERGE_SHA: ${{ inputs.merge_sha }}
-        PUSH_TOKEN: ${{ inputs.push-token }}
         REQUIRE_FILE: ${{ inputs.require-file }}
         # Step-scoped credential (design/architecture.md → "No persisted git
         # credentials"): git reads GIT_CONFIG_* from the environment with
         # command-line precedence, so this defines a credential helper that
-        # answers the 401 on the fetch and the push from PUSH_TOKEN — the
+        # answers the 401 on the fetch and the push from GIT_TOKEN — the
         # push runs as the token's identity, and the token exists nowhere but
-        # this step's environment. The empty first entry resets any helper
-        # inherited from the runner image's global config. (A URL-embedded
-        # credential, as claude-code-action leaves on origin after a Claude
-        # run, takes precedence over helpers: same machine account there.)
+        # this step's environment. GIT_TOKEN is the one variable name every
+        # copy of this block reads (AGENTS.md), so a copied block cannot
+        # silently reference an unset name. The empty first entry resets any
+        # helper inherited from the runner image's global config; the helper
+        # itself is scoped to this server's URL, so no other host is ever
+        # answered with the token. (A URL-embedded credential, as
+        # claude-code-action leaves on origin after a Claude run, takes
+        # precedence over helpers: same machine account there.)
+        GIT_TOKEN: ${{ inputs.push-token }}
         GIT_CONFIG_COUNT: "2"
         GIT_CONFIG_KEY_0: credential.helper
         GIT_CONFIG_VALUE_0: ""
-        GIT_CONFIG_KEY_1: credential.helper
-        GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$PUSH_TOKEN"; }; f'
+        GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+        GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
       run: |
         set -euo pipefail
         # Fence first: a run whose agent never started leaves the merge on the
@@ -94,7 +98,7 @@ runs:
         fi
         # Composite inputs are not enforced as required at runtime; a missing
         # token must not degrade into an unauthenticated push.
-        if [ -z "$PUSH_TOKEN" ]; then
+        if [ -z "$GIT_TOKEN" ]; then
           echo "::error::push-base-merge: push-token is empty — refusing to push the base merge unauthenticated."
           exit 1
         fi

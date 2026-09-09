@@ -180,10 +180,16 @@ if `git config --get-all http.https://github.com/.extraheader` finds anything
 (git follows includes, so the check survives checkout's layout changes); and
 every runner-side git network operation authenticates itself, scoped to its
 step, through git's environment config — `GIT_CONFIG_COUNT` /
-`GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` define a `credential.helper` that
-answers a 401 from a masked env var (`GIT_TOKEN` in the workflows, the token
-input in the composites), with an empty first entry resetting any helper the
-runner image's global config might carry. A helper rather than the base64
+`GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` define a credential helper that
+answers a 401 from a masked env var — `GIT_TOKEN`, the one variable name
+every copy of the block reads (the composites map their token input onto
+it), so a block copied into a new step cannot silently name a variable the
+step never set — with an empty first `credential.helper` entry resetting any
+helper the runner image's global config might carry. The helper itself is
+keyed `credential.${{ github.server_url }}.helper`: git's URL-scoped
+credential config, so only this server's 401s are answered and a `git fetch`
+aimed at any other host (the dev agent's allow-list permits the verb) gets no
+credential. A helper rather than the base64
 `AUTHORIZATION` header #61 sketched, for two reasons: expressions have no
 base64, so a header cannot be composed in YAML `env:` (and a prior step's
 masked base64 output would be dropped by the runner's "may contain secret"
@@ -196,7 +202,7 @@ changes who pushes. Per step:
 | --- | --- |
 | `sync-branch` (all three workflows) | job token — fetches only |
 | `push-base-merge` (all three) | `push-token`, now required and validated: `MARVIN_TOKEN` (the push must trigger CI) |
-| codex landing steps | `MARVIN_TOKEN` (`\|\| github.token` where the caller lacks it — degrading as every marvin-less push does) |
+| codex landing steps | `MARVIN_TOKEN` — in `claude.yml` `\|\| github.token` where the caller lacks it (degrading as every marvin-less push does); the loops have no fallback, their gate already exited on a missing secret |
 | hand-back, unlanded-work, open-PR and verify fetches | job token — best-effort reads that would otherwise fail silently on a private caller |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
 | the claude-code-action step | `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml`) — see below |

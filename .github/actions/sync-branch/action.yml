@@ -116,15 +116,18 @@ runs:
         # Step-scoped git credential for the fetches below (design/
         # architecture.md → "No persisted git credentials"): git reads
         # GIT_CONFIG_* from the environment with command-line precedence, so
-        # this defines a credential helper that answers a 401 from GH_TOKEN
-        # — nothing is written to .git/config, and it exists only in this
-        # step's environment. The empty first entry resets any helper
-        # inherited from the runner image's global config.
+        # this defines a credential helper that answers a 401 from GIT_TOKEN
+        # (the same token as GH_TOKEN above, under the one variable name
+        # every copy of this block reads — AGENTS.md) — nothing is written
+        # to .git/config, and it exists only in this step's environment. The
+        # empty first entry resets any helper inherited from the runner
+        # image's global config; the helper is scoped to this server's URL.
+        GIT_TOKEN: ${{ inputs.token }}
         GIT_CONFIG_COUNT: "2"
         GIT_CONFIG_KEY_0: credential.helper
         GIT_CONFIG_VALUE_0: ""
-        GIT_CONFIG_KEY_1: credential.helper
-        GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+        GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+        GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
       run: |
         set -euo pipefail
         git config user.name "i-am-marvin"

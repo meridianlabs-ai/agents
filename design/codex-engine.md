@@ -163,22 +163,41 @@ the machine-account credential — and until #61 the credential itself sat in
 
 - the credential never touches the workspace (design/architecture.md → No
   persisted git credentials), so the `chown`/`chmod` exposes none;
+- the landing step pins the git dir by env — `GIT_DIR` and `GIT_COMMON_DIR`
+  to `$GITHUB_WORKSPACE/.git`, `GIT_WORK_TREE` to the workspace. Without
+  that, a `.git/commondir` file codex wrote would make git read *its*
+  config: `gitrepository-layout(5)` — "if this file exists, `$GIT_COMMON_DIR`
+  will be set to the path specified in this file unless `GIT_COMMON_DIR` is
+  explicitly set", and `config` "is ignored if `$GIT_COMMON_DIR` is set". So
+  codex could copy `.git` somewhere it owns, add a `filter.*.clean` driver
+  or repoint `remote.origin.url`, and the restore below would land on a
+  file git no longer reads (review finding on #73). The step also refuses
+  outright if `.git/commondir` exists or `.git` is no longer a plain
+  directory: the pin makes those inert, but a codex that wrote one was
+  aiming at this step, so it fails loudly;
 - `Create codex user` snapshots `.git/config` to
   `$RUNNER_TEMP/git-config.pre-codex` (runner-only) right before the group
   grant, and the landing step restores it after reclaiming `.git` — with `cp
   --remove-destination`, so a config codex replaced with a symlink cannot
-  redirect the write. Everything codex could have configured is gone before
-  the first git command;
+  redirect the write. With the git dir pinned, this is the config git reads,
+  and everything codex could have configured is gone before the first git
+  command;
 - the landing step runs every git command with `GIT_CONFIG_*` env pinning
   `core.hooksPath` to a non-existent runner-only path and
   `core.fsmonitor=false` — the two things a config restore cannot cover,
   since hooks are files and the fsmonitor extension lives in the index. The
   `unresolved-merge-guard`, which reads the index *before* the restore, pins
-  `core.fsmonitor=false` the same way.
+  `core.fsmonitor=false` and the git dir the same way (lower exposure —
+  `ls-files` runs no drivers — but the same redirect would otherwise pick
+  the index it reads).
 
-Verification for a change here: prompt codex (any verb) to write a
-`.git/hooks/pre-commit` that prints `HOOK-RAN` and exits non-zero; the
-landing step must still commit, and its log must not contain `HOOK-RAN`.
+Verification for a change here, both cases prompted to codex (any verb):
+write a `.git/hooks/pre-commit` that prints `HOOK-RAN` and exits non-zero —
+the landing step must still commit, and its log must not contain `HOOK-RAN`;
+and `cp -r .git /tmp/x`, add `filter.x.clean = echo FILTER-RAN >&2` to
+`/tmp/x/config` with `* filter=x` in `.git/info/attributes`, and write
+`/tmp/x` into `.git/commondir` — the landing step must fail on its
+redirected-git-dir check, and its log must not contain `FILTER-RAN`.
 
 ## v1 limitations (deliberate)
 

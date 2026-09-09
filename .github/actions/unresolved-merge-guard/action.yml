@@ -35,7 +35,13 @@ runs:
         # is the one thing here that can execute configuration: an index
         # carrying the fsmonitor extension makes git run the configured
         # core.fsmonitor command on load. Env-config overrides the repo
-        # config, so a codex-written fsmonitor hook can never run here.
+        # config, so a codex-written fsmonitor hook can never run here. The
+        # git dir is pinned the same way the landing steps pin it, so a
+        # codex-written .git/commondir cannot point this read at an index
+        # and config codex owns (design/codex-engine.md → Hook-safe landing).
+        GIT_DIR: ${{ github.workspace }}/.git
+        GIT_COMMON_DIR: ${{ github.workspace }}/.git
+        GIT_WORK_TREE: ${{ github.workspace }}
         GIT_CONFIG_COUNT: "1"
         GIT_CONFIG_KEY_0: core.fsmonitor
         GIT_CONFIG_VALUE_0: "false"

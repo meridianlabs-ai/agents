@@ -425,7 +425,9 @@ jobs:
       # through the rewritten origin URL. URL credentials take precedence
       # over helpers, so it never changes the push identity — and it adds
       # nothing to the agent's reach: the same token is already in its
-      # environment as GITHUB_TOKEN (that is what its `gh` calls use).
+      # environment as GITHUB_TOKEN (that is what its `gh` calls use). The
+      # helper is scoped to this server's URL, so a `git fetch` the agent
+      # aims at any other host gets no credential.
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
         id: claude
@@ -434,7 +436,7 @@ jobs:
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
           GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
           GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
@@ -658,13 +660,19 @@ jobs:
       # This is the first credentialed step after codex had write access to
       # the workspace, so it trusts nothing under .git that codex could
       # have configured (design/codex-engine.md → hook-safe landing): the
+      # git dir is pinned by env (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a
+      # codex-written .git/commondir cannot redirect git to a config it owns
+      # (gitrepository-layout(5): that file sets GIT_COMMON_DIR unless the
+      # env already does) — and the step refuses outright if one exists; the
       # pre-codex .git/config is restored (remote URLs, credential/http keys,
       # filter drivers, fsmonitor, hooksPath — anything codex wrote there is
       # gone), and the GIT_CONFIG_* env below pins the two things a config
       # restore cannot: hooks live as FILES in .git/hooks, so hooksPath points
       # at an empty, runner-only path; and the index may carry the fsmonitor
       # extension, so fsmonitor is off. The credential helper is the
-      # machine account — the push must re-trigger CI — and it lives only
+      # machine account — the push must re-trigger CI, and the gate above
+      # already exited on a missing MARVIN_TOKEN, so there is no job-token
+      # fallback here — it is scoped to this server's URL, and it lives only
       # in this step's environment.
       - name: Land codex fix
         id: codexland
@@ -678,11 +686,14 @@ jobs:
           START_SHA: ${{ steps.base.outputs.sha }}
           HEAD_BRANCH: ${{ inputs.head_branch }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
-          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GIT_DIR: ${{ github.workspace }}/.git
+          GIT_COMMON_DIR: ${{ github.workspace }}/.git
+          GIT_WORK_TREE: ${{ github.workspace }}
+          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN }}
           GIT_CONFIG_COUNT: "4"
           GIT_CONFIG_KEY_0: credential.helper
           GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
           GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
           GIT_CONFIG_KEY_2: core.hooksPath
           GIT_CONFIG_VALUE_2: ${{ runner.temp }}/no-hooks
@@ -697,6 +708,14 @@ jobs:
           # would intermittently fail with "insufficient permission for
           # adding an object".
           sudo chown -R runner "$GITHUB_WORKSPACE/.git"
+          # Refuse a redirected git dir rather than land through it: the env
+          # pin above already makes git ignore a .git/commondir file (and a
+          # .git that became a symlink or gitfile), but a codex that wrote
+          # one was aiming at this step, so fail loudly instead of quietly.
+          if [ -L "$GITHUB_WORKSPACE/.git" ] || [ ! -d "$GITHUB_WORKSPACE/.git" ] || [ -e "$GITHUB_WORKSPACE/.git/commondir" ]; then
+            echo "::error::codex left a redirected git dir (.git is not a plain directory, or .git/commondir exists) — refusing to land."
+            exit 1
+          fi
           # Restore the config snapshotted before codex got write access.
           # --remove-destination: codex could have replaced the file with a
           # symlink, and a plain cp would follow it and write elsewhere.
@@ -801,7 +820,7 @@ jobs:
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
           GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
           GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -uo pipefail
@@ -879,7 +898,7 @@ jobs:
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
           GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.helper
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
           GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -uo pipefail
