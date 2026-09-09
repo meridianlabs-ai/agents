@@ -1238,11 +1238,7 @@ jobs:
         id: codexland
         if: steps.codexguard.outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
-          ROUND: ${{ steps.gate.outputs.round }}
-          MENTION: ${{ steps.gate.outputs.mention }}
           OUT: ${{ runner.temp }}/codex/codex-final.md
           START_SHA: ${{ steps.base.outputs.sha }}
           HEAD_BRANCH: ${{ steps.gate.outputs.head_branch }}
@@ -1307,67 +1303,68 @@ jobs:
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
             echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
           fi
-          # One comment either way, de-fanged (posts from a write-access
-          # account; the gate and the hand-back backstop match the loop's
-          # verdict/handoff markers with plain substring contains(), so codex
-          # QUOTING one — likely, its prompt embeds the reviewer's verdict
-          # comments verbatim — would forge a verdict or suppress an owed
-          # hand-back: break those substrings too, in codex's text only, not
-          # the deliberate leading marker below). Pushed with codex changes:
-          # a plain summary — "Ensure hand-back" below owes the @review. No
-          # changes, or the base merge alone: the round is concluded — lead
-          # with the auto-handoff marker so the selfhandoff detector moves
-          # the board and "Ensure hand-back" sees the hand-off already posted.
-          # Resolve the review threads codex reported as fully addressed —
-          # the codex counterpart of the Claude path's REVIEW_ETIQUETTE
-          # (query reviewThreads, resolveReviewThread each one you addressed;
-          # never one you did not). Codex cannot run gh, so its ending
-          # contract names the thread ids on a final RESOLVED-THREADS: line
-          # (the ids come from the REVIEW THREADS section its prompt embeds)
-          # and this step does the GraphQL calls on its word. Guards: only
-          # after a push of real changes (a no-change or merge-only round
-          # addressed nothing, whatever the line says); ids are validated by
-          # shape and INTERSECTED with the PR's currently-open threads, so a
-          # hallucinated or foreign id is skipped, not resolved; and the
-          # whole thing is best-effort — the push already happened, a failed
-          # resolve must not turn a landed round red. Until 2026-09-09 codex
-          # rounds resolved nothing, so on codex PRs every thread the loop
-          # ever opened stayed OPEN, and the fix and review prompts grew
-          # with settled feedback nobody could tell from live (inspect_ai#428).
-          resolved_n=0
-          if [ -n "$pushed" ] && [ -z "$merge_only" ]; then
-            ids=$(grep -E '^RESOLVED-THREADS:' "$OUT" 2>/dev/null | tail -1 \
-                    | sed -E 's/^RESOLVED-THREADS:[[:space:]]*//' | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
-                    | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
-            if [ -n "$ids" ]; then
-              owner="${REPO%/*}"; name="${REPO##*/}"
-              open=$(gh api graphql -F owner="$owner" -F name="$name" -F number="$PR" \
-                       -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){nodes{id isResolved}}}}}' \
-                       --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not) | .id' 2>/dev/null || true)
-              for id in $ids; do
-                if ! grep -qx -- "$id" <<<"$open"; then
-                  echo "RESOLVED-THREADS: skipping $id — not an open review thread of this PR"; continue
-                fi
-                if gh api graphql -F id="$id" -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' --silent 2>/dev/null; then
-                  resolved_n=$((resolved_n+1)); echo "resolved review thread $id"
-                else
-                  echo "::warning::resolveReviewThread failed for $id (left open)"
-                fi
-              done
-            fi
-          fi
-          # The RESOLVED-THREADS line is machine input, not summary: drop it
-          # from the posted body and say what was resolved instead.
+          # The two steps below (thread resolution, summary comment) run no
+          # git: they key on these outputs instead of re-deriving them.
+          echo "pushed=$pushed" >>"$GITHUB_OUTPUT"
+          echo "merge_only=$merge_only" >>"$GITHUB_OUTPUT"
+
+      # Codex cannot run gh, so the review threads it reports as fully
+      # addressed (the RESOLVED-THREADS: line of its final message) are
+      # resolved here on its word — rationale, guards and format tolerance
+      # in the composite. Only after a push of real changes: a no-change or
+      # merge-only round addressed nothing, whatever the line says. Also
+      # writes the final message with the line stripped, on every path: it
+      # is machine input, not summary. Best-effort — never fails the job.
+      - name: Resolve review threads codex reported as addressed
+        id: codexthreads
+        if: steps.codexland.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/resolve-reported-threads@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          final-message: ${{ runner.temp }}/codex/codex-final.md
+          stripped: ${{ runner.temp }}/codex/codex-final.stripped.md
+          resolve: ${{ steps.codexland.outputs.pushed == '1' && steps.codexland.outputs.merge_only != '1' }}
+
+      # One comment either way, de-fanged (posts from a write-access
+      # account; the gate and the hand-back backstop match the loop's
+      # verdict/handoff markers with plain substring contains(), so codex
+      # QUOTING one — likely, its prompt embeds the reviewer's verdict
+      # comments verbatim — would forge a verdict or suppress an owed
+      # hand-back: break those substrings too, in codex's text only, not
+      # the deliberate leading marker below). Pushed with codex changes:
+      # a plain summary — "Ensure hand-back" below owes the @review. No
+      # changes, or the base merge alone: the round is concluded — lead
+      # with the auto-handoff marker so the selfhandoff detector moves
+      # the board and "Ensure hand-back" sees the hand-off already posted.
+      # Gated on the resolve step (which is gated on the landing): the
+      # summary states the resolved count, and OUT is the stripped copy it
+      # wrote. Runs no git, so it carries no git env or credential.
+      - name: Post codex summary
+        id: codexpost
+        if: steps.codexthreads.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          ROUND: ${{ steps.gate.outputs.round }}
+          MENTION: ${{ steps.gate.outputs.mention }}
+          OUT: ${{ runner.temp }}/codex/codex-final.stripped.md
+          PUSHED: ${{ steps.codexland.outputs.pushed }}
+          MERGE_ONLY: ${{ steps.codexland.outputs.merge_only }}
+          RESOLVED: ${{ steps.codexthreads.outputs.resolved }}
+        run: |
+          set -euo pipefail
           {
-            if [ -z "$pushed" ] || [ -n "$merge_only" ]; then
+            if [ -z "$PUSHED" ] || [ -n "$MERGE_ONLY" ]; then
               echo "<!-- auto-handoff -->"
               ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
-              printf '%sauto (codex, round %s): no code changes this round%s — summary below. No review threads were resolved (nothing changed); please resolve any that are settled.\n\n' "$ping" "$ROUND" "${merge_only:+ (the base-branch merge from the workflow was pushed)}"
+              printf '%sauto (codex, round %s): no code changes this round%s — summary below. No review threads were resolved (nothing changed); please resolve any that are settled.\n\n' "$ping" "$ROUND" "${MERGE_ONLY:+ (the base-branch merge from the workflow was pushed)}"
             else
-              printf '🤖 auto (codex, round %s): changes pushed — summary below. Resolved %s review thread(s) codex reported as fully addressed; the rest stay open.\n\n' "$ROUND" "$resolved_n"
+              printf '🤖 auto (codex, round %s): changes pushed — summary below. Resolved %s review thread(s) codex reported as fully addressed; the rest stay open.\n\n' "$ROUND" "${RESOLVED:-0}"
             fi
-            sed -E -e '/^RESOLVED-THREADS:/d' \
-                   -e 's/@(review|claude|auto)/`\1`/g' \
+            sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
@@ -1470,7 +1467,7 @@ jobs:
         id: selfhandoff
         if: >-
           steps.gate.outputs.act == 'fix' &&
-          (steps.claude.outcome == 'success' || steps.codexland.outcome == 'success')
+          (steps.claude.outcome == 'success' || steps.codexpost.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -1537,6 +1534,7 @@ jobs:
           CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
+          CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
           # Step-scoped credential for the unlanded-work fetch below (nothing
           # is persisted by checkout; see "Ensure hand-back after push").
           GIT_TOKEN: ${{ github.token }}
@@ -1622,6 +1620,13 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
             err="codex finished but its landing step failed — the fix may not have reached the branch (see the job logs)."
+          fi
+          # The landing pushed but the summary never posted (the thread
+          # resolution composite is best-effort and cannot fail, so a skipped
+          # post means a failed post). The hand-back backstop still owes the
+          # @review off the push itself; this names the missing summary.
+          if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "success" ] && [ "${CODEXPOST_OUTCOME:-}" != "success" ]; then
+            err="codex's fix was pushed but its summary comment could not be posted (post step outcome: ${CODEXPOST_OUTCOME:-unknown}; see the job logs for the final message and any review threads resolved)."
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review-fix step failed before producing a result (see the job logs)."

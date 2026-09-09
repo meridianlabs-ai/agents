@@ -73,7 +73,17 @@ round / CI-fix attempt (infra failures — e.g. a missing
 `OPENAI_API_KEY` — must not march a PR toward spurious escalation);
 the loops' hand-back backstop keys on the codex *run* step, so a push
 that landed before the comment post died still gets its owed
-`@review`.
+`@review`. Since 2026-09-09 the landing is three steps, not one: the
+`codexland` step is git-only (commit, push, `pushed`/`merge_only`
+outputs — the only step carrying the pinned git env and the push
+credential), the `resolve-reported-threads` composite consumes the final
+message's `RESOLVED-THREADS:` line (below, under Limitations), and the
+`codexpost` step composes and posts the de-fanged summary with no git
+env at all. The downstream gates that used to read "landing succeeded"
+(the dev verb's `Stage - Review (hand-back)`, the loop's self-handoff
+detector) key on `codexpost`, which implies the two before it; the
+Surface steps name a landed-but-unposted run separately from a failed
+push.
 
 ### Marker/author contract
 
@@ -416,14 +426,22 @@ Verification for a change here, all cases prompted to codex (any verb):
   dozens of settled threads nobody could tell from live). The codex
   ending contract now ends with `RESOLVED-THREADS: <id> ...` naming the
   OPEN threads (ids from the embedded REVIEW THREADS section) it fully
-  addressed in code, or `none`; the landing step resolves exactly those
-  via the `resolveReviewThread` mutation — only after a push of real
-  changes, only ids that are currently-open threads of this PR (shape-
-  checked and intersected, so a hallucinated id is skipped), best-effort
-  so a failed resolve never reddens a landed round. The line is stripped
-  from the posted summary, which states how many threads were resolved.
-  Same rule as the Claude path's REVIEW_ETIQUETTE: never resolve what
-  was declined or only answered with rationale.
+  addressed in code, or `none`; the shared
+  `.github/actions/resolve-reported-threads` composite, run between the
+  landing push and the summary post in both `claude.yml` and
+  `claude-auto-review.yml`, resolves exactly those via the
+  `resolveReviewThread` mutation — only after a push of real changes,
+  only ids that are currently-open threads of this PR (shape-checked and
+  intersected with a fresh query, so a hallucinated id is skipped),
+  best-effort so a failed resolve never reddens a landed round (a failed
+  query or mutation logs a `::warning::` carrying the API's reason rather
+  than reading as "codex hallucinated N ids"). The tag is matched
+  tolerantly (indent, markdown bold/backticks) because the fail-safe
+  miss would otherwise be silent. The composite also writes the final
+  message with the line stripped, and the post step publishes that copy
+  with a header stating how many threads were resolved. Same rule as the
+  Claude path's REVIEW_ETIQUETTE: never resolve what was declined or only
+  answered with rationale.
 - **Branch sync is deterministic, not prompted** (was a limitation; fixed
   2026-09-01 after inspect_ai#392 sat 11 commits behind `main` across 20
   commits, with CI never running because GitHub cannot compute a merge ref
