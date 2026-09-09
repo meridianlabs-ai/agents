@@ -264,8 +264,14 @@ The allow-list grants permission to run `pytest`/`ruff`/`mypy`, but a bare
 `ubuntu-latest` runner has neither the dev tools nor the package installed — so
 without a setup step the agent can only fall back to `py_compile` and reasoning
 (observed: a reviewer reported "env not provisioned: no pytest/inspect_flow" and
-LGTM'd on static checks alone). Both workflows therefore run a setup step
-between checkout and the agent.
+LGTM'd on static checks alone). All four workflows therefore run a setup step
+between checkout and the agent — the dev agent and reviewer from the start,
+the two `@auto` loops since 2026-09-09. The loops went without for their first
+weeks because the gap was invisible on the Claude engine, which installs what
+it needs from inside the agent: it was the codex engine, sandboxed with no
+network, that exposed it — every codex fix round on inspect_flow#824 ran in a
+bare checkout, pushed changes verified only by tests that import nothing, and
+finally declined to fix at all (see design/codex-engine.md).
 
 The mechanism is a **convention, not a duplicated command**. A caller repo opts
 in by adding a `.github/actions/claude-setup` composite action; the workflows
