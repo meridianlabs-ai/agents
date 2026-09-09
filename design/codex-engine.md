@@ -409,8 +409,21 @@ Verification for a change here, all cases prompted to codex (any verb):
   the runner-side provisioning would execute the fork's build backend, so
   an `engine:codex` label on a fork-head PR falls through to the Claude
   engine's sandboxed review path (logged, not commented).
-- **No review-thread resolution** in codex fix rounds (needs gh); the
-  handoff notes it so humans resolve threads at sign-off.
+- **Review-thread resolution in codex fix rounds — since 2026-09-09**
+  (was a limitation: codex cannot run gh, so every thread the loop opened
+  on a codex PR stayed OPEN and the handoff asked humans to resolve them;
+  by inspect_ai#428's eighth round the fix and review prompts carried
+  dozens of settled threads nobody could tell from live). The codex
+  ending contract now ends with `RESOLVED-THREADS: <id> ...` naming the
+  OPEN threads (ids from the embedded REVIEW THREADS section) it fully
+  addressed in code, or `none`; the landing step resolves exactly those
+  via the `resolveReviewThread` mutation — only after a push of real
+  changes, only ids that are currently-open threads of this PR (shape-
+  checked and intersected, so a hallucinated id is skipped), best-effort
+  so a failed resolve never reddens a landed round. The line is stripped
+  from the posted summary, which states how many threads were resolved.
+  Same rule as the Claude path's REVIEW_ETIQUETTE: never resolve what
+  was declined or only answered with rationale.
 - **Branch sync is deterministic, not prompted** (was a limitation; fixed
   2026-09-01 after inspect_ai#392 sat 11 commits behind `main` across 20
   commits, with CI never running because GitHub cannot compute a merge ref

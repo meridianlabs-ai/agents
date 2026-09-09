@@ -1156,7 +1156,7 @@ jobs:
               echo "BASE MERGE NOTE: a workflow step already merged origin/$BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before the task below, and fix it in the working tree if it is off:"
               echo "$SYNC_APPEND"
             fi
-            echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the change (it becomes the commit subject), then a blank line, then a body explaining what you did and why (it is posted as a comment on #$NUM). If you cannot or should not make a change, leave the tree untouched and explain why in the final message."
+            echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the change (it becomes the commit subject), then a blank line, then a body explaining what you did and why (it is posted as a comment on #$NUM). If you cannot or should not make a change, leave the tree untouched and explain why in the final message. If the prompt has a REVIEW THREADS section, end the body with ONE final line of exactly the form RESOLVED-THREADS: <thread-id> <thread-id> ... naming the OPEN threads (their thread-id values from that section) whose feedback you FULLY addressed in code this round — or RESOLVED-THREADS: none. Never list a thread you declined, only partly addressed, or answered with rationale instead of a change: a workflow step resolves exactly the threads on that line, on your word, and only if your changes were pushed."
             [ -n "$EXTRA" ] && printf 'REPO GUIDANCE: %s\n' "$EXTRA"
             echo "TASK:"
             if [ -n "$COMMENT" ]; then
@@ -1502,14 +1502,54 @@ jobs:
           # substring contains() — codex QUOTING a marker would forge a
           # verdict or suppress an owed hand-back, so break those substrings
           # too).
+          # Resolve the review threads codex reported as fully addressed —
+          # the codex counterpart of the Claude path's REVIEW_ETIQUETTE
+          # (query reviewThreads, resolveReviewThread each one you addressed;
+          # never one you did not). Codex cannot run gh, so its ending
+          # contract names the thread ids on a final RESOLVED-THREADS: line
+          # (the ids come from the REVIEW THREADS section its prompt embeds)
+          # and this step does the GraphQL calls on its word. Guards: only
+          # after a push of real changes (a no-change or merge-only round
+          # addressed nothing, whatever the line says); ids are validated by
+          # shape and INTERSECTED with the PR's currently-open threads, so a
+          # hallucinated or foreign id is skipped, not resolved; and the
+          # whole thing is best-effort — the push already happened, a failed
+          # resolve must not turn a landed round red. Until 2026-09-09 codex
+          # rounds resolved nothing, so on codex PRs every thread the loop
+          # ever opened stayed OPEN, and the fix and review prompts grew
+          # with settled feedback nobody could tell from live (inspect_ai#428).
+          resolved_n=0
+          if [ "$IS_PR" = "true" ] && [ -n "$pushed" ] && [ -z "$merge_only" ]; then
+            ids=$(grep -E '^RESOLVED-THREADS:' "$OUT" 2>/dev/null | tail -1 \
+                    | sed -E 's/^RESOLVED-THREADS:[[:space:]]*//' | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
+                    | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
+            if [ -n "$ids" ]; then
+              owner="${REPO%/*}"; name="${REPO##*/}"
+              open=$(gh api graphql -F owner="$owner" -F name="$name" -F number="$NUM" \
+                       -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){nodes{id isResolved}}}}}' \
+                       --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not) | .id' 2>/dev/null || true)
+              for id in $ids; do
+                if ! grep -qx -- "$id" <<<"$open"; then
+                  echo "RESOLVED-THREADS: skipping $id — not an open review thread of this PR"; continue
+                fi
+                if gh api graphql -F id="$id" -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' --silent 2>/dev/null; then
+                  resolved_n=$((resolved_n+1)); echo "resolved review thread $id"
+                else
+                  echo "::warning::resolveReviewThread failed for $id (left open)"
+                fi
+              done
+            fi
+          fi
           {
             printf '🤖 codex (dev agent):\n\n'
-            sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+            sed -E -e '/^RESOLVED-THREADS:/d' \
+                   -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
             [ -z "$pushed" ] && printf '\n\n_No code changes were made._'
             [ -n "$merge_only" ] && printf '\n\n_No code changes were made; the base-branch merge from the workflow was pushed._'
+            [ "$resolved_n" -gt 0 ] && printf '\n\n_Resolved %s review thread(s) codex reported as fully addressed._' "$resolved_n"
           } >"$RUNNER_TEMP/codex-comment.md"
           # GitHub caps comment bodies at 65,536 characters and codex's final
           # message is unbounded; here the post failing lands AFTER the push,
