@@ -1220,7 +1220,7 @@ jobs:
             else
               echo "Context: issue #$NUM — your edits will be pushed to a new branch and opened as a PR fixing it."
             fi
-            echo "CONSTRAINTS: you have NO GitHub credentials — nothing you run can push or post, and you must NOT run gh, git fetch or git push at all (an anonymous fetch might succeed on a public repo; do not try it — the checked-out tree is the one to work on). Network access IS available inside your sandbox for package downloads and test fixtures (install into the project venv if a tool is missing; keep installs minimal, never editable/VCS git+ installs — a nested checkout fails the run — and do not edit dependency files the task does not call for), but nothing you do can push to or post on GitHub. Make your changes in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts for you. $verify"
+            echo "CONSTRAINTS: you have NO GitHub credentials — nothing you run can push or post, and you must NOT run gh, git fetch or git push at all (an anonymous fetch might succeed on a public repo; do not try it — the checked-out tree is the one to work on). Network access IS available inside your sandbox for package downloads and test fixtures (install into the project venv if a tool is missing; keep installs minimal, never install from a git+ URL — an editable VCS install clones a repo into the venv, and a nested checkout fails the run — and do not edit dependency files the task does not call for), but nothing you do can push to or post on GitHub. Make your changes in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts for you. $verify"
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
@@ -1299,106 +1299,18 @@ jobs:
       # dedicated unprivileged user — the README's other blessed strategy for
       # permission profiles: containment is the user boundary plus the
       # profile sandbox, and the API key stays out of reach (codex has no
-      # sudo). Setup mirrors the action's examples/unprivileged-user.yml —
-      # the chown/g+rwX is what lets codex (primary group codex) write the
-      # runner-owned workspace — plus two grants the example never needs (it
-      # passes no explicit output-file and its demo prompt never runs git):
-      # a codex-owned output dir under RUNNER_TEMP and git safe.directory,
-      # commented inline.
-      # NB the runner->codex group grant is inert for this job:
-      # supplementary groups are fixed at process start, and every step is
-      # spawned from a Runner.Worker that predates the usermod. Landing
-      # codex's edits works anyway — runner still owns the pre-existing
-      # workspace directories, codex's files are world-readable under its
-      # umask, and the reclaim step takes .git back — the one place
-      # codex-owned dirs (objects/ fan-out) would block runner's writes.
-      # (Group kept as a faithful copy of the example; if codex ever drops a
-      # 600 file, the reclaim step needs a chmod -R a+rX sweep, not this
-      # group.)
+      # sudo). The user/grant recipe — pre-codex .git/config and embedded-
+      # repo snapshots for the reclaim step, the action's
+      # examples/unprivileged-user.yml chown/g+rwX, the codex-owned output
+      # dir under RUNNER_TEMP, git safe.directory, and network ON in the
+      # sandbox (design/codex-engine.md → Network) — is the shared
+      # create-codex-user composite; its description carries the rationale
+      # for each. Step name and id are load-bearing: the reclaim step gates
+      # on `steps.codexuser.outcome`.
       - name: Create codex user
         id: codexuser
         if: steps.engine.outputs.engine == 'codex'
-        run: |
-          set -euo pipefail
-          # Last runner-only moment for the tree: snapshot the repo config
-          # for the reclaim step to restore. The group grant below makes
-          # .git/config codex-writable, and git executes configuration —
-          # core.hooksPath, core.fsmonitor, filter drivers, credential
-          # helpers, remote URLs — so no runner-side git may run against
-          # anything codex could have written there. RUNNER_TEMP itself
-          # stays runner-only (755 runner:runner; see below). The second
-          # snapshot lists any embedded .git already in the tree (a caller's
-          # provisioning may leave one); the reclaim step refuses to run git
-          # over the tree if codex added one, since a nested .git/config is
-          # executed by the landing step and no restore or pin covers it.
-          # Both scans run as root so they see the same tree: this one runs
-          # before the chown below, and a root-owned unreadable directory a
-          # caller's provisioning left would otherwise fail this step or
-          # read as a codex addition in the reclaim.
-          cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
-          sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
-          sudo adduser --system --home /home/codex --shell /bin/bash --group codex
-          sudo usermod -a -G codex runner
-          sudo usermod -a -G runner codex
-          sudo chown -R runner:codex "$GITHUB_WORKSPACE"
-          sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
-          sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
-          # codex itself (via sudo -u) writes the explicit output-file and
-          # the action re-reads it as codex, but RUNNER_TEMP is 755
-          # runner:runner on the hosted image. Not g+w on the temp root:
-          # codex's runner-group membership IS effective (its processes
-          # start post-usermod), so that would hand it rename/delete over
-          # the runner's step scripts and the per-step GITHUB_ENV/OUTPUT/
-          # PATH files. A codex-owned subdir grants only the output-file
-          # write; 755 keeps $OUT readable for the runner-side land step.
-          sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
-          # The checkout stays runner-owned, so git commands running as
-          # codex hit the dubious-ownership refusal, and no profile sandbox
-          # lets the agent add the exemption itself.
-          sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          # Network ON inside codex's sandbox (decision: Ransom, 2026-09-09).
-          # With network off, codex's Linux sandbox installs a seccomp filter
-          # that allows AF_UNIX socket/socketpair but denies setsockopt,
-          # getsockopt, getsockname, shutdown, bind and connect
-          # unconditionally (seccomp cannot see an fd's family) — so trio's
-          # event loop dies creating its wakeup socketpair (it sets
-          # SO_SNDBUF), inspect_ai's control server cannot bind, asyncio
-          # thread wake-ups stall, and nothing can download a tokenizer.
-          # inspect_ai#428's codex reviews (2026-09-09) lost every trio test
-          # and half the asyncio suite to this. `network_access = true` on
-          # the builtin :workspace profile skips the filter entirely (codex
-          # reads it from [sandbox_workspace_write] in CODEX_HOME/config.toml;
-          # codex-action keeps a pre-existing config.toml and appends its
-          # provider block, and rejects the same key via codex-args). Trust
-          # argument: every codex run here is a same-repo tree (the reviewer
-          # routes fork heads to Claude, the dev agent refuses them, the
-          # loops gate on isCrossRepository) and codex holds NO credentials —
-          # the API key sits behind the action's proxy, no GitHub token
-          # reaches it, and its env carries no OIDC request token — so
-          # network buys installs and test fixtures, not a push path or an
-          # exfiltration channel beyond what the Claude engine already has
-          # (it runs pytest unsandboxed with full network AND a token).
-          # 755 on the home and .codex so codex-action (runner-side) can read
-          # the file back before appending; a 700 home would make it read ""
-          # and silently drop this block.
-          sudo chmod 755 /home/codex
-          sudo install -d -o codex -g codex -m 755 /home/codex/.codex
-          # Pre-creating .codex makes codex-action's resolve-codex-home take
-          # its "already exists, assume it's correctly permissioned" branch
-          # and skip its own bootstrap — which is also where it pre-touches
-          # the world-writable $CODEX_HOME/$GITHUB_RUN_ID.json that
-          # codex-responses-api-proxy (run as `runner`, no sudo) writes its
-          # server info into. Without it the proxy gets EACCES in this
-          # codex-owned 755 dir and the action fails at "Wait for Responses
-          # API proxy" before codex ever runs (review round 1 of #87).
-          # Mirror the action's create path: root-owned, 666 for now; the
-          # action chmods it 444 / chowns root once the proxy is up, and its
-          # `-s` probe reads the empty file as "not running yet", as today.
-          sudo touch "/home/codex/.codex/$GITHUB_RUN_ID.json"
-          sudo chmod 666 "/home/codex/.codex/$GITHUB_RUN_ID.json"
-          printf '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).\n[sandbox_workspace_write]\nnetwork_access = true\n' \
-            | sudo -u codex tee /home/codex/.codex/config.toml >/dev/null
-          sudo chmod 644 /home/codex/.codex/config.toml
+        uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
 
       - name: Run Codex
         id: codexrun

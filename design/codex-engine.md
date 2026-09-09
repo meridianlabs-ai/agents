@@ -134,7 +134,10 @@ temp root would expose the runner's step scripts and per-step
 checkout added to the codex user's git `safe.directory` (the repo stays
 runner-owned, so git run as codex otherwise refuses with "dubious
 ownership", and no profile sandbox lets the agent add the exemption
-itself). One deliberate divergence from a four-way copy: on the write
+itself). The recipe is the `create-codex-user` composite — one body for
+the four `Create codex user` steps (it was a four-way verbatim copy until
+#87's review asked for the composite AGENTS.md prescribes). One
+deliberate divergence between the paths: on the write
 paths the `reclaim-codex-workspace` step (Hook-safe landing, below) runs
 `chown -R runner` on `.git` right after codex (object fan-out dirs codex
 creates are codex-owned, and the runner's codex-group membership never
@@ -143,10 +146,12 @@ fail intermittently). One more
 unprivileged-user consequence, reviewer-only: the action's inline
 `output-schema` input is broken under this strategy at `@v1`
 (openai/codex-action#103 — the schema temp dir is mktemp'd as codex, mode
-700, then written as the runner, EACCES; fix #147 unmerged), so the setup
-step writes the review schema to a runner-owned file and the codex step
-passes `output-schema-file` instead — the explicit-path branch creates no
-temp dir. Revisit when #160's fixes land upstream (and drop the schema
+700, then written as the runner, EACCES; fix #147 unmerged), so the
+reviewer's `Prepare codex review inputs` step (right after the composite;
+it also discovers the absolute tool paths for the prompt) writes the
+review schema to a runner-owned file and the codex step passes
+`output-schema-file` instead — the explicit-path branch creates no temp
+dir. Revisit when #160's fixes land upstream (and drop the schema
 workaround when #103's does).
 
 ### Hook-safe landing
@@ -493,7 +498,8 @@ Verification for a change here, all cases prompted to codex (any verb):
 
 ON since 2026-09-09 (decision: Ransom), via `network_access = true` under
 `[sandbox_workspace_write]` in the codex user's `config.toml`, written by
-the `Create codex user` step before codex-action runs (the action keeps a
+the `Create codex user` step (the `create-codex-user` composite, shared by
+all four codex steps) before codex-action runs (the action keeps a
 pre-existing config and appends its provider block; the same key is
 rejected through `codex-args`). The home and `.codex` are 755 so the
 runner-side action can read the file back — a 700 home would make it read
@@ -535,7 +541,15 @@ Claude engine already has (it runs pytest unsandboxed with full network
 AND a token). Read-only-ness of reviews and the deterministic landing of
 fix rounds never rested on the network being off. The prompts now say
 network is available for installs and fixtures and that nothing codex runs
-can push to or post on GitHub.
+can push to or post on GitHub. One thing network does newly expose
+(review round 2 of #87, accepted): codex-action's
+`codex-responses-api-proxy` listens on loopback, so anything codex runs —
+tests, installed packages — can `connect()` to it and `POST /v1/responses`
+(billed to the org key, which never leaves the proxy) or, because the
+action starts it with `--http-shutdown`, hit an unauthenticated
+`GET /shutdown` that kills the proxy and fails the codex run mid-way.
+Same-repo trust covers it as it covers the Claude engine's unsandboxed
+test runs; the shutdown case fails loudly rather than silently.
 
 What DID shift is the "codex cannot fetch" rationale scattered through the
 sync comments: checkout runs `persist-credentials: false`, so origin is a
@@ -550,8 +564,10 @@ Two install caveats the prompts carry, both regressions accepted in #87's
 review: `reclaim-codex-workspace` refuses any nested `.git` codex added
 (compared against the pre-codex snapshot), and a `pip install -e git+…`
 into a workspace venv creates exactly that (pip's default `--src` is
-`<venv>/src`) — so the prompts forbid editable/VCS installs, and the guard
-fails the run loudly if one slips through. And on the landing paths a
+`<venv>/src`) — so the prompts forbid installing from a `git+` URL (a
+local `pip install -e '.[dev]'`, which the provisioning-failed text
+suggests, clones nothing and is fine), and the guard fails the run loudly
+if one slips through. And on the landing paths a
 `uv add`-style install rewrites `pyproject.toml`/`uv.lock`, which the
 landing step would commit — so the prompts also say not to edit dependency
 files the task does not call for. Where provisioning FAILED on a
