@@ -996,22 +996,35 @@ jobs:
             # (inspect_ai#428, 2026-09-09: the slice was bare triggers, verdict
             # marker comments, the sticky counter and stale fix summaries around the
             # one review that mattered). Drop machine comments (verdict markers,
-            # counters, convergence notes, provenance, tracking comments, bare
-            # trigger one-liners), find the newest review summary (Claude's carry
-            # the claude-review-comment marker, codex's the engine footer), and keep
-            # it plus everything after it, plus the last 5 HUMAN comments before it
-            # (an adjudication that preceded the review is context; older review
-            # rounds are stale by construction — their findings are fixed or live
-            # on as threads). No review found: last 8 substantive comments.
+            # counters, convergence notes, provenance, tracking comments, and
+            # BARE triggers — the token followed by nothing but whitespace or
+            # punctuation; a short human instruction that opens with the token
+            # is an adjudication and stays), find the newest review round
+            # (Claude's comments carry the claude-review-comment marker, codex's
+            # the engine footer) and keep it plus everything after it, plus the
+            # last 5 HUMAN comments before it (an adjudication that preceded the
+            # review is context; older review rounds are stale by construction —
+            # their findings are fixed or live on as threads). The anchor is the
+            # round's FIRST marker-bearing comment, not its last: the reviewer
+            # stamps every top-level comment it posts, so a round can be several
+            # (a regression note, then the summary), and anchoring on the last
+            # would drop the earlier ones as pre-anchor bot comments. "The round"
+            # is everything after the newest verdict comment that precedes the
+            # last marker-bearing comment (verdicts are per round, posted after
+            # the round's comments; found on the unfiltered list, since the
+            # filter drops them). No review found: last 8 substantive comments.
             echo "RECENT PR COMMENTS (newest last; the review feedback is here):"
-            fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$$PR/comments" --paginate --slurp
-            jq -r '(add // [])
+            fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$PR/comments" --paginate --slurp
+            jq -r '(add // []) | . as $raw
                 | map(select(
                     (.body | test("<!-- (claude-review-summary|auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head|model-provenance) -->") | not)
-                    and (.body | test("^\\s*@(review|auto|claude)\\b[\\s\\S]{0,80}$") | not)
+                    and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
                     and (.body | test("^\\*\\*Claude finished") | not)))
                 | . as $all
-                | ([ $all | to_entries[] | select(.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex")) | .key ] | last) as $ri
+                | ([ $all | to_entries[] | select(.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex")) ]) as $marks
+                | (if ($marks | length) == 0 then null
+                   else ([ $raw[] | select((.body | test("<!-- claude-review-summary -->")) and .created_at < $marks[-1].value.created_at) | .created_at ] | last // "") as $pv
+                      | ($marks | map(select(.value.created_at > $pv)) | first.key) end) as $ri
                 | (if $ri == null then $all[-8:]
                    else ($all[:$ri] | map(select((.user.type // "") != "Bot" and .user.login != "i-am-marvin")) | .[-5:]) + $all[$ri:] end)
                 | .[] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/codex-prc.json"
@@ -1020,20 +1033,22 @@ jobs:
             # #428, 36 of 40 were threads settled days earlier, indistinguishable
             # from the open ones). OPEN threads in full, each with its thread id
             # (the deterministic handle for resolving it); RESOLVED threads as a
-            # one-line index so the agent knows they exist without re-reading them;
-            # resolved AND outdated threads dropped entirely.
+            # one-line index (header included only when there is one) so the
+            # agent knows they exist without re-reading them; resolved AND
+            # outdated threads dropped entirely.
             echo "REVIEW THREADS (OPEN threads are this round's inline feedback; each comment oldest first):"
             owner="${REPO%%/*}"; name="${REPO##*/}"
             fetch "$RUNNER_TEMP/codex-threads.json" api graphql \
-              -F owner="$owner" -F name="$name" -F number="$$PR" \
+              -F owner="$owner" -F name="$name" -F number="$PR" \
               -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){nodes{id isResolved isOutdated path line originalLine comments(first:20){nodes{author{login} createdAt body}}}}}}}'
             jq -r '.data.repository.pullRequest.reviewThreads.nodes
                 | map(select((.isResolved and .isOutdated) | not))
                 | (map(select(.isResolved | not)) | .[]
                     | "--- \(.path):\(.line // .originalLine // "?") [OPEN\(if .isOutdated then ", outdated" else "" end)] thread-id \(.id)"
                       + ([.comments.nodes[] | "\n  \(.author.login // "?") at \(.createdAt):\n  \(.body | gsub("\n"; "\n  "))"] | join("\n")) + "\n"),
-                  "SETTLED THREADS (resolved in earlier rounds — addressed and accepted; do not re-open unless the current code contradicts the resolution):",
-                  (map(select(.isResolved)) | .[] | "  \(.path):\(.line // .originalLine // "?") — \((.comments.nodes[0].body // "") | gsub("\n"; " ") | .[:100])")' "$RUNNER_TEMP/codex-threads.json"
+                  (map(select(.isResolved)) | select(length > 0)
+                    | "SETTLED THREADS (resolved in earlier rounds — addressed and accepted; do not re-open unless the current code contradicts the resolution):",
+                      (.[] | "  \(.path):\(.line // .originalLine // "?") — \((.comments.nodes[0].body // "") | gsub("\n"; " ") | .[:100])"))' "$RUNNER_TEMP/codex-threads.json"
           } >"$RUNNER_TEMP/codex-context.md"
           # The review feedback IS this round's task, and the verdict
           # comment that triggered the run guarantees at least one PR
@@ -1068,9 +1083,12 @@ jobs:
           # closed pipe. (The sed is belt-and-braces with the landing step's
           # output de-fang: the embedded comments include the reviewer's
           # verdict comments, and a marker substring codex never sees is one
-          # it cannot echo; the substitutions are length-neutral.)
+          # it cannot echo; the substitutions are length-neutral. The
+          # review-comment anchor marker is in the list too: the jq above
+          # has already anchored on it, and a fix summary that echoed it
+          # would be a false anchor for a later round on this PR.)
           head -c 120000 "$RUNNER_TEMP/codex-context.md" \
-            | sed -E -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+            | sed -E -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
                      -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >.codex-prompt.md
           #
           # The landing step stages with a blanket `git add -A`, so exclude
@@ -1365,7 +1383,7 @@ jobs:
               printf '🤖 auto (codex, round %s): changes pushed — summary below. Resolved %s review thread(s) codex reported as fully addressed; the rest stay open.\n\n' "$ROUND" "${RESOLVED:-0}"
             fi
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
-                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
           } >"$RUNNER_TEMP/codex-comment.md"

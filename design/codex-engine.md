@@ -395,13 +395,19 @@ Verification for a change here, all cases prompted to codex (any verb):
   sticky counter and stale fix summaries around the one review that
   mattered, and 36 of the 40 inline entries were threads resolved days
   earlier with nothing marking them settled. Now: machine comments are
-  dropped, the slice is anchored on the newest review summary (kept in
-  full with everything after it, plus the last five human comments before
-  it), and review threads come from GraphQL `reviewThreads` by state —
-  OPEN in full with the thread id (the handle a later change uses to
-  resolve them), RESOLVED as a one-line index, resolved-and-outdated
-  dropped. The reviewer is also told not to restate regression-accepted
-  notes an earlier round already posted.
+  dropped (bare triggers included — but only genuinely bare ones, so a
+  short human instruction opening with the token survives), the slice is
+  anchored on the newest review round (its first marker-bearing comment,
+  since the reviewer stamps every top-level comment it posts and a round
+  can be several; kept in full with everything after it, plus the last
+  five human comments before it), and review threads come from GraphQL
+  `reviewThreads` by state — OPEN in full with the thread id (the handle a
+  later change uses to resolve them), RESOLVED as a one-line index (only
+  when there are any), resolved-and-outdated dropped. The anchor marker
+  joins the de-fanged substrings on both the prompt and the output side,
+  so a codex summary echoing it cannot become a false anchor. The
+  reviewer is also told not to restate regression-accepted notes an
+  earlier round already posted.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which
