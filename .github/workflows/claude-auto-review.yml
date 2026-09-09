@@ -328,6 +328,10 @@ jobs:
           fi
           echo "mention=$mention" >>"$GITHUB_OUTPUT"
 
+          # Fetch the PR's comments ONCE, unfiltered, and query the local array
+          # below. Filtering with `--paginate --jq` would be wrong here:
+          # `--jq` runs PER PAGE, so past 100 comments `... | last` emits one
+          # element per page and a "single" body comes back multi-line.
           # `--paginate` output is one merged array on current gh, one array
           # per page on older releases; -s plus `.[][]` flattens either.
           comments=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate | jq -s '[.[][]]')
@@ -385,12 +389,14 @@ jobs:
             act converged; exit 0
           fi
 
-          cid=$(jq -r 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' <<<"$comments")
+          # Latest rounds-marker comment, captured once like summary_json above;
+          # cid feeds the Record round PATCH, the body the counters below.
+          marker_json=$(jq -c --arg m "$MARKER" 'map(select(.body|contains($m))) | last // empty' <<<"$comments")
+          cid=$(jq -r '.id // empty' <<<"${marker_json:-null}")
           prev=0
           prevsha=""
           if [ -n "$cid" ]; then
-            # Body is already in hand from the single comments fetch above.
-            mbody=$(jq -r 'map(select(.body|contains("'"$MARKER"'"))) | last | .body // ""' <<<"$comments")
+            mbody=$(jq -r '.body // ""' <<<"$marker_json")
             prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
             prev=${prev:-0}
             # Branch tip recorded when the previous round started (see Record round).
