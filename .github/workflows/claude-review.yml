@@ -455,9 +455,10 @@ jobs:
       # sandbox runs on a fork head could read it, and nothing after this
       # step needs an authenticated remote — claude-code-action's agent mode
       # does no fetch, and the codex path has no network. (The action then
-      # embeds its OWN app token in the origin URL for the agent run; that is
-      # its behavior, out of reach here — see design/architecture.md →
-      # untrusted checkouts, residual risks.)
+      # embeds its OWN app token in the origin URL for the agent run — its
+      # behavior, not this workflow's; on the sandboxed paths the settings
+      # overlay below masks that token for sandboxed commands, issue #70 —
+      # see design/architecture.md → untrusted checkouts.)
       - if: steps.trig.outputs.ok == 'true' && steps.trig.outputs.mode != 'external'
         uses: actions/checkout@v4
         with:
@@ -787,6 +788,73 @@ jobs:
       # writes this merge to ~/.claude/settings.json (USER scope, lowest
       # precedence), so a surviving project-scope settings file could set the
       # key back to false — the strip is what keeps that scope empty.
+      #
+      # credentials.files (issue #70): persist-credentials:false keeps only
+      # CHECKOUT's token out of .git/config — claude-code-action's prepare step
+      # then rewrites the origin URL to embed its OWN installation token
+      # (replaceCheckoutCredentials in its src/github/operations/git-config.ts,
+      # every mode; the credential-helper alternative is tied to its
+      # allowed_non_write_users input, which would widen who may trigger
+      # runs). That token has contents:read + pull-requests:write for the
+      # agent step, and sandboxed contributor code (a build backend, a
+      # collected test) can read the file. The `mask` entry makes sandboxed
+      # commands read a sentinel copy with the token replaced; `extract`
+      # limits the replacement to capture group 1 so git still parses its
+      # config (the agent's own git diff/log run sandboxed and keep working;
+      # the reviewer never pushes on these paths); onExtractNoMatch:deny makes
+      # the file unreadable should the action ever change how it embeds the
+      # token, rather than silently exposing the real file. The sentinel must
+      # never be swapped back for the real token on a sandboxed request; what
+      # guarantees that here is that this overlay sets NO network.tlsTerminate
+      # and NO credentials.allowPlaintextInject — the proxy cannot see request
+      # contents, so it substitutes nothing (docs: "the sentinel reaches the
+      # server unchanged"; Claude Code reports the mask-without-tlsTerminate
+      # state at startup — a report, not a setup failure). Note the entry has
+      # no injectHosts, and per the docs a mask entry WITHOUT injectHosts is
+      # substituted on requests to EVERY host in network.allowedDomains — so
+      # neither tlsTerminate nor allowPlaintextInject may ever be added to
+      # this overlay, or contributor code could read the sentinel and have the
+      # proxy inject the real token into a request to a PyPI host. The
+      # caller's `inputs.settings` is the other door: a caller using its own
+      # mask entries in normal mode has tlsTerminate set, and jq's recursive
+      # merge would carry it (and allowPlaintextInject) straight through. The
+      # merge therefore DELETES both keys from the merged result, making the
+      # invariant structural rather than a comment — on these paths a caller
+      # mask entry still hides its credential from sandboxed commands, it just
+      # cannot inject it (the docs' fail-without-exposing state), which is the
+      # right trade on paths that run contributor code. `del` rather than
+      # setting a false value: the docs only show tlsTerminate as an object.
+      # (Whether an explicit empty injectHosts:[] means "no hosts" is
+      # undocumented, so it is not relied on.) ~/.config/gh and ~/.gitconfig are the other
+      # places a GitHub credential could sit on the runner (gh's own store, a
+      # credential helper) — nothing sandboxed needs them, so plain deny. The
+      # agent's gh is in excludedCommands and reads the real files. The
+      # .git/config path is spliced in ABSOLUTE ($GITHUB_WORKSPACE): the
+      # action writes this merge to ~/.claude/settings.json (user scope),
+      # where Claude Code resolves a relative sandbox path against ~/.claude,
+      # not the checkout (code.claude.com/docs/en/sandboxing → filesystem
+      # path prefixes). File `mask` mode requires Claude Code >= 2.1.221
+      # (same page → Mask credential files); the action pins the CLI it
+      # installs (2.1.266 at the time of writing), and the version-check
+      # step after the agent fails the run loudly if that ever regresses.
+      # This mask protects against sandboxed CODE reading the token; the
+      # agent's own Read tool is not sandboxed and still sees the real file
+      # (the pre-existing prompt-injection channel). Proper fix is upstream:
+      # a git-auth option independent of allowed_non_write_users is
+      # requested in anthropics/claude-code-action#1818 (filed 2026-09-09
+      # from the draft in #70). If the action gains it, this entry becomes
+      # belt-and-braces.
+      #
+      # Merge shape: jq's `*` recurses into objects but replaces arrays
+      # wholesale, so the two credentials arrays are re-spliced as CALLER
+      # entries + overlay entries — a caller's own `files`/`envVars`
+      # protections in `inputs.settings` compose with these instead of being
+      # silently dropped (overlay entries last). Deliberately NOT done for
+      # allowedDomains / excludedCommands: those are restrictions, and a
+      # caller list concatenated onto them would widen the sandbox. The two
+      # `del`s at the end strip network.tlsTerminate and
+      # credentials.allowPlaintextInject from whatever the caller passed —
+      # see the credentials.files paragraph above for why.
       - name: Compose settings (external sandbox overlay)
         if: >-
           steps.trig.outputs.ok == 'true' &&
@@ -796,22 +864,35 @@ jobs:
           SETTINGS: ${{ inputs.settings }}
         run: |
           [ -n "$SETTINGS" ] || SETTINGS='{}'
-          overlay='{"disableAllHooks":true,"sandbox":{
+          overlay=$(jq -cn --arg gitcfg "$GITHUB_WORKSPACE/.git/config" '{"disableAllHooks":true,"sandbox":{
             "enabled":true,
             "failIfUnavailable":true,
             "allowUnsandboxedCommands":false,
             "excludedCommands":["gh *"],
             "network":{"allowedDomains":["pypi.org","files.pythonhosted.org"]},
-            "credentials":{"envVars":[
-              {"name":"GITHUB_TOKEN","mode":"deny"},
-              {"name":"GH_TOKEN","mode":"deny"},
-              {"name":"ACTIONS_ID_TOKEN_REQUEST_TOKEN","mode":"deny"},
-              {"name":"ACTIONS_RUNTIME_TOKEN","mode":"deny"},
-              {"name":"ANTHROPIC_API_KEY","mode":"deny"},
-              {"name":"ANTHROPIC_AUTH_TOKEN","mode":"deny"},
-              {"name":"CLAUDE_CODE_OAUTH_TOKEN","mode":"deny"}
-            ]}}}'
-          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson o "$overlay" '. * $o')
+            "credentials":{
+              "files":[
+                {"path":$gitcfg,"mode":"mask","extract":"x-access-token:([^@]+)@","onExtractNoMatch":"deny"},
+                {"path":"~/.config/gh","mode":"deny"},
+                {"path":"~/.gitconfig","mode":"deny"}
+              ],
+              "envVars":[
+                {"name":"GITHUB_TOKEN","mode":"deny"},
+                {"name":"GH_TOKEN","mode":"deny"},
+                {"name":"ACTIONS_ID_TOKEN_REQUEST_TOKEN","mode":"deny"},
+                {"name":"ACTIONS_RUNTIME_TOKEN","mode":"deny"},
+                {"name":"ANTHROPIC_API_KEY","mode":"deny"},
+                {"name":"ANTHROPIC_AUTH_TOKEN","mode":"deny"},
+                {"name":"CLAUDE_CODE_OAUTH_TOKEN","mode":"deny"}
+              ]}}}')
+          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson o "$overlay" '
+            (.sandbox.credentials.files // []) as $cf
+            | (.sandbox.credentials.envVars // []) as $ce
+            | . * $o
+            | .sandbox.credentials.files = $cf + $o.sandbox.credentials.files
+            | .sandbox.credentials.envVars = $ce + $o.sandbox.credentials.envVars
+            | del(.sandbox.network.tlsTerminate)
+            | del(.sandbox.credentials.allowPlaintextInject)')
           {
             echo "value<<SETTINGS_EOF"
             printf '%s\n' "$merged"
@@ -834,6 +915,52 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
             ${{ inputs.claude_args }}
+
+      # The sandbox overlay's file `mask` entry (issue #70) needs Claude Code
+      # >= 2.1.221. claude-code-action@v1 pins the CLI it installs and puts
+      # it on GITHUB_PATH from inside its own steps, so `claude` exists on the
+      # runner only AFTER the agent step — the check cannot run before it.
+      # An older CLI would not have applied the mask, so a regression fails
+      # the run loudly after the fact (::error + red job, the review already
+      # posted) instead of leaving a green run with the token readable — and
+      # `Surface agent errors` reads this step's outcome to post a ⚠️ on the
+      # thread, since a red job under an already-complete review is the kind
+      # of red nobody opens. Sandboxed paths only; skipped when the agent
+      # never launched.
+      - name: Check Claude Code version (sandbox file-mask support)
+        id: cliver
+        if: >-
+          always() && steps.trig.outputs.ok == 'true' &&
+          steps.claude.outcome != 'skipped' &&
+          (steps.trig.outputs.mode == 'external' || steps.trig.outputs.fork_head == 'true')
+        env:
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          set -uo pipefail
+          need=2.1.221
+          # `|| true`: the step runs under `bash -e`, so without it a missing
+          # binary (or unparseable --version) would exit here, before the
+          # diagnostics below — red but silent.
+          have=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          echo "Claude Code version: ${have:-unknown} (sandbox credentials.files mask mode needs >= $need)"
+          if [ -z "$have" ]; then
+            # always() reaches this step even when the agent step failed before
+            # the action's install phase (auth/actor failure): no binary, and
+            # Claude never launched, so the mask question is moot — the job is
+            # already red from the agent step and `Surface agent errors` posts
+            # the ⚠️ for it; a second red step here would be noise. Only a
+            # SUCCESSFUL agent step with no binary is a real anomaly.
+            if [ "$CLAUDE_OUTCOME" != "success" ]; then
+              echo "::notice::claude is not on PATH and the agent step outcome was '$CLAUDE_OUTCOME' — Claude never launched, so the sandbox overlay's .git/config mask is moot for this run; nothing to check"
+              exit 0
+            fi
+            echo "::error::claude is not on PATH after a successful agent step — cannot confirm the sandbox overlay's .git/config mask was in effect (needs Claude Code >= $need); check whether the action still installs the CLI to a GITHUB_PATH directory"
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            echo "::error::Claude Code $have is below $need — the sandbox overlay's .git/config mask may not have been in effect for this run (the action's token could have been readable by sandboxed code); check the action's pinned CLI version"
+            exit 1
+          fi
 
       # Codex engine (design/codex-engine.md): the sandbox has no network and
       # no GitHub credentials, so the agent cannot post — it emits a
@@ -1042,9 +1169,15 @@ jobs:
       # External review finished: the findings sit on the proxy issue awaiting
       # the maintainer's judgment — hand the stage back (mirrors the dev
       # agent's hand-back; without this the proxy would stay parked at Agent
-      # Working after the review posts).
+      # Working after the review posts). always(): the version check above
+      # fails the job AFTER a successful review — exactly the case it exists
+      # for — and without always() the implicit success() gate would skip
+      # this hand-back and leave the proxy at Agent Working. The
+      # steps.claude.outcome guard is what ties it to a posted review.
       - name: Stage - Review (external review posted)
-        if: steps.trig.outputs.mode == 'external' && steps.claude.outcome == 'success'
+        if: >-
+          always() && steps.trig.outputs.mode == 'external' &&
+          steps.claude.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Review
@@ -1140,6 +1273,7 @@ jobs:
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
           CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
+          CLIVER_OUTCOME: ${{ steps.cliver.outcome }}
         run: |
           set -uo pipefail
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
@@ -1172,6 +1306,21 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEXPOST_OUTCOME:-}" = "failure" ]; then
             err="codex produced a review but posting it failed — no review or verdict reached the PR (see the job logs)."
+          fi
+          # Sandbox file-mask version check (issue #70) is a different shape
+          # of failure: the review DID post; what is in doubt is whether the
+          # .git/config token mask was in effect while sandboxed contributor
+          # code ran. Own comment — the generic "did not complete, re-trigger"
+          # text below would be wrong on both counts (not incomplete, not
+          # transient).
+          if [ -z "$err" ] && [ "${CLIVER_OUTCOME:-}" = "failure" ]; then
+            echo "::error::The sandbox file-mask version check failed after the review posted (see the job log)."
+            if [ -n "${NUM:-}" ]; then
+              cc=""
+              [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
+              gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The review posted, but the Claude Code version check guarding the sandbox token mask on `.git/config` failed: the installed CLI is below 2.1.221, or was not found after a successful agent step. The installation token claude-code-action writes into `.git/config` may therefore have been readable by sandboxed contributor code during this run. Not transient — check the pinned Claude Code version in the action (the job log has the detail).%s' "$cc")" || true
+            fi
+            exit 1
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Review did not complete: $err"
