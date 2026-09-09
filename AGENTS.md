@@ -113,11 +113,12 @@ take effect on every repo's next run.
   (guard, landing, the loops' hand-back fetch; the Surface steps set their
   error on `!= success`, not `= failure`, so a reclaim cancelled mid-run
   skips their git calls too) and put nothing that runs git between codex
-  and it. The guard and landing steps additionally pin
+  and it. The landing steps additionally pin
   `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE`, `GIT_CONFIG_GLOBAL=/dev/null`
-  and the same two `core.*` keys by env as belt and braces, and every
-  post-codex `git status` passes `--ignore-submodules=dirty`; keep all of
-  that when touching them. See
+  and the same two `core.*` keys by env as belt and braces; the guard pins
+  the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
+  (`ls-files` runs no hooks); and every post-codex `git status` passes
+  `--ignore-submodules=dirty`; keep all of that when touching them. See
   design/architecture.md → No persisted git credentials and
   design/codex-engine.md → Hook-safe landing.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat

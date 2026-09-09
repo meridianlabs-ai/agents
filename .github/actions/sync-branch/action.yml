@@ -34,7 +34,7 @@ inputs:
     description: >-
       Token for the `gh pr view` lookup AND the git fetches (read access is
       enough — the job token). The fetches authenticate through a step-scoped
-      GIT_CONFIG_* header built from it (design/architecture.md → "No
+      GIT_CONFIG_* credential helper reading it (design/architecture.md → "No
       persisted git credentials"): the callers' checkouts run with
       persist-credentials:false, so nothing in the workspace authenticates a
       fetch, and an unauthenticated one fails on a private caller.
