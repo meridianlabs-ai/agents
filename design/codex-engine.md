@@ -132,11 +132,12 @@ temp root would expose the runner's step scripts and per-step
 checkout added to the codex user's git `safe.directory` (the repo stays
 runner-owned, so git run as codex otherwise refuses with "dubious
 ownership", and no profile sandbox lets the agent add the exemption
-itself). One deliberate divergence from a four-way copy: the write-path
-land steps start with `chown -R runner` on
-`.git` (object fan-out dirs codex creates are codex-owned, and the
-runner's codex-group membership never takes effect within the job, so
-runner-side object writes would otherwise fail intermittently). One more
+itself). One deliberate divergence from a four-way copy: on the write
+paths the `reclaim-codex-workspace` step (Hook-safe landing, below) runs
+`chown -R runner` on `.git` right after codex (object fan-out dirs codex
+creates are codex-owned, and the runner's codex-group membership never
+takes effect within the job, so runner-side object writes would otherwise
+fail intermittently). One more
 unprivileged-user consequence, reviewer-only: the action's inline
 `output-schema` input is broken under this strategy at `@v1`
 (openai/codex-action#103 — the schema temp dir is mktemp'd as codex, mode
@@ -171,11 +172,19 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   (`.github/actions/reclaim-codex-workspace`, shared by the three workflows)
   is the FIRST step after codex on every path — `if: always() &&
   steps.codexuser.outcome == 'success'`, so it runs whether codex succeeded,
-  failed or was cancelled, and before the guard and the landing. It takes
-  `.git` back (`chown -R runner`), refuses if `.git/commondir` exists or
-  `.git` is no longer a plain directory (below), and restores the snapshot
-  with `cp --remove-destination`, so a config codex replaced with a symlink
-  cannot redirect the write. It runs no git itself. Everything downstream —
+  failed or was cancelled, and before the guard and the landing. It kills
+  every process still running as the codex user (`pkill -KILL -u codex` —
+  the runner does not reap orphans between steps, so a background process a
+  prompt-injected codex left behind would otherwise outlive the step and
+  could rewrite the restored config before the landing step's credentialed
+  push; review round 4 of #73), refuses if `.git/commondir` exists or `.git`
+  is no longer a plain directory (below), takes `.git` back (`chown -R
+  runner`), revokes the group grant on it (`chmod -R g-w` — the chown alone
+  leaves `.git/` group-writable by codex, and a `chgrp` would not do since
+  codex is in the `runner` group too; the working tree keeps its grant), and
+  restores the snapshot with `cp --remove-destination`, so a config codex
+  replaced with a symlink cannot redirect the write. It runs no git itself.
+  Everything downstream —
   the guard, the landing, the loops' hand-back and unlanded-work fetches —
   is either gated on that step's success or (Surface) sets its error and
   skips its git calls when it failed, so everything codex could have
@@ -236,7 +245,13 @@ Verification for a change here, all cases prompted to codex (any verb):
    the guard fails — the run must go red on the guard with the Surface
    comment naming the unresolved merge, and no step's log may contain
    `SSH-RAN` (the reclaim restored the config before the hand-back and
-   Surface fetches ran).
+   Surface fetches ran);
+4. the survivor path: have codex start `setsid nohup sh -c 'while :; do
+   git config core.sshCommand "sh -c \"echo SURVIVOR-RAN >&2\""; sleep 0.1;
+   done' &` and leave the tree otherwise clean — the reclaim step's log must
+   show the kill, `.git` must be `drwxr-xr-x` afterwards (`stat` it in a
+   scratch step), and the landing step's push must go out with no
+   `SURVIVOR-RAN` in any log.
 
 ## v1 limitations (deliberate)
 

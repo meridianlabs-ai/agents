@@ -510,24 +510,12 @@ jobs:
           token: ${{ github.token }}
           persist-credentials: false
 
-      # Regression guard for the invariant above: the persisted-credential
-      # layout has changed across actions/checkout releases (a local
-      # extraheader, then an include.path to a file under RUNNER_TEMP), so
-      # ask git — which follows includes — rather than grepping the file.
-      # Keyed on the server URL, as checkout keys the header it persists
-      # (its git-auth-helper builds the key from serverUrl.origin), so the
-      # check is not vacuous on a GHES caller.
+      # Regression guard for the invariant above (shared composite — one copy
+      # for all three workflows): asks git, which follows includes, for the
+      # header checkout would have persisted, keyed on the server URL.
       - name: Assert no credential persisted in the workspace
         if: steps.gate.outputs.act == 'fix'
-        env:
-          SERVER_URL: ${{ github.server_url }}
-        run: |
-          set -uo pipefail
-          if git config --get-all "http.$SERVER_URL/.extraheader"; then
-            echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
-            exit 1
-          fi
-          echo "no credential persisted in .git/config."
+        uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
 
       # Capture the branch tip before the agent runs so the error-surfacing step
       # can tell whether the agent's work actually landed on the branch — and
@@ -743,6 +731,17 @@ jobs:
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
+
+      # The action leaves MARVIN_TOKEN in remote.origin.url; reset the URL so
+      # the later runner-side fetches (backstop, hand-back, Surface) reach
+      # their own step-scoped helpers — git never consults a helper when the
+      # URL carries a credential — and so the PAT does not sit in .git/config
+      # for the rest of the job. Same identity either way here (this loop
+      # always has MARVIN_TOKEN); hygiene, and one mechanism across the three
+      # workflows. always(): a failed agent leaves the URL rewritten too.
+      - name: Reset origin URL after the agent
+        if: always() && steps.claude.outcome != 'skipped'
+        uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
 
       # If the runner's base merge is STILL the branch tip, the agent finished
       # without committing anything of its own and nothing else will push it.

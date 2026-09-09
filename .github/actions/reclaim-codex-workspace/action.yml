@@ -11,12 +11,15 @@ description: >-
   errors) then reads a clean config instead of each step defending itself;
   before this existed the loops' `Ensure hand-back after push` ran `git
   fetch` against the un-restored, codex-writable .git whenever the guard or
-  the landing failed (review finding on #73). Three things, in order:
+  the landing failed (review finding on #73). Five things, in order:
 
-  1. `chown -R runner .git` — object fan-out dirs codex created are
-     codex-owned, and the runner's codex-group membership is inert within
-     the job, so runner-side object writes would otherwise fail
-     intermittently.
+  1. Kill every process still running as the codex user (`pkill -KILL -u
+     codex`). codex-action's step is over and nothing legitimate runs as
+     codex after it, but the runner does not reap orphans between steps, so
+     a background process a prompt-injected codex left behind (`setsid
+     nohup … &`) would otherwise outlive this step — and could rewrite the
+     restored config below before the landing step's credentialed push
+     (review round 4 of #73).
   2. Refuse a redirected git dir: fail if `.git` is a symlink, not a
      directory, or contains a `commondir` file. gitrepository-layout(5): a
      `commondir` file sets `$GIT_COMMON_DIR` unless the env already does,
@@ -26,7 +29,19 @@ description: >-
      reads. This step runs no git, so the check needs no pin; every later
      git-running step pins `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` too,
      and this refusal makes a codex that tried it fail loudly instead.
-  3. Restore the config `Create codex user` snapshotted right before the
+  3. `chown -R runner .git` — object fan-out dirs codex created are
+     codex-owned, and the runner's codex-group membership is inert within
+     the job, so runner-side object writes would otherwise fail
+     intermittently.
+  4. `chmod -R g-w .git` — revoke the group grant `Create codex user` put on
+     the tree (`g+rwX` plus setgid on every directory). The chown alone
+     leaves `.git/` `drwxrwsr-x runner codex`, a directory the codex user
+     can still unlink from and create in, so a survivor of the kill would
+     have a write path to the restored config; without the group bit it
+     has none (codex is also in the `runner` group, so a `chgrp` would not
+     do). The working tree keeps its grant — runner owns the directories
+     and reads codex's files fine.
+  5. Restore the config `Create codex user` snapshotted right before the
      group grant, with `cp --remove-destination` — codex could have
      replaced the file with a symlink, and a plain cp would follow it and
      write elsewhere.
@@ -68,6 +83,12 @@ runs:
           echo "::error::pre-codex git config snapshot not found at $SNAPSHOT — refusing to reuse the codex-written .git/config."
           exit 1
         fi
+        # First: nothing may still be running as codex while .git is put
+        # back — a lingering background process could re-tamper the config
+        # after the restore below and before the landing step's credentialed
+        # push. `|| true`: pkill exits 1 when there is nothing to kill, the
+        # normal case.
+        sudo pkill -KILL -u codex || true
         # Refuse BEFORE the chown: a .git that codex turned into a symlink
         # would otherwise have its target re-owned first. -L on commondir
         # too — -e is false for a dangling symlink.
@@ -76,5 +97,9 @@ runs:
           exit 1
         fi
         sudo chown -R runner "$gitdir"
+        # Revoke the codex group's write grant on .git so a survivor of the
+        # kill has no write path into it either (chown -R does not follow
+        # symlinks under .git — GNU default -P — and neither does chmod -R).
+        sudo chmod -R g-w "$gitdir"
         cp --remove-destination "$SNAPSHOT" "$gitdir/config"
-        echo "reclaimed .git from codex and restored the pre-codex config."
+        echo "reclaimed .git from codex (codex processes killed, group write revoked) and restored the pre-codex config."

@@ -518,24 +518,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Regression guard for the invariant above: the persisted-credential
-      # layout has changed across actions/checkout releases (a local
-      # extraheader, then an include.path to a file under RUNNER_TEMP), so
-      # ask git — which follows includes — rather than grepping the file.
-      # Keyed on the server URL, as checkout keys the header it persists
-      # (its git-auth-helper builds the key from serverUrl.origin), so the
-      # check is not vacuous on a GHES caller.
+      # Regression guard for the invariant above (shared composite — one copy
+      # for all three workflows): asks git, which follows includes, for the
+      # header checkout would have persisted, keyed on the server URL.
       - name: Assert no credential persisted in the workspace
         if: steps.trig.outputs.ok == 'true'
-        env:
-          SERVER_URL: ${{ github.server_url }}
-        run: |
-          set -uo pipefail
-          if git config --get-all "http.$SERVER_URL/.extraheader"; then
-            echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
-            exit 1
-          fi
-          echo "no credential persisted in .git/config."
+        uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
 
       # ---- Deterministic base-branch sync (design/architecture.md) ---------
       # The base merge happens HERE, on the runner, for BOTH engines — not in
@@ -778,6 +766,21 @@ jobs:
             ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
             ${{ inputs.claude_args }}
 
+      # The action leaves its github_token in remote.origin.url, and git never
+      # falls back to a helper when the URL carries a credential (a 401 there
+      # rejects outright). Reset the URL so every later `git fetch`/`git push
+      # origin` in this job — the backstop, Open or adopt PR, Verify agent
+      # work landed — reaches its own step-scoped helper as designed. This is
+      # what makes the marvin-less path work at all: there the URL token is
+      # the Claude App token, which the action revokes in its own final step,
+      # so those fetches failed ("not on origin", no PR opened) before this
+      # existed. Also stops the token sitting in .git/config for the rest of
+      # the job. always(): a failed or cancelled agent leaves the URL
+      # rewritten too, and the backstop below runs on those paths.
+      - name: Reset origin URL after the agent
+        if: always() && steps.claude.outcome != 'skipped'
+        uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
+
       # If the runner's base merge is STILL the branch tip, the agent finished
       # without committing anything of its own — and on a PR run nothing else
       # pushes it. Land it anyway: restoring the PR to mergeable is what lets
@@ -822,8 +825,11 @@ jobs:
       # its step fails even though the file is there if Claude ran.
       # push-token is the machine account where the caller has it (the push
       # must trigger CI; the `|| github.token` fallback degrades exactly as
-      # every other marvin-less push does) — the composite authenticates its
-      # own push, step-scoped; nothing is persisted by this job's checkout.
+      # every other marvin-less push does: github-actions[bot], no CI) — the
+      # composite authenticates its own push, step-scoped; nothing is
+      # persisted by this job's checkout, and the origin-URL reset above is
+      # what lets its helper be consulted at all (a URL credential would win
+      # — on a marvin-less caller a revoked one, failing the fetch).
       - name: Push base merge if unpushed
         id: backstop
         if: >-
@@ -1486,6 +1492,11 @@ jobs:
       # Actions PR-creation, and even when allowed its PRs trigger no CI
       # (recursion guard). The `|| github.token` fallback only applies on repos
       # without the secret, where it degrades exactly as documented above.
+      # The git fetch below is a separate matter from gh: it authenticates
+      # through this step's helper (job token), which the origin-URL reset
+      # after the action step is what makes reachable — with the action's URL
+      # credential still in place git would use that instead, and on a
+      # marvin-less caller it is the revoked App token.
       - name: Open or adopt PR for issue-triggered run
         id: openpr
         if: >-
@@ -1508,8 +1519,9 @@ jobs:
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           REQ_REVIEW: ${{ inputs.request_review_after_open }}
           # Step-scoped credential for the fetch below (nothing is persisted
-          # by checkout): unauthenticated it would fail on a private caller
-          # and this step would conclude "not on origin" and open no PR.
+          # by checkout, and the origin URL carries none after the reset):
+          # unauthenticated it would fail on a private caller and this step
+          # would conclude "not on origin" and open no PR.
           GIT_TOKEN: ${{ github.token }}
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
@@ -1620,8 +1632,9 @@ jobs:
           BRANCH: ${{ steps.claude.outputs.branch_name }}
           START_SHA: ${{ github.sha }}
           # Step-scoped credential for the best-effort fetch below (nothing
-          # is persisted by checkout; a silent fetch failure on a private
-          # caller would read landed work as unlanded).
+          # is persisted by checkout and the origin URL carries none after
+          # the reset; a silent fetch failure on a private caller would read
+          # landed work as unlanded).
           GIT_TOKEN: ${{ github.token }}
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper

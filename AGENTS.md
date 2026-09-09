@@ -20,8 +20,9 @@ take effect on every repo's next run.
   taken by the reusable definitions; keep them in sync with `examples/`. No CI
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
-  reusable workflows (`set-stage`, `sync-branch`, `reclaim-codex-workspace`,
-  `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`).
+  reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
+  `reset-origin-url`, `reclaim-codex-workspace`, `unresolved-merge-guard`,
+  `push-base-merge`, `provision-fallback`).
   Referenced fully-qualified
   (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
   regardless of what the job checked out; put step bodies that would otherwise
@@ -88,11 +89,20 @@ take effect on every repo's next run.
   token is the job token for reads, `MARVIN_TOKEN` for pushes that must
   trigger CI. When adding a git network call to a workflow or composite,
   give its step that env — never rely on `.git/config`, and never put a
-  token in a URL or an `http.*.extraheader`. On the codex path, the
+  token in a URL or an `http.*.extraheader`. A URL credential WINS over a
+  helper (git never consults one when the URL carries auth), which is why
+  the `reset-origin-url` step runs right after every claude-code-action
+  step: the action rewrites `remote.origin.url` to carry its token, and
+  until the reset every later fetch/push would use that instead of its
+  helper — a revoked token on marvin-less callers. Keep that step directly
+  after the action step, `always()`-gated, and put no git network call
+  between the two. On the codex path, the
   `reclaim-codex-workspace` step runs unconditionally right after codex
-  (`if: always() && steps.codexuser.outcome == 'success'`): it takes `.git`
-  back, refuses a redirected git dir (`.git/commondir`, symlinked `.git`),
-  and restores the pre-codex `.git/config` — so keep every later git-running
+  (`if: always() && steps.codexuser.outcome == 'success'`): it kills any
+  process still running as codex, refuses a redirected git dir
+  (`.git/commondir`, symlinked `.git`), takes `.git` back and revokes the
+  codex group's write grant on it, and restores the pre-codex `.git/config`
+  — so keep every later git-running
   step gated on its success (guard, landing, the loops' hand-back fetch) and
   put nothing that runs git between codex and it. The guard and landing
   steps additionally pin `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE` and

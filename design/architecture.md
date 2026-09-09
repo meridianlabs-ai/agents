@@ -175,11 +175,13 @@ group-grants the whole workspace, so codex could read the PAT off disk
 
 Since #61 (decision: Ransom, 2026-09-09) **no credential is written to the
 workspace**. All three checkouts run `persist-credentials: false` with the
-job token (the fetch is a read); an assertion step right after fails the job
-if `git config --get-all http.<server_url>/.extraheader` finds anything
-(git follows includes, so the check survives checkout's layout changes, and
-the key comes from `github.server_url` because checkout keys the header on
-the server origin — a literal `github.com` would pass vacuously on GHES); and
+job token (the fetch is a read); an assertion step right after (the
+`assert-no-persisted-credential` composite, one copy for the three workflows)
+fails the job if `git config --get-all http.<server_url>/.extraheader` finds
+anything (git follows includes, so the check survives checkout's layout
+changes, and the key comes from `github.server_url` because checkout keys the
+header on the server origin — a literal `github.com` would pass vacuously on
+GHES); and
 every runner-side git network operation authenticates itself, scoped to its
 step, through git's environment config — `GIT_CONFIG_COUNT` /
 `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` define a credential helper that
@@ -205,9 +207,10 @@ changes who pushes. Per step:
 | `sync-branch` (all three workflows) | job token — fetches only |
 | `push-base-merge` (all three) | `push-token`, now required and validated: `MARVIN_TOKEN` (the push must trigger CI) |
 | codex landing steps | `MARVIN_TOKEN` — in `claude.yml` `\|\| github.token` where the caller lacks it (degrading as every marvin-less push does); the loops have no fallback, their gate already exited on a missing secret |
-| hand-back, unlanded-work, open-PR and verify fetches | job token — best-effort reads that would otherwise fail silently on a private caller |
+| hand-back, unlanded-work, open-PR and verify fetches | job token — best-effort reads that would otherwise fail silently on a private caller. Reachable only because of the origin-URL reset after the action step (below) |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
 | the claude-code-action step | `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml`) — see below |
+| `reset-origin-url` (right after the action step, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
 claude-code-action's prepare step (`configureGitAuth`, agent mode included —
@@ -228,13 +231,37 @@ the job token carries only the caller's `permissions:` block, on a repo the
 agent already writes to. The URL precedence above means that job-token helper
 leaves the push identity with the Claude App.
 
-Two things this does not change. The action's URL rewrite still leaves *its*
-token in `.git/config` for the remainder of a Claude run — the action's
-behavior, noted as a residual risk under Untrusted checkouts — but the codex
-path, where the exposure was, never runs the action. And on the codex path
-no runner-side git command trusts anything under `.git` until the
-`reclaim-codex-workspace` step has restored it: see design/codex-engine.md →
-Hook-safe landing.
+**The URL credential wins, so it has to go before the helpers can work.**
+Git never consults a credential helper when the URL already carries a
+credential: a 401 with URL auth is `credential_reject` → `HTTP_NOAUTH`, and
+helpers are tried only on the `HTTP_REAUTH` path (a URL with no credential).
+After the action step, `remote.origin.url` carries the action's
+`github_token`, so every later runner-side `git fetch`/`git push origin`
+would have used *that* and bypassed its step's helper. On a repo with
+`MARVIN_TOKEN` that is the same identity — harmless. On a marvin-less
+`claude.yml` caller the URL token is the Claude App token, which the action
+revokes in its own final composite step (`Revoke app token`, `if: always()
+&& inputs.github_token == ''`), so the open-PR fetch failed ("not on origin;
+nothing to open" — no PR opened on an issue run), the verify fetch failed
+(landed work read as unlanded) and the backstop died at its fetch — a
+breakage that already existed on `main` with current checkout v4 (include
+layout) + current action v1 (which strips includes), since the persisted
+header those steps used to ride on was gone by the time they ran, and which
+review round 4 of #73 caught. So a **`reset-origin-url` step** (composite,
+one copy for the three workflows) runs right after the action step, `if:
+always() && steps.claude.outcome != 'skipped'`, and puts checkout's
+credential-free URL back with `git remote set-url origin` (idempotent, no
+network). Every later network git call then reaches its own step-scoped
+helper as the table says, the marvin-less backstop really does degrade to a
+github-actions[bot] push instead of failing, and the action's token no
+longer sits in `.git/config` for the remainder of the job — the residual
+risk this section carried since #61 (the reviewer's own run, where the
+sandbox lets contributor code read `.git/config` *during* the action step,
+is a different window: see Untrusted checkouts).
+
+One thing this does not change: on the codex path no runner-side git command
+trusts anything under `.git` until the `reclaim-codex-workspace` step has
+restored it — see design/codex-engine.md → Hook-safe landing.
 
 ## Model selection: prefer Fable, fall back gracefully
 

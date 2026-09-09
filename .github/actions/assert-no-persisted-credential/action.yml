@@ -1,0 +1,31 @@
+name: assert-no-persisted-credential
+description: >-
+  Regression guard for the no-persisted-credential invariant
+  (design/architecture.md → "No persisted git credentials"): fail the job if
+  actions/checkout left a credential in the workspace despite
+  `persist-credentials: false`. Runs right after the checkout in claude.yml,
+  claude-auto.yml and claude-auto-review.yml (one copy for all three, so the
+  check cannot drift). The persisted-credential layout has changed across
+  checkout releases — a local `http.<server>/.extraheader`, then an
+  `include.path` to a file under RUNNER_TEMP (v4.3.1/v6) — so this asks git,
+  which follows includes, rather than grepping the file. Keyed on the server
+  URL, as checkout keys the header it persists (its git-auth-helper builds the
+  key from serverUrl.origin), so the check is not vacuous on a GHES caller.
+  Runs no network git. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main);
+  NO post step (local composite actions with post steps break teardown on the
+  fork).
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SERVER_URL: ${{ github.server_url }}
+      run: |
+        set -uo pipefail
+        if git config --get-all "http.$SERVER_URL/.extraheader"; then
+          echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
+          exit 1
+        fi
+        echo "no credential persisted in .git/config."
