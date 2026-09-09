@@ -101,11 +101,16 @@ runs:
         # (2026-09-09) stopped "on an unavailable tokenizer download"; the
         # cache dir is tiktoken's default (TIKTOKEN_CACHE_DIR unset in the
         # agents' env → tempfile.gettempdir()/data-gym-cache, i.e. /tmp on
-        # the runner and under codex, whose curated env sets no TMPDIR and
-        # whose bubblewrap sandbox binds the host /tmp). The Python resolves
-        # the dir exactly as tiktoken does and prints it, so a runner whose
-        # TMPDIR diverges from codex's /tmp is visible in the log rather than
-        # a silent no-op; it then makes the files world-readable (the codex
+        # the runner and under codex, which codex-action launches via `sudo
+        # -u codex` — sudo's env_reset drops TMPDIR, which is not in the
+        # default env_keep — and whose bubblewrap sandbox binds the host
+        # /tmp). The Python resolves the dir exactly as tiktoken does —
+        # TIKTOKEN_CACHE_DIR, then DATA_GYM_CACHE_DIR, each honored when SET
+        # even if empty (an empty value means tiktoken caches nothing, so
+        # there is nothing to warm), then the tempdir default — and prints
+        # it, so a runner whose TMPDIR diverges from codex's /tmp is visible
+        # in the log rather than a silent no-op; it then makes the files
+        # world-readable (the codex
         # user reads what the runner wrote) and the dir sticky-writable like
         # /tmp itself, so codex can still cache an encoding outside this list
         # once it has egress (tiktoken hash-checks known encodings on read,
@@ -120,14 +125,19 @@ runs:
         import os, tempfile
         from pathlib import Path
         import tiktoken
+        cache_dir = os.environ.get(
+            "TIKTOKEN_CACHE_DIR",
+            os.environ.get(
+                "DATA_GYM_CACHE_DIR", os.path.join(tempfile.gettempdir(), "data-gym-cache")
+            ),
+        )
+        if cache_dir == "":
+            print("tiktoken caching disabled by env; nothing to warm")
+            raise SystemExit(0)
         names = ("cl100k_base", "o200k_base")
         for name in names:
             tiktoken.get_encoding(name)
-        cache = Path(
-            os.environ.get("TIKTOKEN_CACHE_DIR")
-            or os.environ.get("DATA_GYM_CACHE_DIR")
-            or Path(tempfile.gettempdir(), "data-gym-cache")
-        )
+        cache = Path(cache_dir)
         for f in cache.iterdir():
             f.chmod(0o644)
         cache.chmod(0o1777)
