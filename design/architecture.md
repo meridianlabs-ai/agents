@@ -296,7 +296,19 @@ against the docs, not assumed):
 
 The step is **fatal on failure** (no `continue-on-error`): a broken setup config
 should surface loudly rather than silently degrade every run to static-only
-review.
+review. One deliberate exception, in the two `@auto` loops only: on the **codex
+conflict path** the sync step hands codex the base merge still in progress,
+with conflict markers in the tree, and provisioning runs over that tree — so a
+conflicted `pyproject.toml` or lockfile fails the install *deterministically*,
+and a fatal failure would skip the very round that exists to resolve the
+markers (every re-trigger failing identically). There the loops set
+`continue-on-error` to "the sync left conflicts" (non-empty only on the codex
+path; the Claude path aborts its conflicted merge), the round runs static-only
+with the failure spelled out in codex's prompt, and the next round — on the
+resolved branch — provisions normally. The error-surfacing step reads the
+conflict list too, so it never advises "re-trigger to retry" for that case.
+`claude.yml` keeps the fatal stance on its codex conflict path but names the
+conflicted files in its error comment.
 
 **Fork asymmetry.** What's in the workspace — not which branch the workflow was
 *resolved* from — decides whether the shim is found, and the two agents check

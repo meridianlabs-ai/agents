@@ -176,7 +176,16 @@ workaround when #103's does).
   CI-fix attempt 2 correctly declined to guess. Both loops now run the
   reviewer's two provisioning steps after the base sync and before the
   attempt/round is recorded, so a provisioning failure skips the agent
-  without burning a round; the Surface step names it.
+  without burning a round; the Surface step names it. On a **conflicted**
+  codex round the failure is tolerated instead (`continue-on-error` when
+  the sync left conflicts): provisioning runs over the in-progress merge,
+  so a conflicted dependency file fails it every time, and skipping the
+  agent there would strand the branch — the round runs static-only, the
+  prompt says so and tells codex to report static-only verification, and
+  the next round provisions on the resolved branch. The codex prompt's
+  verification line is composed from the provisioning outcomes (venv on
+  PATH / provisioning failed / nothing to provision) rather than asserting
+  a venv unconditionally.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which

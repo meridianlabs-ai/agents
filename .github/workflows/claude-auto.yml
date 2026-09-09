@@ -333,11 +333,6 @@ jobs:
           engine: ${{ steps.gate.outputs.engine }}
           token: ${{ secrets.MARVIN_TOKEN || github.token }}
 
-      # Record the attempt (idempotent sticky comment) before invoking the
-      # agent — but AFTER the sync step, matching the review loop's ordering:
-      # a sync failure (transient gh/fetch error) skips the agent steps rather
-      # than failing them, so the refund step would never fire, and an attempt
-      # recorded up front would stay burned with no fix ever tried.
       # Provision the project environment BEFORE the fix agent starts, so its
       # pytest/ruff/pyright actually run — the same two steps the reviewer
       # has (claude-review.yml; rationale there and in design/architecture.md
@@ -354,17 +349,34 @@ jobs:
       # attempt is never recorded, so nothing needs refunding — the Surface
       # step reports it. Fatal on failure, like the reviewer's: a broken
       # setup must be loud, not a silent static-only fix round.
+      #
+      # ONE exception: the codex conflict path. sync-branch hands codex the
+      # base merge still IN PROGRESS, with conflict markers in the tree, and
+      # provisioning runs over that tree — so when pyproject.toml or the
+      # lockfile is among the conflicted files the install fails
+      # DETERMINISTICALLY, and a fatal failure here would skip the very round
+      # that exists to resolve the markers (every re-trigger failing the
+      # same way). So when the sync left conflicts (non-empty only on the
+      # codex path — the Claude path aborts its conflicted merge), a
+      # provisioning failure is tolerated: the round runs static-only, as
+      # every codex round did before 2026-09-09, codex is told in its prompt
+      # that provisioning failed, and the next round — on the resolved
+      # branch — provisions normally. `outcome` still reads `failure` on the
+      # tolerated path (only `conclusion` is neutralized), which is what the
+      # prompt composer and the Surface step key on.
       - name: Provision project environment
         id: setup
         if: >-
           steps.gate.outputs.act == 'fix' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: ./.github/actions/claude-setup
 
       # Fallback where claude-setup is absent (fork PR heads cut from pristine
       # main; Python caller repos that never added the action): the
       # reviewer's recipe verbatim — see claude-review.yml for the uv
-      # version, retry, extras/`--group dev` and PATH reasoning.
+      # version, retry, extras/`--group dev` and PATH reasoning. Same
+      # conflicted-round tolerance as above.
       - name: Provision project environment (fallback)
         id: setupfb
         timeout-minutes: 10
@@ -372,6 +384,7 @@ jobs:
           steps.gate.outputs.act == 'fix' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
@@ -392,6 +405,12 @@ jobs:
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
           echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
 
+      # Record the attempt (idempotent sticky comment) before invoking the
+      # agent — but AFTER the sync and provisioning steps, matching the review
+      # loop's ordering: a sync or provisioning failure (transient gh/fetch or
+      # download error) skips the agent steps rather than failing them, so the
+      # refund step would never fire, and an attempt recorded up front would
+      # stay burned with no fix ever tried.
       - name: Record attempt
         if: steps.gate.outputs.act == 'fix'
         env:
@@ -505,6 +524,8 @@ jobs:
           SYNC_BASE: ${{ steps.sync.outputs.base }}
           SYNC_APPEND: ${{ inputs.branch_sync_append }}
           CAP: ${{ inputs.fix_attempt_cap }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
         run: |
           set -euo pipefail
           # Retry-then-fail on context fetches — never swallow: the embedded
@@ -532,9 +553,24 @@ jobs:
           }
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
+          # What the sandbox actually has depends on what the provisioning
+          # steps did: both are conditional (no claude-setup and no
+          # pyproject.toml means neither ran), and on a conflicted round a
+          # failure is tolerated rather than fatal (see the provisioning
+          # steps) — so the verification instruction says which case it is
+          # instead of asserting a venv that may not exist. codex-action
+          # forwards the runner PATH into its sandbox, so a provisioned venv
+          # IS on codex's PATH.
+          if [ "${SETUP_OUTCOME:-}" = "success" ] || [ "${SETUPFB_OUTCOME:-}" = "success" ]; then
+            verify="Verify with the locally provisioned tools (pytest/ruff/mypy — the project venv is on PATH) where relevant."
+          elif [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+            verify="NOTE: environment provisioning FAILED before you started (on this conflicted round the likely cause is a conflicted dependency file — pyproject.toml or a lockfile — see the merge conflict task below), so pytest and the project's dependencies are probably NOT installed and you cannot install them (no network). Resolve the merge conflict first; verify as far as the bare runner allows (py_compile, reading the code), and state plainly in your final message that verification was static-only this round — the next round provisions normally once the resolved branch is pushed."
+          else
+            verify="Verify locally (pytest/ruff/mypy) where relevant and available — no project environment was provisioned for this checkout (no claude-setup action and no pyproject.toml)."
+          fi
           {
             echo "You are auto, fixing failing CI on PR #$PR in $REPO (branch $HEAD, fix attempt $ATTEMPT of $CAP), running on the Codex engine in a local checkout of the branch."
-            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes (which re-runs CI), and posts for you. Verify with the locally provisioned tools (pytest/ruff/mypy — the project venv is on PATH) where relevant."
+            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes (which re-runs CI), and posts for you. $verify"
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
@@ -835,6 +871,7 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           SINCE: ${{ steps.base.outputs.ts }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
           BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
@@ -859,8 +896,19 @@ jobs:
           # Provisioning died before the agent started: same shape as the sync
           # failure above — every downstream step is SKIPPED (the attempt was
           # not recorded, so no refund applies) and without this the job is a
-          # silent red with the board parked at Agent.
-          if [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+          # silent red with the board parked at Agent. EXCEPT on the codex
+          # conflict path (SYNC_CONFLICTS non-empty): there the provisioning
+          # steps are continue-on-error, the round ran static-only with the
+          # failure spelled out in codex's prompt, and the later clauses
+          # judge what it did — so a failure there is a log warning, not an
+          # error, and "re-trigger to retry" (wrong advice for a conflicted
+          # dependency file, which fails identically every time) is never
+          # given for it.
+          if [ -n "${SYNC_CONFLICTS:-}" ]; then
+            if [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+              echo "::warning::environment provisioning failed on a conflicted round (conflicts in: $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//')); the fix agent ran static-only and was told so."
+            fi
+          elif [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             err="environment provisioning (claude-setup) failed before the fix agent started — usually a transient dependency-download/network error, or a dependency file the base merge touched; no fix was attempted. Re-trigger to retry."
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the fix agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); no fix was attempted. Re-trigger if it looks transient."

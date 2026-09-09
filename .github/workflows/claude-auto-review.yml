@@ -564,17 +564,34 @@ jobs:
       # round is never recorded, so nothing needs refunding — the Surface
       # step reports it. Fatal on failure, like the reviewer's: a broken
       # setup must be loud, not a silent static-only fix round.
+      #
+      # ONE exception: the codex conflict path. sync-branch hands codex the
+      # base merge still IN PROGRESS, with conflict markers in the tree, and
+      # provisioning runs over that tree — so when pyproject.toml or the
+      # lockfile is among the conflicted files the install fails
+      # DETERMINISTICALLY, and a fatal failure here would skip the very round
+      # that exists to resolve the markers (every re-trigger failing the
+      # same way). So when the sync left conflicts (non-empty only on the
+      # codex path — the Claude path aborts its conflicted merge), a
+      # provisioning failure is tolerated: the round runs static-only, as
+      # every codex round did before 2026-09-09, codex is told in its prompt
+      # that provisioning failed, and the next round — on the resolved
+      # branch — provisions normally. `outcome` still reads `failure` on the
+      # tolerated path (only `conclusion` is neutralized), which is what the
+      # prompt composer and the Surface step key on.
       - name: Provision project environment
         id: setup
         if: >-
           steps.gate.outputs.act == 'fix' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: ./.github/actions/claude-setup
 
       # Fallback where claude-setup is absent (fork PR heads cut from pristine
       # main; Python caller repos that never added the action): the
       # reviewer's recipe verbatim — see claude-review.yml for the uv
-      # version, retry, extras/`--group dev` and PATH reasoning.
+      # version, retry, extras/`--group dev` and PATH reasoning. Same
+      # conflicted-round tolerance as above.
       - name: Provision project environment (fallback)
         id: setupfb
         timeout-minutes: 10
@@ -582,6 +599,7 @@ jobs:
           steps.gate.outputs.act == 'fix' &&
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
@@ -735,10 +753,27 @@ jobs:
           SYNC_APPEND: ${{ inputs.branch_sync_append }}
           CAP: ${{ inputs.review_round_cap }}
           CONTINUATION: ${{ steps.gate.outputs.continuation }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
         run: |
           set -euo pipefail
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
+          # What the sandbox actually has depends on what the provisioning
+          # steps did: both are conditional (no claude-setup and no
+          # pyproject.toml means neither ran), and on a conflicted round a
+          # failure is tolerated rather than fatal (see the provisioning
+          # steps) — so the verification instruction says which case it is
+          # instead of asserting a venv that may not exist. codex-action
+          # forwards the runner PATH into its sandbox, so a provisioned venv
+          # IS on codex's PATH.
+          if [ "${SETUP_OUTCOME:-}" = "success" ] || [ "${SETUPFB_OUTCOME:-}" = "success" ]; then
+            verify="Verify your changes with the locally provisioned tools (pytest/ruff/mypy — the project venv is on PATH) where relevant."
+          elif [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+            verify="NOTE: environment provisioning FAILED before you started (on this conflicted round the likely cause is a conflicted dependency file — pyproject.toml or a lockfile — see the merge conflict task below), so pytest and the project's dependencies are probably NOT installed and you cannot install them (no network). Resolve the merge conflict first; verify as far as the bare runner allows (py_compile, reading the code), and state plainly in your final message that verification was static-only this round — the next round provisions normally once the resolved branch is pushed."
+          else
+            verify="Verify your changes locally (pytest/ruff/mypy) where relevant and available — no project environment was provisioned for this checkout (no claude-setup action and no pyproject.toml)."
+          fi
           # Retry-then-fail on context fetches — never swallow: the embedded
           # context is load-bearing, so a swallowed transient either burns
           # the round on inference (PR #392, 2026-09-01: the emptiness guard
@@ -771,7 +806,7 @@ jobs:
             if [ "${CONTINUATION:-}" = "true" ]; then
               echo "NOTE — closed-PR continuation: PR #$PR is CLOSED but still auto-labeled with a live branch (on repos with a promotion flow this means it was promoted upstream and pushes to this branch update the upstream PR's diff). The checked-out branch is the loop's working surface, not a dead PR — address the feedback as usual."
             fi
-            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Edit the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts the re-review request for you. Verify your changes with the locally provisioned tools (pytest/ruff/mypy — the project venv is on PATH) where relevant."
+            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Edit the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts the re-review request for you. $verify"
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
@@ -1149,6 +1184,7 @@ jobs:
           MENTION: ${{ steps.gate.outputs.mention }}
           HANDED: ${{ steps.selfhandoff.outputs.found }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
           BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
@@ -1173,8 +1209,19 @@ jobs:
           # Provisioning died before the agent started: same shape as the sync
           # failure above — every downstream step is SKIPPED (the round was
           # not recorded, so no refund applies) and without this the job is a
-          # silent red with the board parked at Agent.
-          if [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+          # silent red with the board parked at Agent. EXCEPT on the codex
+          # conflict path (SYNC_CONFLICTS non-empty): there the provisioning
+          # steps are continue-on-error, the round ran static-only with the
+          # failure spelled out in codex's prompt, and the later clauses
+          # judge what it did — so a failure there is a log warning, not an
+          # error, and "re-trigger to retry" (wrong advice for a conflicted
+          # dependency file, which fails identically every time) is never
+          # given for it.
+          if [ -n "${SYNC_CONFLICTS:-}" ]; then
+            if [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+              echo "::warning::environment provisioning failed on a conflicted round (conflicts in: $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//')); the fix agent ran static-only and was told so."
+            fi
+          elif [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             err="environment provisioning (claude-setup) failed before the fix agent started — usually a transient dependency-download/network error, or a dependency file the base merge touched; no fix was attempted. Re-trigger to retry."
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the fix agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); no fix was attempted. Re-trigger if it looks transient."
