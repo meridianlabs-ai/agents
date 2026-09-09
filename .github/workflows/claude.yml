@@ -522,11 +522,16 @@ jobs:
       # layout has changed across actions/checkout releases (a local
       # extraheader, then an include.path to a file under RUNNER_TEMP), so
       # ask git — which follows includes — rather than grepping the file.
+      # Keyed on the server URL, as checkout keys the header it persists
+      # (its git-auth-helper builds the key from serverUrl.origin), so the
+      # check is not vacuous on a GHES caller.
       - name: Assert no credential persisted in the workspace
         if: steps.trig.outputs.ok == 'true'
+        env:
+          SERVER_URL: ${{ github.server_url }}
         run: |
           set -uo pipefail
-          if git config --get-all http.https://github.com/.extraheader; then
+          if git config --get-all "http.$SERVER_URL/.extraheader"; then
             echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
             exit 1
           fi
@@ -734,9 +739,13 @@ jobs:
       # action then rewrites the origin URL to carry github_token, and a
       # URL-embedded credential takes precedence over helpers — so on repos
       # without MARVIN_TOKEN the push still goes out as the Claude App (which
-      # triggers CI), not as github-actions[bot]. Nothing new reaches the
-      # agent either: on MARVIN repos the same token is already in its
-      # environment as GITHUB_TOKEN (that is what its `gh` calls use). The
+      # triggers CI), not as github-actions[bot]. What the agent can read:
+      # on MARVIN repos nothing new — the same token is already in its
+      # environment as GITHUB_TOKEN (that is what its `gh` calls use). On a
+      # marvin-less repo GIT_TOKEN is the JOB token, which the agent could
+      # not read before (its GITHUB_TOKEN is the Claude App token there, and
+      # the action strips checkout's copy) — bounded by the caller's
+      # `permissions:` block, on a repo the agent already writes to. The
       # helper is scoped to this server's URL, so a `git fetch` the agent
       # aims at any other host (its allow-list permits the verb) gets no
       # credential.

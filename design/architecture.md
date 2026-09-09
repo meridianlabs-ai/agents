@@ -176,8 +176,10 @@ group-grants the whole workspace, so codex could read the PAT off disk
 Since #61 (decision: Ransom, 2026-09-09) **no credential is written to the
 workspace**. All three checkouts run `persist-credentials: false` with the
 job token (the fetch is a read); an assertion step right after fails the job
-if `git config --get-all http.https://github.com/.extraheader` finds anything
-(git follows includes, so the check survives checkout's layout changes); and
+if `git config --get-all http.<server_url>/.extraheader` finds anything
+(git follows includes, so the check survives checkout's layout changes, and
+the key comes from `github.server_url` because checkout keys the header on
+the server origin — a literal `github.com` would pass vacuously on GHES); and
 every runner-side git network operation authenticates itself, scoped to its
 step, through git's environment config — `GIT_CONFIG_COUNT` /
 `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` define a credential helper that
@@ -216,10 +218,15 @@ account either way. The action step still gets the helper env. In
 origin <branch>` (and `git ls-remote` on issue runs) *before*
 `configureGitAuth`, which rode on the persisted header and would fail on a
 private caller with nothing persisted. In the loops it is belt and braces —
-the fallback #61 named. Nothing new reaches the agent: the same token is
-already its `GITHUB_TOKEN` (what its `gh` calls use), and the URL precedence
-above means a job-token helper on a marvin-less repo leaves the push
-identity with the Claude App.
+the fallback #61 named. What this hands the agent: on repos with
+`MARVIN_TOKEN`, nothing new — the same token is already its `GITHUB_TOKEN`
+(what its `gh` calls use). On a marvin-less `claude.yml` caller the helper's
+`GIT_TOKEN` is the *job* token, which the agent could not previously read
+(its `GITHUB_TOKEN` there is the Claude App token, and the action's
+`replaceCheckoutCredentials` removed checkout's copy) — a bounded addition:
+the job token carries only the caller's `permissions:` block, on a repo the
+agent already writes to. The URL precedence above means that job-token helper
+leaves the push identity with the Claude App.
 
 Two things this does not change. The action's URL rewrite still leaves *its*
 token in `.git/config` for the remainder of a Claude run — the action's

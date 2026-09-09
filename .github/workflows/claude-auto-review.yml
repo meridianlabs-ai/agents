@@ -514,11 +514,16 @@ jobs:
       # layout has changed across actions/checkout releases (a local
       # extraheader, then an include.path to a file under RUNNER_TEMP), so
       # ask git — which follows includes — rather than grepping the file.
+      # Keyed on the server URL, as checkout keys the header it persists
+      # (its git-auth-helper builds the key from serverUrl.origin), so the
+      # check is not vacuous on a GHES caller.
       - name: Assert no credential persisted in the workspace
         if: steps.gate.outputs.act == 'fix'
+        env:
+          SERVER_URL: ${{ github.server_url }}
         run: |
           set -uo pipefail
-          if git config --get-all http.https://github.com/.extraheader; then
+          if git config --get-all "http.$SERVER_URL/.extraheader"; then
             echo "::error::actions/checkout persisted a credential in .git/config despite persist-credentials:false"
             exit 1
           fi

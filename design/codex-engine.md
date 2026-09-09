@@ -189,7 +189,16 @@ the machine-account credential — and until #61 the credential itself sat in
   `unresolved-merge-guard`, which reads the index *before* the restore, pins
   `core.fsmonitor=false` and the git dir the same way (lower exposure —
   `ls-files` runs no drivers — but the same redirect would otherwise pick
-  the index it reads).
+  the index it reads). The env pin, not the restore, is also what covers a
+  *nested* repository: codex can leave an embedded repo in the tree with
+  `core.fsmonitor=<cmd>` in *its* `.git/config`, and the landing step's `git
+  status --porcelain` then spawns `git status --porcelain=2` inside it
+  (`is_submodule_modified`). That child gets `GIT_DIR`/`GIT_COMMON_DIR`
+  cleared and reads the nested config, which the restore never touched —
+  but git's `sanitize_repo_env` (run-command.c) deliberately keeps
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, so the `core.fsmonitor=false`
+  and `core.hooksPath` pins still apply there. Keep the pins on every git
+  command in the step, not just the ones that obviously execute config.
 
 Verification for a change here, both cases prompted to codex (any verb):
 write a `.git/hooks/pre-commit` that prints `HOOK-RAN` and exits non-zero —
