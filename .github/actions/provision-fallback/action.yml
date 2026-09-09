@@ -64,8 +64,10 @@ description: >-
 
   After the install it warms network-fetched caches the tests need
   (2026-09-09): tiktoken's BPE files into its default /tmp cache, readable
-  by the codex user. Evidence-driven — add an entry when a run reports a
-  blocked download; a failed warm only costs a slower first test.
+  by the codex user (and the dir left sticky-writable so codex can cache
+  encodings outside the list). Evidence-driven — add an entry when a run
+  reports a blocked download; a failed or stalled warm (bounded by
+  `timeout`) only costs a slower first test.
 
 runs:
   using: composite
@@ -100,16 +102,36 @@ runs:
         # cache dir is tiktoken's default (TIKTOKEN_CACHE_DIR unset in the
         # agents' env → tempfile.gettempdir()/data-gym-cache, i.e. /tmp on
         # the runner and under codex, whose curated env sets no TMPDIR and
-        # whose bubblewrap sandbox binds the host /tmp). World-readable so
-        # the codex user can read what the runner wrote. Best-effort: a
-        # failed warm is a slower first test, never a failed provisioning.
+        # whose bubblewrap sandbox binds the host /tmp). The Python resolves
+        # the dir exactly as tiktoken does and prints it, so a runner whose
+        # TMPDIR diverges from codex's /tmp is visible in the log rather than
+        # a silent no-op; it then makes the files world-readable (the codex
+        # user reads what the runner wrote) and the dir sticky-writable like
+        # /tmp itself, so codex can still cache an encoding outside this list
+        # once it has egress (tiktoken hash-checks known encodings on read,
+        # so a shared cache is not a poisoning vector). Best-effort and
+        # bounded: tiktoken downloads with no request timeout, so without the
+        # `timeout` a stalled blob host would hold the step to the caller's
+        # timeout-minutes and FAIL provisioning; with it, a stall (rc 124)
+        # lands in the warning branch like any other failure — a failed warm
+        # is a slower first test, never a failed provisioning.
         if .venv/bin/python -c 'import tiktoken' 2>/dev/null; then
-          if .venv/bin/python - <<'PY'
+          if ! timeout 120 .venv/bin/python - <<'PY'
+        import os, tempfile
+        from pathlib import Path
         import tiktoken
-        for name in ("cl100k_base", "o200k_base"):
+        names = ("cl100k_base", "o200k_base")
+        for name in names:
             tiktoken.get_encoding(name)
-        print("warmed tiktoken encodings: cl100k_base o200k_base")
+        cache = Path(
+            os.environ.get("TIKTOKEN_CACHE_DIR")
+            or os.environ.get("DATA_GYM_CACHE_DIR")
+            or Path(tempfile.gettempdir(), "data-gym-cache")
+        )
+        for f in cache.iterdir():
+            f.chmod(0o644)
+        cache.chmod(0o1777)
+        print(f"warmed tiktoken encodings into {cache}: {' '.join(names)}")
         PY
-          then chmod -R a+rX /tmp/data-gym-cache 2>/dev/null || true
-          else echo "::warning::tiktoken cache warm failed (tests needing it will try to download at run time)"; fi
+          then echo "::warning::tiktoken cache warm failed or timed out (tests needing it will try to download at run time)"; fi
         fi
