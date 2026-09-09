@@ -1207,13 +1207,11 @@ jobs:
           set -euo pipefail
           verdict=$(jq -r '.verdict // empty' "$OUT" 2>/dev/null || true)
           case "$verdict" in clean|suggestions) ;; *) verdict=suggestions ;; esac
-          {
-            jq -r '.review // "codex returned no review body."' "$OUT" \
-              | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
-                       -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                       -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g'
-            printf '\n\n🤖 engine: codex\n'
-          } >"$RUNNER_TEMP/codex-review-body.md"
+          jq -r '.review // "codex returned no review body."' "$OUT" \
+            | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                     -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+            >"$RUNNER_TEMP/codex-review-body.md"
           # GitHub caps comment bodies at 65,536 characters and the model's
           # review is unbounded (the prompt side is head -c-capped, the
           # output side wasn't): over the cap the post fails and the review
@@ -1226,6 +1224,10 @@ jobs:
             printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-review-body.trunc"
             mv "$RUNNER_TEMP/codex-review-body.trunc" "$RUNNER_TEMP/codex-review-body.md"
           fi
+          # The footer goes on AFTER the cap: it is the anchor the
+          # pr-feedback-context filter keys on for the next codex fix
+          # round, so a review long enough to truncate must still carry it.
+          printf '\n\n🤖 engine: codex\n' >>"$RUNNER_TEMP/codex-review-body.md"
           gh pr comment "$NUM" --repo "$REPO" --body-file "$RUNNER_TEMP/codex-review-body.md"
           if [ "$verdict" = "clean" ]; then
             gh pr comment "$NUM" --repo "$REPO" --body \

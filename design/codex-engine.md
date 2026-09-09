@@ -423,9 +423,11 @@ Verification for a change here, all cases prompted to codex (any verb):
   footer — join the de-fanged substrings on both the prompt and the
   output side (every codex summary that posts as marvin, the CI-fix
   loop's included), so a codex summary echoing either cannot become a
-  false anchor (the reviewer's own footer is printed after its sed, so it
-  is unaffected), and the Claude fix prompt's forbidden-substring list
-  names them too; the author restriction covers a caller's human
+  false anchor (the reviewer's own footer is appended after its sed AND
+  after its comment-size cap, so a truncated review still carries the
+  anchor), and the Claude-path prompts that post on a PR — the fix
+  prompt's forbidden-substring list and the dev verb's review-etiquette
+  rule — name them too; the author restriction covers a caller's human
   commenters, who are under neither rule. The
   reviewer is also told not to restate regression-accepted notes an
   earlier round already posted.

@@ -130,7 +130,7 @@ runs:
                     + ($all | to_entries | .[$rk[0]:]
                        | if length > 30 then (map(select(.key as $k | $rk | index($k))) + (map(select(.key as $k | ($rk | index($k)) | not)) | .[-25:]) | sort_by(.key)) else . end
                        | map(.value)) end)
-            | .[] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/pr-feedback-comments.json"
+            | .[] | "--- \(.user.login // "?") at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/pr-feedback-comments.json"
           # Review threads BY STATE via GraphQL instead of the flat REST list
           # of the last 40 inline comments, which carried no resolution state.
           # OPEN threads in full, each with its thread id (the deterministic

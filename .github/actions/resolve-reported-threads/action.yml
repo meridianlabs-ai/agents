@@ -87,9 +87,13 @@ runs:
         # likely renderings). The ids may follow on the tag's own line or as
         # a list beneath it: after a tag line, lines that are blank or hold
         # nothing but a bullet/number and `PRRT_…` tokens belong to the block
-        # (parsed and stripped); the first other line ends it and is kept,
-        # with any blank lines held back before it. The last tag block wins.
-        # The id filter below already tolerates any decoration on the ids.
+        # (parsed and stripped); the first other line ends it and is kept.
+        # Blank lines are always held back and flushed only before the next
+        # kept line, so the blank that preceded a tag (or trailed the
+        # message) is dropped with the block rather than left as a stray
+        # trailing blank or a double blank before the prose that follows.
+        # The last tag block wins. The id filter below already tolerates any
+        # decoration on the ids.
         ids=
         if [ -f "$FINAL" ]; then
           ids=$(awk -v out="$STRIPPED" '
@@ -98,10 +102,10 @@ runs:
             /^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/ {
               inblock = 1; held = 0; ids = $0
               sub(/^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/, "", ids); next }
-            inblock && /^[[:space:]]*$/ { held++; next }
+            /^[[:space:]]*$/ { held++; next }
             inblock && /^[[:space:]]*([-*+]|[0-9]+[.)])?[[:space:]]*(`?PRRT_[A-Za-z0-9_-]+`?[[:space:],;]*)+$/ {
               held = 0; ids = ids " " $0; next }
-            { if (inblock) { flush(); inblock = 0 }; print > out }
+            { inblock = 0; flush(); print > out }
             END { print ids }
           ' "$FINAL" | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
                   | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
