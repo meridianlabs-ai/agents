@@ -31,6 +31,20 @@ reviewer physically cannot push regardless of what it's asked to do.
 - `scripts/enable-claude.sh` — opens a PR adding both agent stubs to a repo.
 - `design/architecture.md` — design rationale and history.
 
+## Local skills
+
+`skills/` holds the six shared skills. Both `.agents/skills` and `.claude/skills` link to it, so Codex and Claude Code discover the same files when working in this repo. Use `$skill-name` in Codex or `/skill-name` in Claude Code.
+
+For use from other repos, link each desired skill into both user skill directories. For example, from this checkout:
+
+```sh
+mkdir -p ~/.agents/skills ~/.claude/skills
+ln -s "$PWD/skills/checkout" ~/.agents/skills/checkout
+ln -s "$PWD/skills/checkout" ~/.claude/skills/checkout
+```
+
+Run each `ln` command only when that destination name is absent. Preserve existing links and directories from other sources. Both links must point at the same stable checkout.
+
 ## Enabling the agents in a repo
 
 ```sh

@@ -663,8 +663,8 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
    sync as a backstop. **Both built**: the sync is the hourly `atlas-sync.yml`
    in THIS repo (migrated from the fork 2026-08-26); the promote skill is
    [skills/promote/SKILL.md](../skills/promote/SKILL.md) (canonical here,
-   symlinked into `~/.claude/skills/promote` so it loads in any local
-   session). The skill is idempotent — running it on an already-promoted issue
+   available in either reader through the links described in
+   [Local skills](../README.md#local-skills)). The skill is idempotent — running it on an already-promoted issue
    verifies/heals the four bookkeeping items instead of duplicating.
 
 ## Deferred
