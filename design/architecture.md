@@ -475,21 +475,77 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   sandbox lets contributor code read. Nothing after checkout needs an
   authenticated remote (claude-code-action's agent mode does no fetch; the
   codex path has no network).
+- **Credential file masks** (`sandbox.credentials.files`, issue #70):
+  `persist-credentials: false` keeps checkout's token out of `.git/config`,
+  but a different token lands there anyway. claude-code-action's own prepare
+  step rewrites the origin URL to embed the **app installation token**
+  (`replaceCheckoutCredentials` in its `git-config.ts`, every mode) — a
+  `contents: read` / `pull-requests: write` credential, present for the whole
+  agent step, that neither `persist-credentials: false` nor the env-var
+  denies touch because it is the action's, not one this repo passes in. The
+  action's credential-helper alternative is tied to its
+  `allowed_non_write_users` input, which would widen who may trigger runs, so
+  the overlay masks the file instead: a `mask` entry on
+  `$GITHUB_WORKSPACE/.git/config` makes sandboxed commands read a sentinel
+  copy (Linux behavior; Claude Code ≥ 2.1.221) with an `extract` regex
+  confining the replacement to the token so git still parses its config — the
+  agent's own sandboxed `git diff` / `git log` keep working — and
+  `onExtractNoMatch: deny` making the file unreadable if the action ever
+  changes the URL shape, rather than exposing the real file. The proxy
+  never substitutes the real token back into a sandboxed request because the
+  overlay configures no `network.tlsTerminate` (and no
+  `credentials.allowPlaintextInject`): the proxy cannot see request contents,
+  so the sentinel reaches the server unchanged (Claude Code reports this
+  mask-without-`tlsTerminate` state at startup; a report, not a setup
+  failure). The entry deliberately carries no `injectHosts`, and a mask entry
+  *without* `injectHosts` is substituted on requests to **every** host in
+  `network.allowedDomains` — so neither `network.tlsTerminate` nor
+  `credentials.allowPlaintextInject` may ever be added to this overlay while
+  the mask lacks an explicit host restriction, or contributor code could read
+  the sentinel and have the proxy inject the real token into a request to a
+  PyPI host. The caller's `settings` input is the other door — a caller using
+  its own `mask` entries in normal mode has `tlsTerminate` set, and the
+  recursive merge would carry it through — so the compose step **deletes both
+  keys** from the merged result; the invariant is structural, not a comment.
+  On these paths a caller's mask entries still hide their credentials from
+  sandboxed commands, they just cannot inject them (the docs'
+  fail-without-exposing state), which is the right trade where contributor
+  code runs. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
+  credential helper) get plain `deny` entries — nothing sandboxed needs
+  them, and the agent's `gh` is excluded from the sandbox. Two gotchas
+  encoded in the workflow: the path must be **absolute** (the action writes
+  the merged settings to `~/.claude/settings.json`, and a relative sandbox
+  path in user-scope settings resolves against `~/.claude`, not the
+  checkout), and the CLI version can only be checked *after* the agent step
+  (the action installs the pinned CLI — 2.1.266 at the time of writing —
+  from inside its own steps), so a post-agent step fails the run loudly if
+  the version ever drops below 2.1.221 (the external stage hand-back runs
+  under `always()` so that failure cannot park the proxy issue at Agent
+  Working, and "Surface agent errors" reads the step's outcome to post a ⚠️
+  on the thread — the review is already there, so a red job alone would go
+  unopened). The overlay's `files` and `envVars` arrays are spliced as
+  caller entries + overlay entries (jq `*` would otherwise replace a
+  caller's own protections wholesale); the restriction arrays
+  (`allowedDomains`, `excludedCommands`) stay overlay-wins, and
+  `network.tlsTerminate` / `credentials.allowPlaintextInject` are deleted
+  whatever the caller passed. The proper fix is an action-side git-auth
+  option independent of `allowed_non_write_users`; requested as
+  [anthropics/claude-code-action#1818](https://github.com/anthropics/claude-code-action/issues/1818)
+  (filed 2026-09-09 from the draft in #70 — by hand, the machine account
+  cannot open issues outside the org). If the action gains it, the mask
+  becomes belt-and-braces.
 
 Residual risks, accepted deliberately: this defends against malicious
 contributor *code*, not a prompt-injected *agent* — the agent itself still
-holds credentials and an unsandboxed `gh`, a channel that existed in
-static-review mode too (it reads untrusted text either way). The PyPI
-egress needed for `pip install` is a (narrow) exfiltration path for code
-running during the install itself. And `persist-credentials: false` removes
-only *checkout's* token: claude-code-action's own prepare step then rewrites
-the origin URL to embed the **app token** (`replaceCheckoutCredentials` in
-its `git-config.ts`, all modes), so `.git/config` holds a `contents: read` /
-`pull-requests: write` credential for the duration of the agent run,
-readable by sandboxed code. Its credential-helper alternative is tied to the
-action's `allowed_non_write_users` input, which would widen who may trigger
-the run — not a trade worth making here; a fix belongs upstream in the
-action.
+holds credentials and an unsandboxed `gh`, and its `Read` tool is not
+sandboxed either (it sees the real `.git/config`, mask or no mask) — a
+channel that existed in static-review mode too (it reads untrusted text
+either way). The PyPI egress needed for `pip install` is a (narrow)
+exfiltration path for code running during the install itself. And the
+`.git/config` mask depends on the exact URL shape the action writes: a
+change there fails closed (`onExtractNoMatch: deny`, the file becomes
+unreadable and sandboxed git stops working — visible, not silent), but only
+an upstream option removes the token from the workspace altogether.
 
 ### Branch sync before work
 
