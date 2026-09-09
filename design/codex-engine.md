@@ -46,10 +46,11 @@ therefore moves into deterministic workflow steps:
 | task context (CI logs, review findings) | agent fetches via gh | workflow pre-fetches into the prompt/workspace |
 
 Pre-fetching covers the dev verb's PR runs too: the prompt-compose step
-embeds the PR title/body and bounded newest-last comment slices (last
-12 discussion + 40 inline, the review-fix prep's bounds), so a trigger
-like "address the feedback above" carries its referent — codex cannot
-read the thread at runtime the way the Claude path does.
+embeds the PR title/body, the top-level comments filtered and anchored
+on the newest review round, and the review threads by state (the
+review-fix prep's shape — see Limitations → Fix-round context), so a
+trigger like "address the feedback above" carries its referent — codex
+cannot read the thread at runtime the way the Claude path does.
 
 This is a feature as much as a constraint: the verdict marker and the
 hand-back become guaranteed instead of prompt-enforced, and the
@@ -407,8 +408,9 @@ Verification for a change here, all cases prompted to codex (any verb):
   several; kept in full with everything after it up to a bound of the
   round's marker comments plus 25 others, plus the last five human
   comments before it), and review threads come from GraphQL
-  `reviewThreads` by state — OPEN in full with the thread id (the handle a
-  later change uses to resolve them), RESOLVED as a one-line index (only
+  `reviewThreads` by state — OPEN in full with the thread id (the handle
+  the `RESOLVED-THREADS:` ending-contract line names for the
+  `resolve-reported-threads` composite), RESOLVED as a one-line index (only
   when there are any), resolved-and-outdated dropped; the query's page
   bounds (newest 100 threads, first 20 comments each) print a note when
   hit rather than truncating silently. Both anchor
