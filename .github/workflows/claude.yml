@@ -572,6 +572,27 @@ jobs:
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
         uses: ./.github/actions/claude-setup
 
+      # Fallback where claude-setup is absent — the shared provision-fallback
+      # composite the reviewer and both loops already use (the recipe, uv
+      # version, retry, extras/`--group dev` and the .git/info/exclude
+      # entries live there). The dev agent was the
+      # last path without it: on the inspect_ai fork every PR branch is cut
+      # from pristine main and carries no claude-setup, so a dev-verb run
+      # on a PR there — `@auto fix review feedback` on inspect_ai#428,
+      # 2026-09-09 — ran with no pytest/ruff/mypy at all. Claude installs
+      # its own (it has network) so the gap only showed on codex, which
+      # tried an offline install, failed, pushed unformatted code with two
+      # mypy errors, and CI caught what the agent could not. Same trigger
+      # gate as the shim step: never on a refused run.
+      - name: Provision project environment (fallback)
+        id: setupfb
+        timeout-minutes: 10
+        if: >-
+          steps.trig.outputs.ok == 'true' &&
+          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
+          hashFiles('pyproject.toml') != ''
+        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+
       # Compose the appended-system-prompt sources into ONE value, so we emit a
       # single --append-system-prompt flag. Multiple flags would force a bet on
       # undocumented CLI behavior (accumulate vs. last-one-wins), and the sources
@@ -1112,8 +1133,32 @@ jobs:
           IBODY: ${{ github.event.issue.body }}
           ITITLE: ${{ github.event.issue.title }}
           EXTRA: ${{ inputs.append_system_prompt }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
         run: |
           set -euo pipefail
+          # Verification instruction keyed on what provisioning did, with the
+          # tools' ABSOLUTE paths: codex's tool calls run through `bash -lc`
+          # as the codex user, and the login shell's /etc/profile resets PATH
+          # to the system default — so GITHUB_PATH additions (the venv) do
+          # NOT resolve as bare names there, whatever PATH codex-action
+          # forwarded (inspect_flow#818 dev run, 2026-09-09: `command -v
+          # pytest ruff mypy` printed nothing under codex while the venv was
+          # on the runner PATH; the reviewer prompt has said as much since
+          # 2026-09-01). This compose step runs as the runner, where the
+          # provisioned PATH is in effect, so discovery happens here.
+          if [ "${SETUP_OUTCOME:-}" = "success" ] || [ "${SETUPFB_OUTCOME:-}" = "success" ]; then
+            tools=""
+            for t in pytest ruff mypy pyright python3; do
+              path=$(command -v "$t" 2>/dev/null || true)
+              [ -n "$path" ] && tools="$tools$t=$path "
+            done
+            verify="Verify your work with the locally provisioned tools where relevant. Your process runs under a login shell with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
+          elif [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+            verify="NOTE: environment provisioning FAILED before you started, so pytest and the project's dependencies are probably NOT installed and you cannot install them (no network). Verify as far as the bare runner allows (py_compile, reading the code) and state plainly in your final message that verification was static-only."
+          else
+            verify="No project environment was provisioned for this checkout (no claude-setup action and no pyproject.toml); verify with whatever the bare runner offers and say what you could not run."
+          fi
           # Retry-then-fail on context fetches — never swallow: the embedded
           # context is load-bearing, so a swallowed transient either burns
           # the round on inference (PR #392, 2026-09-01: the emptiness guard
@@ -1144,7 +1189,7 @@ jobs:
             else
               echo "Context: issue #$NUM — your edits will be pushed to a new branch and opened as a PR fixing it."
             fi
-            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Make your changes in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts for you. Verify your work with the locally provisioned tools (pytest/ruff/mypy) where relevant."
+            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Make your changes in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes, and posts for you. $verify"
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
@@ -1751,6 +1796,7 @@ jobs:
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
           BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
           HANDBACK_OUTCOME: ${{ steps.handback.outcome }}
           AGENTPUSH_OUTCOME: ${{ steps.agentpush.outcome }}
@@ -1788,6 +1834,9 @@ jobs:
             if [ -n "${SYNC_CONFLICTS:-}" ]; then
               err="environment provisioning (claude-setup) failed before the agent started — the base-branch merge left conflicts in $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//'), so if one of those is a dependency file the provisioning ran over conflict markers (see the sync step's warning); otherwise usually a transient dependency-download/network error. Resolve the conflict or re-trigger to retry."
             fi
+          fi
+          if [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
+            err="fallback environment provisioning (uv dev-install) failed before the agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); re-trigger if it looks transient."
           fi
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then

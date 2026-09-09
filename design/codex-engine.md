@@ -378,6 +378,28 @@ Verification for a change here, all cases prompted to codex (any verb):
   verification line is composed from the provisioning outcomes (venv on
   PATH / provisioning failed / nothing to provision) rather than asserting
   a venv unconditionally.
+- **Codex reviews get the PR thread since 2026-09-09**: the Claude
+  reviewer reads the PR description, prior review rounds and thread state
+  with `gh` at runtime; codex cannot, and its prompt had been the generic
+  `review_prompt` plus the codex adjustments — 7.5 KB, nothing PR-specific
+  beyond the number. inspect_ai#428's two codex reviews (2026-09-09) never
+  saw the 18 KB description's "implementation decisions that differ from
+  the design" section or a human adjudication sitting on an open thread,
+  and re-derived intent from the design doc. A `Compose codex review
+  context` step now embeds title/body, the newest 15 top-level comments,
+  and the review threads with resolution state (GraphQL `reviewThreads`:
+  RESOLVED/OPEN, outdated) — the prompt tells codex a RESOLVED thread is
+  settled unless the current code contradicts it — and hands codex a
+  prompt file (same retry-then-fail fetches, source-bounded slices, 120 KB
+  cap on the finished file, marker/trigger de-fang as the other preps).
+- **Tools are named by absolute path in every codex prompt** (reviewer
+  since 2026-09-01; dev verb and loops since 2026-09-09): codex-action
+  forwards the runner PATH, but codex runs tool calls through `bash -lc`
+  as the codex user and `/etc/profile` resets PATH for non-root logins, so
+  a venv on `GITHUB_PATH` does not resolve as bare names (inspect_flow#818:
+  `command -v pytest ruff mypy` printed nothing). The compose steps run as
+  the runner with the provisioned PATH, discover the paths there, and
+  splice them into the verification instruction.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which

@@ -443,12 +443,29 @@ out different things on the inspect_ai fork:
   fork-specific wiring. Like the shim, the fallback is fatal on failure, with
   its own clause in each error-surfacing step. Non-Python repos (no
   `pyproject.toml`) still degrade to static review. For normal (non-fork)
-  repos with claude-setup, all three provision identically as before. The
+  repos with claude-setup, all four provision identically as before. The
   fallback also excludes what it writes into the tree — `.venv/` and the
   `<pkg>.egg-info/` a setuptools editable install leaves in the source tree
   — via `.git/info/exclude`, because the loops' Claude-engine agent commits
   from that tree and the codex landing step stages with `git add -A` (the
   codex prep steps re-exclude both regardless).
+
+  The **dev agent gained the same fallback on 2026-09-09** — it was the last
+  path without one. Its PR-context runs check out the PR head too, so on the
+  fork a dev-verb run on a PR (`@auto fix review feedback` on inspect_ai#428)
+  had no environment at all: invisible on Claude, which installs its own,
+  total on codex, which tried an offline install, failed, and pushed
+  unformatted code with two mypy errors that CI then caught. In the same
+  change every codex prompt (dev verb, both loops; the reviewer since
+  2026-09-01) names the provisioned tools by **absolute path**: codex-action
+  forwards the runner PATH, but codex runs its tool calls through `bash -lc`
+  as the codex user and the login shell's `/etc/profile` resets PATH to the
+  system default for non-root users, so a venv on `GITHUB_PATH` does not
+  resolve as bare names there (inspect_flow#818's codex dev run: `command -v
+  pytest ruff mypy` printed nothing while the venv was on the runner PATH).
+  The prompts had asserted "the venv is on PATH"; the compose steps now run
+  the discovery as the runner, where that PATH is in effect, and splice the
+  paths in.
 
   Two details of a **fatal provisioning failure in the loops** are worth
   knowing when reading a "stalled" loop. The agent is skipped and the
