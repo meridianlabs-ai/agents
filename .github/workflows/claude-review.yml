@@ -840,9 +840,9 @@ jobs:
       # This mask protects against sandboxed CODE reading the token; the
       # agent's own Read tool is not sandboxed and still sees the real file
       # (the pre-existing prompt-injection channel). Proper fix is upstream:
-      # a git-auth option independent of allowed_non_write_users has been
-      # requested of anthropics/claude-code-action (drafted in #70; link the
-      # issue here once filed). If the action gains it, this entry becomes
+      # a git-auth option independent of allowed_non_write_users is
+      # requested in anthropics/claude-code-action#1818 (filed 2026-09-09
+      # from the draft in #70). If the action gains it, this entry becomes
       # belt-and-braces.
       #
       # Merge shape: jq's `*` recurses into objects but replaces arrays

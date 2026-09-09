@@ -529,10 +529,11 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   (`allowedDomains`, `excludedCommands`) stay overlay-wins, and
   `network.tlsTerminate` / `credentials.allowPlaintextInject` are deleted
   whatever the caller passed. The proper fix is an action-side git-auth
-  option independent of `allowed_non_write_users`; a request for one on
-  `anthropics/claude-code-action` was drafted in #70 (to be filed by hand —
-  the machine account cannot open issues outside the org). If the action
-  gains it, the mask becomes belt-and-braces.
+  option independent of `allowed_non_write_users`; requested as
+  [anthropics/claude-code-action#1818](https://github.com/anthropics/claude-code-action/issues/1818)
+  (filed 2026-09-09 from the draft in #70 — by hand, the machine account
+  cannot open issues outside the org). If the action gains it, the mask
+  becomes belt-and-braces.
 
 Residual risks, accepted deliberately: this defends against malicious
 contributor *code*, not a prompt-injected *agent* — the agent itself still
