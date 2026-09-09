@@ -693,7 +693,7 @@ jobs:
           fi
           {
             echo "You are auto, fixing failing CI on PR #$PR in $REPO (branch $HEAD, fix attempt $ATTEMPT of $CAP), running on the Codex engine in a local checkout of the branch."
-            echo "CONSTRAINTS: you have NO network access and NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes (which re-runs CI), and posts for you. $verify"
+            echo "CONSTRAINTS: you have NO GitHub credentials — you cannot run gh, git fetch, git push, or post comments; do not try. Network access IS available inside your sandbox for package downloads and test fixtures (install into the project venv if a tool is missing; keep installs minimal), but nothing you do reaches GitHub. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes (which re-runs CI), and posts for you. $verify"
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
@@ -785,6 +785,36 @@ jobs:
           # codex hit the dubious-ownership refusal, and no profile sandbox
           # lets the agent add the exemption itself.
           sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # Network ON inside codex's sandbox (decision: Ransom, 2026-09-09).
+          # With network off, codex's Linux sandbox installs a seccomp filter
+          # that allows AF_UNIX socket/socketpair but denies setsockopt,
+          # getsockopt, getsockname, shutdown, bind and connect
+          # unconditionally (seccomp cannot see an fd's family) — so trio's
+          # event loop dies creating its wakeup socketpair (it sets
+          # SO_SNDBUF), inspect_ai's control server cannot bind, asyncio
+          # thread wake-ups stall, and nothing can download a tokenizer.
+          # inspect_ai#428's codex reviews (2026-09-09) lost every trio test
+          # and half the asyncio suite to this. `network_access = true` on
+          # the builtin :workspace profile skips the filter entirely (codex
+          # reads it from [sandbox_workspace_write] in CODEX_HOME/config.toml;
+          # codex-action keeps a pre-existing config.toml and appends its
+          # provider block, and rejects the same key via codex-args). Trust
+          # argument: every codex run here is a same-repo tree (the reviewer
+          # routes fork heads to Claude, the dev agent refuses them, the
+          # loops gate on isCrossRepository) and codex holds NO credentials —
+          # the API key sits behind the action's proxy, no GitHub token
+          # reaches it, and its env carries no OIDC request token — so
+          # network buys installs and test fixtures, not a push path or an
+          # exfiltration channel beyond what the Claude engine already has
+          # (it runs pytest unsandboxed with full network AND a token).
+          # 755 on the home and .codex so codex-action (runner-side) can read
+          # the file back before appending; a 700 home would make it read ""
+          # and silently drop this block.
+          sudo chmod 755 /home/codex
+          sudo install -d -o codex -g codex -m 755 /home/codex/.codex
+          printf '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).\n[sandbox_workspace_write]\nnetwork_access = true\n' \
+            | sudo -u codex tee /home/codex/.codex/config.toml >/dev/null
+          sudo chmod 644 /home/codex/.codex/config.toml
 
       - name: Run Codex CI fix
         id: codexfix

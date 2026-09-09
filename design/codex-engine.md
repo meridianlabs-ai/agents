@@ -31,8 +31,10 @@ battle and scale badly with token count. So:
 
 ## The structural difference: Codex cannot post or push
 
-`openai/codex-action` runs the Codex CLI in a sandbox with **no network
-access and no GitHub credentials** (permission profile `:workspace`).
+`openai/codex-action` runs the Codex CLI in a sandbox with **no GitHub
+credentials** (permission profile `:workspace`; network inside the sandbox
+is ON since 2026-09-09 — see "Network" below — but nothing codex can reach
+carries a token).
 Claude Code posts its own comments and pushes its own
 branches; Codex cannot. Every GitHub side effect on the codex path
 therefore moves into deterministic workflow steps:
@@ -341,12 +343,12 @@ Verification for a change here, all cases prompted to codex (any verb):
   claude-setup provisioning, so codex can verify findings with
   pytest/ruff/mypy like the Claude reviewer. Read-only-ness of the
   review is enforced by instruction plus structure — the review path
-  has no landing step, no push credentials, and no network, so stray
+  has no landing step and no push credentials, so stray
   writes die with the runner (decided after inspect_ai#392's review
-  produced four static "blocking" findings of uncertain reality). No
-  network still means no installs by the AGENT — but the reviewer
-  workflow provisions a fallback venv (uv dev-install, as the runner,
-  which has network) when claude-setup is absent and a pyproject.toml
+  produced four static "blocking" findings of uncertain reality). The
+  reviewer
+  workflow provisions a fallback venv (uv dev-install, as the runner)
+  when claude-setup is absent and a pyproject.toml
   exists, so PR heads on the inspect_ai fork (cut from pristine main;
   cross-repository fork heads are deliberately never provisioned, issue
   #59) — and Python caller repos that never added claude-setup — get
@@ -486,6 +488,42 @@ Verification for a change here, all cases prompted to codex (any verb):
   execution log (#65).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
+
+## Network inside the codex sandbox
+
+ON since 2026-09-09 (decision: Ransom), via `network_access = true` under
+`[sandbox_workspace_write]` in the codex user's `config.toml`, written by
+the `Create codex user` step before codex-action runs (the action keeps a
+pre-existing config and appends its provider block; the same key is
+rejected through `codex-args`). The home and `.codex` are 755 so the
+runner-side action can read the file back — a 700 home would make it read
+"" and drop the block silently.
+
+Why: with network off, codex's Linux sandbox installs a seccomp filter
+(`linux-sandbox/src/landlock.rs`, `Restricted` mode) that allows AF_UNIX
+`socket`/`socketpair` but denies `setsockopt`, `getsockopt`,
+`getsockname`, `shutdown`, `bind` and `connect` unconditionally — seccomp
+cannot see an fd's address family. Trio's event loop dies creating its
+wakeup socketpair (it sets `SO_SNDBUF`), inspect_ai's control server
+cannot bind, asyncio thread wake-ups stall, and nothing downloads a
+tokenizer. inspect_ai#428's codex reviews (2026-09-09) lost every trio
+test and half the asyncio suite to this and fell back to timers and
+stubs. `network_access = true` on the builtin `:workspace` profile skips
+the filter entirely.
+
+Trust argument: every codex run here is a same-repo tree — the reviewer
+routes fork heads to Claude, the dev agent refuses them, the loops gate on
+`isCrossRepository` — and codex holds NO credentials: the API key sits
+behind the action's proxy, no GitHub token reaches it, and its curated env
+carries no OIDC request token. Network therefore buys installs and test
+fixtures, not a push path or an exfiltration channel beyond what the
+Claude engine already has (it runs pytest unsandboxed with full network
+AND a token). Read-only-ness of reviews and the deterministic landing of
+fix rounds never rested on the network being off. The prompts now say
+network is available for installs and fixtures and that nothing reaches
+GitHub. The alternatives considered — a runner-side test sidecar with an
+allow-list, or an upstream AF_UNIX-complete restricted mode — remain
+options if the posture ever needs to tighten.
 
 ## Testing
 
