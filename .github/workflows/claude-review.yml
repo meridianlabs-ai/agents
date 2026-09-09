@@ -839,9 +839,20 @@ jobs:
       # config (the agent's own git diff/log run sandboxed and keep working;
       # the reviewer never pushes on these paths); onExtractNoMatch:deny makes
       # the file unreadable should the action ever change how it embeds the
-      # token, rather than silently exposing the real file. No injectHosts:
-      # the proxy must never substitute the real token for a sandboxed
-      # request on any host. ~/.config/gh and ~/.gitconfig are the other
+      # token, rather than silently exposing the real file. The sentinel must
+      # never be swapped back for the real token on a sandboxed request; what
+      # guarantees that here is that this overlay sets NO network.tlsTerminate
+      # and NO credentials.allowPlaintextInject — the proxy cannot see request
+      # contents, so it substitutes nothing (docs: "the sentinel reaches the
+      # server unchanged"; Claude Code reports the mask-without-tlsTerminate
+      # state at startup — a report, not a setup failure). Note the entry has
+      # no injectHosts, and per the docs a mask entry WITHOUT injectHosts is
+      # substituted on requests to EVERY host in network.allowedDomains — so
+      # neither tlsTerminate nor allowPlaintextInject may ever be added to
+      # this overlay, or contributor code could read the sentinel and have the
+      # proxy inject the real token into a request to a PyPI host. (Whether an
+      # explicit empty injectHosts:[] means "no hosts" is undocumented, so it
+      # is not relied on.) ~/.config/gh and ~/.gitconfig are the other
       # places a GitHub credential could sit on the runner (gh's own store, a
       # credential helper) — nothing sandboxed needs them, so plain deny. The
       # agent's gh is in excludedCommands and reads the real files. The
@@ -930,10 +941,20 @@ jobs:
         run: |
           set -uo pipefail
           need=2.1.221
-          have=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          # `|| true`: the step runs under `bash -e`, so without it a missing
+          # binary (or unparseable --version) would exit here, before the
+          # diagnostics below — red but silent.
+          have=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
           echo "Claude Code version: ${have:-unknown} (sandbox credentials.files mask mode needs >= $need)"
-          if [ -z "$have" ] || [ "$(printf '%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
-            echo "::error::Claude Code ${have:-unknown} is below $need — the sandbox overlay's .git/config mask may not have been in effect for this run (the action's token could have been readable by sandboxed code); check the action's pinned CLI version"
+          if [ -z "$have" ]; then
+            # always() reaches this step even when the agent step failed before
+            # the action's install phase (auth/actor failure): no binary, and
+            # Claude never launched, so the mask question is moot.
+            echo "::error::claude is not on PATH — the agent step likely failed before installing it (see its log); cannot confirm the sandbox overlay's .git/config mask (needs Claude Code >= $need)"
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            echo "::error::Claude Code $have is below $need — the sandbox overlay's .git/config mask may not have been in effect for this run (the action's token could have been readable by sandboxed code); check the action's pinned CLI version"
             exit 1
           fi
 

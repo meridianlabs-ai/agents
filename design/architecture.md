@@ -444,9 +444,18 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   `extract` regex confining the replacement to the token so git still parses
   its config — the agent's own sandboxed `git diff` / `git log` keep working
   — and `onExtractNoMatch: deny` making the file unreadable if the action
-  ever changes the URL shape, rather than exposing the real file. No
-  `injectHosts`, so the proxy never substitutes the real token for a
-  sandboxed request. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
+  ever changes the URL shape, rather than exposing the real file. The proxy
+  never substitutes the real token back into a sandboxed request because the
+  overlay configures no `network.tlsTerminate` (and no
+  `credentials.allowPlaintextInject`): the proxy cannot see request contents,
+  so the sentinel reaches the server unchanged (Claude Code reports this
+  mask-without-`tlsTerminate` state at startup; a report, not a setup
+  failure). The entry deliberately carries no `injectHosts`, and a mask entry
+  *without* `injectHosts` is substituted on requests to **every** host in
+  `network.allowedDomains` — so `tlsTerminate` must never be added to this
+  overlay while the mask lacks an explicit host restriction, or contributor
+  code could read the sentinel and have the proxy inject the real token into
+  a request to a PyPI host. `~/.config/gh` and `~/.gitconfig` (gh's own store; any
   credential helper) get plain `deny` entries — nothing sandboxed needs
   them, and the agent's `gh` is excluded from the sandbox. Two gotchas
   encoded in the workflow: the path must be **absolute** (the action writes
