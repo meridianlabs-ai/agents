@@ -88,10 +88,13 @@ runs:
         # a list beneath it: after a tag line, lines that are blank or hold
         # nothing but a bullet/number and `PRRT_…` tokens belong to the block
         # (parsed and stripped); the first other line ends it and is kept.
-        # Blank lines are always held back and flushed only before the next
-        # kept line, so the blank that preceded a tag (or trailed the
-        # message) is dropped with the block rather than left as a stray
-        # trailing blank or a double blank before the prose that follows.
+        # Blank lines are held back and flushed only before the next kept
+        # line, and blanks inside a block are not counted at all, so: a tag
+        # that ends the message (the contract) takes the blank before it
+        # along — no stray trailing blank; a blank that preceded the tag
+        # carries over to the prose that follows the block (off-contract,
+        # but the paragraph break survives); and a blank inside the block
+        # does not double it up.
         # The last tag block wins. The id filter below already tolerates any
         # decoration on the ids.
         ids=
@@ -100,11 +103,11 @@ runs:
             function flush() { for (; held > 0; held--) print "" > out }
             BEGIN { printf "" > out }
             /^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/ {
-              inblock = 1; held = 0; ids = $0
+              inblock = 1; ids = $0
               sub(/^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/, "", ids); next }
-            /^[[:space:]]*$/ { held++; next }
+            /^[[:space:]]*$/ { if (!inblock) held++; next }
             inblock && /^[[:space:]]*([-*+]|[0-9]+[.)])?[[:space:]]*(`?PRRT_[A-Za-z0-9_-]+`?[[:space:],;]*)+$/ {
-              held = 0; ids = ids " " $0; next }
+              ids = ids " " $0; next }
             { inblock = 0; flush(); print > out }
             END { print ids }
           ' "$FINAL" | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \

@@ -116,7 +116,7 @@ runs:
           fetch "$RUNNER_TEMP/pr-feedback-comments.json" api "repos/$REPO/issues/$PR/comments" --paginate --slurp
           jq -r '(add // []) | . as $raw
             | map(select(
-                (.body | test("<!-- (auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head|model-provenance) -->") | not)
+                (.body | test("<!-- (auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head:[^>]*|model-provenance) -->") | not)
                 and (((.body | test("<!-- claude-review-summary -->")) and ((.body | gsub("<!--[^>]*-->"; "") | length) <= 200)) | not)
                 and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
                 and (.body | test("^\\*\\*Claude finished") | not)))
