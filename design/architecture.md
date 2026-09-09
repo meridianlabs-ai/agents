@@ -264,8 +264,14 @@ The allow-list grants permission to run `pytest`/`ruff`/`mypy`, but a bare
 `ubuntu-latest` runner has neither the dev tools nor the package installed — so
 without a setup step the agent can only fall back to `py_compile` and reasoning
 (observed: a reviewer reported "env not provisioned: no pytest/inspect_flow" and
-LGTM'd on static checks alone). Both workflows therefore run a setup step
-between checkout and the agent.
+LGTM'd on static checks alone). All four workflows therefore run a setup step
+between checkout and the agent — the dev agent and reviewer from the start,
+the two `@auto` loops since 2026-09-09. The loops went without for their first
+weeks because the gap was invisible on the Claude engine, which installs what
+it needs from inside the agent: it was the codex engine, sandboxed with no
+network, that exposed it — every codex fix round on inspect_flow#824 ran in a
+bare checkout, pushed changes verified only by tests that import nothing, and
+finally declined to fix at all (see design/codex-engine.md).
 
 The mechanism is a **convention, not a duplicated command**. A caller repo opts
 in by adding a `.github/actions/claude-setup` composite action; the workflows
@@ -290,7 +296,19 @@ against the docs, not assumed):
 
 The step is **fatal on failure** (no `continue-on-error`): a broken setup config
 should surface loudly rather than silently degrade every run to static-only
-review.
+review. One deliberate exception, in the two `@auto` loops only: on the **codex
+conflict path** the sync step hands codex the base merge still in progress,
+with conflict markers in the tree, and provisioning runs over that tree — so a
+conflicted `pyproject.toml` or lockfile fails the install *deterministically*,
+and a fatal failure would skip the very round that exists to resolve the
+markers (every re-trigger failing identically). There the loops set
+`continue-on-error` to "the sync left conflicts" (non-empty only on the codex
+path; the Claude path aborts its conflicted merge), the round runs static-only
+with the failure spelled out in codex's prompt, and the next round — on the
+resolved branch — provisions normally. The error-surfacing step reads the
+conflict list too, so it never advises "re-trigger to retry" for that case.
+`claude.yml` keeps the fatal stance on its codex conflict path but names the
+conflicted files in its error comment.
 
 **Fork asymmetry.** What's in the workspace — not which branch the workflow was
 *resolved* from — decides whether the shim is found, and the two agents check
@@ -302,19 +320,47 @@ out different things on the inspect_ai fork:
   shim fires. Because `meridian`'s source ≈ pristine `main` ≈ upstream, the
   installed env matches the `main`-cut branch the agent then edits.
 - The **reviewer** deliberately checks out `refs/pull/{N}/head` (so it reviews
-  exactly the upstream-bound diff). That branch is cut from pristine `main` and
-  carries no meridian files, so the shim is absent — and the reviewer used to
-  stay on static checks there. A **fallback provisioning step** now covers this
-  case (decision: Ransom, 2026-09-01): when the shim is absent but the checkout
+  exactly the upstream-bound diff), and the **two `@auto` loops** check out
+  the PR head *branch*. On the fork both are cut from pristine `main` and
+  carry no meridian files, so the shim is absent — and the reviewer used to
+  stay on static checks there (the loops, until 2026-09-09, had no
+  provisioning at all). A **fallback provisioning step** now covers this case
+  in all three workflows (decision: Ransom, 2026-09-01 for the reviewer;
+  extended to the loops 2026-09-09): when the shim is absent but the checkout
   has a root `pyproject.toml` (and the trigger passed the same gate that guards
-  the shim — never in external mode), the workflow step itself bootstraps uv
-  and dev-installs the project, mirroring the fork's claude-setup recipe. The
-  earlier alternative — an extra checkout of `meridian`'s `.github/actions`
-  into a fixed subdir — remains not done; the generic fallback needed no
+  the shim — never in external mode, never on a cross-repository fork head),
+  the workflow step itself bootstraps uv and dev-installs the project,
+  mirroring the fork's claude-setup recipe. The recipe lives once, in the
+  `.github/actions/provision-fallback` composite (referenced `@main` like the
+  other shared step bodies); each workflow keeps only its own gate, timeout
+  and — in the loops — the conflicted-round tolerance above. The earlier
+  alternative — an extra checkout of `meridian`'s `.github/actions` into a
+  fixed subdir — remains not done; the generic fallback needed no
   fork-specific wiring. Like the shim, the fallback is fatal on failure, with
-  its own clause in the error-surfacing step. Non-Python repos (no
+  its own clause in each error-surfacing step. Non-Python repos (no
   `pyproject.toml`) still degrade to static review. For normal (non-fork)
-  repos with claude-setup, both agents provision identically as before.
+  repos with claude-setup, all three provision identically as before. The
+  fallback also excludes what it writes into the tree — `.venv/` and the
+  `<pkg>.egg-info/` a setuptools editable install leaves in the source tree
+  — via `.git/info/exclude`, because the loops' Claude-engine agent commits
+  from that tree and the codex landing step stages with `git add -A` (the
+  codex prep steps re-exclude both regardless).
+
+  Two details of a **fatal provisioning failure in the loops** are worth
+  knowing when reading a "stalled" loop. The agent is skipped and the
+  round/attempt is never recorded, but on the Claude path the
+  `Push base merge if unpushed` backstop (below) is gated on the sync's
+  `merge_sha` alone, so the runner's clean base merge is still pushed and CI
+  re-runs — the branch stays current, no hand-back is owed (that step is gated
+  on the agent having succeeded), and a re-triggered round finds nothing left
+  to merge, so a deterministic failure repeats the error comment at most once
+  more and stops. And the failure *can* be deterministic without a conflict:
+  the PR's own dependency change (a `pyproject.toml` that no longer installs)
+  now fails provisioning on every trigger, where the Claude engine used to
+  attempt that class of fix from inside the agent. Accepted — it is the
+  reviewer's and dev agent's fatal stance applied consistently, and loud — but
+  the error comment names the case and says to fix it by hand rather than
+  re-trigger.
 
 ### Untrusted checkouts: sandboxed execution of untrusted code
 
