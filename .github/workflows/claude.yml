@@ -503,10 +503,27 @@ jobs:
       # refs/pull/N/merge, which CONTAINS a fork author's code when the head is
       # a fork — and the provisioning step right after would execute it. A
       # refused run checks nothing out at all.
+      # persist-credentials:false (issue #61): checkout otherwise writes the
+      # job token into .git/config for the rest of the job — and this job's
+      # codex path group-grants the whole workspace to the codex user, which
+      # could then read a contents-write token off disk. Nothing is persisted
+      # now; every later git network call authenticates itself (design/
+      # architecture.md → "No persisted git credentials"): the runner-side
+      # steps and the claude-code-action step through a step-scoped
+      # credential helper, the agent's pushes through the action's own
+      # origin-URL credential as before.
       - uses: actions/checkout@v4
         if: steps.trig.outputs.ok == 'true'
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      # Regression guard for the invariant above (shared composite — one copy
+      # for all three workflows): asks git, which follows includes, for the
+      # header checkout would have persisted, keyed on the server URL.
+      - name: Assert no credential persisted in the workspace
+        if: steps.trig.outputs.ok == 'true'
+        uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
 
       # ---- Deterministic base-branch sync (design/architecture.md) ---------
       # The base merge happens HERE, on the runner, for BOTH engines — not in
@@ -702,9 +719,38 @@ jobs:
       # the same way: such a run skips rather than runs, which is the
       # de-fanged-everywhere design intent, and every caller stub already
       # excludes marvin at the job level.
+      #
+      # GIT_CONFIG_* env (issue #61): with nothing persisted by checkout, the
+      # action's own git needs a credential BEFORE it configures one — tag
+      # mode's setupBranch runs `git fetch origin <branch>` (and `git
+      # ls-remote` on issue runs) ahead of configureGitAuth (its
+      # src/modes/tag/index.ts), which used to ride on checkout's persisted
+      # header and would now fail on a private caller. This defines a
+      # credential helper, in this step's environment only, that answers a
+      # 401 from GIT_TOKEN. It does NOT change who the agent pushes as: the
+      # action then rewrites the origin URL to carry github_token, and a
+      # URL-embedded credential takes precedence over helpers — so on repos
+      # without MARVIN_TOKEN the push still goes out as the Claude App (which
+      # triggers CI), not as github-actions[bot]. What the agent can read:
+      # on MARVIN repos nothing new — the same token is already in its
+      # environment as GITHUB_TOKEN (that is what its `gh` calls use). On a
+      # marvin-less repo GIT_TOKEN is the JOB token, which the agent could
+      # not read before (its GITHUB_TOKEN is the Claude App token there, and
+      # the action strips checkout's copy) — bounded by the caller's
+      # `permissions:` block, on a repo the agent already writes to. The
+      # helper is scoped to this server's URL, so a `git fetch` the agent
+      # aims at any other host (its allow-list permits the verb) gets no
+      # credential.
       - uses: anthropics/claude-code-action@v1
         if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine != 'codex'
         id: claude
+        env:
+          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         with:
           anthropic_federation_rule_id: fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
@@ -723,6 +769,21 @@ jobs:
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
             ${{ inputs.claude_args }}
+
+      # The action leaves its github_token in remote.origin.url, and git never
+      # falls back to a helper when the URL carries a credential (a 401 there
+      # rejects outright). Reset the URL so every later `git fetch`/`git push
+      # origin` in this job — the backstop, Open or adopt PR, Verify agent
+      # work landed — reaches its own step-scoped helper as designed. This is
+      # what makes the marvin-less path work at all: there the URL token is
+      # the Claude App token, which the action revokes in its own final step,
+      # so those fetches failed ("not on origin", no PR opened) before this
+      # existed. Also stops the token sitting in .git/config for the rest of
+      # the job. always(): a failed or cancelled agent leaves the URL
+      # rewritten too, and the backstop below runs on those paths.
+      - name: Reset origin URL after the agent
+        if: always() && steps.claude.outcome != 'skipped'
+        uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
 
       # If the runner's base merge is STILL the branch tip, the agent finished
       # without committing anything of its own — and on a PR run nothing else
@@ -761,17 +822,18 @@ jobs:
       # of sitting at Agent with a red job and nothing on the PR.
       #
       # Shared push-base-merge composite (exact-SHA gate, non-fast-forward
-      # guard, push). Two inputs differ from the loops' calls: require-file
+      # guard, push). One input differs from the loops' calls: require-file
       # carries the execution-file fence (the loops' own gate already
       # authorized the actor, so they leave it empty), with the same fallback
       # path the Surface step uses because the action's output is unset when
-      # its step fails even though the file is there if Claude ran; and
-      # push-token is set — same extraheader override as the codex landing
-      # step: this job's checkout persisted github.token as an
-      # http.<origin>.extraheader, which preempts the URL credential, so
-      # without the reset the push runs as github-actions[bot] and triggers
-      # nothing. The loops' checkouts persisted MARVIN_TOKEN and leave it
-      # empty.
+      # its step fails even though the file is there if Claude ran.
+      # push-token is the machine account where the caller has it (the push
+      # must trigger CI; the `|| github.token` fallback degrades exactly as
+      # every other marvin-less push does: github-actions[bot], no CI) — the
+      # composite authenticates its own push, step-scoped; nothing is
+      # persisted by this job's checkout, and the origin-URL reset above is
+      # what lets its helper be consulted at all (a URL credential would win
+      # — on a marvin-less caller a revoked one, failing the fetch).
       - name: Push base merge if unpushed
         id: backstop
         if: >-
@@ -979,6 +1041,15 @@ jobs:
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BASE: ${{ inputs.base_branch }}
           SYNC_START_SHA: ${{ steps.sync.outputs.start_sha }}
+          # Step-scoped credential for the fetch below (nothing is persisted
+          # by checkout; design/architecture.md → "No persisted git
+          # credentials"). A read, so the job token.
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -euo pipefail
           git config user.name "i-am-marvin"
@@ -1163,15 +1234,33 @@ jobs:
       # spawned from a Runner.Worker that predates the usermod. Landing
       # codex's edits works anyway — runner still owns the pre-existing
       # workspace directories, codex's files are world-readable under its
-      # umask, and the land step reclaims .git — the one place codex-owned
-      # dirs (objects/ fan-out) would block runner's writes. (Group kept as
-      # a faithful copy of the example; if codex ever drops a 600 file, the
-      # land step needs a chmod -R a+rX sweep, not this group.)
+      # umask, and the reclaim step takes .git back — the one place
+      # codex-owned dirs (objects/ fan-out) would block runner's writes.
+      # (Group kept as a faithful copy of the example; if codex ever drops a
+      # 600 file, the reclaim step needs a chmod -R a+rX sweep, not this
+      # group.)
       - name: Create codex user
         id: codexuser
         if: steps.engine.outputs.engine == 'codex'
         run: |
           set -euo pipefail
+          # Last runner-only moment for the tree: snapshot the repo config
+          # for the reclaim step to restore. The group grant below makes
+          # .git/config codex-writable, and git executes configuration —
+          # core.hooksPath, core.fsmonitor, filter drivers, credential
+          # helpers, remote URLs — so no runner-side git may run against
+          # anything codex could have written there. RUNNER_TEMP itself
+          # stays runner-only (755 runner:runner; see below). The second
+          # snapshot lists any embedded .git already in the tree (a caller's
+          # provisioning may leave one); the reclaim step refuses to run git
+          # over the tree if codex added one, since a nested .git/config is
+          # executed by the landing step and no restore or pin covers it.
+          # Both scans run as root so they see the same tree: this one runs
+          # before the chown below, and a root-owned unreadable directory a
+          # caller's provisioning left would otherwise fail this step or
+          # read as a codex addition in the reclaim.
+          cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
+          sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
           sudo adduser --system --home /home/codex --shell /bin/bash --group codex
           sudo usermod -a -G codex runner
           sudo usermod -a -G runner codex
@@ -1216,6 +1305,23 @@ jobs:
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
+      # FIRST step after codex had write access to the tree, on every path
+      # (always(): success, failure, cancelled): take .git back from the
+      # codex user, refuse a redirected git dir (.git/commondir, symlinked
+      # .git), and restore the pre-codex .git/config that `Create codex user`
+      # snapshotted (design/codex-engine.md → Hook-safe landing). Runs BEFORE
+      # the guard and the landing so that every later step reads a clean
+      # config regardless of how codex, the guard or the landing ended. This
+      # workflow's post-codex git users are all gated on the landing having
+      # succeeded, so the exposure the loops had (a hand-back fetch through
+      # codex's config) never existed here — the step is the same one for
+      # consistency and so the invariant is structural, not per-gate. Runs
+      # no git itself.
+      - name: Reclaim workspace from codex
+        id: codexreclaim
+        if: always() && steps.codexuser.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+
       # Token split for the codex run: the CLI's step-log "tokens used" is one
       # blended number (non-cached input + output), so this reads the session
       # rollout codex wrote under its CODEX_HOME and puts input / cached /
@@ -1238,10 +1344,11 @@ jobs:
       # produce a valid merge commit containing them, so this check is the
       # only thing between a half-resolved merge and the PR branch. A separate
       # step so the landing step below is skipped, not entered, on failure;
-      # the Surface step reads this step's outcome.
+      # the Surface step reads this step's outcome. Also gated on the reclaim:
+      # a refused (redirected) git dir must not be read at all.
       - name: Guard against an unresolved merge (codex)
         id: codexguard
-        if: steps.codexrun.outcome == 'success'
+        if: steps.codexrun.outcome == 'success' && steps.codexreclaim.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/unresolved-merge-guard@main
         with:
           conflicts: ${{ steps.sync.outputs.conflicts }}
@@ -1251,12 +1358,35 @@ jobs:
       # opens/labels the PR on issue runs, post the final message, and on
       # @auto PR runs post the re-review hand-back the push now owes. This
       # step failing fails the run loudly — codex work cannot strand silently.
+      #
+      # First credentialed step after codex had write access to the
+      # workspace. The reclaim step above already took .git back and restored
+      # the pre-codex .git/config (remote URLs, credential/http keys, filter
+      # drivers, fsmonitor, hooksPath — anything codex wrote there is gone),
+      # and this step trusts nothing else under .git (design/codex-engine.md
+      # → hook-safe landing): the git dir is pinned by env
+      # (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a .git/commondir file
+      # could not redirect git to a config codex owns even if the reclaim's
+      # refusal had missed it (gitrepository-layout(5): that file sets
+      # GIT_COMMON_DIR unless the env already does), and the GIT_CONFIG_* env
+      # below re-pins the two things a config restore cannot: hooks live as
+      # FILES in .git/hooks, so hooksPath points at an empty, runner-only
+      # path; and the index may carry the fsmonitor extension, so fsmonitor
+      # is off. The reclaim already moved .git/hooks aside and appended the
+      # same two keys to the restored config for every later step; the env
+      # pin here is belt and braces on the step that pushes. GIT_CONFIG_GLOBAL
+      # skips the runner's ~/.gitconfig as well: codex is in the runner
+      # group, and a group-writable home file would sit outside the restore
+      # (the hosted image ships it runner-only; this makes that structural —
+      # identity for the commit is in the repo config the reclaim restored).
+      # The credential helper is the machine account where the caller
+      # has it — the push must trigger CI — it is scoped to this server's
+      # URL, and it lives only in this step's environment.
       - name: Land codex work
         id: codexland
         if: steps.codexguard.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          MARVIN: ${{ secrets.MARVIN_TOKEN }}
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
@@ -1265,14 +1395,22 @@ jobs:
           OUT: ${{ runner.temp }}/codex/codex-final.md
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          GIT_DIR: ${{ github.workspace }}/.git
+          GIT_COMMON_DIR: ${{ github.workspace }}/.git
+          GIT_WORK_TREE: ${{ github.workspace }}
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GIT_CONFIG_COUNT: "4"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+          GIT_CONFIG_KEY_2: core.hooksPath
+          GIT_CONFIG_VALUE_2: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_3: core.fsmonitor
+          GIT_CONFIG_VALUE_3: "false"
         run: |
           set -euo pipefail
-          # Reclaim .git before writing objects as runner: any objects/XX
-          # fan-out dir codex created (any object-writing git command) is
-          # codex-owned, and runner's codex-group membership is inert this
-          # job — the commit below would intermittently fail with
-          # "insufficient permission for adding an object".
-          sudo chown -R runner "$GITHUB_WORKSPACE/.git"
           # Untracked files count: new source files are legitimate codex
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).
@@ -1280,7 +1418,14 @@ jobs:
           # HEAD ("ours" on every hunk) leaves status clean while the merge
           # is still in progress — commit anyway so the merge completes,
           # HEAD moves past START_SHA, and the push gate lands it.
-          if [ -n "$(git status --porcelain)" ] || git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+          # --ignore-submodules=dirty: never spawn `git status` inside an
+          # embedded repo (is_submodule_modified) — its nested .git/config
+          # is codex-writable and outside the restore and the pins. The
+          # reclaim step already refuses a nested repo codex added; this is
+          # belt and braces, and `dirty` (unlike `all`) still reports a
+          # changed gitlink pointer. `git add -A` below cannot be pinned the
+          # same way, which is why the refusal is the primary defence.
+          if [ -n "$(git status --porcelain --ignore-submodules=dirty)" ] || git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             # || true inside the substitution: without it a missing/unreadable
             # $OUT fails the pipeline and set -e kills the step before the
             # fallback is reached — the fallback would only ever cover an
@@ -1300,17 +1445,11 @@ jobs:
           pushed=""
           merge_only=""
           if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
-            # -c http...extraheader=: this job's checkout persisted
-            # github.token as an http.<origin>.extraheader authorization
-            # header, which git attaches to every request here and which
-            # preempts the URL credential (URL creds are only offered on a
-            # 401 challenge, and the header means none comes) — without the
-            # override the push silently runs as github-actions[bot] and
-            # triggers nothing. An empty value resets the header list for
-            # this one command, so the machine-account credential in the
-            # URL is the one that authenticates. (The loop workflows don't
-            # need this: their checkout persists MARVIN_TOKEN itself.)
-            git -c http.https://github.com/.extraheader= push --quiet "https://x-access-token:${MARVIN:-$GH_TOKEN}@github.com/$REPO.git" "HEAD:refs/heads/$BRANCH"
+            # Authenticates through this step's credential helper (see the
+            # step comment): the restored config's origin URL carries no
+            # credential, so the 401 goes to the helper and the push runs as
+            # the machine account.
+            git push --quiet origin "HEAD:refs/heads/$BRANCH"
             pushed=1
             # HEAD still exactly the runner's clean base merge: codex changed
             # nothing (any commit above would have moved it). Report that
@@ -1381,6 +1520,11 @@ jobs:
       # Actions PR-creation, and even when allowed its PRs trigger no CI
       # (recursion guard). The `|| github.token` fallback only applies on repos
       # without the secret, where it degrades exactly as documented above.
+      # The git fetch below is a separate matter from gh: it authenticates
+      # through this step's helper (job token), which the origin-URL reset
+      # after the action step is what makes reachable — with the action's URL
+      # credential still in place git would use that instead, and on a
+      # marvin-less caller it is the revoked App token.
       - name: Open or adopt PR for issue-triggered run
         id: openpr
         if: >-
@@ -1402,6 +1546,16 @@ jobs:
           # label the PR even when the issue itself carries no `auto` label.
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           REQ_REVIEW: ${{ inputs.request_review_after_open }}
+          # Step-scoped credential for the fetch below (nothing is persisted
+          # by checkout, and the origin URL carries none after the reset):
+          # unauthenticated it would fail on a private caller and this step
+          # would conclude "not on origin" and open no PR.
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -euo pipefail
           # The branch lives on origin; the initial checkout predates the push.
@@ -1505,10 +1659,20 @@ jobs:
           ISSUE: ${{ github.event.issue.number }}
           BRANCH: ${{ steps.claude.outputs.branch_name }}
           START_SHA: ${{ github.sha }}
+          # Step-scoped credential for the best-effort fetch below (nothing
+          # is persisted by checkout and the origin URL carries none after
+          # the reset; a silent fetch failure on a private caller would read
+          # landed work as unlanded).
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -uo pipefail
           unlanded=""
-          dirty=$(git status --porcelain --untracked-files=no 2>/dev/null || true)
+          dirty=$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)
           [ -n "$dirty" ] && unlanded="uncommitted edits to tracked files"
           local_tip=$(git rev-parse --quiet --verify "refs/heads/${BRANCH:-}" || true)
           if [ -n "$local_tip" ] && [ "$local_tip" != "$START_SHA" ]; then
@@ -1597,6 +1761,7 @@ jobs:
           CODEXCOMPOSE_OUTCOME: ${{ steps.codexcompose.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexrun.outcome }}
+          CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
         run: |
@@ -1659,6 +1824,15 @@ jobs:
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
+          fi
+          # A reclaim that did not succeed SKIPS the guard and the landing, so
+          # it needs its own check or the failure is a silent red job. `!=
+          # success` (not `= failure`) so a job cancel that landed mid-reclaim
+          # is named too, as in the loops' Surface steps — this step runs no
+          # git, so here it is only the message; the codexuser test keeps the
+          # Claude path's `skipped` reclaim from tripping it.
+          if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXRECLAIM_OUTCOME:-}" != "success" ]; then
+            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was pushed. Inspect the codex run's transcript before re-triggering."
           fi
           # A failed guard SKIPS the landing step, so it needs its own check.
           if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then

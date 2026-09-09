@@ -132,11 +132,12 @@ temp root would expose the runner's step scripts and per-step
 checkout added to the codex user's git `safe.directory` (the repo stays
 runner-owned, so git run as codex otherwise refuses with "dubious
 ownership", and no profile sandbox lets the agent add the exemption
-itself). One deliberate divergence from a four-way copy: the write-path
-land steps start with `chown -R runner` on
-`.git` (object fan-out dirs codex creates are codex-owned, and the
-runner's codex-group membership never takes effect within the job, so
-runner-side object writes would otherwise fail intermittently). One more
+itself). One deliberate divergence from a four-way copy: on the write
+paths the `reclaim-codex-workspace` step (Hook-safe landing, below) runs
+`chown -R runner` on `.git` right after codex (object fan-out dirs codex
+creates are codex-owned, and the runner's codex-group membership never
+takes effect within the job, so runner-side object writes would otherwise
+fail intermittently). One more
 unprivileged-user consequence, reviewer-only: the action's inline
 `output-schema` input is broken under this strategy at `@v1`
 (openai/codex-action#103 — the schema temp dir is mktemp'd as codex, mode
@@ -145,6 +146,191 @@ step writes the review schema to a runner-owned file and the codex step
 passes `output-schema-file` instead — the explicit-path branch creates no
 temp dir. Revisit when #160's fixes land upstream (and drop the schema
 workaround when #103's does).
+
+### Hook-safe landing
+
+The group grant that lets codex edit the tree also makes `.git`
+codex-writable, and git *executes* configuration: `core.hooksPath` and the
+files in `.git/hooks/` (run by `git commit`, but also by `git fetch` —
+`reference-transaction` fires on every ref update, the remote-tracking ref
+included — and by `git status`, which runs `post-index-change` whenever it
+writes the refreshed index), `core.fsmonitor` (run whenever
+an index carrying the fsmonitor extension is read — `git status`, even
+`ls-files`), `filter.*.clean` drivers (run by `git add`), plus
+`credential.helper`, `http.*`, `url.*.insteadOf` and `remote.origin.url`,
+which decide where a push goes and what authenticates it. Every runner-side
+step that runs git after codex — the landing step with the machine-account
+credential, but also the loops' `Ensure hand-back after push` and `Surface
+agent errors` fetches — runs as `runner` (sudo), so any of those was a route
+from the sandboxed codex to code execution with the machine-account
+credential — and until #61 the credential itself sat in `.git/config`,
+readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
+#61 (2026-09-09):
+
+- the credential never touches the workspace (design/architecture.md → No
+  persisted git credentials), so the `chown`/`chmod` exposes none;
+- `Create codex user` snapshots `.git/config` to
+  `$RUNNER_TEMP/git-config.pre-codex` (runner-only) right before the group
+  grant, and the **`Reclaim workspace from codex` step**
+  (`.github/actions/reclaim-codex-workspace`, shared by the three workflows)
+  is the FIRST step after codex on every path — `if: always() &&
+  steps.codexuser.outcome == 'success'`, so it runs whether codex succeeded,
+  failed or was cancelled, and before the guard and the landing. It kills
+  every process still running as the codex user (`pkill -KILL -u codex` —
+  the runner does not reap orphans between steps, so a background process a
+  prompt-injected codex left behind would otherwise outlive the step and
+  could rewrite the restored config before the landing step's credentialed
+  push; review round 4 of #73 — the kill is repeated until a pass finds
+  nothing, since one `pkill` scans `/proc` once and a forking survivor can
+  slip it), refuses if `.git/commondir` exists or `.git` is no longer a
+  plain directory (below), refuses if codex left an *embedded repository*
+  in the tree (below — the list of nested `.git` entries is compared with
+  the one `Create codex user` snapshotted, so a caller's provisioning that
+  legitimately leaves one keeps working), takes `.git` back (`chown -R
+  runner`), revokes the group grant on it (`chmod -R g-w` — the chown alone
+  leaves `.git/` group-writable by codex, and a `chgrp` would not do since
+  codex is in the `runner` group too) and on the workspace root (`chmod
+  g-w`, not recursive: a same-parent rename needs write on the parent only,
+  so a survivor could otherwise `mv .git .git.x && cp -a .git.x .git` and
+  own a git dir the `GIT_DIR` pin then follows by path; review round 5 of
+  #73 — the rest of the working tree keeps its grant), restores the
+  snapshot with `cp --remove-destination`, so a config codex replaced with a
+  symlink cannot redirect the write, **moves `.git/hooks` aside** (to
+  `$RUNNER_TEMP`, non-sample names logged — hooks are files, so the restore
+  never reached them and the chown left codex's runner-owned and executable;
+  review round 6 of #73) and **appends `core.hooksPath` / `core.fsmonitor =
+  false` to the restored config**, so every later git in the job is
+  hook-free without each step carrying an env pin. It runs no git itself.
+  Everything downstream —
+  the guard, the landing, the loops' hand-back and unlanded-work fetches —
+  is either gated on that step's success or (Surface) sets its error and
+  skips its git calls whenever the step did *not* succeed — `!= success`,
+  not `= failure`: a job cancel that lands mid-reclaim leaves the step
+  `cancelled` with the kill/chown/restore only partly done, and `always()`
+  still runs Surface afterwards (review round 7 of #73) — so everything
+  codex could have configured is gone before the first runner-side git
+  command on every path, not just the success path. The reclaim lived inside the landing step
+  first (review round 1 of #73); round 3 found that a failed guard, or the
+  landing's own refusal, left the loops' `Ensure hand-back after push`
+  (gated on the codex step, not the landing, so a landing that pushed and
+  then died posting still owes its `@review`) running `git fetch` through
+  the un-restored, codex-writable config — `remote.origin.url = ssh://…` +
+  `core.sshCommand = <script>` executes as `runner` there — with
+  `MARVIN_TOKEN` in its env. Moving the reclaim ahead of the guard and
+  gating the hand-back on it closed that, and made the loops' Surface step's
+  `[ -z "$err" ]` guards structural rather than incidental;
+- the guard and landing steps pin the git dir by env — `GIT_DIR` and
+  `GIT_COMMON_DIR` to `$GITHUB_WORKSPACE/.git`, `GIT_WORK_TREE` to the
+  workspace. Without that, a `.git/commondir` file codex wrote would make
+  git read *its* config: `gitrepository-layout(5)` — "if this file exists,
+  `$GIT_COMMON_DIR` will be set to the path specified in this file unless
+  `GIT_COMMON_DIR` is explicitly set", and `config` "is ignored if
+  `$GIT_COMMON_DIR` is set". So codex could copy `.git` somewhere it owns,
+  add a `filter.*.clean` driver or repoint `remote.origin.url`, and the
+  restore would land on a file git no longer reads (review finding on #73).
+  The reclaim step's refusal is the primary defence — nothing runs git
+  through a redirected dir — and the pins are belt and braces for the two
+  steps that write. The same two steps set `GIT_CONFIG_GLOBAL=/dev/null`:
+  codex is in the `runner` group, so a group-writable `~runner/.gitconfig`
+  would be a config file outside the restore; the hosted image ships it
+  runner-only, and the pin makes that structural (the commit identity is in
+  the repo config the reclaim restored, so nothing there needs the global
+  file);
+- hooks and fsmonitor are neutralized for *every* post-codex step at the
+  reclaim, not per step: the two things a config restore cannot cover are
+  hooks (files in `.git/hooks`) and the fsmonitor extension (in the index),
+  and the steps that run git after codex are not only the landing — the
+  loops' `Ensure hand-back after push` and `Surface agent errors` and
+  `claude.yml`'s `Open or adopt PR` run `git fetch` (which runs
+  `reference-transaction` when it updates the remote-tracking ref — and
+  codex, owning `.git` during its step, can delete the local one so the
+  next fetch deterministically does) and `git status` (which runs
+  `post-index-change` when it writes the refreshed index — always, after
+  codex touched tracked files), with `MARVIN_TOKEN` in their env. Until
+  round 6 of #73 only the landing pinned `core.hooksPath` by env, so a
+  codex-written hook in `.git/hooks` — runner-owned and executable after the
+  chown — ran as `runner` in those steps. The reclaim now moves `.git/hooks`
+  aside and appends `core.hooksPath = $RUNNER_TEMP/no-hooks` and
+  `core.fsmonitor = false` to the restored config, so a git-running step
+  added later cannot drift out of the pin. The landing step still runs every
+  git command with the same two keys in `GIT_CONFIG_*` env, and the
+  `unresolved-merge-guard` pins `core.fsmonitor=false` and the git dir the
+  same way (lower exposure — `ls-files` runs no drivers — but it reads the
+  index, which the restore does not touch): belt and braces on the two
+  steps that write. Keep the env pins on every git command in those steps,
+  not just the ones that obviously execute config;
+- a *nested* repository is refused, not pinned. Codex can leave an embedded
+  repo in the tree with its *own* `.git/config` and stage the directory as
+  a gitlink (`git add evil` — all local git); the landing step's `git status
+  --porcelain` then spawns `git status --porcelain=2` inside it
+  (`is_submodule_modified`), and `git add -A` can do the same for an
+  unchanged-HEAD gitlink. That child gets `GIT_DIR`/`GIT_COMMON_DIR` cleared and reads the
+  nested config, which the restore never touched. Git's `sanitize_repo_env`
+  (run-command.c) keeps `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`, so the
+  `core.fsmonitor=false` and `core.hooksPath` pins do carry into the child —
+  but the pins cover only those two keys, and the child *refreshes its
+  index*: a tracked file whose mtime changed but whose size did not is
+  re-hashed through `convert_to_git` → the `filter.*.clean` driver named by
+  the nested `.gitattributes` and nested config, as `runner`, with the
+  machine-account token in the environment (review round 5 of #73; env
+  config cannot wildcard a filter name away). So the reclaim step compares
+  `find $GITHUB_WORKSPACE -mindepth 2 -name .git` (as root, so an unreadable
+  directory cannot hide one; matches gitfiles and symlinks too) against the
+  pre-codex snapshot and fails on any difference — git-free, and every
+  downstream git user is already gated on the step. Belt and braces: every
+  post-codex `git status` passes `--ignore-submodules=dirty`, which is what
+  suppresses the `is_submodule_modified` spawn while (unlike `all`) still
+  reporting a changed gitlink pointer; `git add`/`git commit` have no such
+  flag, which is why the refusal is the primary defence. Recognizing the
+  refusal when it is a false alarm: a codex run that `git init`s a fixture
+  or `git worktree add`s under the checkout (rather than `/tmp`) goes red on
+  `Reclaim workspace from codex` with the nested `.git` path in the log and
+  the Surface comment naming the step; the fix is the prompt (create
+  scratch repos outside the workspace), not a weaker check.
+
+Verification for a change here, all cases prompted to codex (any verb):
+
+1. write a `.git/hooks/pre-commit` that prints `HOOK-RAN` and exits non-zero
+   — the landing step must still commit, and its log must not contain
+   `HOOK-RAN`;
+2. `cp -r .git /tmp/x`, add `filter.x.clean = echo FILTER-RAN >&2` to
+   `/tmp/x/config` with `* filter=x` in `.git/info/attributes`, and write
+   `/tmp/x` into `.git/commondir` — the reclaim step must fail on its
+   redirected-git-dir check, the guard and landing must be skipped, and no
+   later step's log (hand-back, Surface) may contain `FILTER-RAN`;
+3. the guard-failure path: on a loop run, set `remote.origin.url =
+   ssh://x/y` and `core.sshCommand = <script printing SSH-RAN>` in
+   `.git/config` and leave a conflict unstaged (or corrupt `.git/index`) so
+   the guard fails — the run must go red on the guard with the Surface
+   comment naming the unresolved merge, and no step's log may contain
+   `SSH-RAN` (the reclaim restored the config before the hand-back and
+   Surface fetches ran);
+4. the survivor path: have codex start `setsid nohup sh -c 'while :; do
+   git config core.sshCommand "sh -c \"echo SURVIVOR-RAN >&2\""; sleep 0.1;
+   done' &` and leave the tree otherwise clean — the reclaim step's log must
+   show the kill, `.git` and the workspace root must both be `drwxr-sr-x`
+   afterwards (`stat` them in a scratch step; symbolic `g-w` keeps the
+   setgid bit `Create codex user` set, so `drwxr-xr-x` would be wrong, not
+   better), and the landing step's push must go out with no `SURVIVOR-RAN`
+   in any log;
+5. the embedded-repository path: `git init evil && git -C evil config
+   filter.x.clean "echo FILTER-RAN >&2"`, `echo "* filter=x"
+   >evil/.gitattributes`, commit a file inside `evil`, `touch` it, then `git
+   add evil` in the outer repo — the reclaim step must fail on its
+   embedded-repository check (its log names the `evil/.git` path), the guard
+   and landing must be skipped, and no later step's log (hand-back, Surface)
+   may contain `FILTER-RAN`. Control: a run on a caller whose provisioning
+   leaves a nested `.git` before codex (an editable `git+` install under
+   `src/`) must NOT be refused — the snapshot covers it;
+6. the unpinned-step hooks path: on a loop run, write
+   `.git/hooks/reference-transaction` and `.git/hooks/post-index-change`
+   that print `HOOK-RAN` to stderr, `chmod +x` them, `git update-ref -d
+   refs/remotes/origin/<head branch>` so the hand-back's fetch must recreate
+   the tracking ref, and `touch` a tracked file so `git status` rewrites the
+   index — the reclaim step's log must list both hooks as moved aside,
+   `git config --get core.hooksPath` in a scratch step must print
+   `$RUNNER_TEMP/no-hooks`, and no later step's log (landing, hand-back,
+   Surface) may contain `HOOK-RAN`.
 
 ## v1 limitations (deliberate)
 

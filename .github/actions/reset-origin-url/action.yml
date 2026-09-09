@@ -1,0 +1,46 @@
+name: reset-origin-url
+description: >-
+  Put the credential-free origin URL back after the claude-code-action step
+  (design/architecture.md → "No persisted git credentials"). The action's
+  prepare step (`replaceCheckoutCredentials`, every mode) rewrites
+  `remote.origin.url` to `https://x-access-token:<github_token>@<server>/...`
+  so the agent's own pushes authenticate; that URL outlives the step. Two
+  consequences this step removes, in claude.yml, claude-auto.yml and
+  claude-auto-review.yml (one copy for all three):
+
+  1. Git never consults a credential helper when the URL already carries a
+     credential — a 401 with URL auth is `credential_reject` → `HTTP_NOAUTH`,
+     and helpers are tried only on the `HTTP_REAUTH` path. So the
+     step-scoped helpers the later runner-side steps define (open-PR, verify,
+     hand-back and unlanded-work fetches; the push-base-merge backstop) were
+     bypassed by whatever the URL carried. On a repo with MARVIN_TOKEN that
+     is the same identity and harmless; on a marvin-less claude.yml caller
+     the URL token is the Claude App token, which the action REVOKES in its
+     own final composite step (`Revoke app token`, `if: always() &&
+     inputs.github_token == ''`) — so every later `git fetch origin` failed
+     ("not on origin; nothing to open" on issue runs, landed work read as
+     unlanded, the backstop dying at its fetch) while the workflow described
+     the helper as covering them (review round 4 of #73).
+  2. The action's token sat in `.git/config` for the remainder of the job —
+     the residual risk architecture.md carried since #61.
+
+  `git remote set-url origin <server_url>/<repository>` — idempotent, no
+  network, the URL actions/checkout set — and every later `git fetch`/`git
+  push origin` reaches its step's helper as designed: job token for the
+  reads, `MARVIN_TOKEN` (`|| github.token` in claude.yml) for the backstop
+  push. Gate it `if: always() && steps.claude.outcome != 'skipped'` right
+  after the action step: a failed or cancelled agent leaves the URL rewritten
+  too. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/reset-origin-url@main); NO post step
+  (local composite actions with post steps break teardown on the fork).
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ORIGIN_URL: ${{ github.server_url }}/${{ github.repository }}
+      run: |
+        set -euo pipefail
+        git remote set-url origin "$ORIGIN_URL"
+        echo "origin reset to $ORIGIN_URL (no URL-embedded credential)."

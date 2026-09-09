@@ -20,7 +20,8 @@ take effect on every repo's next run.
   taken by the reusable definitions; keep them in sync with `examples/`. No CI
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
-  reusable workflows (`set-stage`, `sync-branch`, `unresolved-merge-guard`,
+  reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
+  `reset-origin-url`, `reclaim-codex-workspace`, `unresolved-merge-guard`,
   `push-base-merge`, `provision-fallback`, `reset-auto-counters`,
   `disarm-auto-loop`, `post-pr-comment`). Referenced fully-qualified
   (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
@@ -75,6 +76,51 @@ take effect on every repo's next run.
 - **Permissions live in the `settings` input** (inline Claude Code
   `settings.json`), not `--allowedTools`. Keep them allow-lists; the reviewer
   carries a `deny` overlay. See design/architecture.md → Permissions.
+- **No git credential is ever written to the workspace** (issue #61,
+  2026-09-09): every checkout runs `persist-credentials: false`, and every
+  runner-side `git fetch`/`push` authenticates through a step-scoped
+  credential helper defined in that step's `GIT_CONFIG_*` env. Copy an
+  existing block verbatim: every copy reads the token from the ONE variable
+  name `GIT_TOKEN` (composites set `GIT_TOKEN: ${{ inputs.<token> }}`; the
+  helper runs under `sh` without `set -u`, so a block that names a variable
+  the step never set fails silently with an empty password), and the helper
+  key is `credential.${{ github.server_url }}.helper`, not the generic
+  `credential.helper`, so no other host is ever answered with the token. The
+  token is the job token for reads, `MARVIN_TOKEN` for pushes that must
+  trigger CI. When adding a git network call to a workflow or composite,
+  give its step that env — never rely on `.git/config`, and never put a
+  token in a URL or an `http.*.extraheader`. A URL credential WINS over a
+  helper (git never consults one when the URL carries auth), which is why
+  the `reset-origin-url` step runs right after every claude-code-action
+  step: the action rewrites `remote.origin.url` to carry its token, and
+  until the reset every later fetch/push would use that instead of its
+  helper — a revoked token on marvin-less callers. Keep that step directly
+  after the action step, `always()`-gated, and put no git network call
+  between the two. On the codex path, the
+  `reclaim-codex-workspace` step runs unconditionally right after codex
+  (`if: always() && steps.codexuser.outcome == 'success'`): it kills any
+  process still running as codex, refuses a redirected git dir
+  (`.git/commondir`, symlinked `.git`) and any embedded repository codex
+  added (a nested `.git/config` is executed by the landing step's `git
+  status`/`git add` and no restore or pin reaches it — compared against the
+  list `Create codex user` snapshots, so a caller's provisioning may leave
+  one), takes `.git` back and revokes the codex group's write grant on it
+  and on the workspace root, restores the pre-codex `.git/config`, moves
+  `.git/hooks` aside and appends `core.hooksPath`/`core.fsmonitor=false`
+  to the restored config (hooks and the index are files a restore cannot
+  cover, and `git fetch`/`git status` run hooks too, not just `git
+  commit`) — so keep every later git-running step gated on its success
+  (guard, landing, the loops' hand-back fetch; the Surface steps set their
+  error on `!= success`, not `= failure`, so a reclaim cancelled mid-run
+  skips their git calls too) and put nothing that runs git between codex
+  and it. The landing steps additionally pin
+  `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE`, `GIT_CONFIG_GLOBAL=/dev/null`
+  and the same two `core.*` keys by env as belt and braces; the guard pins
+  the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
+  (`ls-files` runs no hooks); and every post-codex `git status` passes
+  `--ignore-submodules=dirty`; keep all of that when touching them. See
+  design/architecture.md → No persisted git credentials and
+  design/codex-engine.md → Hook-safe landing.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat
   them as sensitive, and don't add API-key secrets; auth is Workload Identity
   Federation.

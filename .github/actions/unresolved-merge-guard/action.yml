@@ -8,9 +8,10 @@ description: >-
   containing them, so this check is the only thing between a half-resolved
   merge and the PR branch. Two distinct failures: an unmerged index (codex
   never staged a resolution) and staged-but-unresolved text (it staged the
-  markers). Read-only — it inspects the index and the reported files, so it
-  can run before the landing step reclaims .git from the codex user.
-  Referenced fully-qualified
+  markers). Read-only — it inspects the index and the reported files. Runs
+  after the reclaim-codex-workspace step has taken .git back and restored
+  the pre-codex config, and is gated on that step's success. Referenced
+  fully-qualified
   (meridianlabs-ai/agents/.github/actions/unresolved-merge-guard@main); NO
   post step (local composite actions with post steps break teardown on the
   fork).
@@ -29,6 +30,28 @@ runs:
     - shell: bash
       env:
         CONFLICTS: ${{ inputs.conflicts }}
+        # This runs as `runner` on a .git the codex user could write to (the
+        # codex-user step group-grants the whole workspace). The reclaim step
+        # before it restored the pre-codex .git/config, but a restore cannot
+        # cover the INDEX: one carrying the fsmonitor extension makes git run
+        # the configured core.fsmonitor command on load, and reading the
+        # index is the one thing here that can execute configuration.
+        # Env-config overrides the repo config, so a fsmonitor command can
+        # never run here whatever the config says. The git dir is pinned the
+        # same way the landing steps pin it, so a codex-written
+        # .git/commondir could not point this read at an index and config
+        # codex owns even if the reclaim's refusal had missed it
+        # (design/codex-engine.md → Hook-safe landing). GIT_CONFIG_GLOBAL
+        # skips the runner's ~/.gitconfig too: codex is in the runner group,
+        # and a group-writable home file would sit outside the restore (the
+        # hosted image ships it runner-only; this makes that structural).
+        GIT_DIR: ${{ github.workspace }}/.git
+        GIT_COMMON_DIR: ${{ github.workspace }}/.git
+        GIT_WORK_TREE: ${{ github.workspace }}
+        GIT_CONFIG_GLOBAL: /dev/null
+        GIT_CONFIG_COUNT: "1"
+        GIT_CONFIG_KEY_0: core.fsmonitor
+        GIT_CONFIG_VALUE_0: "false"
       run: |
         set -euo pipefail
         # The index check runs BEFORE the landing step's `git add -A` on
@@ -37,10 +60,8 @@ runs:
         # conflicts, which have no markers to scan for — a blanket add would
         # silently "resolve" those to whatever sits in the working tree.
         # Assigned first, not tested inside the substitution: `[ -n "$(git
-        # ...)" ]` would lose git's exit status, so an unreadable index or a
-        # dubious-ownership refusal (this runs while codex-created files under
-        # .git are still codex-owned) would print nothing and PASS the guard.
-        # Fail closed instead.
+        # ...)" ]` would lose git's exit status, so an unreadable index would
+        # print nothing and PASS the guard. Fail closed instead.
         unmerged=$(git -c core.quotePath=false ls-files --unmerged) || {
           echo "::error::git ls-files failed while checking for an unresolved merge — refusing to land."
           exit 1
