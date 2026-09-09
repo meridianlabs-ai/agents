@@ -257,6 +257,27 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
   visible and recoverable. That comment is deliberately **trigger-free** (no
   literal `@review`/`@auto`): a bot-authored comment carrying a live trigger
   would re-fire the loop and, on a persistent gate failure, spin.
+- **Stale-verdict guard (implemented)** — the review-fix job fires on the
+  verdict comment but shares the per-PR concurrency group with ci-fix
+  (`cancel-in-progress: false`), so it can queue for many minutes; when it
+  finally runs, the "latest" verdict it reads may describe a commit that is no
+  longer the tip. Seen on inspect_flow#825 (2026-09-09): a clean verdict on the
+  original commit queued behind the ci-fix run; ci-fix pushed a fix and posted
+  `@review`; the queued run then read the still-latest clean verdict, converged
+  and pinged the human, who merged before the real re-review landed a
+  suggestion. The gate now skips a verdict older than a later bare `@review`
+  request (same word-bounded token test the reusable reviewer applies before
+  running, so a stray `@reviewers` mention does not count as pending): every
+  loop-driven push (ci-fix, the dev agent, review-fix rounds and
+  their hand-back backstop) ends with one, so such a verdict describes code the
+  reviewer never saw *and* has a fresh review pending whose verdict re-fires
+  the loop with the right answer. The guard deliberately does **not** compare
+  against the tip commit's date: the reviewer never fires on `synchronize`, so
+  a push without a request (a human pushing while the run is queued) has no
+  review pending — skipping there would strand the loop with the label on and
+  nothing scheduled, and a committer clock ahead of GitHub's could skip the
+  verdict for the very commit reviewed. That push keeps the prior behavior (the
+  verdict is acted on against the new tip).
 - **Cost visibility** — each run's job summary (the `model-provenance`
   table plus its cost/duration/turns line) makes spend auditable after the
   fact. The transcript itself is not uploaded (architecture.md → No

@@ -328,25 +328,75 @@ jobs:
           fi
           echo "mention=$mention" >>"$GITHUB_OUTPUT"
 
+          # Fetch the PR's comments ONCE, unfiltered, and query the local array
+          # below. Filtering with `--paginate --jq` would be wrong here:
+          # `--jq` runs PER PAGE, so past 100 comments `... | last` emits one
+          # element per page and a "single" body comes back multi-line.
+          # `--paginate` output is one merged array on current gh, one array
+          # per page on older releases; -s plus `.[][]` flattens either.
+          comments=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate | jq -s '[.[][]]')
+
+          # Stale-verdict guard: this job fires on the verdict comment but can
+          # queue for many minutes behind a ci-fix run (shared per-PR
+          # concurrency group, cancel-in-progress: false), and by the time it
+          # runs the "latest" verdict may describe a commit that is no longer
+          # the tip. Observed inspect_flow#825 (2026-09-09): a clean verdict
+          # on the original commit queued its review-fix run behind the
+          # ci-fix run; ci-fix pushed a fix and requested re-review; the
+          # queued run then read the still-latest clean verdict, declared
+          # convergence and pinged the human, who merged — and the real
+          # re-review landed a suggestion on a merged PR. Every loop-driven
+          # push (ci-fix, the dev agent, this job's fix rounds and their
+          # hand-back backstop) ends with a bare re-review request, so a
+          # verdict older than the latest such request describes code the
+          # reviewer never saw AND has a fresh review pending: skip and let
+          # that review's own verdict re-fire the loop. The request-shape
+          # test is the caller stub's admission gate (not backticked; not a
+          # reviewer-stamped comment) AND the word-bounded token test the
+          # reusable reviewer applies before it actually runs a review
+          # (claude-review.yml, trig step) — a looser `contains` would count
+          # `cc @reviewers` as a pending request and skip with nothing
+          # scheduled.
+          # Deliberately NOT compared against the tip commit's date: the
+          # reviewer never fires on `synchronize`, so a push that arrives
+          # WITHOUT a request (a human pushing while this run is queued) has
+          # no review pending — skipping there would strand the loop (label
+          # on, nothing scheduled, only a job-log line), and a committer clock
+          # ahead of GitHub's could skip the verdict for the very commit the
+          # reviewer reviewed. Such a push keeps the prior behavior: the
+          # verdict is acted on against the new tip.
+          summary_json=$(jq -c 'map(select(.body|contains("claude-review-summary"))) | last // empty' <<<"$comments")
+          summary=$(jq -r '.body' <<<"${summary_json:-null}")
+          verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
+          if [ -n "$verdict" ]; then
+            verdict_at=$(jq -r '.created_at' <<<"$summary_json")
+            rereview_at=$(jq -r '[.[] | select((.body|test("(^|\\s)@review(\\s|[,.!?;:]|$)")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not)) | .created_at] | max // ""' <<<"$comments")
+            # ISO-8601 UTC timestamps compare correctly as strings; an empty
+            # rereview_at (no request yet) never compares greater.
+            if [[ "$verdict_at" < "$rereview_at" ]]; then
+              echo "Latest verdict '$verdict' ($verdict_at) predates a later re-review request ($rereview_at); that review is pending. Skipping."
+              act skip; exit 0
+            fi
+          fi
+
           # Deterministic convergence: if the reviewer's latest summary carries a
           # `clean` verdict (no outstanding suggestions), hand off to a human
           # without spending a fix round. An absent verdict (older reviewer, or a
           # caller that overrides review_prompt) falls through to the round-count
           # path below, preserving prior behavior.
-          summary=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                      --jq 'map(select(.body|contains("claude-review-summary"))) | last | .body')
-          verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
           if [ "$verdict" = "clean" ]; then
             echo "Reviewer verdict is clean; converging without a fix round."
             act converged; exit 0
           fi
 
-          cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
+          # Latest rounds-marker comment, captured once like summary_json above;
+          # cid feeds the Record round PATCH, the body the counters below.
+          marker_json=$(jq -c --arg m "$MARKER" 'map(select(.body|contains($m))) | last // empty' <<<"$comments")
+          cid=$(jq -r '.id // empty' <<<"${marker_json:-null}")
           prev=0
           prevsha=""
           if [ -n "$cid" ]; then
-            mbody=$(ghr gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
+            mbody=$(jq -r '.body // ""' <<<"$marker_json")
             prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
             prev=${prev:-0}
             # Branch tip recorded when the previous round started (see Record round).
