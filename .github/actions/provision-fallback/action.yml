@@ -110,16 +110,16 @@ runs:
         # there is nothing to warm), then the tempdir default — and prints
         # it, so a runner whose TMPDIR diverges from codex's /tmp is visible
         # in the log rather than a silent no-op; it then makes the files
-        # world-readable (the codex
-        # user reads what the runner wrote) and the dir sticky-writable like
-        # /tmp itself, so codex can still cache an encoding outside this list
-        # once it has egress (tiktoken hash-checks known encodings on read,
-        # so a shared cache is not a poisoning vector). Best-effort and
-        # bounded: tiktoken downloads with no request timeout, so without the
-        # `timeout` a stalled blob host would hold the step to the caller's
-        # timeout-minutes and FAIL provisioning; with it, a stall (rc 124)
-        # lands in the warning branch like any other failure — a failed warm
-        # is a slower first test, never a failed provisioning.
+        # world-readable (the codex user reads what the runner wrote) and the
+        # dir sticky-writable like /tmp itself, so codex can still cache an
+        # encoding outside this list once it has egress (tiktoken hash-checks
+        # known encodings on read, so a shared cache is not a poisoning
+        # vector). Best-effort and bounded: tiktoken downloads with no
+        # request timeout, so without the `timeout` a stalled blob host would
+        # hold the step to the caller's timeout-minutes and FAIL
+        # provisioning; with it, a stall (rc 124) lands in the warning branch
+        # like any other failure — a failed warm is a slower first test, never
+        # a failed provisioning.
         if .venv/bin/python -c 'import tiktoken' 2>/dev/null; then
           if ! timeout 120 .venv/bin/python - <<'PY'
         import os, tempfile
