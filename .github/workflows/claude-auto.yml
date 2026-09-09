@@ -273,20 +273,37 @@ jobs:
 
       # Over the cap: hand off to a human and disarm the loop by removing the
       # label. Removing it is also what a human does to stop @auto manually.
+      # The attempt counter is a per-PR-lifetime tally (green CI in between
+      # does not reset it), so escalation ALSO resets it to 0: the hand-off
+      # promises "re-add the label to let me try again", and without the
+      # reset that was false — the next red CI read the exhausted counter
+      # and escalated again on sight, no fix attempted (inspect_flow#824,
+      # 2026-09-09: two of the three attempts had been burned by rounds that
+      # ran without a provisioned environment, and the third was 70 minutes
+      # and five green pushes earlier). Re-labeling is an explicit human
+      # decision; it buys a fresh budget. The reset is best-effort (|| true):
+      # the hand-off comment and label removal are the load-bearing part.
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.gate.outputs.pr }}
+          CID: ${{ steps.gate.outputs.cid }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.fix_attempt_cap }}
+          MARKER: "<!-- auto-fix-attempts -->"
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
         run: |
           set -euo pipefail
           gh pr comment "$PR" --repo "$REPO" --body \
-            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again."
+            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again — the attempt counter is reset, so that starts a fresh budget of $CAP."
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+          if [ -n "$CID" ]; then
+            body="$MARKER
+          🤖 auto CI-fix attempts: 0 (cap $CAP). (counter reset on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget)"
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || true
+          fi
 
       # Capture the branch tip and a timestamp before the agent runs so later
       # steps can tell whether the agent's fix landed and what it posted.

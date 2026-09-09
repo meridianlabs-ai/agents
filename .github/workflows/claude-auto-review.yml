@@ -467,14 +467,27 @@ jobs:
           gh pr comment "$PR" --repo "$REPO" --body "$MARKER
           ${ping}🤖 auto: the reviewer has no outstanding feedback — this PR has converged. auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; $ci The \`auto\` label is left on, so auto will still react to new review or CI activity; remove it to disengage."
 
+      # Escalation also resets the round counter to 0 (mirror of
+      # claude-auto.yml's attempt reset, same reasoning): the counter is a
+      # per-PR-lifetime tally, so after a cap escalation "re-add it to let me
+      # keep iterating" would otherwise re-escalate on the very next review
+      # with suggestions (round 11 > 10) — a human re-labeling has decided
+      # the loop deserves another full budget. The head marker is kept so
+      # the no-progress check keeps its reference tip; with rounds at 0 that
+      # check is skipped for the first fresh round anyway (it needs
+      # prev >= 1), so re-adding the label without pushing does not trip it.
+      # Best-effort (|| true): the comment and label removal are what matter.
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
+          CID: ${{ steps.gate.outputs.cid }}
+          HEAD: ${{ steps.gate.outputs.head }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
+          MARKER: "<!-- auto-review-rounds -->"
           MENTION: ${{ steps.gate.outputs.mention }}
           STALLED: ${{ steps.gate.outputs.stalled }}
         run: |
@@ -486,8 +499,14 @@ jobs:
             reason="the reviewer still has feedback after $CAP review rounds and I haven't converged"
           fi
           gh pr comment "$PR" --repo "$REPO" --body \
-            "${ping}🤖 auto: $reason. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating."
+            "${ping}🤖 auto: $reason. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating — the round counter is reset, so that starts a fresh budget of $CAP."
           gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+          if [ -n "$CID" ]; then
+            body="$MARKER
+          🤖 auto review rounds: 0 (cap $CAP). (counter reset on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget)
+          <!-- auto-review-head:$HEAD -->"
+            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || true
+          fi
 
       # Check out the PR head (derived above); authenticate as the machine
       # account so the agent's fix push re-triggers CI and its `@review` comment
