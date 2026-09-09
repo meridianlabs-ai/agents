@@ -197,6 +197,17 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
   visible and recoverable. That comment is deliberately **trigger-free** (no
   literal `@review`/`@auto`): a bot-authored comment carrying a live trigger
   would re-fire the loop and, on a persistent gate failure, spin.
+- **Stale-verdict guard (implemented)** — the review-fix job fires on the
+  verdict comment but shares the per-PR concurrency group with ci-fix
+  (`cancel-in-progress: false`), so it can queue for many minutes; when it
+  finally runs, the "latest" verdict it reads may describe a commit that is no
+  longer the tip. Seen on inspect_flow#825 (2026-09-09): a clean verdict on the
+  original commit queued behind the ci-fix run; ci-fix pushed a fix and posted
+  `@review`; the queued run then read the still-latest clean verdict, converged
+  and pinged the human, who merged before the real re-review landed a
+  suggestion. The gate now skips a verdict older than the tip commit's
+  committer date or older than a later bare `@review` request — the pending
+  review's own verdict re-fires the loop with the right answer.
 - **Cost visibility** — each run's job summary (the `model-provenance`
   table plus its cost/duration/turns line) makes spend auditable after the
   fact. The transcript itself is not uploaded (architecture.md → No

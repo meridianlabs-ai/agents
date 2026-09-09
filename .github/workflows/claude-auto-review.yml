@@ -328,21 +328,54 @@ jobs:
           fi
           echo "mention=$mention" >>"$GITHUB_OUTPUT"
 
+          head=$(jq -r '.headRefOid' <<<"$pr_json")
+          # Closed-PR continuation: the frozen headRefOid lies; the live tip
+          # is what fix rounds push to and what progress is measured by.
+          [ -n "$live_tip" ] && head="$live_tip"
+          # `--paginate` output is one merged array on current gh, one array
+          # per page on older releases; -s plus `.[][]` flattens either.
+          comments=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate | jq -s '[.[][]]')
+
+          # Stale-verdict guard: this job fires on the verdict comment but can
+          # queue for many minutes behind a ci-fix run (shared per-PR
+          # concurrency group, cancel-in-progress: false), and by the time it
+          # runs the "latest" verdict may describe a commit that is no longer
+          # the tip. Observed inspect_flow#825 (2026-09-09): a clean verdict
+          # on the original commit queued its review-fix run behind the
+          # ci-fix run; ci-fix pushed a fix and requested re-review; the
+          # queued run then read the still-latest clean verdict, declared
+          # convergence and pinged the human, who merged — and the real
+          # re-review landed a suggestion on a merged PR. A verdict older than
+          # the tip commit, or older than a later bare re-review request (the
+          # fix loops' hand-back), describes code the reviewer never saw:
+          # skip and let the pending review's own verdict re-fire the loop.
+          # The re-review-request test mirrors the caller stub's trigger gate
+          # (bare token; not backticked; not a reviewer-stamped comment).
+          summary_json=$(jq -c 'map(select(.body|contains("claude-review-summary"))) | last // empty' <<<"$comments")
+          summary=$(jq -r '.body' <<<"${summary_json:-null}")
+          verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
+          if [ -n "$verdict" ]; then
+            verdict_at=$(jq -r '.created_at' <<<"$summary_json")
+            head_at=$(ghr gh api "repos/$REPO/commits/$head" --jq '.commit.committer.date')
+            rereview_at=$(jq -r '[.[] | select((.body|contains("@review")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not)) | .created_at] | max // ""' <<<"$comments")
+            # ISO-8601 UTC timestamps compare correctly as strings.
+            if [[ "$verdict_at" < "$head_at" || "$verdict_at" < "$rereview_at" ]]; then
+              echo "Latest verdict '$verdict' ($verdict_at) predates the branch tip $head ($head_at) or a later re-review request (${rereview_at:-none}); a fresh review is pending. Skipping."
+              act skip; exit 0
+            fi
+          fi
+
           # Deterministic convergence: if the reviewer's latest summary carries a
           # `clean` verdict (no outstanding suggestions), hand off to a human
           # without spending a fix round. An absent verdict (older reviewer, or a
           # caller that overrides review_prompt) falls through to the round-count
           # path below, preserving prior behavior.
-          summary=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                      --jq 'map(select(.body|contains("claude-review-summary"))) | last | .body')
-          verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
           if [ "$verdict" = "clean" ]; then
             echo "Reviewer verdict is clean; converging without a fix round."
             act converged; exit 0
           fi
 
-          cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
+          cid=$(jq -r 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' <<<"$comments")
           prev=0
           prevsha=""
           if [ -n "$cid" ]; then
@@ -353,10 +386,6 @@ jobs:
             prevsha=$(printf '%s' "$mbody" | sed -n 's/.*auto-review-head:\([0-9a-f]*\).*/\1/p')
           fi
           next=$((prev + 1))
-          head=$(jq -r '.headRefOid' <<<"$pr_json")
-          # Closed-PR continuation: the frozen headRefOid lies; the live tip
-          # is what fix rounds push to and what progress is measured by.
-          [ -n "$live_tip" ] && head="$live_tip"
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
           echo "round=$next" >>"$GITHUB_OUTPUT"
           echo "head=$head" >>"$GITHUB_OUTPUT"
