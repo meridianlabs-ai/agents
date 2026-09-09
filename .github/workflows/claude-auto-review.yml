@@ -328,25 +328,75 @@ jobs:
           fi
           echo "mention=$mention" >>"$GITHUB_OUTPUT"
 
+          # Fetch the PR's comments ONCE, unfiltered, and query the local array
+          # below. Filtering with `--paginate --jq` would be wrong here:
+          # `--jq` runs PER PAGE, so past 100 comments `... | last` emits one
+          # element per page and a "single" body comes back multi-line.
+          # `--paginate` output is one merged array on current gh, one array
+          # per page on older releases; -s plus `.[][]` flattens either.
+          comments=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate | jq -s '[.[][]]')
+
+          # Stale-verdict guard: this job fires on the verdict comment but can
+          # queue for many minutes behind a ci-fix run (shared per-PR
+          # concurrency group, cancel-in-progress: false), and by the time it
+          # runs the "latest" verdict may describe a commit that is no longer
+          # the tip. Observed inspect_flow#825 (2026-09-09): a clean verdict
+          # on the original commit queued its review-fix run behind the
+          # ci-fix run; ci-fix pushed a fix and requested re-review; the
+          # queued run then read the still-latest clean verdict, declared
+          # convergence and pinged the human, who merged — and the real
+          # re-review landed a suggestion on a merged PR. Every loop-driven
+          # push (ci-fix, the dev agent, this job's fix rounds and their
+          # hand-back backstop) ends with a bare re-review request, so a
+          # verdict older than the latest such request describes code the
+          # reviewer never saw AND has a fresh review pending: skip and let
+          # that review's own verdict re-fire the loop. The request-shape
+          # test is the caller stub's admission gate (not backticked; not a
+          # reviewer-stamped comment) AND the word-bounded token test the
+          # reusable reviewer applies before it actually runs a review
+          # (claude-review.yml, trig step) — a looser `contains` would count
+          # `cc @reviewers` as a pending request and skip with nothing
+          # scheduled.
+          # Deliberately NOT compared against the tip commit's date: the
+          # reviewer never fires on `synchronize`, so a push that arrives
+          # WITHOUT a request (a human pushing while this run is queued) has
+          # no review pending — skipping there would strand the loop (label
+          # on, nothing scheduled, only a job-log line), and a committer clock
+          # ahead of GitHub's could skip the verdict for the very commit the
+          # reviewer reviewed. Such a push keeps the prior behavior: the
+          # verdict is acted on against the new tip.
+          summary_json=$(jq -c 'map(select(.body|contains("claude-review-summary"))) | last // empty' <<<"$comments")
+          summary=$(jq -r '.body' <<<"${summary_json:-null}")
+          verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
+          if [ -n "$verdict" ]; then
+            verdict_at=$(jq -r '.created_at' <<<"$summary_json")
+            rereview_at=$(jq -r '[.[] | select((.body|test("(^|\\s)@review(\\s|[,.!?;:]|$)")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not)) | .created_at] | max // ""' <<<"$comments")
+            # ISO-8601 UTC timestamps compare correctly as strings; an empty
+            # rereview_at (no request yet) never compares greater.
+            if [[ "$verdict_at" < "$rereview_at" ]]; then
+              echo "Latest verdict '$verdict' ($verdict_at) predates a later re-review request ($rereview_at); that review is pending. Skipping."
+              act skip; exit 0
+            fi
+          fi
+
           # Deterministic convergence: if the reviewer's latest summary carries a
           # `clean` verdict (no outstanding suggestions), hand off to a human
           # without spending a fix round. An absent verdict (older reviewer, or a
           # caller that overrides review_prompt) falls through to the round-count
           # path below, preserving prior behavior.
-          summary=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                      --jq 'map(select(.body|contains("claude-review-summary"))) | last | .body')
-          verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
           if [ "$verdict" = "clean" ]; then
             echo "Reviewer verdict is clean; converging without a fix round."
             act converged; exit 0
           fi
 
-          cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
+          # Latest rounds-marker comment, captured once like summary_json above;
+          # cid feeds the Record round PATCH, the body the counters below.
+          marker_json=$(jq -c --arg m "$MARKER" 'map(select(.body|contains($m))) | last // empty' <<<"$comments")
+          cid=$(jq -r '.id // empty' <<<"${marker_json:-null}")
           prev=0
           prevsha=""
           if [ -n "$cid" ]; then
-            mbody=$(ghr gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
+            mbody=$(jq -r '.body // ""' <<<"$marker_json")
             prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
             prev=${prev:-0}
             # Branch tip recorded when the previous round started (see Record round).
@@ -467,27 +517,105 @@ jobs:
           gh pr comment "$PR" --repo "$REPO" --body "$MARKER
           ${ping}🤖 auto: the reviewer has no outstanding feedback — this PR has converged. auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; $ci The \`auto\` label is left on, so auto will still react to new review or CI activity; remove it to disengage."
 
-      - name: Escalate to human
+      # Escalation is three steps in a fixed order — disarm, reset, hand off —
+      # and each later one phrases itself on the earlier ones' outcomes
+      # (mirror of claude-auto.yml's escalation, same reasoning):
+      #   1. Disarm: remove the label. This is the load-bearing part (it is
+      #      also what a human does to stop @auto manually), so it goes first
+      #      and nothing else is gated on anything but it.
+      #   2. Reset the round counter — ONLY if the disarm succeeded. The
+      #      counter is a per-PR-lifetime tally, so after a cap escalation
+      #      "re-add it to let me keep iterating" would otherwise re-escalate
+      #      on the very next review with suggestions (round 11 > 10); a human
+      #      re-labeling has decided the loop deserves another full budget.
+      #      Gating on the disarm keeps a failed label removal self-limiting,
+      #      as it was before the reset existed: the label stays on but the
+      #      counter stays exhausted, so the next verdict re-escalates (and
+      #      retries the removal) instead of running a fresh budget with no
+      #      human decision. The reset body is the shared composite's (no
+      #      head marker: the no-progress check needs prev >= 1, so a fresh
+      #      budget's first round skips it and records a fresh tip first).
+      #   3. Hand off: the comment tells the truth about both — a failed reset
+      #      leaves the exhausted counter in place, and promising a fresh
+      #      budget then would be exactly the false "re-add it" the reset
+      #      exists to fix; a failed disarm is the one case where "re-add it"
+      #      is wrong because it was never removed. It also says that re-adding
+      #      the label ALONE does nothing here: this loop only fires on the
+      #      reviewer's next verdict, so the human must request a fresh review
+      #      too (the CI-fix loop needs no such clause — a red run is its
+      #      trigger). The post retries (shared post-pr-comment composite) and
+      #      runs even if the disarm or reset STEP errored outright
+      #      (!cancelled(), not the default success()): by this point the
+      #      label may already be gone, so a skipped or transiently failed
+      #      comment would leave the PR silently parked with nobody pinged and
+      #      only a red job as the trace. Empty disarm/reset outputs (the step
+      #      never wrote them) route to the conservative wording — "still
+      #      armed", "could not reset".
+      # The disarm and the reset are shared composites (AGENTS.md convention:
+      # step bodies copied between the loops live in .github/actions/).
+      - name: Disarm the loop (escalation)
         if: steps.gate.outputs.act == 'escalate'
+        id: disarm
+        uses: meridianlabs-ai/agents/.github/actions/disarm-auto-loop@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          label: ${{ inputs.auto_label }}
+
+      - name: Reset the round counter (escalation)
+        if: steps.gate.outputs.act == 'escalate' && steps.disarm.outputs.disarmed == '1'
+        id: reset
+        uses: meridianlabs-ai/agents/.github/actions/reset-auto-counters@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          counters: rounds
+          reason: "on escalation — re-adding `${{ inputs.auto_label }}` starts a fresh budget"
+
+      # Trigger-free ON PURPOSE (like every bot-authored comment here): the
+      # re-engagement path is described, never spelled as its literal trigger.
+      - name: Compose the hand-off
+        if: ${{ !cancelled() && steps.gate.outputs.act == 'escalate' }}
+        id: handoff
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ inputs.pr_number }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
           MENTION: ${{ steps.gate.outputs.mention }}
           STALLED: ${{ steps.gate.outputs.stalled }}
+          DISARMED: ${{ steps.disarm.outputs.disarmed }}
+          RESET_OK: ${{ steps.reset.outputs.ok }}
         run: |
           set -euo pipefail
+          if [ "$DISARMED" != "1" ]; then
+            clause="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its round counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me keep iterating with a fresh budget, re-engage me with an @-mention comment (that re-applies the label, resets both counters and, if it pushes a fix, requests a fresh review)."
+          elif [ "$RESET_OK" = "1" ]; then
+            clause="Removing the \`$AUTO_LABEL\` label. Re-add it AND request a fresh review to let me keep iterating — I only act on the reviewer's next verdict, so the label alone does nothing. The round counter is reset, so that starts a fresh budget of $CAP."
+          else
+            clause="Removing the \`$AUTO_LABEL\` label. Re-add it AND request a fresh review to let me keep iterating (I only act on the reviewer's next verdict) — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label, resets both counters and, if it pushes a fix, requests a fresh review); otherwise I'll escalate again on sight."
+          fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
           if [ "${STALLED:-}" = "1" ]; then
             reason="my last fix round pushed no new changes, so I'm not making progress on the reviewer's remaining feedback"
           else
             reason="the reviewer still has feedback after $CAP review rounds and I haven't converged"
           fi
-          gh pr comment "$PR" --repo "$REPO" --body \
-            "${ping}🤖 auto: $reason. Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add it to let me keep iterating."
-          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+          printf 'body=%s\n' "${ping}🤖 auto: $reason. Handing this to a human. $clause" >>"$GITHUB_OUTPUT"
+
+      - name: Escalate to human
+        if: ${{ !cancelled() && steps.gate.outputs.act == 'escalate' }}
+        uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          body: ${{ steps.handoff.outputs.body }}
+          what: escalation hand-off
+          failure-hint: >-
+            The disarm (disarmed=${{ steps.disarm.outputs.disarmed || 'unknown' }})
+            and reset (ok=${{ steps.reset.outputs.ok || 'skipped' }}) above have
+            already run, so nobody was told.
 
       # Check out the PR head (derived above). persist-credentials:false
       # (issue #61): checkout otherwise writes its token into .git/config for
@@ -885,8 +1013,18 @@ jobs:
           # would spend the round on a feedback-less prompt and conclude the
           # loop on missing context; fail loud instead — a codexprep failure
           # routes into the existing error surfacing and the round refund.
-          if ! sed -n '/^RECENT PR COMMENTS/,/^INLINE REVIEW COMMENTS/p' \
-              "$RUNNER_TEMP/codex-context.md" | grep -q '^--- '; then
+          # NOT `sed … | grep -q` (the original shape): grep -q exits on
+          # its first match and closes the pipe, sed then fails flushing
+          # what it still had buffered ("couldn't flush stdout: Broken
+          # pipe"), and under pipefail the pipeline's status is sed's — so
+          # a feedback section large enough to outrun grep read as "no
+          # comments" and failed a healthy round (inspect_ai#428 round 7,
+          # 2026-09-09: 55 comments, long review). Same SIGPIPE hazard the
+          # head -c note below already avoids; extract to a file, then
+          # grep the file — no writer ever sees a closed pipe.
+          sed -n '/^RECENT PR COMMENTS/,/^INLINE REVIEW COMMENTS/p' \
+              "$RUNNER_TEMP/codex-context.md" >"$RUNNER_TEMP/codex-feedback-section.md"
+          if ! grep -q '^--- ' "$RUNNER_TEMP/codex-feedback-section.md"; then
             echo "::error::review-feedback fetch returned no comments (transient gh/API failure?) — failing the round rather than running codex without the feedback"
             exit 1
           fi
@@ -1196,11 +1334,17 @@ jobs:
       # a reclaim that refused (redirected git dir) means nothing pushed and
       # nothing is owed, and this step must not run git through codex's
       # config with the machine-account token in its env.
-      - name: Ensure hand-back after push
+      # Two steps: this one decides whether a hand-back is owed; the shared
+      # post-pr-comment composite posts it with retry/backoff and fails the
+      # run loudly if it never lands — this comment IS the hand-back, and a
+      # swallowed failure (observed: GitHub 503 during an outage) strands the
+      # board at Agent with green CI and nobody notified.
+      - name: Check whether a hand-back is owed
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
           (steps.claude.outcome == 'success' ||
            (steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'))
+        id: handback
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -1232,21 +1376,18 @@ jobs:
             echo "Hand-back already posted this round."
           else
             echo "Agent pushed ($BASE_SHA -> $tip) without a hand-back; posting the re-review request."
-            # Retry with backoff: this comment IS the hand-back — a swallowed
-            # failure (observed: GitHub 503 during an outage) strands the
-            # board at Agent with green CI and nobody notified. Fail the run
-            # loudly if it never lands.
-            ok=""
-            for i in 1 2 3 4 5; do
-              if gh pr comment "$PR" --repo "$REPO" --body '@review'; then ok=1; break; fi
-              echo "hand-back post failed (attempt $i); retrying"
-              sleep $((i * 15))
-            done
-            if [ -z "$ok" ]; then
-              echo "::error::hand-back @review comment failed after 5 attempts — post it manually"
-              exit 1
-            fi
+            echo "owed=1" >>"$GITHUB_OUTPUT"
           fi
+
+      - name: Ensure hand-back after push
+        if: always() && steps.handback.outputs.owed == '1'
+        uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          body: "@review"
+          what: hand-back @review
 
       # rationale — by posting a handoff comment whose first line is
       # <!-- auto-handoff -->. Detect a fresh one (posted by the machine

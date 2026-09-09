@@ -286,22 +286,97 @@ jobs:
           issue: ${{ steps.gate.outputs.pr }}
           branch: ${{ inputs.head_branch }}
 
-      # Over the cap: hand off to a human and disarm the loop by removing the
-      # label. Removing it is also what a human does to stop @auto manually.
-      - name: Escalate to human
+      # Over the cap: hand off to a human and disarm the loop. Three steps in
+      # a fixed order — disarm, reset, hand off — each later one phrasing
+      # itself on the earlier ones' outcomes (claude-auto-review.yml's
+      # escalation mirrors this):
+      #   1. Disarm: remove the label. This is the load-bearing part (it is
+      #      also what a human does to stop @auto manually), so it goes first
+      #      and nothing else is gated on anything but it.
+      #   2. Reset the attempt counter — ONLY if the disarm succeeded. The
+      #      counter is a per-PR-lifetime tally (green CI in between does not
+      #      reset it), so without the reset the hand-off's "re-add the label
+      #      to let me try again" was false: the next red CI read the
+      #      exhausted counter and escalated again on sight, no fix attempted
+      #      (inspect_flow#824, 2026-09-09: two of the three attempts had been
+      #      burned by rounds that ran without a provisioned environment, and
+      #      the third was 70 minutes and five green pushes earlier).
+      #      Re-labeling is an explicit human decision; it buys a fresh
+      #      budget. Gating on the disarm keeps a failed label removal
+      #      self-limiting, as it was before the reset existed: the label
+      #      stays on but the counter stays exhausted, so the next red CI
+      #      re-escalates (and retries the removal) instead of running a
+      #      fresh budget with no human decision.
+      #   3. Hand off: the comment tells the truth about both — a failed reset
+      #      leaves the exhausted counter in place, and promising a fresh
+      #      budget then would be exactly the false "re-add it" the reset
+      #      exists to fix; a failed disarm is the one case where "re-add it"
+      #      is wrong because it was never removed. The post retries (shared
+      #      post-pr-comment composite) and runs even if the disarm or reset
+      #      STEP errored outright (!cancelled(), not the default success()):
+      #      by this point the label may already be gone, so a skipped or
+      #      transiently failed comment would leave the PR silently parked
+      #      with nobody pinged and only a red job as the trace. Empty
+      #      disarm/reset outputs (the step never wrote them) route to the
+      #      conservative wording — "still armed", "could not reset".
+      # The disarm and the reset are shared composites (AGENTS.md convention:
+      # step bodies copied between the loops live in .github/actions/).
+      - name: Disarm the loop (escalation)
         if: steps.gate.outputs.act == 'escalate'
+        id: disarm
+        uses: meridianlabs-ai/agents/.github/actions/disarm-auto-loop@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ steps.gate.outputs.pr }}
+          label: ${{ inputs.auto_label }}
+
+      - name: Reset the attempt counter (escalation)
+        if: steps.gate.outputs.act == 'escalate' && steps.disarm.outputs.disarmed == '1'
+        id: reset
+        uses: meridianlabs-ai/agents/.github/actions/reset-auto-counters@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ steps.gate.outputs.pr }}
+          counters: attempts
+          reason: "on escalation — re-adding `${{ inputs.auto_label }}` starts a fresh budget"
+
+      # Trigger-free ON PURPOSE (like every bot-authored comment here): the
+      # re-engagement path is described, never spelled as its literal trigger.
+      - name: Compose the hand-off
+        if: ${{ !cancelled() && steps.gate.outputs.act == 'escalate' }}
+        id: handoff
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ steps.gate.outputs.pr }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.fix_attempt_cap }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
+          DISARMED: ${{ steps.disarm.outputs.disarmed }}
+          RESET_OK: ${{ steps.reset.outputs.ok }}
         run: |
           set -euo pipefail
-          gh pr comment "$PR" --repo "$REPO" --body \
-            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. Re-add the label to let me try again."
-          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+          if [ "$DISARMED" != "1" ]; then
+            clause="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its attempt counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me try again with a fresh budget, re-engage me with an @-mention comment (that re-applies the label and resets both counters)."
+          elif [ "$RESET_OK" = "1" ]; then
+            clause="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again on the next red CI run — the attempt counter is reset, so that starts a fresh budget of $CAP."
+          else
+            clause="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again on the next red CI run — but I could not reset the attempt counter (API error), so first edit my sticky \"auto CI-fix attempts\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label and resets both counters); otherwise I'll escalate again on sight."
+          fi
+          printf 'body=%s\n' "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Handing this to a human. $clause" >>"$GITHUB_OUTPUT"
+
+      - name: Escalate to human
+        if: ${{ !cancelled() && steps.gate.outputs.act == 'escalate' }}
+        uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ steps.gate.outputs.pr }}
+          body: ${{ steps.handoff.outputs.body }}
+          what: escalation hand-off
+          failure-hint: >-
+            The disarm (disarmed=${{ steps.disarm.outputs.disarmed || 'unknown' }})
+            and reset (ok=${{ steps.reset.outputs.ok || 'skipped' }}) above have
+            already run, so nobody was told.
 
       # Capture the branch tip and a timestamp before the agent runs so later
       # steps can tell whether the agent's fix landed and what it posted.
@@ -915,11 +990,17 @@ jobs:
       # a reclaim that refused (redirected git dir) means nothing pushed and
       # nothing is owed, and this step must not run git through codex's
       # config with the machine-account token in its env.
-      - name: Ensure hand-back after push
+      # Two steps: this one decides whether a hand-back is owed; the shared
+      # post-pr-comment composite posts it with retry/backoff and fails the
+      # run loudly if it never lands — this comment IS the hand-back, and a
+      # swallowed failure (observed: GitHub 503 during an outage) strands the
+      # board at Agent with green CI and nobody notified.
+      - name: Check whether a hand-back is owed
         if: >-
           always() && steps.gate.outputs.act == 'fix' &&
           (steps.claude.outcome == 'success' ||
            (steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'))
+        id: handback
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -951,21 +1032,18 @@ jobs:
             echo "Hand-back already posted this round."
           else
             echo "Agent pushed ($BASE_SHA -> $tip) without a hand-back; posting the re-review request."
-            # Retry with backoff: this comment IS the hand-back — a swallowed
-            # failure (observed: GitHub 503 during an outage) strands the
-            # board at Agent with green CI and nobody notified. Fail the run
-            # loudly if it never lands.
-            ok=""
-            for i in 1 2 3 4 5; do
-              if gh pr comment "$PR" --repo "$REPO" --body '@review'; then ok=1; break; fi
-              echo "hand-back post failed (attempt $i); retrying"
-              sleep $((i * 15))
-            done
-            if [ -z "$ok" ]; then
-              echo "::error::hand-back @review comment failed after 5 attempts — post it manually"
-              exit 1
-            fi
+            echo "owed=1" >>"$GITHUB_OUTPUT"
           fi
+
+      - name: Ensure hand-back after push
+        if: always() && steps.handback.outputs.owed == '1'
+        uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ steps.gate.outputs.pr }}
+          body: "@review"
+          what: hand-back @review
 
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
