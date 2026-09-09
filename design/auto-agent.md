@@ -195,7 +195,15 @@ review loop's hand-off also says that re-adding the label *alone* does nothing
 a fresh review too. The composite's lookup and PATCH retry with backoff (like
 the gates' own API calls), and the hand-off post retries as well: once the
 disarm and reset have run, a transiently failed comment would otherwise park the
-PR with nobody pinged and only a red job as the trace. The
+PR with nobody pinged and only a red job as the trace. For the same reason the
+hand-off step is gated on `!cancelled()` rather than the default success — an
+outright step failure in the disarm or reset (not the handled "could not"
+outcomes) must not skip the comment on a PR whose label may already be gone;
+empty outputs route to the conservative wording. Each of the three steps is a
+shared composite (`disarm-auto-loop`, `reset-auto-counters`, `post-pr-comment`)
+so the two loops cannot drift; `post-pr-comment` is also what the loops' "Ensure
+hand-back after push" backstop posts the `@review` with, since that comment is
+the loop's other unlosable one. The
 reset body carries no `rounds:`/`attempts:` number and, for the review loop, no
 head marker: the gates read 0 via their `${prev:-0}` default, and the
 no-progress check needs a prior round to compare against, so a fresh budget's
