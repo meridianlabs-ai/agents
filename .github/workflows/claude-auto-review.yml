@@ -846,6 +846,20 @@ jobs:
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
+      # Token split for the codex run: the CLI's step-log "tokens used" is one
+      # blended number (non-cached input + output), so this reads the session
+      # rollout codex wrote under its CODEX_HOME and puts input / cached /
+      # output / reasoning counts and the model that served in the job
+      # summary — the codex counterpart of Model provenance below. Runs right
+      # after codex, before landing, so a landing failure can't hide the
+      # spend. Best-effort, always exits 0.
+      - name: Codex usage
+        if: always() && steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        uses: meridianlabs-ai/agents/.github/actions/codex-usage@main
+        with:
+          requested-model: ${{ inputs.codex_model }}
+          requested-effort: ${{ inputs.codex_effort }}
+
       # Unresolved-merge guard (shared composite): the landing step's `git add
       # -A` would happily stage conflict markers and `git commit` would then
       # produce a valid merge commit containing them, so this check is the
@@ -1050,7 +1064,7 @@ jobs:
       # --fallback-model fires, so this parses modelUsage and posts a note on
       # the PR when a non-requested model served tokens or the result
       # reads like a classifier refusal. Best-effort, always exits 0. Codex
-      # runs have no execution file and a pinned model — nothing to report.
+      # runs have no execution file — the Codex usage step above covers them.
       - name: Model provenance
         if: always() && steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
         uses: meridianlabs-ai/agents/.github/actions/model-provenance@main

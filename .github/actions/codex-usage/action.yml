@@ -1,0 +1,125 @@
+name: codex-usage
+description: >-
+  Report the token split and the model that served a codex run in the job
+  summary. The codex CLI's step-log footer is a single "tokens used" number
+  (its blended_total: non-cached input + output), which cannot be priced —
+  input, cached input and output bill at different rates. codex persists a
+  session rollout (JSONL) under CODEX_HOME/sessions/YYYY/MM/DD/ unless run
+  with --ephemeral; its token_count events carry the cumulative split and its
+  turn_context items name the model actually used, so this reads the newest
+  rollout and writes a "Codex usage" table — the codex counterpart of the
+  model-provenance action. Tokens only: pricing is not encoded here (apply
+  the model's published rates, or read the OpenAI usage dashboard). Nothing
+  leaves the runner — the rollout is the full transcript, the same reason the
+  Claude path stopped uploading its execution log (#65). Best-effort by
+  design: every path exits 0 — usage reporting must never fail the agent's
+  real work. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/codex-usage@main) so it works
+  regardless of what the job checked out; NO post step (local composite
+  actions with post steps break teardown on the fork).
+
+inputs:
+  codex-home:
+    description: >-
+      CODEX_HOME the codex step ran with. codex-action resolves it to the
+      codex user's ~/.codex under safety-strategy unprivileged-user; the file
+      is codex-owned, so it is read via sudo.
+    required: false
+    default: "/home/codex/.codex"
+  requested-model:
+    description: The workflow's codex_model input (empty = the codex CLI default).
+    required: false
+    default: ""
+  requested-effort:
+    description: The workflow's codex_effort input (empty = the codex CLI default).
+    required: false
+    default: ""
+
+outputs:
+  model:
+    description: Model named by the rollout's last turn_context (empty if unknown).
+    value: ${{ steps.usage.outputs.model }}
+  input-tokens:
+    description: Cumulative input tokens (includes the cached ones).
+    value: ${{ steps.usage.outputs.input }}
+  cached-input-tokens:
+    description: Cumulative cached input tokens.
+    value: ${{ steps.usage.outputs.cached }}
+  output-tokens:
+    description: Cumulative output tokens (includes reasoning).
+    value: ${{ steps.usage.outputs.output }}
+  reasoning-output-tokens:
+    description: Cumulative reasoning tokens (a subset of output).
+    value: ${{ steps.usage.outputs.reasoning }}
+  total-tokens:
+    description: Cumulative total tokens as reported by the API.
+    value: ${{ steps.usage.outputs.total }}
+  blended-tokens:
+    description: Non-cached input + output — the CLI's "tokens used" figure.
+    value: ${{ steps.usage.outputs.blended }}
+
+runs:
+  using: composite
+  steps:
+    - id: usage
+      shell: bash
+      env:
+        CODEX_HOME_DIR: ${{ inputs.codex-home }}
+        REQ_MODEL: ${{ inputs.requested-model }}
+        REQ_EFFORT: ${{ inputs.requested-effort }}
+      run: |
+        set -uo pipefail
+        dir="$CODEX_HOME_DIR/sessions"
+        if ! sudo test -d "$dir"; then
+          echo "codex-usage: no sessions dir at $dir (codex never launched, or ran --ephemeral); nothing to report."
+          exit 0
+        fi
+        # One run = one rollout, but read the newest by mtime rather than
+        # assuming: a resumed or forked thread could leave two.
+        files=$(sudo find "$dir" -type f -name 'rollout-*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -n || true)
+        file=$(printf '%s\n' "$files" | tail -1 | cut -d' ' -f2-)
+        [ -n "$file" ] || { echo "codex-usage: no rollout file under $dir; nothing to report."; exit 0; }
+        n=$(printf '%s\n' "$files" | grep -c . || true)
+        [ "$n" -eq 1 ] || echo "codex-usage: $n rollout files present; reading the newest: $file"
+        # Rollout lines: {"timestamp","type","payload"}. `fromjson?` skips a
+        # torn final line (codex killed mid-write) instead of aborting jq.
+        # token_count's info.total_token_usage is cumulative for the thread,
+        # so the LAST one is the run's total; a token_count with null info is
+        # a rate-limit-only update and carries no usage.
+        usage=$(sudo cat "$file" | jq -c -R 'fromjson? | select(.type=="event_msg" and .payload.type=="token_count" and .payload.info != null) | .payload.info.total_token_usage' 2>/dev/null | tail -1 || true)
+        if [ -z "$usage" ] || [ "$usage" = "null" ]; then
+          echo "codex-usage: no token_count event in $file (the run ended before its first model response?); nothing to report."
+          exit 0
+        fi
+        model=$(sudo cat "$file" | jq -r -R 'fromjson? | select(.type=="turn_context") | .payload.model // empty' 2>/dev/null | tail -1 || true)
+        effort=$(sudo cat "$file" | jq -r -R 'fromjson? | select(.type=="turn_context") | .payload.effort // empty' 2>/dev/null | tail -1 || true)
+        # The rollout is codex's own record, not agent prose, but the values
+        # land in markdown: keep them to identifier characters.
+        model=$(printf '%s' "$model" | tr -cd 'A-Za-z0-9._:/-' | head -c 80)
+        effort=$(printf '%s' "$effort" | tr -cd 'A-Za-z0-9_-' | head -c 20)
+        read -r input cached output reasoning total < <(jq -r '[.input_tokens // 0, .cached_input_tokens // 0, .output_tokens // 0, .reasoning_output_tokens // 0, .total_tokens // 0] | map(tostring) | join(" ")' <<<"$usage")
+        noncached=$(( input - cached )); [ "$noncached" -ge 0 ] || noncached=0
+        blended=$(( noncached + output ))
+        echo "codex-usage: model='${model:-?}' (requested '${REQ_MODEL:-<CLI default>}') effort='${effort:-?}' (requested '${REQ_EFFORT:-<CLI default>}')"
+        echo "codex-usage: input=$input cached_input=$cached output=$output reasoning_output=$reasoning total=$total blended(tokens used)=$blended"
+        {
+          echo "### Codex usage"
+          echo ""
+          echo "Model: \`${model:-?}\` (requested: \`${REQ_MODEL:-<codex CLI default>}\`), reasoning effort: \`${effort:-?}\` (requested: \`${REQ_EFFORT:-<codex CLI default>}\`)"
+          echo ""
+          echo "| input tokens | of which cached | output tokens | of which reasoning | total | blended (\"tokens used\") |"
+          echo "|---:|---:|---:|---:|---:|---:|"
+          echo "| $input | $cached | $output | $reasoning | $total | $blended |"
+          echo ""
+          echo "Cumulative for the run, from the session rollout. Cost = non-cached input × input rate + cached input × cached rate + output × output rate at the model's published prices."
+        } >>"$GITHUB_STEP_SUMMARY"
+        {
+          echo "model=$model"
+          echo "input=$input"
+          echo "cached=$cached"
+          echo "output=$output"
+          echo "reasoning=$reasoning"
+          echo "total=$total"
+          echo "blended=$blended"
+        } >>"$GITHUB_OUTPUT"
+        exit 0
