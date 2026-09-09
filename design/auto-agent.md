@@ -206,7 +206,9 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
   `@review`; the queued run then read the still-latest clean verdict, converged
   and pinged the human, who merged before the real re-review landed a
   suggestion. The gate now skips a verdict older than a later bare `@review`
-  request: every loop-driven push (ci-fix, the dev agent, review-fix rounds and
+  request (same word-bounded token test the reusable reviewer applies before
+  running, so a stray `@reviewers` mention does not count as pending): every
+  loop-driven push (ci-fix, the dev agent, review-fix rounds and
   their hand-back backstop) ends with one, so such a verdict describes code the
   reviewer never saw *and* has a fresh review pending whose verdict re-fires
   the loop with the right answer. The guard deliberately does **not** compare

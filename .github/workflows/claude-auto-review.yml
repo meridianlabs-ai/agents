@@ -347,8 +347,12 @@ jobs:
           # verdict older than the latest such request describes code the
           # reviewer never saw AND has a fresh review pending: skip and let
           # that review's own verdict re-fire the loop. The request-shape
-          # test mirrors the caller stub's trigger gate (bare token; not
-          # backticked; not a reviewer-stamped comment).
+          # test is the caller stub's admission gate (not backticked; not a
+          # reviewer-stamped comment) AND the word-bounded token test the
+          # reusable reviewer applies before it actually runs a review
+          # (claude-review.yml, trig step) — a looser `contains` would count
+          # `cc @reviewers` as a pending request and skip with nothing
+          # scheduled.
           # Deliberately NOT compared against the tip commit's date: the
           # reviewer never fires on `synchronize`, so a push that arrives
           # WITHOUT a request (a human pushing while this run is queued) has
@@ -362,7 +366,7 @@ jobs:
           verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
           if [ -n "$verdict" ]; then
             verdict_at=$(jq -r '.created_at' <<<"$summary_json")
-            rereview_at=$(jq -r '[.[] | select((.body|contains("@review")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not)) | .created_at] | max // ""' <<<"$comments")
+            rereview_at=$(jq -r '[.[] | select((.body|test("(^|\\s)@review(\\s|[,.!?;:]|$)")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not)) | .created_at] | max // ""' <<<"$comments")
             # ISO-8601 UTC timestamps compare correctly as strings; an empty
             # rereview_at (no request yet) never compares greater.
             if [[ "$verdict_at" < "$rereview_at" ]]; then
@@ -385,7 +389,8 @@ jobs:
           prev=0
           prevsha=""
           if [ -n "$cid" ]; then
-            mbody=$(ghr gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
+            # Body is already in hand from the single comments fetch above.
+            mbody=$(jq -r 'map(select(.body|contains("'"$MARKER"'"))) | last | .body // ""' <<<"$comments")
             prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
             prev=${prev:-0}
             # Branch tip recorded when the previous round started (see Record round).
