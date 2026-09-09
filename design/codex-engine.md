@@ -450,9 +450,12 @@ Verification for a change here, all cases prompted to codex (any verb):
   query or mutation logs a `::warning::` carrying the API's reason rather
   than reading as "codex hallucinated N ids"). The tag is matched
   tolerantly (indent, list bullet, markdown bold/backticks closed on
-  either side of the colon) because the fail-safe miss would otherwise be
-  silent. The composite also writes the final
-  message with the line stripped, and the post step publishes that copy
+  either side of the colon, and the ids rendered as a bulleted or
+  numbered list on the lines beneath the tag rather than on its line —
+  one awk pass parses and strips the same block, so the two cannot
+  disagree) because the fail-safe miss would otherwise be silent. The
+  composite also writes the final
+  message with the block stripped, and the post step publishes that copy
   with a header stating how many threads were resolved. Same rule as the
   Claude path's REVIEW_ETIQUETTE: never resolve what was declined or only
   answered with rationale.

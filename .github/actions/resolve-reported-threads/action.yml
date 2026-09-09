@@ -18,7 +18,8 @@ description: >-
   that on every path (a round that resolved nothing must not post the line
   either), and tolerates the likely deviations from "exactly the form" —
   leading whitespace, a list bullet, markdown bold/backticks around the tag
-  (closed on either side of the colon). Until
+  (closed on either side of the colon), and the ids rendered as a list on
+  the lines beneath the tag instead of on its line. Until
   2026-09-09 codex rounds resolved nothing, so on codex PRs every thread the
   loop ever opened stayed OPEN, and the fix and review prompts grew with
   settled feedback nobody could tell from live (inspect_ai#428). Shared by
@@ -75,20 +76,34 @@ runs:
       run: |
         # No -e: every path below is best-effort by design (see description).
         set -uo pipefail
-        # One pattern for the parse and the strip: the tag may be indented,
-        # bulleted, or wrapped in markdown bold/backticks — closed either side
-        # of the colon (`**RESOLVED-THREADS:**` and `**RESOLVED-THREADS**:`
-        # are both likely renderings). The id filter below already tolerates
-        # any decoration on the ids themselves.
-        tag='^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:'
+        # One awk pass does both the parse and the strip, so they cannot
+        # disagree about what the line is. The tag may be indented, bulleted,
+        # or wrapped in markdown bold/backticks — closed either side of the
+        # colon (`**RESOLVED-THREADS:**` and `**RESOLVED-THREADS**:` are both
+        # likely renderings). The ids may follow on the tag's own line or as
+        # a list beneath it: after a tag line, lines that are blank or hold
+        # nothing but a bullet/number and `PRRT_…` tokens belong to the block
+        # (parsed and stripped); the first other line ends it and is kept,
+        # with any blank lines held back before it. The last tag block wins.
+        # The id filter below already tolerates any decoration on the ids.
+        ids=
         if [ -f "$FINAL" ]; then
-          sed -E "/${tag}/d" "$FINAL" >"$STRIPPED"
+          ids=$(awk -v out="$STRIPPED" '
+            function flush() { for (; held > 0; held--) print "" > out }
+            BEGIN { printf "" > out }
+            /^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/ {
+              inblock = 1; held = 0; ids = $0
+              sub(/^[[:space:]]*[-*_`[:space:]]*RESOLVED-THREADS[*_`]*:/, "", ids); next }
+            inblock && /^[[:space:]]*$/ { held++; next }
+            inblock && /^[[:space:]]*([-*+]|[0-9]+[.)])?[[:space:]]*(`?PRRT_[A-Za-z0-9_-]+`?[[:space:],;]*)+$/ {
+              held = 0; ids = ids " " $0; next }
+            { if (inblock) { flush(); inblock = 0 }; print > out }
+            END { print ids }
+          ' "$FINAL" | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
+                  | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
         fi
         resolved=0
         if [ "$RESOLVE" = "true" ]; then
-          ids=$(grep -E "$tag" "$FINAL" 2>/dev/null | tail -1 \
-                  | sed -E "s/${tag}//" | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
-                  | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
           if [ -z "$ids" ]; then
             echo "RESOLVED-THREADS: no thread ids reported; nothing to resolve."
           else
