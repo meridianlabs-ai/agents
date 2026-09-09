@@ -378,6 +378,20 @@ Verification for a change here, all cases prompted to codex (any verb):
   verification line is composed from the provisioning outcomes (venv on
   PATH / provisioning failed / nothing to provision) rather than asserting
   a venv unconditionally.
+- **Fix-round context is filtered and stateful since 2026-09-09**: the
+  codex fix prompts (review-fix loop, dev verb on a PR) embedded the last
+  12 top-level comments and the last 40 inline comments as a flat REST
+  list. On inspect_ai#428 that was bare triggers, verdict markers, the
+  sticky counter and stale fix summaries around the one review that
+  mattered, and 36 of the 40 inline entries were threads resolved days
+  earlier with nothing marking them settled. Now: machine comments are
+  dropped, the slice is anchored on the newest review summary (kept in
+  full with everything after it, plus the last five human comments before
+  it), and review threads come from GraphQL `reviewThreads` by state —
+  OPEN in full with the thread id (the handle a later change uses to
+  resolve them), RESOLVED as a one-line index, resolved-and-outdated
+  dropped. The reviewer is also told not to restate regression-accepted
+  notes an earlier round already posted.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
   back to `github.token` where the secret is absent, and those pushes
   do not trigger CI (the Claude path pushes via the app token, which

@@ -992,17 +992,48 @@ jobs:
             # combination outright), so standalone jq over the fetched file.
             # `add // []` keeps a legitimately empty comment set an empty
             # section (add of no pages is null) — only the FETCH may fail.
+            # Top-level comments: filtered and anchored, not "last 12 of anything"
+            # (inspect_ai#428, 2026-09-09: the slice was bare triggers, verdict
+            # marker comments, the sticky counter and stale fix summaries around the
+            # one review that mattered). Drop machine comments (verdict markers,
+            # counters, convergence notes, provenance, tracking comments, bare
+            # trigger one-liners), find the newest review summary (Claude's carry
+            # the claude-review-comment marker, codex's the engine footer), and keep
+            # it plus everything after it, plus the last 5 HUMAN comments before it
+            # (an adjudication that preceded the review is context; older review
+            # rounds are stale by construction — their findings are fixed or live
+            # on as threads). No review found: last 8 substantive comments.
             echo "RECENT PR COMMENTS (newest last; the review feedback is here):"
-            fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$PR/comments" --paginate --slurp
-            jq -r '(add // []) | .[-12:][] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/codex-prc.json"
-            # Bounded like the issue-comment slice above: the head -c cap
-            # below keeps the START of the file, so an unbounded inline
-            # section (every thread the PR ever had, oldest first) would
-            # crowd out the NEWEST feedback — the findings this round is
-            # meant to address — on long-lived comment-heavy PRs.
-            echo "INLINE REVIEW COMMENTS (path:line; newest last):"
-            fetch "$RUNNER_TEMP/codex-inline.json" api "repos/$REPO/pulls/$PR/comments" --paginate --slurp
-            jq -r '(add // []) | .[-40:][] | "--- \(.path):\(.line // .original_line // "?") \(.user.login):\n\(.body)\n"' "$RUNNER_TEMP/codex-inline.json"
+            fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$$PR/comments" --paginate --slurp
+            jq -r '(add // [])
+                | map(select(
+                    (.body | test("<!-- (claude-review-summary|auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head|model-provenance) -->") | not)
+                    and (.body | test("^\\s*@(review|auto|claude)\\b[\\s\\S]{0,80}$") | not)
+                    and (.body | test("^\\*\\*Claude finished") | not)))
+                | . as $all
+                | ([ $all | to_entries[] | select(.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex")) | .key ] | last) as $ri
+                | (if $ri == null then $all[-8:]
+                   else ($all[:$ri] | map(select((.user.type // "") != "Bot" and .user.login != "i-am-marvin")) | .[-5:]) + $all[$ri:] end)
+                | .[] | "--- \(.user.login) at \(.created_at):\n\(.body)\n"' "$RUNNER_TEMP/codex-prc.json"
+            # Review threads BY STATE via GraphQL instead of the flat REST list of
+            # the last 40 inline comments, which carried no resolution state (on
+            # #428, 36 of 40 were threads settled days earlier, indistinguishable
+            # from the open ones). OPEN threads in full, each with its thread id
+            # (the deterministic handle for resolving it); RESOLVED threads as a
+            # one-line index so the agent knows they exist without re-reading them;
+            # resolved AND outdated threads dropped entirely.
+            echo "REVIEW THREADS (OPEN threads are this round's inline feedback; each comment oldest first):"
+            owner="${REPO%%/*}"; name="${REPO##*/}"
+            fetch "$RUNNER_TEMP/codex-threads.json" api graphql \
+              -F owner="$owner" -F name="$name" -F number="$$PR" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){nodes{id isResolved isOutdated path line originalLine comments(first:20){nodes{author{login} createdAt body}}}}}}}'
+            jq -r '.data.repository.pullRequest.reviewThreads.nodes
+                | map(select((.isResolved and .isOutdated) | not))
+                | (map(select(.isResolved | not)) | .[]
+                    | "--- \(.path):\(.line // .originalLine // "?") [OPEN\(if .isOutdated then ", outdated" else "" end)] thread-id \(.id)"
+                      + ([.comments.nodes[] | "\n  \(.author.login // "?") at \(.createdAt):\n  \(.body | gsub("\n"; "\n  "))"] | join("\n")) + "\n"),
+                  "SETTLED THREADS (resolved in earlier rounds — addressed and accepted; do not re-open unless the current code contradicts the resolution):",
+                  (map(select(.isResolved)) | .[] | "  \(.path):\(.line // .originalLine // "?") — \((.comments.nodes[0].body // "") | gsub("\n"; " ") | .[:100])")' "$RUNNER_TEMP/codex-threads.json"
           } >"$RUNNER_TEMP/codex-context.md"
           # The review feedback IS this round's task, and the verdict
           # comment that triggered the run guarantees at least one PR
@@ -1022,7 +1053,7 @@ jobs:
           # 2026-09-09: 55 comments, long review). Same SIGPIPE hazard the
           # head -c note below already avoids; extract to a file, then
           # grep the file — no writer ever sees a closed pipe.
-          sed -n '/^RECENT PR COMMENTS/,/^INLINE REVIEW COMMENTS/p' \
+          sed -n '/^RECENT PR COMMENTS/,/^REVIEW THREADS/p' \
               "$RUNNER_TEMP/codex-context.md" >"$RUNNER_TEMP/codex-feedback-section.md"
           if ! grep -q '^--- ' "$RUNNER_TEMP/codex-feedback-section.md"; then
             echo "::error::review-feedback fetch returned no comments (transient gh/API failure?) — failing the round rather than running codex without the feedback"

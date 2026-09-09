@@ -56,7 +56,10 @@ on:
           mitigation costs more than the risk — say why). Only
           regression-blocking findings count as actionable for your verdict;
           regression-accepted notes are informational and must NOT flip the
-          verdict to `suggestions` on their own. You may run
+          verdict to `suggestions` on their own. Do NOT restate a
+          regression-accepted note that an earlier review on this PR already
+          posted unless the risk itself changed — repeating it every round
+          pads the review and the fix agent's context. You may run
           the test suite, ruff, and mypy to verify a finding before reporting
           it. This is a read-only review: do NOT modify code or push commits.
           You MUST post your review to the PR — it is not surfaced anywhere
