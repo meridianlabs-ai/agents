@@ -68,8 +68,8 @@ to this document together.
 | `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName` |
 | `start_sha`, `head_sha` | emit-landing | 40 lowercase hex; equal iff `has_bundle` is false |
 | `has_bundle` | emit-landing | boolean; when true `commits.bundle` must exist and its tip must be `head_sha` and descend from `start_sha` (checked by `land`, in an empty repo) |
-| `pr_number` | emit-landing (`pr-number` input) | positive integer or null; required by `replies` and `resolve_threads` |
-| `issue_number` | emit-landing (`issue-number` input) | positive integer or null; where `land` posts the error report / hand-off / provenance when there is no PR |
+| `pr_number` | emit-landing (`pr-number` input) | positive integer or null; **must equal the land job's `pr-number` input** (null when that is empty) — the PR the run's trusted context names, so an agent job cannot steer the push, replies, thread resolutions and hand-back at a PR of its choosing, nor drop the number on a PR run to skip the head-ref rule and let `pr.open` adopt another PR. Required by `replies` and `resolve_threads` |
+| `issue_number` | emit-landing (`issue-number` input) | positive integer or null; **must equal the land job's `issue-number` input** the same way; where `land` posts the error report / hand-off / provenance when there is no PR |
 | `pr` | workflow | `open` (bool), `title` (≤ 256 chars), `body_file`; optional `base` (branch name; absent or empty means the land job's default branch, as `gh pr create` would default), `labels` (strings, applied whether `land` opened the PR or adopted an agent-opened one — the `auto` and `engine:*` labels must reach both) and `issue` (the originating issue, gets a "✅ Opened a pull request" comment only when `land` opened the PR). Skipped when `pr_number` is already set; an existing open PR for `branch` is adopted, and the adopt check runs inside the create retry so a create whose response was lost is adopted on the next attempt, not duplicated |
 | `comments[]` | workflow | `number` (positive integer — an issue or a PR; the issues endpoint serves both), `body_file` |
 | `replies[]` | workflow | `review_comment_id` positive integer, `body_file`; posted on `pr_number` |
@@ -78,7 +78,7 @@ to this document together.
 | `stage` | workflow | one of `Contributor`, `Agent`, `Review`, `Sign-off`, `Merge`, or absent |
 | `handback` | workflow | boolean; posts exactly `@review` on the PR (needs `pr_number` or `pr.open`) |
 | `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line |
-| `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move, and a failed hand-back or hand-off does not withhold the stage move either) and a planned stage move that was withheld, and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
+| `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move, and a failed hand-back does not withhold the hand-off or the stage move either) and every planned hand-back, hand-off or stage move that never ran because the PR step failed after the push (a failed fetch or push owes nothing — the work never landed), and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
 
 File references: relative, `^[A-Za-z0-9._/-]{1,200}$`, no `..`, no path
@@ -93,6 +93,13 @@ Core fields (everything emit-landing sets) **win** over the workflow's
 `manifest-extra`: the extra supplies only what the core does not define.
 
 ## Using the pair
+
+`pr-number` / `issue-number` go to **both** composites as the **same
+expression**, evaluated in the caller's trusted context (the event payload,
+or a gate-job output computed before any untrusted code ran): `emit-landing`
+copies them into the manifest, and `land`'s validator refuses a manifest
+whose numbers differ from its own inputs. That is what ties the landing to
+the PR/issue the run is actually for.
 
 Agent job, last step. It runs git in the workspace, so on the codex path it
 is gated on the reclaim step having **succeeded** — `== 'success'`, never
@@ -119,9 +126,11 @@ Land job (`needs: agent`, `if: always()`, a fresh runner, **no checkout**):
         with:
           token: <MARVIN_TOKEN — the land job is the only job that names it>
           allowed-issue-repos: ${{ github.repository }}
-          # Trusted fallback target for the final report when the manifest
-          # never validated (missing artifact, tampered manifest): from the
-          # EVENT payload, never from the manifest.
+          # The same expressions as above: the validator pins the manifest's
+          # pr_number / issue_number to them, and they are the trusted
+          # fallback target for the final report when the manifest never
+          # validated (missing artifact, tampered manifest) — from the EVENT
+          # payload, never from the manifest.
           pr-number: ${{ github.event.pull_request.number }}
           issue-number: ${{ github.event.issue.number }}
 ```

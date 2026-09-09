@@ -235,37 +235,49 @@ def test_landing_failure_hint(failed, pushed, expected):
     assert "@" not in r.stdout
 
 
+PUSHED_PREFIX = "The agent's commits were pushed; only what follows the push is affected."
+
+
 @pytest.mark.parametrize(
-    "failed,pushed,expected",
+    "failed,pushed,withheld,expected",
     [
-        # The PR step failed after the push, so the stage step was skipped
-        # (not failed) with a stage planned: the move is owed all the same.
-        ("pr", "1",
-         "The agent's commits were pushed; only what follows the push is affected. Move the Atlas stage by hand."),
+        # The PR step failed after the push, so the planned stage step was
+        # skipped (not failed): the move is owed all the same.
+        ("pr", "1", "stage", f"{PUSHED_PREFIX} Move the Atlas stage by hand."),
+        # ... and so are a planned hand-back and hand-off; each is named.
+        ("pr", "1", "handback, stage",
+         f"{PUSHED_PREFIX} Post the re-review request by hand. Move the Atlas stage by hand."),
+        ("pr", "1", "handoff", f"{PUSHED_PREFIX} Post the hand-off by hand."),
+        ("pr", "1", "handback, handoff, stage",
+         f"{PUSHED_PREFIX} Post the re-review request by hand. Post the hand-off by hand. Move the Atlas stage by hand."),
         # A failed hand-back and a withheld stage coincide: both are named.
-        ("handback", "1",
-         ("The agent's commits were pushed; only what follows the push is affected. "
-          "Post the re-review request by hand. Move the Atlas stage by hand.")),
-        # Withheld AND failed never both apply, but the line must not double.
-        ("stage", "1",
-         "The agent's commits were pushed; only what follows the push is affected. Move the Atlas stage by hand."),
+        ("handback", "1", "stage",
+         f"{PUSHED_PREFIX} Post the re-review request by hand. Move the Atlas stage by hand."),
+        # Failed AND withheld never both apply to one step, but the line must
+        # not double if they did.
+        ("stage", "1", "stage", f"{PUSHED_PREFIX} Move the Atlas stage by hand."),
+        # Nothing withheld (the common case): unchanged.
+        ("pr", "1", "", PUSHED_PREFIX),
     ],
 )
-def test_landing_failure_hint_names_a_withheld_stage(failed, pushed, expected):
-    r = bash_lib(f"landing_failure_hint '{failed}' '{pushed}' 1")
+def test_landing_failure_hint_names_withheld_steps(failed, pushed, withheld, expected):
+    r = bash_lib(f"landing_failure_hint '{failed}' '{pushed}' '{withheld}'")
     assert r.returncode == 0, r.stderr
     assert r.stdout == expected
     assert "@" not in r.stdout
 
 
-def test_stage_step_runs_after_a_failed_hand_back():
-    # The stage move must not be withheld by a failed hand-back or hand-off
-    # (that strands the board at Agent with the PR head moved); it is gated
-    # on the PR step instead, which succeeding implies the push did.
+def test_stage_and_handoff_steps_run_after_a_failed_hand_back():
+    # Neither the stage move nor the hand-off may be withheld by a failed
+    # hand-back (that strands the board at Agent with the PR head moved);
+    # both are gated on the PR step instead, which succeeding implies the
+    # push did. Report's "never ran" list relies on the same gate: a planned
+    # step is owed-but-skipped exactly when the PR step failed.
     text = LAND.read_text()
-    stage = text[text.index("    - id: stage\n"):]
-    cond = stage.splitlines()[1].strip()
-    assert cond == "if: always() && steps.pr.outcome == 'success' && steps.plan.outputs.stage != ''"
+    for step, planned in (("stage", "steps.plan.outputs.stage != ''"), ("handoff", "steps.plan.outputs.handoff == 'true'")):
+        block = text[text.index(f"    - id: {step}\n"):]
+        cond = block.splitlines()[1].strip()
+        assert cond == f"if: always() && steps.pr.outcome == 'success' && {planned}", step
 
 
 # --- the git contract ------------------------------------------------------

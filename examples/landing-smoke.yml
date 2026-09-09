@@ -126,8 +126,10 @@ jobs:
         with:
           token: ${{ secrets.MARVIN_TOKEN }}
           allowed-issue-repos: ${{ github.repository }}
-          # From the (trusted) dispatch input, not the manifest: where the
-          # final report goes when the validator refused the manifest.
+          # From the (trusted) dispatch input, not the manifest — the same
+          # expression emit-landing got above: the validator pins the
+          # manifest's issue_number to it, and it is where the final report
+          # goes when the validator refused the manifest.
           issue-number: ${{ inputs.issue }}
       - name: Confirm the pushed tip is head_sha
         if: steps.land.outputs.pushed == '1'

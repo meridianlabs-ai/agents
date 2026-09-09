@@ -303,8 +303,12 @@ Three rules define the shape:
   another run's artifact), the branch to a bare name that is neither the
   default branch nor on the land job's `refused-branches` list (`main` by
   default — the fork's pristine `main` is not its default branch, and its
-  ruleset should be the second line, not the only one) and that matches the
-  PR's live head ref, the SHAs to 40 hex with `has_bundle` ⇔
+  ruleset should be the second line, not the only one), `pr_number` and
+  `issue_number` to the numbers the caller's trusted context names
+  (`pr-number` / `issue-number` inputs, from the event payload — so the
+  agent job cannot steer the push, replies, thread resolutions and
+  hand-back at a PR of its choosing) and the branch to that PR's live head
+  ref, the SHAs to 40 hex with `has_bundle` ⇔
   `head_sha != start_sha`, every `*_file` reference to a regular,
   non-symlinked file inside the artifact under 64 KiB, `issues[].repo` to
   an allow-list, thread IDs and numbers to their shapes, `stage` to the
@@ -329,13 +333,15 @@ Three rules define the shape:
   and finally reports the manifest's `error` — failing the run when it says
   so, after every other step ran. Once the push has landed, a lost comment,
   reply or follow-up issue is recorded and reported, not allowed to withhold
-  the hand-back or the stage move, and a failed hand-back or hand-off does
-  not withhold the stage move either (either would strand the board at
+  the hand-back or the stage move, and a failed hand-back does not withhold
+  the hand-off or the stage move either (either would strand the board at
   Agent with the PR head moved — the failure post-pr-comment exists to
-  prevent; the stage step is gated on the PR step, not on the posts); the
-  final report names what failed, and a planned stage move that was
-  withheld, on the PR/issue as well as in the log, since the agent job can
-  no longer post. When the refusal came *before*
+  prevent; those two steps are gated on the PR step, not on the posts); the
+  final report names what failed, and every planned hand-back, hand-off or
+  stage move that never ran because the PR step failed after the push (a
+  failed fetch or push owes nothing — the work never landed), on the
+  PR/issue as well as in the log, since the agent job can no longer post.
+  When the refusal came *before*
   the manifest validated (no artifact, a tampered or malformed manifest),
   the report's target is the PR/issue number the caller passed from the
   **event payload** (`pr-number` / `issue-number` inputs) — trusted, unlike

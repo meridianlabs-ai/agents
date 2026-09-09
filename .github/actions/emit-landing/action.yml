@@ -37,13 +37,18 @@ inputs:
       or claude-code-action's branch_name). A bare name, not a ref.
     required: true
   pr-number:
-    description: Pull-request number the run operates on; empty on issue runs.
+    description: >-
+      Pull-request number the run operates on; empty on issue runs. The SAME
+      expression the workflow passes to `land`'s `pr-number`: the validator
+      refuses a manifest whose pr_number differs from the land job's input.
     required: false
     default: ""
   issue-number:
     description: >-
       Issue number the run was triggered from (issue runs); empty otherwise.
-      The land job posts errors here when there is no PR.
+      The land job posts errors here when there is no PR — and pins the
+      manifest's issue_number to its own `issue-number` input the same way,
+      so pass the same expression to both.
     required: false
     default: ""
   manifest-extra:

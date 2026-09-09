@@ -17,14 +17,21 @@ description: >-
   landed, and stranding the board at Agent over one lost comment is the
   failure post-pr-comment exists to prevent: the Post step (comments,
   replies, thread resolutions, follow-up issues) records what failed and
-  carries on, and the stage move runs even when the hand-back or the
-  hand-off failed (it is gated on the PR step, which succeeding implies the
-  push did). The final Report step always runs, names every step that
-  failed and a stage move that was withheld, posts a short note about it on
+  carries on, and the hand-off and the stage move run even when the
+  hand-back failed (both are gated on the PR step, which succeeding implies
+  the push did). The final Report step always runs, names every step that
+  failed and every planned hand-back, hand-off or stage move that never ran
+  because the PR step failed after the push, posts a short note about it on
   the PR/issue — the manifest's once it validated, else the one the caller's
   `pr-number` / `issue-number` inputs name from the event payload, so a
   refused manifest or a missing artifact reaches the requester and not just
   the run log — and fails the run.
+
+  The manifest's `pr_number` / `issue_number` are pinned to the `pr-number`
+  / `issue-number` inputs by the validator (equal, or null when the input is
+  empty), so the run's trusted context — not the agent job — decides which
+  PR is pushed to, replied on, thread-resolved and handed back. Callers pass
+  the same expressions to `emit-landing` and here.
 
   Two tokens: `read-token` (the job token) for the artifact-adjacent reads —
   the PR head-ref and default-branch lookups, the start-SHA fetch, the
@@ -84,28 +91,36 @@ inputs:
     default: ${{ github.repository }}
   pr-head-ref:
     description: >-
-      headRefName of the manifest's `pr_number`, read with `gh pr view` by
-      the caller. Empty: this action looks it up itself with `read-token`
-      (reading ONLY `pr_number`, integer-checked, from the unvalidated
-      manifest).
+      headRefName of the PR `pr-number` names (`github.event.pull_request.head.ref`
+      on pull_request events, or read with `gh pr view` by the caller). Empty:
+      this action looks it up itself with `read-token`. Safe to take from the
+      event because the validator pins the manifest's `pr_number` to
+      `pr-number`, so the manifest's `branch` is compared against the head
+      of the PR the run is actually for.
     required: false
     default: ""
   pr-number:
     description: >-
-      The PR the caller's EVENT names (`github.event.pull_request.number`, or
-      `github.event.issue.number` on a PR comment): the Report step's
-      fallback target when the manifest never validated (missing artifact,
-      tampered or malformed manifest), so the refusal is posted where the
-      run was requested and not only logged. Trusted because it comes from
-      the event payload — never read from the unvalidated manifest, whose
-      number could steer the note to an arbitrary issue. Digits only;
-      anything else is ignored.
+      The PR the caller's TRUSTED context names (`github.event.pull_request.number`,
+      `github.event.issue.number` on a PR comment, or a gate-job output
+      computed before any untrusted code ran) — the SAME expression the
+      caller passes to `emit-landing`. Two roles: the validator refuses a
+      manifest whose `pr_number` differs from it (or is set when this is
+      empty, or null when this is not), and it is the Report step's fallback
+      target when the manifest never validated (missing artifact, tampered
+      or malformed manifest), so the refusal is posted where the run was
+      requested and not only logged. Never read from the unvalidated
+      manifest, whose number could steer the landing at an arbitrary PR.
+      Digits only; anything else refuses the manifest and is ignored by the
+      report.
     required: false
     default: ""
   issue-number:
     description: >-
-      The issue the caller's event names (`github.event.issue.number` on
-      issue runs); the same fallback target when there is no PR.
+      The issue the caller's event names (`github.event.issue.number`), the
+      SAME expression the caller passes to `emit-landing`: the validator pins
+      the manifest's `issue_number` to it the same way, and it is the
+      report's fallback target when there is no PR.
     required: false
     default: ""
 
@@ -133,29 +148,27 @@ runs:
         path: ${{ runner.temp }}/landing
 
     # The validator needs two facts the caller may not have supplied: the
-    # PR's live head ref to compare the manifest's branch against, and the
-    # repo's default branch (absent from the event payload on `schedule`).
-    # Read ONLY pr_number from the unvalidated manifest, and only as an
-    # integer — everything else waits for the validator. Either lookup
-    # failing leaves its value empty, which the validator refuses.
+    # live head ref of the PR the run is for (to compare the manifest's
+    # branch against), and the repo's default branch (absent from the event
+    # payload on `schedule`). The PR is the caller's trusted `pr-number` —
+    # the validator pins the manifest's pr_number to it, so nothing is read
+    # from the unvalidated manifest here. Either lookup failing leaves its
+    # value empty, which the validator refuses.
     - id: lookup
-      if: inputs.pr-head-ref == '' || inputs.default-branch == ''
+      if: (inputs.pr-head-ref == '' && inputs.pr-number != '') || inputs.default-branch == ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.read-token }}
         REPO: ${{ inputs.repo }}
-        DIR: ${{ runner.temp }}/landing
         PR_HEAD_REF: ${{ inputs.pr-head-ref }}
+        EVENT_PR_NUMBER: ${{ inputs.pr-number }}
         DEFAULT_BRANCH: ${{ inputs.default-branch }}
       run: |
         set -uo pipefail
         ref=""
-        if [ -z "$PR_HEAD_REF" ]; then
-          n=$(jq -r 'if type=="object" and (.pr_number|type)=="number" then .pr_number else "" end' "$DIR/manifest.json" 2>/dev/null || true)
-          if [[ "$n" =~ ^[1-9][0-9]{0,9}$ ]]; then
-            ref=$(gh pr view "$n" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null) || ref=""
-            [ -n "$ref" ] || echo "::warning::land: could not read PR #$n's head ref; the validator will refuse the manifest."
-          fi
+        if [ -z "$PR_HEAD_REF" ] && [[ "$EVENT_PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
+          ref=$(gh pr view "$EVENT_PR_NUMBER" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null) || ref=""
+          [ -n "$ref" ] || echo "::warning::land: could not read PR #$EVENT_PR_NUMBER's head ref; the validator will refuse a manifest naming it."
         fi
         default=""
         if [ -z "$DEFAULT_BRANCH" ]; then
@@ -176,12 +189,15 @@ runs:
         REFUSED: ${{ inputs.refused-branches }}
         ALLOWED: ${{ inputs.allowed-issue-repos }}
         PR_HEAD_REF: ${{ inputs.pr-head-ref || steps.lookup.outputs.ref }}
+        EVENT_PR_NUMBER: ${{ inputs.pr-number }}
+        EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
         python3 "$VALIDATOR" --dir "$DIR" --repo "$REPO" --run-id "$GITHUB_RUN_ID" \
           --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
           --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
+          --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.
@@ -514,8 +530,10 @@ runs:
     # Escalation hand-off: the loop's marker as the first line (the loops
     # detect it with startswith), then the de-fanged body — de-fanged FIRST,
     # so the body's own copy of the marker is broken and only ours survives.
+    # Gated like the stage step below: a failed hand-back must not withhold
+    # it (the PR step succeeding implies the push landed).
     - id: handoff
-      if: steps.plan.outputs.handoff == 'true'
+      if: always() && steps.pr.outcome == 'success' && steps.plan.outputs.handoff == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
@@ -541,7 +559,7 @@ runs:
     # reviewer's own "Stage - Review" recovers a hand-back once a human
     # re-posts it, but nothing recovers a skipped stage. Gated on the PR
     # step succeeding, which implies validation and the push did too; when
-    # it is skipped with a stage planned, Report says the move was withheld.
+    # the PR step failed with a stage planned, Report says the move is owed.
     - id: stage
       if: always() && steps.pr.outcome == 'success' && steps.plan.outputs.stage != ''
       uses: meridianlabs-ai/agents/.github/actions/set-stage@main
@@ -579,8 +597,10 @@ runs:
         exit 0
 
     # Always last: name any landing step that failed (and what the Post step
-    # recorded), say when a planned stage move was withheld (the stage step
-    # skipped because the PR step did not succeed), report the manifest's
+    # recorded), say which planned hand-back / hand-off / stage move never
+    # ran (skipped, not failed, because the PR step failed AFTER the push —
+    # the one case where they are owed but nothing posted them; a fetch or
+    # push failure owes nothing, the work never landed), report the manifest's
     # error (the agent job's "Surface agent errors" text), post all of it on
     # the PR or issue — the agent job can no longer post, so without this a
     # landing that broke after the push is visible only in the run log — and
@@ -605,9 +625,14 @@ runs:
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         PUSHED: ${{ steps.push.outputs.pushed }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
-        # A stage the manifest planned that never ran: `stage` is skipped
-        # (not failed) when an earlier step stopped the composite.
-        STAGE_WITHHELD: ${{ steps.plan.outputs.stage != '' && steps.stage.outcome == 'skipped' && '1' || '' }}
+        # The PR step runs only after the push succeeded or was not needed,
+        # and its failure skips every step that follows — so it is exactly
+        # when a planned hand-back, hand-off or stage move is owed but never
+        # ran. (Any other failure before it means nothing landed.)
+        PR_FAILED: ${{ steps.pr.outcome == 'failure' && '1' || '' }}
+        HANDBACK_PLANNED: ${{ steps.plan.outputs.handback }}
+        HANDOFF_PLANNED: ${{ steps.plan.outputs.handoff }}
+        STAGE_PLANNED: ${{ steps.plan.outputs.stage }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         OUTCOMES: >-
           download=${{ steps.download.outcome }}
@@ -631,15 +656,26 @@ runs:
         done
         [ -z "$POST_FAILED" ] || failed="${failed:+$failed, }post ($POST_FAILED)"
         [ -z "$failed" ] || echo "::error::land: step(s) failed: $failed"
+        # Planned steps that never ran because the PR step failed after the
+        # push: owed like a failed one, and named as such.
+        withheld=""
+        if [ -n "$PR_FAILED" ]; then
+          [ "$HANDBACK_PLANNED" != "true" ] || withheld="handback"
+          [ "$HANDOFF_PLANNED" != "true" ] || withheld="${withheld:+$withheld, }handoff"
+          [ -z "$STAGE_PLANNED" ] || withheld="${withheld:+$withheld, }stage"
+        fi
+        [ -z "$withheld" ] || echo "::error::land: planned step(s) never ran: $withheld"
         rc=0
         [ -z "$failed" ] || rc=1
         : >"$RUNNER_TEMP/report.md"
         # The landing-failure note is our own text (lib.sh), so it needs no
         # de-fang — and it names no trigger token either.
         if [ -n "$failed" ]; then
-          hint=$(landing_failure_hint "$failed" "$PUSHED" "$STAGE_WITHHELD")
+          hint=$(landing_failure_hint "$failed" "$PUSHED" "$withheld")
           {
-            printf '⚠️ **Landing failed** at step(s): %s — see the [run log](%s).\n' "$failed" "$RUN_URL"
+            printf '⚠️ **Landing failed** at step(s): %s' "$failed"
+            [ -z "$withheld" ] || printf ' (never ran: %s)' "$withheld"
+            printf ' — see the [run log](%s).\n' "$RUN_URL"
             [ -z "$hint" ] || printf '\n%s\n' "$hint"
           } >"$RUNNER_TEMP/report.md"
         fi

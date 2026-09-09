@@ -80,8 +80,23 @@ def base_manifest(d: Path, **overrides) -> dict:
     return m
 
 
+# What the run's event names — base_manifest's pr_number / issue_number.
+EVENT_PR = "456"
+EVENT_ISSUE = "79"
+
+
 def run(
-    d: Path, manifest, *, pr_head_ref=BRANCH, default_branch=DEFAULT_BRANCH, repo=REPO, run_id=RUN_ID, allowed=None, refused=None
+    d: Path,
+    manifest,
+    *,
+    pr_head_ref=BRANCH,
+    default_branch=DEFAULT_BRANCH,
+    repo=REPO,
+    run_id=RUN_ID,
+    allowed=None,
+    refused=None,
+    event_pr=EVENT_PR,
+    event_issue=EVENT_ISSUE,
 ):
     return vm.validate(
         manifest,
@@ -92,6 +107,8 @@ def run(
         allowed_issue_repos=ALLOWED if allowed is None else allowed,
         pr_head_ref=pr_head_ref,
         refused_branches=REFUSED if refused is None else refused,
+        event_pr_number=event_pr,
+        event_issue_number=event_issue,
     )
 
 
@@ -100,6 +117,8 @@ def test_valid_manifest(tmp_path):
 
 
 def test_minimal_manifest_without_bundle(tmp_path):
+    # A `schedule` / `workflow_dispatch` shape: the event names no PR or
+    # issue, and the manifest names none either.
     m = {
         "schema": 1,
         "repo": REPO,
@@ -109,7 +128,7 @@ def test_minimal_manifest_without_bundle(tmp_path):
         "head_sha": START,
         "has_bundle": False,
     }
-    assert run(tmp_path, m, pr_head_ref="") == []
+    assert run(tmp_path, m, pr_head_ref="", event_pr="", event_issue="") == []
 
 
 # --- schema / identity -------------------------------------------------------
@@ -240,6 +259,71 @@ def test_branch_must_match_pr_head_ref(tmp_path):
 def test_pr_number_without_head_ref_fails_closed(tmp_path):
     errs = run(tmp_path, base_manifest(tmp_path), pr_head_ref="")
     assert any("no PR head ref was supplied" in e for e in errs)
+
+
+# --- the event tie: pr_number / issue_number are the run's, not the agent's --
+
+
+def test_pr_number_must_be_the_events_pr(tmp_path):
+    # A run for PR 456 whose manifest names PR 457 (with 457's head as
+    # branch and 457's tip as start_sha) would otherwise push onto, reply
+    # on, thread-resolve and hand back a PR the agent picked.
+    errs = run(tmp_path, base_manifest(tmp_path, pr_number=457), pr_head_ref=BRANCH)
+    assert "manifest: pr_number 457 is not the PR this run's event names (#456)" in errs
+
+
+def test_pr_number_set_but_event_names_no_pr(tmp_path):
+    errs = run(tmp_path, base_manifest(tmp_path), event_pr="")
+    assert any("pr_number is set (456) but this run's event names no PR" in e for e in errs)
+
+
+def test_pr_number_null_but_event_names_a_pr(tmp_path):
+    # Dropping pr_number on a PR run would skip the head-ref rule and let
+    # `pr.open` adopt whatever open PR `branch` belongs to.
+    m = base_manifest(tmp_path, pr_number=None, replies=[], resolve_threads=[])
+    errs = run(tmp_path, m, pr_head_ref="")
+    assert errs == ["manifest: pr_number is null but this run's event names PR #456"]
+
+
+def test_pr_number_of_wrong_type_is_not_also_reported_as_null(tmp_path):
+    # The type error is the one to fix; the tie does not pile a misleading
+    # "pr_number is null" error on top of it.
+    m = base_manifest(tmp_path, pr_number="456", replies=[], resolve_threads=[])
+    assert run(tmp_path, m) == ["manifest: pr_number must be a positive integer"]
+
+
+def test_issue_number_must_be_the_events_issue(tmp_path):
+    errs = run(tmp_path, base_manifest(tmp_path, issue_number=80))
+    assert errs == ["manifest: issue_number 80 is not the issue this run's event names (#79)"]
+
+
+def test_issue_number_set_but_event_names_no_issue(tmp_path):
+    errs = run(tmp_path, base_manifest(tmp_path), event_issue="")
+    assert errs == ["manifest: issue_number is set (79) but this run's event names no issue (--event-issue-number is empty)"]
+
+
+def test_issue_number_null_but_event_names_an_issue(tmp_path):
+    errs = run(tmp_path, base_manifest(tmp_path, issue_number=None))
+    assert errs == ["manifest: issue_number is null but this run's event names issue #79"]
+
+
+def test_pr_comment_run_names_the_pr_as_both(tmp_path):
+    # `issue_comment` on a PR: github.event.issue.number IS the PR number,
+    # and callers pass it as both inputs — the manifest carries both too.
+    m = base_manifest(tmp_path, issue_number=456)
+    assert run(tmp_path, m, event_issue="456") == []
+
+
+def test_event_numbers_are_trimmed(tmp_path):
+    assert run(tmp_path, base_manifest(tmp_path), event_pr=" 456 ", event_issue="79\n") == []
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1", "456 457", "01"])
+def test_malformed_event_number_fails_closed(tmp_path, value):
+    # A caller passing a non-number is misconfigured; refuse rather than
+    # treat it as "names none" (which a null pr_number would then satisfy).
+    errs = run(tmp_path, base_manifest(tmp_path), event_pr=value)
+    assert any(f"--event-pr-number {value!r} is not a positive integer" in e for e in errs)
 
 
 # --- shas / bundle ------------------------------------------------------------
@@ -407,7 +491,7 @@ def test_reply_id_must_be_positive_int(tmp_path, value):
 
 def test_replies_need_pr_number(tmp_path):
     m = base_manifest(tmp_path, pr_number=None)
-    errs = run(tmp_path, m, pr_head_ref="")
+    errs = run(tmp_path, m, pr_head_ref="", event_pr="")
     assert any("replies need pr_number" in e for e in errs)
     assert any("resolve_threads need pr_number" in e for e in errs)
 
@@ -446,7 +530,7 @@ def test_every_stage_option(tmp_path, stage):
 
 def test_handback_needs_pr(tmp_path):
     m = base_manifest(tmp_path, pr_number=None, pr=None, replies=[], resolve_threads=[])
-    errs = run(tmp_path, m, pr_head_ref="")
+    errs = run(tmp_path, m, pr_head_ref="", event_pr="")
     assert any("handback needs a PR" in e for e in errs)
 
 
@@ -472,7 +556,7 @@ def test_pr_title_too_long(tmp_path):
 # --- CLI ---------------------------------------------------------------------
 
 
-def cli(d: Path, *extra, pr_head_ref=BRANCH):
+def cli(d: Path, *extra, pr_head_ref=BRANCH, event_pr=EVENT_PR, event_issue=EVENT_ISSUE):
     argv = [
         "--dir", str(d),
         "--repo", REPO,
@@ -481,6 +565,8 @@ def cli(d: Path, *extra, pr_head_ref=BRANCH):
         "--refused-branches", ",".join(REFUSED),
         "--allowed-issue-repos", ",".join(ALLOWED),
         "--pr-head-ref", pr_head_ref,
+        "--event-pr-number", event_pr,
+        "--event-issue-number", event_issue,
         *extra,
     ]
     return vm.main(argv)
@@ -490,6 +576,26 @@ def test_cli_valid(tmp_path, capsys):
     (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
     assert cli(tmp_path) == 0
     assert "manifest ok." in capsys.readouterr().out
+
+
+def test_cli_event_numbers_default_to_none_named(tmp_path, capsys):
+    # The flags' own default is the empty string — "the event names no PR /
+    # issue" — so a manifest naming either is refused when a caller omits them.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    argv = [
+        "--dir", str(tmp_path), "--repo", REPO, "--run-id", RUN_ID, "--default-branch", DEFAULT_BRANCH,
+        "--allowed-issue-repos", ",".join(ALLOWED), "--pr-head-ref", BRANCH,
+    ]
+    assert vm.main(argv) == 1
+    out = capsys.readouterr().out
+    assert "pr_number is set (456) but this run's event names no PR" in out
+    assert "issue_number is set (79) but this run's event names no issue" in out
+
+
+def test_cli_event_pr_mismatch(tmp_path, capsys):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path, event_pr="457") == 1
+    assert "pr_number 456 is not the PR this run's event names (#457)" in capsys.readouterr().out
 
 
 def test_cli_prints_one_line_per_violation(tmp_path, capsys):

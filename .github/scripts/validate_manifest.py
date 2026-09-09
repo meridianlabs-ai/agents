@@ -19,7 +19,15 @@ manifest. Usage:
         --repo owner/name --run-id "$GITHUB_RUN_ID" --default-branch meridian \
         --refused-branches main \
         --allowed-issue-repos owner/name,owner/other \
-        [--pr-head-ref <headRefName of manifest.pr_number, from the API>]
+        --event-pr-number "$EVENT_PR" --event-issue-number "$EVENT_ISSUE" \
+        [--pr-head-ref <headRefName of that PR, from the API>]
+
+`--event-pr-number` / `--event-issue-number` are the numbers the run's
+TRUSTED context names (the event payload, or a gate-job output computed
+before any untrusted code ran); the manifest's `pr_number` / `issue_number`
+must equal them exactly — null when the event names none — so an agent job
+cannot steer the landing (push, replies, thread resolutions, hand-back) at a
+PR of its choosing.
 
 The schema is documented in .github/actions/emit-landing/README.md; keep
 the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
@@ -46,6 +54,10 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 THREAD_RE = re.compile(r"^PRRT_[A-Za-z0-9_-]+$")
 FILE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+# The event-payload numbers the land job passes through: digits, no leading
+# zero, and short enough that a GitHub expression's empty string is the only
+# other value they ever take.
+EVENT_NUMBER_RE = re.compile(r"^[1-9][0-9]{0,9}$")
 
 # Atlas Stage options (.github/actions/set-stage/action.yml).
 STAGES = ("Contributor", "Agent", "Review", "Sign-off", "Merge")
@@ -101,6 +113,8 @@ class Validator:
         allowed_issue_repos,
         pr_head_ref: str = "",
         refused_branches=(),
+        event_pr_number: str = "",
+        event_issue_number: str = "",
     ) -> None:
         self.m = manifest
         self.dir = Path(artifact_dir)
@@ -111,6 +125,8 @@ class Validator:
         self.refused_branches = {b.strip() for b in refused_branches if b.strip()}
         self.allowed_issue_repos = {r.strip().lower() for r in allowed_issue_repos if r.strip()}
         self.pr_head_ref = pr_head_ref
+        self.event_pr_number = event_pr_number.strip()
+        self.event_issue_number = event_issue_number.strip()
         self.errors: list[str] = []
 
     def err(self, msg: str) -> None:
@@ -215,6 +231,27 @@ class Validator:
         if st.st_size > MAX_BODY_FILE_BYTES:
             self.err(f"{label} is {st.st_size} bytes; the cap is {MAX_BODY_FILE_BYTES}")
 
+    def _tie_to_event(self, key: str, value: int | None, event: str, what: str, flag: str) -> None:
+        """Pin `pr_number` / `issue_number` to the number the run's event names.
+
+        Both sides come from the same trusted expression in the caller (the
+        event payload, or a gate-job output) — the agent job only copies it
+        into the manifest — so the two must agree exactly, null included: a
+        manifest may neither name a PR/issue the event did not, nor drop the
+        one it did (which would let `pr.open` adopt an arbitrary open PR).
+        """
+        if event and not EVENT_NUMBER_RE.match(event):
+            self.err(f"manifest: {flag} {event!r} is not a positive integer (caller misconfiguration; failing closed)")
+            return
+        if value is None:
+            if event and self.m.get(key) is None:
+                self.err(f"manifest: {key} is null but this run's event names {what} #{event}")
+            return
+        if not event:
+            self.err(f"manifest: {key} is set ({value}) but this run's event names no {what} ({flag} is empty)")
+        elif str(value) != event:
+            self.err(f"manifest: {key} {value} is not the {what} this run's event names (#{event})")
+
     def _labels(self, obj: dict, where: str) -> None:
         if "labels" not in obj or obj["labels"] is None:
             return
@@ -274,14 +311,19 @@ class Validator:
             if branch in self.refused_branches:
                 self.err(f"manifest: branch {branch!r} is on the land job's refused list ({', '.join(sorted(self.refused_branches))})")
 
+        # pr_number is pinned to the PR the run's event names (so the head-ref
+        # rule below compares against THAT PR's branch, not one the agent
+        # picked), and issue_number to the event's issue, the same way.
         pr_number = self._positive_int(m, "pr_number", "manifest", required=False)
+        self._tie_to_event("pr_number", pr_number, self.event_pr_number, "PR", "--event-pr-number")
         if pr_number is not None:
             if not self.pr_head_ref:
                 self.err("manifest: pr_number is set but no PR head ref was supplied to compare against (--pr-head-ref)")
             elif branch is not None and branch != self.pr_head_ref:
                 self.err(f"manifest: branch {branch!r} is not PR #{pr_number}'s head ref ({self.pr_head_ref!r})")
 
-        self._positive_int(m, "issue_number", "manifest", required=False)
+        issue_number = self._positive_int(m, "issue_number", "manifest", required=False)
+        self._tie_to_event("issue_number", issue_number, self.event_issue_number, "issue", "--event-issue-number")
 
         start_sha = self._str(m, "start_sha", "manifest", required=True)
         head_sha = self._str(m, "head_sha", "manifest", required=True)
@@ -444,6 +486,16 @@ def main(argv=None) -> int:
         default="",
         help="headRefName of manifest.pr_number as read from the API (required when pr_number is set)",
     )
+    ap.add_argument(
+        "--event-pr-number",
+        default="",
+        help="the PR the run's event names (trusted); manifest.pr_number must equal it, and be null when it is empty",
+    )
+    ap.add_argument(
+        "--event-issue-number",
+        default="",
+        help="the issue the run's event names (trusted); manifest.issue_number must equal it, and be null when it is empty",
+    )
     args = ap.parse_args(argv)
 
     manifest, errors = load_manifest(Path(args.dir))
@@ -457,6 +509,8 @@ def main(argv=None) -> int:
             allowed_issue_repos=args.allowed_issue_repos.split(","),
             pr_head_ref=args.pr_head_ref,
             refused_branches=args.refused_branches.split(","),
+            event_pr_number=args.event_pr_number,
+            event_issue_number=args.event_issue_number,
         )
     for line in errors:
         print(f"manifest violation: {line}")
