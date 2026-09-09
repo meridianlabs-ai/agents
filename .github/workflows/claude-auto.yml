@@ -271,49 +271,84 @@ jobs:
           issue: ${{ steps.gate.outputs.pr }}
           branch: ${{ inputs.head_branch }}
 
-      # Over the cap: hand off to a human and disarm the loop by removing the
-      # label. Removing it is also what a human does to stop @auto manually.
-      # The attempt counter is a per-PR-lifetime tally (green CI in between
-      # does not reset it), so escalation ALSO resets it to 0: the hand-off
-      # promises "re-add the label to let me try again", and without the
-      # reset that was false — the next red CI read the exhausted counter
-      # and escalated again on sight, no fix attempted (inspect_flow#824,
-      # 2026-09-09: two of the three attempts had been burned by rounds that
-      # ran without a provisioned environment, and the third was 70 minutes
-      # and five green pushes earlier). Re-labeling is an explicit human
-      # decision; it buys a fresh budget. The reset is best-effort — the
-      # hand-off comment and label removal are the load-bearing part — but it
-      # runs FIRST so the hand-off can tell the truth about it: a failed PATCH
-      # leaves the exhausted counter in place, and promising a fresh budget
-      # then would be exactly the false "re-add it" this reset exists to fix.
+      # Over the cap: hand off to a human and disarm the loop. Three steps in
+      # a fixed order — disarm, reset, hand off — each later one phrasing
+      # itself on the earlier ones' outcomes (claude-auto-review.yml's
+      # escalation mirrors this):
+      #   1. Disarm: remove the label. This is the load-bearing part (it is
+      #      also what a human does to stop @auto manually), so it goes first
+      #      and nothing else is gated on anything but it.
+      #   2. Reset the attempt counter — ONLY if the disarm succeeded. The
+      #      counter is a per-PR-lifetime tally (green CI in between does not
+      #      reset it), so without the reset the hand-off's "re-add the label
+      #      to let me try again" was false: the next red CI read the
+      #      exhausted counter and escalated again on sight, no fix attempted
+      #      (inspect_flow#824, 2026-09-09: two of the three attempts had been
+      #      burned by rounds that ran without a provisioned environment, and
+      #      the third was 70 minutes and five green pushes earlier).
+      #      Re-labeling is an explicit human decision; it buys a fresh
+      #      budget. Gating on the disarm keeps a failed label removal
+      #      self-limiting, as it was before the reset existed: the label
+      #      stays on but the counter stays exhausted, so the next red CI
+      #      re-escalates (and retries the removal) instead of running a
+      #      fresh budget with no human decision.
+      #   3. Hand off: the comment tells the truth about both — a failed reset
+      #      leaves the exhausted counter in place, and promising a fresh
+      #      budget then would be exactly the false "re-add it" the reset
+      #      exists to fix; a failed disarm is the one case where "re-add it"
+      #      is wrong because it was never removed.
+      - name: Disarm the loop (escalation)
+        if: steps.gate.outputs.act == 'escalate'
+        id: disarm
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          AUTO_LABEL: ${{ inputs.auto_label }}
+        run: |
+          set -uo pipefail
+          if gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL"; then
+            echo "disarmed=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::could not remove the '$AUTO_LABEL' label from #$PR; the loop stays armed with its counter exhausted."
+            echo "disarmed=0" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Reset the attempt counter (escalation)
+        if: steps.gate.outputs.act == 'escalate' && steps.disarm.outputs.disarmed == '1'
+        id: reset
+        uses: meridianlabs-ai/agents/.github/actions/reset-auto-counters@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ steps.gate.outputs.pr }}
+          counters: attempts
+          reason: "on escalation — re-adding `${{ inputs.auto_label }}` starts a fresh budget"
+
+      # Trigger-free ON PURPOSE (like every bot-authored comment here): the
+      # re-engagement path is described, never spelled as its literal trigger.
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.gate.outputs.pr }}
-          CID: ${{ steps.gate.outputs.cid }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.fix_attempt_cap }}
-          MARKER: "<!-- auto-fix-attempts -->"
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
+          DISARMED: ${{ steps.disarm.outputs.disarmed }}
+          RESET_OK: ${{ steps.reset.outputs.ok }}
         run: |
           set -euo pipefail
-          # No counter comment means nothing to reset: the next attempt starts at 1.
-          reset=1
-          if [ -n "$CID" ]; then
-            body="$MARKER
-          🤖 auto CI-fix attempts: 0 (cap $CAP). (counter reset on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget)"
-            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || reset=0
-          fi
-          if [ "$reset" = 1 ]; then
-            relabel="Re-add the label to let me try again — the attempt counter is reset, so that starts a fresh budget of $CAP."
+          if [ "$DISARMED" != "1" ]; then
+            label="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its attempt counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me try again with a fresh budget, re-engage me with an @-mention comment (that re-applies the label and resets both counters)."
+          elif [ "$RESET_OK" = "1" ]; then
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again — the attempt counter is reset, so that starts a fresh budget of $CAP."
           else
-            relabel="Re-add the label to let me try again — but I could not reset the attempt counter (API error), so first edit my sticky \"auto CI-fix attempts\" comment to read 0, or I'll escalate again on sight."
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me try again — but I could not reset the attempt counter (API error), so first edit my sticky \"auto CI-fix attempts\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label and resets both counters); otherwise I'll escalate again on sight."
           fi
           gh pr comment "$PR" --repo "$REPO" --body \
-            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Removing the \`$AUTO_LABEL\` label and handing this to a human. $relabel"
-          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+            "🤖 auto: I've hit the $CAP-attempt limit fixing CI and still can't get it green ([latest run]($RUN_URL)). Handing this to a human. $label"
 
       # Capture the branch tip and a timestamp before the agent runs so later
       # steps can tell whether the agent's fix landed and what it posted.

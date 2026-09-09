@@ -1,0 +1,107 @@
+name: reset-auto-counters
+description: >-
+  Reset the @auto loops' sticky counter comments — the CI-fix attempt tally
+  (`<!-- auto-fix-attempts -->`, claude-auto.yml) and/or the review-round
+  tally (`<!-- auto-review-rounds -->`, claude-auto-review.yml) — so the
+  loop's next round starts at 1 with the full cap (design/auto-agent.md →
+  Autonomy ceiling). Both counters are per-PR-lifetime tallies; the ONLY
+  things that reset them are the two paths that share this step body: a
+  human re-engaging the loop with an `@auto` comment on an existing PR
+  (claude.yml, both counters) and the loops' own escalation hand-off (each
+  loop resets its own counter, so "re-add the label to let me try again" is
+  true). Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/reset-auto-counters@main); NO post
+  step (local composite actions with post steps break teardown on the fork).
+
+  The reset body keeps the marker on line 1 (that is what the gates search
+  for) and carries NO `rounds:` / `attempts:` number and NO
+  `auto-review-head:` tip, so each gate's `sed` extractor reads 0 via
+  `${prev:-0}` and the next round's Record step re-initialises the marker.
+  Dropping the head marker is deliberate: the no-progress check compares tips
+  only once `prev >= 1`, so a fresh budget's first round is never mis-read as
+  a stall (re-adding the label without pushing does not trip it), and that
+  round records a fresh tip before anything reads one. The `reason` text is
+  spliced into the body, so it must not contain a marker substring, a
+  `rounds:`/`attempts:` number, or a literal @-trigger.
+
+  Best-effort: every failure is reported through the `ok` output and never
+  fails the caller's job — the callers' hand-off comment and label handling
+  are the load-bearing part, and they phrase themselves on `ok`. A missing
+  counter comment is not a failure (nothing to reset: the next round already
+  starts at 1).
+
+inputs:
+  token:
+    description: >-
+      Token that can edit the machine account's comments (MARVIN_TOKEN, or
+      github.token where the counters were posted by the workflow token).
+    required: true
+  repo:
+    description: owner/name the PR lives in.
+    required: true
+  pr:
+    description: Pull-request number whose counter comment(s) to reset.
+    required: true
+  counters:
+    description: >-
+      Space-separated subset of `rounds attempts` to reset. Default: both.
+    required: false
+    default: "rounds attempts"
+  reason:
+    description: >-
+      Short human-readable clause recorded in the reset body after the word
+      "reset", e.g. "on escalation — re-adding `auto` starts a fresh budget"
+      (renders as "🤖 auto review rounds reset (on escalation — …) — the next
+      round starts at 1 with the full cap.").
+    required: true
+
+outputs:
+  ok:
+    description: >-
+      "1" when every requested counter was reset or had no comment to reset;
+      "0" when a lookup or PATCH failed (that counter keeps its old value).
+    value: ${{ steps.reset.outputs.ok }}
+
+runs:
+  using: composite
+  steps:
+    - id: reset
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+        COUNTERS: ${{ inputs.counters }}
+        REASON: ${{ inputs.reason }}
+      run: |
+        set -uo pipefail
+        ok=1
+        for counter in $COUNTERS; do
+          case "$counter" in
+            rounds)   marker="<!-- auto-review-rounds -->"; label="auto review rounds";  unit="round" ;;
+            attempts) marker="<!-- auto-fix-attempts -->";  label="auto CI-fix attempts"; unit="attempt" ;;
+            *) echo "::warning::reset-auto-counters: unknown counter '$counter'; skipping."; ok=0; continue ;;
+          esac
+          # Same lookup the gates use: the LAST comment carrying the marker.
+          # Gate on the exit code, not the output: an empty result means no
+          # counter comment exists (nothing to reset), a failed call means we
+          # don't know — report that as not-ok rather than claiming a reset.
+          if ! cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                       --jq 'map(select(.body|contains("'"$marker"'"))) | last | .id // empty'); then
+            echo "::warning::reset-auto-counters: could not look up the $label comment on #$PR."
+            ok=0; continue
+          fi
+          if [ -z "$cid" ]; then
+            echo "reset-auto-counters: no $label comment on #$PR; nothing to reset (the next $unit starts at 1)."
+            continue
+          fi
+          body="$marker
+        🤖 $label reset ($REASON) — the next $unit starts at 1 with the full cap."
+          if gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent; then
+            echo "reset-auto-counters: reset $label on #$PR (comment $cid)."
+          else
+            echo "::warning::reset-auto-counters: could not reset $label on #$PR (comment $cid); it keeps its old value."
+            ok=0
+          fi
+        done
+        echo "ok=$ok" >>"$GITHUB_OUTPUT"

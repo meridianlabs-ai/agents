@@ -467,45 +467,79 @@ jobs:
           gh pr comment "$PR" --repo "$REPO" --body "$MARKER
           ${ping}🤖 auto: the reviewer has no outstanding feedback — this PR has converged. auto never takes the final step (merge, or upstream promotion on the fork), so it's yours now; $ci The \`auto\` label is left on, so auto will still react to new review or CI activity; remove it to disengage."
 
-      # Escalation also resets the round counter to 0 (mirror of
-      # claude-auto.yml's attempt reset, same reasoning): the counter is a
-      # per-PR-lifetime tally, so after a cap escalation "re-add it to let me
-      # keep iterating" would otherwise re-escalate on the very next review
-      # with suggestions (round 11 > 10) — a human re-labeling has decided
-      # the loop deserves another full budget. The reset body carries no
-      # head marker: the no-progress check needs prev >= 1 to compare tips,
-      # so a fresh budget's first round skips it (re-adding the label without
-      # pushing does not trip it), and that round's Record round writes a
-      # fresh tip before anything reads one. The reset is best-effort — the
-      # comment and label removal are what matter — but it runs FIRST so the
-      # hand-off can tell the truth about it: a failed PATCH leaves the
-      # exhausted counter in place, and promising a fresh budget then would
-      # be exactly the false "re-add it" this reset exists to fix.
+      # Escalation is three steps in a fixed order — disarm, reset, hand off —
+      # and each later one phrases itself on the earlier ones' outcomes
+      # (mirror of claude-auto.yml's escalation, same reasoning):
+      #   1. Disarm: remove the label. This is the load-bearing part (it is
+      #      also what a human does to stop @auto manually), so it goes first
+      #      and nothing else is gated on anything but it.
+      #   2. Reset the round counter — ONLY if the disarm succeeded. The
+      #      counter is a per-PR-lifetime tally, so after a cap escalation
+      #      "re-add it to let me keep iterating" would otherwise re-escalate
+      #      on the very next review with suggestions (round 11 > 10); a human
+      #      re-labeling has decided the loop deserves another full budget.
+      #      Gating on the disarm keeps a failed label removal self-limiting,
+      #      as it was before the reset existed: the label stays on but the
+      #      counter stays exhausted, so the next verdict re-escalates (and
+      #      retries the removal) instead of running a fresh budget with no
+      #      human decision. The reset body is the shared composite's (no
+      #      head marker: the no-progress check needs prev >= 1, so a fresh
+      #      budget's first round skips it and records a fresh tip first).
+      #   3. Hand off: the comment tells the truth about both — a failed reset
+      #      leaves the exhausted counter in place, and promising a fresh
+      #      budget then would be exactly the false "re-add it" the reset
+      #      exists to fix; a failed disarm is the one case where "re-add it"
+      #      is wrong because it was never removed.
+      - name: Disarm the loop (escalation)
+        if: steps.gate.outputs.act == 'escalate'
+        id: disarm
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          AUTO_LABEL: ${{ inputs.auto_label }}
+        run: |
+          set -uo pipefail
+          if gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL"; then
+            echo "disarmed=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::could not remove the '$AUTO_LABEL' label from #$PR; the loop stays armed with its counter exhausted."
+            echo "disarmed=0" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Reset the round counter (escalation)
+        if: steps.gate.outputs.act == 'escalate' && steps.disarm.outputs.disarmed == '1'
+        id: reset
+        uses: meridianlabs-ai/agents/.github/actions/reset-auto-counters@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          counters: rounds
+          reason: "on escalation — re-adding `${{ inputs.auto_label }}` starts a fresh budget"
+
+      # Trigger-free ON PURPOSE (like every bot-authored comment here): the
+      # re-engagement path is described, never spelled as its literal trigger.
       - name: Escalate to human
         if: steps.gate.outputs.act == 'escalate'
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
-          CID: ${{ steps.gate.outputs.cid }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           CAP: ${{ inputs.review_round_cap }}
-          MARKER: "<!-- auto-review-rounds -->"
           MENTION: ${{ steps.gate.outputs.mention }}
           STALLED: ${{ steps.gate.outputs.stalled }}
+          DISARMED: ${{ steps.disarm.outputs.disarmed }}
+          RESET_OK: ${{ steps.reset.outputs.ok }}
         run: |
           set -euo pipefail
-          # No counter comment means nothing to reset: the next round starts at 1.
-          reset=1
-          if [ -n "$CID" ]; then
-            body="$MARKER
-          🤖 auto review rounds: 0 (cap $CAP). (counter reset on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget)"
-            gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent || reset=0
-          fi
-          if [ "$reset" = 1 ]; then
-            relabel="Re-add it to let me keep iterating — the round counter is reset, so that starts a fresh budget of $CAP."
+          if [ "$DISARMED" != "1" ]; then
+            label="I could not remove the \`$AUTO_LABEL\` label (API error), so the loop is still armed — but its round counter is exhausted, so I'll escalate again rather than run. Remove the label by hand to stop me; to let me keep iterating with a fresh budget, re-engage me with an @-mention comment (that re-applies the label and resets both counters)."
+          elif [ "$RESET_OK" = "1" ]; then
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me keep iterating — the round counter is reset, so that starts a fresh budget of $CAP."
           else
-            relabel="Re-add it to let me keep iterating — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment to read 0, or I'll escalate again on sight."
+            label="Removing the \`$AUTO_LABEL\` label. Re-add it to let me keep iterating — but I could not reset the round counter (API error), so first edit my sticky \"auto review rounds\" comment so the count reads 0, or re-engage me with an @-mention comment instead (that re-applies the label and resets both counters); otherwise I'll escalate again on sight."
           fi
           ping=""; [ -n "$MENTION" ] && ping="@$MENTION "
           if [ "${STALLED:-}" = "1" ]; then
@@ -514,8 +548,7 @@ jobs:
             reason="the reviewer still has feedback after $CAP review rounds and I haven't converged"
           fi
           gh pr comment "$PR" --repo "$REPO" --body \
-            "${ping}🤖 auto: $reason. Removing the \`$AUTO_LABEL\` label and handing this to a human. $relabel"
-          gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" || true
+            "${ping}🤖 auto: $reason. Handing this to a human. $label"
 
       # Check out the PR head (derived above); authenticate as the machine
       # account so the agent's fix push re-triggers CI and its `@review` comment
