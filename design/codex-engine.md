@@ -396,16 +396,23 @@ Verification for a change here, all cases prompted to codex (any verb):
   mattered, and 36 of the 40 inline entries were threads resolved days
   earlier with nothing marking them settled. Now: machine comments are
   dropped (bare triggers included — but only genuinely bare ones, so a
-  short human instruction opening with the token survives), the slice is
+  short human instruction opening with the token survives; verdict
+  comments likewise only when they are the bare verdict line, so a
+  reviewer run that folds its summary into the verdict comment is still
+  embedded rather than filtered out — the prep guard's error names that
+  filter as a possible cause of an empty section), the slice is
   anchored on the newest review round (its first marker-bearing comment,
   since the reviewer stamps every top-level comment it posts and a round
   can be several; kept in full with everything after it, plus the last
   five human comments before it), and review threads come from GraphQL
   `reviewThreads` by state — OPEN in full with the thread id (the handle a
   later change uses to resolve them), RESOLVED as a one-line index (only
-  when there are any), resolved-and-outdated dropped. The anchor marker
-  joins the de-fanged substrings on both the prompt and the output side,
-  so a codex summary echoing it cannot become a false anchor. The
+  when there are any), resolved-and-outdated dropped. Both anchor
+  patterns — the Claude marker and the codex reviewer's `engine: codex`
+  footer — join the de-fanged substrings on both the prompt and the
+  output side, so a codex summary echoing either cannot become a false
+  anchor (the reviewer's own footer is printed after its sed, so it is
+  unaffected). The
   reviewer is also told not to restate regression-accepted notes an
   earlier round already posted.
 - **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall

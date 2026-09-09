@@ -1186,9 +1186,13 @@ jobs:
               # Top-level comments: filtered and anchored, not "last 12 of anything"
               # (inspect_ai#428, 2026-09-09: the slice was bare triggers, verdict
               # marker comments, the sticky counter and stale fix summaries around the
-              # one review that mattered). Drop machine comments (verdict markers,
-              # counters, convergence notes, provenance, tracking comments, and
-              # BARE triggers — the token followed by nothing but whitespace or
+              # one review that mattered). Drop machine comments (counters,
+              # convergence notes, provenance, tracking comments; verdict
+              # comments only when they are the BARE verdict line — under 200
+              # chars once the HTML markers are stripped — so a reviewer run that
+              # folds its summary into the verdict comment against its prompt
+              # still has its review embedded rather than filtered out; and BARE
+              # triggers — the token followed by nothing but whitespace or
               # punctuation; a short human instruction that opens with the token
               # is an adjudication and stays), find the newest review round
               # (Claude's comments carry the claude-review-comment marker, codex's
@@ -1208,7 +1212,8 @@ jobs:
               fetch "$RUNNER_TEMP/codex-prc.json" api "repos/$REPO/issues/$NUM/comments" --paginate --slurp
               jq -r '(add // []) | . as $raw
                 | map(select(
-                    (.body | test("<!-- (claude-review-summary|auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head|model-provenance) -->") | not)
+                    (.body | test("<!-- (auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head|model-provenance) -->") | not)
+                    and (((.body | test("<!-- claude-review-summary -->")) and ((.body | gsub("<!--[^>]*-->"; "") | length) <= 200)) | not)
                     and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
                     and (.body | test("^\\*\\*Claude finished") | not)))
                 | . as $all
@@ -1253,11 +1258,13 @@ jobs:
           # de-fang: the embedded comments can include reviewer verdict
           # comments, and a marker substring codex never sees is one it
           # cannot echo (length-neutral substitutions). The review-comment
-          # anchor marker is in the list too: the jq above has already
-          # anchored on it, and a posted summary that echoed it would be a
-          # false anchor for a later round on this PR.
+          # anchor marker and the codex reviewer's engine footer are in the
+          # list too: the jq above has already anchored on them, and a posted
+          # summary that echoed either would be a false anchor for a later
+          # round on this PR.
           head -c 120000 "$RUNNER_TEMP/codex-context.md" \
             | sed -E -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                     -e 's/engine: codex/engine  codex/g' \
                      -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >.codex-prompt.md
           # The landing step stages with a blanket `git add -A` (new source
           # files are legitimate output), so exclude the prompt file and the
@@ -1565,6 +1572,7 @@ jobs:
             printf '🤖 codex (dev agent):\n\n'
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                   -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
             [ -z "$PUSHED" ] && printf '\n\n_No code changes were made._'
