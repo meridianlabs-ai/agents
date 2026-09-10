@@ -118,7 +118,14 @@ finding 4121989) that is enforced in three layers rather than assumed:
   review or issue that carries the `@auto` text, so an outsider's comment does
   not start a workflow run at all. This is a *cost* filter, not the gate:
   `CONTRIBUTOR` is anyone with a merged commit and `MEMBER` visibility depends
-  on org settings, so the trig lookup stays the authority.
+  on org settings, so the trig lookup stays the authority. The filter cuts
+  the other way too: a writer whose association is reported looser than
+  expected is dropped at the stub — trig would have authorized them — and
+  their fallback is the `auto` label path, which carries no association
+  filter. Issue body/title match only on `issues: opened`, in the stubs and
+  in trig alike: claude-code-action checks them only there, so matching
+  them on `labeled` too made any later label added to a phrase-bearing
+  issue pass trig (ack, stage move, checkout) before the action no-op'd.
 - **The loop gates verify who applied the label.** Both loops' gates
   (`claude-auto.yml`, `claude-auto-review.yml`) run the shared
   `verify-auto-labeler` composite between their label check and their

@@ -314,8 +314,16 @@ jobs:
             *)
               text="$COMMENT$REVIEW"
               if [ "$EVENT" = "issues" ]; then
-                text="$IBODY
+                # Body/title count only on `opened`: the action checks them only
+                # there (src/github/validation/trigger.ts), so matching them on
+                # `labeled` too let ANY later label on an issue whose body carries
+                # the phrase pass this gate — ack, stage move, checkout — before
+                # the action no-op'd. A matching label is handled above/below.
+                text=""
+                if [ "$EVENT_ACTION" = "opened" ]; then
+                  text="$IBODY
           $ITITLE"
+                fi
               fi
               esc=$(printf '%s' "$PHRASE" | sed 's/[.[\*^$()+?{|]/\\&/g')
               printf '%s' "$text" | grep -qiE "(^|[[:space:]])$esc([[:space:],.!?;:]|$)" && ok=true
