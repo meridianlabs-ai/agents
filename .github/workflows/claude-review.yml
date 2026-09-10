@@ -610,11 +610,17 @@ jobs:
       # the end of this job (no git after the agent, head_sha = this) and the
       # land job refuses any manifest that claims otherwise; the value only
       # has to be a real SHA. On pull_request events it is the merge ref's
-      # commit, on comment runs the pinned head — either is fine.
+      # commit, on comment runs the pinned head — either is fine. rev-parse
+      # on its own line under -e, so a failure is this step's (not echo's
+      # success with an empty sha, which the land job would refuse with only
+      # a generic "validate" note); Surface agent errors reads the outcome.
       - name: Record checkout SHA
         id: base
         if: needs.gate.outputs.ok == 'true'
-        run: echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
 
       # Untrusted checkouts (external mode, fork heads) must not carry PROJECT
       # CONFIGURATION into the agent run (issue #59): claude-code-action runs
@@ -1418,7 +1424,10 @@ jobs:
           # Pre-agent setup failures skip the agent step entirely, so without
           # these checks no comment posts and the trigger silently goes red
           # (observed: a transient curl failure downloading uv in claude-setup).
-          if [ "${BASE_OUTCOME:-}" = "failure" ]; then
+          # The SHA step has no always(): when the checkout fails it is
+          # SKIPPED, not failed — and under this step's ok == true gate,
+          # skipped can only mean that — so test for anything but success.
+          if [ "${BASE_OUTCOME:-}" != "success" ]; then
             err="reading the checkout's SHA failed before the reviewer started (the checkout itself probably failed — see the job logs); re-trigger to retry."
           elif [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             err="environment provisioning (claude-setup) failed before the reviewer started — usually a transient dependency-download/network error; re-trigger to retry."
@@ -1583,8 +1592,10 @@ jobs:
         with:
           start-sha: ${{ steps.base.outputs.sha }}
           # The admitted PR's head ref (the validator pins a PR run's branch
-          # to it); external mode has no PR of ours, so a fixed name the
-          # land job's branch-prefix pins to — never pushed to either way.
+          # to it — and under the land job's refuse-bundle that pin is the
+          # only branch rule, so a fork-head PR's `main` passes); external
+          # mode has no PR of ours, so a fixed name the land job's
+          # branch-prefix pins to — never pushed to either way.
           branch: ${{ needs.gate.outputs.head_ref || format('review/external-{0}', github.event.issue.number) }}
           pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
           issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}

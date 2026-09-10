@@ -151,7 +151,12 @@ inputs:
       refuses a manifest that carries commits, claims HEAD moved, or ships a
       commits.bundle — whatever the agent job uploaded — so this land job
       can never become the push channel the agent's own token denies it.
-      Pair with `emit-landing`'s `read-only`, the convenience side.
+      Since nothing is pushed, the push-side rules on `branch` (charset,
+      `default-branch`, `refused-branches`) are off under this flag: the
+      branch is the run's PR head ref — `main` on a fork-head PR, or any
+      name git accepts — and only the head-ref pin / `branch-prefix` and a
+      control-character/length check apply. Pair with `emit-landing`'s
+      `read-only`, the convenience side.
     required: false
     default: "false"
 

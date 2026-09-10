@@ -67,7 +67,7 @@ to this document together.
 | `schema` | emit-landing | must be `1` |
 | `repo` | emit-landing (`$GITHUB_REPOSITORY`) | must equal the repo the land job operates on (case-insensitive) |
 | `run_id` | emit-landing (`$GITHUB_RUN_ID`) | must equal the land job's `$GITHUB_RUN_ID` — an artifact from another run cannot be replayed |
-| `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName`; when the run names no PR and the land job's `branch-prefix` is set, must start with it (an issue run's `claude/issue-N-`) — with no PR and no prefix the branch is agent-chosen within the bounds above |
+| `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName`; when the run names no PR and the land job's `branch-prefix` is set, must start with it (an issue run's `claude/issue-N-`) — with no PR and no prefix the branch is agent-chosen within the bounds above. Under the land job's `refuse-bundle` (the reviewer) nothing is ever pushed to `branch`, so the shape, default-branch and refused-list rules do not apply — a fork-head PR's `main`, or any head ref git accepts, passes; only the head-ref pin / `branch-prefix` and a no-control-characters, ≤ 1000 chars check remain |
 | `start_sha`, `head_sha` | emit-landing | 40 lowercase hex; equal iff `has_bundle` is false |
 | `has_bundle` | emit-landing | boolean; when true `commits.bundle` must exist and its tip must be `head_sha` and descend from `start_sha` (checked by `land`, in an empty repo) |
 | `pr_number` | emit-landing (`pr-number` input) | positive integer or null; **must equal the land job's `pr-number` input** (null when that is empty) — the PR the run's trusted context names, so on a PR run an agent job cannot steer the push, replies, thread resolutions and hand-back at a PR of its choosing, nor drop the number to skip the head-ref rule and let `pr.open` adopt another PR (on a run that names no PR, `branch-prefix` is what keeps the push off the branches of PRs opened for other issues; a still-open PR from an earlier run on the same issue carries the prefix and is adopted). Required by `replies` and `resolve_threads` |
@@ -90,7 +90,10 @@ runs no git at all and writes `head_sha` = `start_sha`, `has_bundle` false;
 the latter makes the validator refuse any manifest that carries commits,
 claims HEAD moved or ships a `commits.bundle` — whatever the agent job
 uploaded — so the reviewer's land job cannot become the push channel its own
-`contents: read` token denies it.
+`contents: read` token denies it. With no push, `branch` is only the pin that
+ties the manifest to the run's PR (its live head ref) or, in external mode,
+to the `branch-prefix`: the push-side branch rules are off, so a review of a
+fork-head PR whose branch is `main` lands (see the `branch` row above).
 
 File references: relative, `^[A-Za-z0-9._/-]{1,200}$`, no `..`, no path
 component starting with `.` (emit-landing uploads with

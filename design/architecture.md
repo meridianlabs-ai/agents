@@ -381,6 +381,11 @@ reviewer needed that the dev-agent shape did not:
   needs no reclaim step); `land`'s `refuse-bundle` input is the enforcing
   side: the validator refuses any manifest that carries commits, claims
   HEAD moved or ships a `commits.bundle`, whatever the review job uploaded.
+  The same flag turns the push-side branch rules off (charset, default
+  branch, refused list): with nothing pushed, `branch` is only the pin to
+  the run's PR head ref, and a fork-head PR whose branch is `main` — the
+  common outside-contributor shape — must review green, not fail at
+  `validate` after the review posted (found in review of #91).
 - **The codex verdict comment must carry live markers.** Every `comments[]`
   body is de-fanged, which would split `claude-review-summary` /
   `claude-review-verdict:…` and the @auto loop would never see the verdict.

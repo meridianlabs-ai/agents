@@ -689,6 +689,73 @@ def test_refuse_bundle_refuses_a_stray_bundle_file(tmp_path):
     assert errs == ["manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact"]
 
 
+def test_refuse_bundle_accepts_a_fork_heads_main_as_branch(tmp_path):
+    # The fork_head path (issue #59): an outside contributor's PR whose head
+    # branch is `main`. Nothing is ever pushed to `branch` under
+    # refuse_bundle, so neither the default-branch rule nor the refused list
+    # may fail the reviewer's landing over it …
+    m = review_manifest(tmp_path, branch="main")
+    assert run(tmp_path, m, pr_head_ref="main", event_issue="", refuse_bundle=True) == []
+    # … while the same manifest on a pushing land job is refused by both.
+    errs = run(tmp_path, m, pr_head_ref="main", event_issue="")
+    assert any("must not be the default branch" in e for e in errs)
+    assert any("is on the land job's refused list" in e for e in errs)
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "feature+1",
+        "user@host/fix",
+        "issue#81",
+        "corrección-ñ",
+        "refs/heads/odd-but-legal",
+        "release.lock",
+        "x" * 300,
+    ],
+)
+def test_refuse_bundle_accepts_any_head_ref_git_accepts(tmp_path, branch):
+    # Legal git branch characters outside BRANCH_RE (and names the push-side
+    # rules refuse): the head ref is whatever the PR's author named it, and
+    # the pin below is what ties the manifest to the run.
+    m = review_manifest(tmp_path, branch=branch)
+    assert run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True) == []
+    errs = run(tmp_path, m, pr_head_ref=branch, event_issue="")
+    assert errs, "the same name must still be refused on a pushing land job"
+
+
+def test_refuse_bundle_keeps_the_head_ref_pin(tmp_path):
+    # Relaxing the shape rules must not loosen the pin: a review job may not
+    # name any branch but the run's PR head ref.
+    m = review_manifest(tmp_path, branch="main")
+    errs = run(tmp_path, m, pr_head_ref="feature", event_issue="", refuse_bundle=True)
+    assert errs == ["manifest: branch 'main' is not PR #456's head ref ('feature')"]
+
+
+@pytest.mark.parametrize("branch", ["main\npr_number=999", "a\x7fb", "tab\there", "", "x" * 1001])
+def test_refuse_bundle_still_refuses_unsafe_branch_values(tmp_path, branch):
+    # What is left of the shape rule: the land job echoes `branch` into
+    # $GITHUB_OUTPUT and reads it into shell variables, so a control character
+    # (a newline would inject a second output line) or an unbounded value is
+    # refused even though nothing is pushed.
+    m = review_manifest(tmp_path, branch=branch)
+    errs = run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True)
+    assert errs, branch
+    assert all("is not PR" not in e for e in errs), "refused by shape, not merely by the pin"
+
+
+def test_refuse_bundle_external_mode_keeps_the_branch_prefix(tmp_path):
+    # External mode names no PR of ours: the review job emits a fixed
+    # `review/external-<issue>` name and the land job pins the prefix. Under
+    # refuse_bundle that pin is the only branch rule left besides shape.
+    m = review_manifest(tmp_path, branch="review/external-12", pr_number=None, issue_number=12, comments=[], review_verdict=None)
+    common = {"pr_head_ref": "", "event_pr": "", "event_issue": "12", "branch_prefix": "review/external-12", "refuse_bundle": True}
+    assert run(tmp_path, m, **common) == []
+    m["branch"] = "review/external-13"
+    errs = run(tmp_path, m, **common)
+    assert any("does not start with the prefix" in e for e in errs)
+
+
 # --- CLI ---------------------------------------------------------------------
 
 
@@ -784,6 +851,18 @@ def test_cli_refuse_bundle(tmp_path, capsys):
     )
     (tmp_path / "commits.bundle").unlink()
     assert cli(tmp_path, "--refuse-bundle") == 0
+
+
+def test_cli_refuse_bundle_relaxes_the_branch_rules(tmp_path, capsys):
+    # The reviewer's landing on a fork-head PR whose branch is `main`: the
+    # composite passes --default-branch main and --refused-branches main, and
+    # the manifest must still validate.
+    m = base_manifest(tmp_path, branch="main", head_sha=START, has_bundle=False, pr=None, handback=False)
+    (tmp_path / "commits.bundle").unlink()
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path, pr_head_ref="main") == 1
+    assert "must not be the default branch" in capsys.readouterr().out
+    assert cli(tmp_path, "--refuse-bundle", pr_head_ref="main") == 0
 
 
 def test_cli_missing_manifest(tmp_path, capsys):

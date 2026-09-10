@@ -26,7 +26,14 @@ manifest. Usage:
 `--refuse-bundle` is for callers whose agent never commits (the reviewer):
 a manifest that carries commits, claims HEAD moved, or ships a
 `commits.bundle` is refused, so that land job can never become a push
-channel however the artifact was produced.
+channel however the artifact was produced. Because nothing is ever pushed
+to `branch` there, the push-side branch rules (charset, not the default
+branch, not on the refused list, not `refs/…`) do not apply under the flag:
+`branch` is the PR's live head ref as the trusted context reports it, and a
+fork-head PR's `main` or a `+`/`@`/`#`/non-ASCII name must pass. The pin to
+`--pr-head-ref` (or `--branch-prefix`) still holds, and the value must
+still be safe to read into a shell variable and a step output (no control
+characters, bounded length).
 
 `--event-pr-number` / `--event-issue-number` are the numbers the run's
 TRUSTED context names (the event payload, or a gate-job output computed
@@ -62,6 +69,11 @@ MAX_TITLE_CHARS = 256
 MAX_MESSAGE_CHARS = MAX_BODY_FILE_BYTES
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+# Under --refuse-bundle `branch` is never pushed to, so any name git accepts
+# must pass; the only shape rule left is what keeps the value safe to echo
+# into $GITHUB_OUTPUT and read into a shell variable — no C0 control
+# characters (a newline would inject a second output) or DEL, bounded length.
+READ_ONLY_BRANCH_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,1000}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 THREAD_RE = re.compile(r"^PRRT_[A-Za-z0-9_-]+$")
 FILE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
@@ -313,7 +325,17 @@ class Validator:
             if not isinstance(pr, dict):
                 self.err("manifest: pr must be an object")
                 pr = None
-        if branch is not None:
+        if branch is not None and self.refuse_bundle:
+            # Never pushed to (the reviewer's land job — see the `refuse_bundle`
+            # block below): `branch` is kept only so the pin to the run's PR
+            # head ref (or the external-mode prefix) below still ties the
+            # manifest to the run. A fork-head PR whose branch is `main`, or
+            # any head ref git accepts (`+`, `@`, `#`, non-ASCII), must pass,
+            # so the push-side rules in the other arm do not apply; only the
+            # shell/step-output safety check does.
+            if not READ_ONLY_BRANCH_RE.match(branch):
+                self.err("manifest: branch has control characters or is longer than 1000")
+        elif branch is not None:
             if not BRANCH_RE.match(branch):
                 self.err("manifest: branch has characters outside [A-Za-z0-9._/-] or is longer than 200")
             if ".." in branch:
@@ -550,7 +572,7 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--refuse-bundle",
         action="store_true",
-        help="refuse a manifest that carries commits (the caller's agent never commits — the reviewer); has_bundle must be false, head_sha must equal start_sha and no commits.bundle may be present",
+        help="refuse a manifest that carries commits (the caller's agent never commits — the reviewer); has_bundle must be false, head_sha must equal start_sha and no commits.bundle may be present. `branch` is then never pushed to, so only the head-ref pin / --branch-prefix and a control-character/length check apply to it (a fork-head PR's `main` passes)",
     )
     args = ap.parse_args(argv)
 
