@@ -509,9 +509,18 @@ Verification for a change here, all cases prompted to codex (any verb):
   disagree) because the fail-safe miss would otherwise be silent. The
   composite also writes the final
   message with the block stripped, and the post step publishes that copy
-  with a header stating how many threads were resolved. Same rule as the
-  Claude path's REVIEW_ETIQUETTE: never resolve what was declined or only
-  answered with rationale.
+  with a header stating how many threads were resolved. The stripped copy
+  lives directly under `$RUNNER_TEMP`, not in the codex-owned output dir
+  (2026-09-10): the composite runs as the runner, and a path inside
+  `$RUNNER_TEMP/codex` made its awk die on the first write — the ids were
+  lost and every one of inspect_ai#428's ten overnight rounds posted
+  "(codex produced no final message)" while codex's summary sat unread; a
+  codex-owned dir was also a symlink hazard for a runner-side write. If
+  the copy is still missing the composite warns and the post step falls
+  back to the unstripped final message (a read needs no write permission)
+  before it gives up with the placeholder. Same rule as the Claude path's
+  REVIEW_ETIQUETTE: never resolve what was declined or only answered with
+  rationale.
 - **Branch sync is deterministic, not prompted** (was a limitation; fixed
   2026-09-01 after inspect_ai#392 sat 11 commits behind `main` across 20
   commits, with CI never running because GitHub cannot compute a merge ref
