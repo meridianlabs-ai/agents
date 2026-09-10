@@ -1293,10 +1293,11 @@ jobs:
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::CI-fix run did not complete: $err"
           if [ -n "${NUM:-}" ]; then
-            # @-mention the responsible human (the Fixes-ref issue's author,
-            # same-repo refs only, bots skipped): without a mention, these
-            # error reports on agent-authored PRs generate no email for
-            # anyone — non-participants never hear about the failure.
+            # @-mention the responsible human (the Fixes-ref issue's first
+            # assignee, else its author; same-repo refs only, bots and the
+            # machine account skipped): without a mention, these error
+            # reports on agent-authored PRs generate no email for anyone —
+            # non-participants never hear about the failure.
             mention=""
             ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
                     | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \

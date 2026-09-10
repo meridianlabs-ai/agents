@@ -2016,8 +2016,8 @@ jobs:
             # auto loops): PR-triggered failures otherwise email nobody. Issue
             # threads skip this — the issue author/assignee already gets email
             # as a participant. Derivation mirrors claude-auto.yml: closing
-            # ref, else claude/issue-N-* branch; author unless bot/machine
-            # account, else first assignee.
+            # ref, else claude/issue-N-* branch; first assignee unless
+            # bot/machine account, else author unless bot/machine account.
             cc=""
             if [ "${IS_PR:-false}" = "true" ]; then
               mention=""
