@@ -16,7 +16,9 @@ name: Claude Auto Review (reusable)
 # the actual review + inline findings via the API.
 #
 # Only the automated reviewer's comments drive the loop (reviewer_login); the
-# `auto` label authorizes; cross-repo (fork) PRs are skipped (the agent checks
+# `auto` label authorizes — and the gate verifies who applied it (issue #92:
+# the machine account or a write-access account, else the label is removed and
+# no round runs); cross-repo (fork) PRs are skipped (the agent checks
 # out and runs PR head code under MARVIN_TOKEN — don't do that for untrusted
 # forks). Shares the per-PR `concurrency` group with claude-auto.yml so the
 # CI-fixer and review-fixer never push to the same branch at once.
@@ -222,6 +224,42 @@ jobs:
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr_json")" != "true" ]; then
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
           fi
+          # Who applied the label (issue #92). The label is the loop's opt-in
+          # and kill-switch, and until now nothing checked who opted in: a
+          # label planted by an account without write access armed the loop
+          # exactly like a maintainer's. The most recent `labeled` event for
+          # it must come from the machine account (claude.yml's @auto opt-in
+          # and PR-open propagation, or the triage pipeline) or from an
+          # account with write access. Timeline fetched through the retrying
+          # ghr and filtered locally (`--paginate --jq` runs per page).
+          # Positive evidence of an outsider DISARMS — the label comes off as
+          # marvin, so the PR does not stay armed for the next event; no
+          # evidence (no labeled event found, or the permission lookup
+          # failed) refuses WITHOUT disarming: fail closed, but never take a
+          # human's label away on an API blip. Twin of the block in
+          # claude-auto.yml's gate; keep them in step.
+          labeler=$(ghr gh api "repos/$REPO/issues/$PR/timeline" --paginate \
+                      | jq -rs --arg l "$AUTO_LABEL" \
+                          '[.[][] | select(.event=="labeled" and .label.name==$l)] | last | .actor.login // empty')
+          lperm=""
+          if [ -z "$labeler" ]; then
+            echo "::warning::PR #$PR carries '$AUTO_LABEL' but its timeline has no labeled event for it; cannot verify who opted in. Skipping."
+            act skip; exit 0
+          elif [ "$labeler" != "i-am-marvin" ]; then
+            lperm=$(ghr gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission') || lperm=""
+            case "$lperm" in
+              admin|maintain|write) ;;
+              "")
+                echo "::warning::could not look up the permission of $labeler (who applied '$AUTO_LABEL' to PR #$PR); skipping without disarming."
+                act skip; exit 0 ;;
+              *)
+                echo "::warning::'$AUTO_LABEL' on PR #$PR was applied by $labeler, who has no write access ($lperm); removing the label and skipping."
+                gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" \
+                  || echo "::warning::could not remove '$AUTO_LABEL' from PR #$PR"
+                act skip; exit 0 ;;
+            esac
+          fi
+          echo "'$AUTO_LABEL' on PR #$PR was applied by $labeler${lperm:+ ($lperm)}."
           # Closed PR, still auto-labeled: on the fork that is a deliberate
           # continuation surface, not garbage — promotion opens the upstream
           # PR from the SAME branch (upstream runs no agents), so

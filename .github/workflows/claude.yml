@@ -259,6 +259,15 @@ jobs:
       # blip, and refuses as a known fork head. The one visible effect is the
       # refusal comment step below, posted only for a write-access commenter
       # so outsiders cannot make the workflow post.
+      #
+      # `ok` ALSO requires the actor to hold write access (issue #92). Until
+      # then it meant only "the text matched": claude-code-action's built-in
+      # write-access check was the sole actor authorization, and it runs
+      # AFTER two machine-account writes — the @auto opt-in label and the
+      # counter reset — so on a public caller any account's `@auto` comment
+      # on a same-repo PR armed the autonomous loops and reset their caps
+      # before the action declined it. The lookup happens here, before any
+      # write, and emits `authorized` so the refusal step can reuse it.
       - name: Check trigger (stage gating)
         id: trig
         env:
@@ -267,6 +276,10 @@ jobs:
           EVENT: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
           ACTOR: ${{ github.actor }}
+          # The payload's sender: on the `labeled` path that is whoever
+          # applied the label (the account the authorization check must
+          # judge); everywhere else it coincides with github.actor.
+          SENDER: ${{ github.event.sender.login }}
           COMMENT: ${{ github.event.comment.body }}
           REVIEW: ${{ github.event.review.body }}
           IBODY: ${{ github.event.issue.body }}
@@ -313,6 +326,41 @@ jobs:
               [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] && [ -n "$label" ] && [ "$lname" = "$label" ] && ok=true
               ;;
           esac
+          # Actor authorization (issue #92): the text matched, now the actor
+          # must hold write access, or nothing below runs — no ack, no stage
+          # move, no @auto opt-in, no counter reset, no checkout, no agent.
+          # Same lookup the reviewer's trig step makes for @review, with the
+          # job token (read is enough, and it cannot expire like a PAT). Who
+          # is judged: the event's sender — on the `labeled` path whoever
+          # applied the label (marvin for triage-applied `auto` labels; it
+          # holds write, so that kickoff still passes), on every other path
+          # the commenter/author, i.e. github.actor. Fail closed: a lookup
+          # error is `none`. Retried once like the fork-head lookup, each
+          # attempt captured and used only on success (a failed `gh api`
+          # prints its error body to STDOUT). Checked BEFORE the fork-head
+          # lookup so an outsider's trigger costs one read and produces no
+          # refusal comment: `fork_head` stays false for them, and the
+          # refusal step is gated on `authorized` as well.
+          authorized=false
+          if [ "$ok" = "true" ]; then
+            who="$ACTOR"
+            if [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] && [ -n "$SENDER" ]; then
+              who="$SENDER"
+            fi
+            perm=""
+            for i in 1 2; do
+              perm=$(gh api "repos/$REPO/collaborators/$who/permission" --jq '.permission' 2>/dev/null) && break
+              perm=""
+              [ "$i" -lt 2 ] && sleep 5
+            done
+            case "$perm" in
+              admin|maintain|write) authorized=true ;;
+              *)
+                ok=false
+                echo "::notice::$who does not have write access (permission: ${perm:-lookup failed}); not running, acking or staging."
+                ;;
+            esac
+          fi
           # Fork-head refusal (issue #59). Resolved only for runs that would
           # otherwise proceed, on PR-context events. issue_comment: one API
           # read of the PR's isCrossRepository, retried once (a transient blip
@@ -357,22 +405,23 @@ jobs:
             fi
           fi
           [ "$fork_head" != "false" ] && ok=false
-          echo "trigger check for stage tracking: ok=$ok fork_head=$fork_head"
+          echo "trigger check for stage tracking: ok=$ok authorized=$authorized fork_head=$fork_head"
           echo "ok=$ok" >>"$GITHUB_OUTPUT"
+          echo "authorized=$authorized" >>"$GITHUB_OUTPUT"
           echo "fork_head=$fork_head" >>"$GITHUB_OUTPUT"
 
       # The refusal's one visible effect: tell the requester why nothing
-      # happened — but ONLY when they hold write access. The trigger check
-      # above checks phrase shape, not permissions (claude-code-action's own
-      # actor gate, which never runs on this path, was the only actor
-      # authorization), so an outsider's @claude on a public repo's fork PR
-      # must exit silently: a workflow that posts on demand for anyone is a
-      # spam channel. Posted as github-actions[bot] via the job token (not
-      # MARVIN_TOKEN — github-actions comments trigger no workflows, so the
-      # backticked `@review` below cannot start a review run even on stubs
-      # with a looser gate). The permission read fails closed: no
-      # permission, or a lookup error, means no comment. Best-effort — never
-      # fails the run.
+      # happened — but ONLY when they hold write access: an outsider's
+      # @claude on a public repo's fork PR must exit silently, since a
+      # workflow that posts on demand for anyone is a spam channel. The
+      # trigger check above already made that decision (issue #92): its
+      # `authorized` output is the fail-closed permission read, and its
+      # fork-head lookup only runs for an authorized actor, so this step's
+      # gate reads both rather than repeating the API call. Posted as
+      # github-actions[bot] via the job token (not MARVIN_TOKEN —
+      # github-actions comments trigger no workflows, so the backticked
+      # `@review` below cannot start a review run even on stubs with a looser
+      # gate). Best-effort — never fails the run.
       #
       # Two texts, one per refusal state. A KNOWN fork head is a fixed
       # property of the PR, so its refusal posts once per PR: the caller
@@ -386,21 +435,16 @@ jobs:
       # trigger phrase bare (backticked like `@review`, belt and braces:
       # github-actions comments start no workflows anyway).
       - name: Refuse fork-head PR (explain to collaborators)
-        if: steps.trig.outputs.fork_head == 'true' || steps.trig.outputs.fork_head == 'unknown'
+        if: >-
+          steps.trig.outputs.authorized == 'true' &&
+          (steps.trig.outputs.fork_head == 'true' || steps.trig.outputs.fork_head == 'unknown')
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          ACTOR: ${{ github.actor }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           FORK_HEAD: ${{ steps.trig.outputs.fork_head }}
           PHRASE: ${{ inputs.trigger_phrase }}
         run: |
-          case "$ACTOR" in *"[bot]") echo "bot actor; no refusal comment."; exit 0 ;; esac
-          perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission' 2>/dev/null || echo none)
-          case "$perm" in
-            admin|write|maintain) ;;
-            *) echo "$ACTOR has no write access ($perm); refusing silently."; exit 0 ;;
-          esac
           if [ "$FORK_HEAD" = "true" ]; then
             marker='<!-- claude-fork-head-refusal -->'
             # Once per PR. Fail-open on the read: a duplicate refusal is
@@ -428,11 +472,10 @@ jobs:
       # check excludes bot/machine actors). Reactions are idempotent, so an
       # edited-comment re-trigger doesn't double up. pull_request_review has no
       # reaction endpoint — that (rare) trigger path goes unacknowledged.
-      # Known divergence (shared with stage tracking): steps.trig does NOT
-      # mirror the action's write-access check on the commenter, so on repos
-      # where non-collaborators can comment (the public inspect_ai fork) an
-      # outsider's trigger gets an 👀 even though claude-code-action then
-      # declines the run — the ack means "seen", not "agent is running".
+      # Since issue #92 steps.trig also verifies the actor's write access, so
+      # on repos where non-collaborators can comment (the public inspect_ai
+      # fork) an outsider's trigger gets no 👀 at all — the ack now does mean
+      # "an authorized run is starting".
       # Best-effort: an ack must never fail the run.
       # Engine selection (design/codex-engine.md): an engine:codex label on
       # the triggering issue/PR routes this run to Codex. API read at gate
@@ -713,7 +756,13 @@ jobs:
       # Gated on the trigger check (issue #59): a refused fork-head run must
       # not opt the PR into the loop — this is a machine-account write that
       # used to be reachable by anyone whose comment passed the stub's
-      # substring gate.
+      # substring gate. And since issue #92 the trigger check verifies the
+      # commenter's write access, so the label is applied only for the
+      # write-access human the comment above describes: before that, `ok`
+      # meant only "the text matched", and this step (plus the counter reset
+      # below) ran as marvin for ANY commenter on a public caller — arming
+      # the loops, whose gates then trusted the label. The loop gates now
+      # also verify who applied the label (claude-auto*.yml, Gate and count).
       - name: Opt existing PR into the @auto loop
         if: >-
           steps.trig.outputs.ok == 'true' &&
@@ -836,11 +885,14 @@ jobs:
       # committed on top — pushed, or deliberately not — is never second-
       # guessed. always(), so a failed or cancelled agent still leaves the
       # branch current rather than resuming tomorrow's drift — but fenced on
-      # the agent having actually STARTED. claude-code-action, not steps.trig,
-      # is what authorizes the commenter (it fails its step for an actor
-      # without write access), so an unfenced always() would let an
-      # outsider's @claude on a public repo's behind PR produce a machine-
-      # account push and a CI re-run: a write reachable without write access.
+      # the agent having actually STARTED. When the fence was added,
+      # claude-code-action alone authorized the commenter (it fails its step
+      # for an actor without write access), so an unfenced always() would
+      # have let an outsider's @claude on a public repo's behind PR produce a
+      # machine-account push and a CI re-run: a write reachable without write
+      # access. steps.trig now verifies write access itself (issue #92), so
+      # an outsider never reaches the sync step; the fence stays as defense
+      # in depth — the two checks are independent lookups.
       # The execution file is the evidence: the action writes it only after
       # the Claude session (or on an SDK error mid-run), never when it
       # declines the actor or dies before starting Claude — verified in its
@@ -1347,16 +1399,15 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          # Authorization: codex-action's own built-in write-access check on
-          # the triggering actor is the real gate here — steps.trig
-          # deliberately checks trigger shape, not permissions (see its
-          # Known-divergence note), mirroring the Claude path where
-          # claude-code-action's internal check authorizes. Consequence on
-          # public repos: an outsider's trigger on an engine:codex item FAILS
-          # this step (the Surface step's error text names that cause) where
-          # the Claude path declines silently. No allow-bot-users: bot actors
-          # never pass steps.trig, so none reach this step — matching the
-          # Claude path, which sets no allowed_bots on this verb either.
+          # Authorization: steps.trig verified the actor's write access
+          # before anything ran (issue #92), so an outsider's trigger on an
+          # engine:codex item never reaches this step; codex-action's own
+          # built-in write-access check on the triggering actor is the second,
+          # independent gate (mirroring the Claude path, where
+          # claude-code-action's internal check is the second one). No
+          # allow-bot-users: bot actors never pass steps.trig, so none reach
+          # this step — matching the Claude path, which sets no allowed_bots
+          # on this verb either.
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 

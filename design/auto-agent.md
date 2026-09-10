@@ -95,9 +95,42 @@ Anthropic seat**.
 - an **`auto` label** on an issue or PR, or
 - an **`@auto` mention** in a comment.
 
-The same write-access-author boundary as the other agents applies (an outsider's
-label/mention does nothing) — the injection blast-radius argument in
-architecture.md → Permissions is unchanged.
+The same write-access-author boundary as the other agents applies — an
+outsider's label/mention does nothing — and since issue #92 (Claude Security
+finding 4121989) that is enforced in three layers rather than assumed:
+
+- **The dev workflow's trigger check verifies write access before any write.**
+  `claude.yml`'s `Check trigger` used to check only trigger-phrase shape, and
+  claude-code-action's built-in write-access check ran *after* two
+  machine-account writes — the `@auto` opt-in label on an existing PR and the
+  counter reset. On a public caller any account could comment `@auto` on a
+  same-repo PR, arm the loops and reset their caps before the action declined
+  it. The trig step now looks up the actor's permission
+  (`repos/{repo}/collaborators/{actor}/permission`, job token, fail-closed —
+  a lookup error is `none`) for every event it accepts; on the `issues`
+  `labeled` path the account judged is the event's sender, i.e. whoever
+  applied the label (marvin for triage-applied labels; it holds write). An
+  unauthorized actor gets nothing: no 👀, no stage move, no label, no reset,
+  no checkout, no agent, and no refusal comment (the fork-head refusal is
+  gated on the same `authorized` output).
+- **The stubs filter on `author_association`.** The `claude-auto` job in the
+  caller stubs requires `OWNER`/`MEMBER`/`COLLABORATOR` on the comment,
+  review or issue that carries the `@auto` text, so an outsider's comment does
+  not start a workflow run at all. This is a *cost* filter, not the gate:
+  `CONTRIBUTOR` is anyone with a merged commit and `MEMBER` visibility depends
+  on org settings, so the trig lookup stays the authority.
+- **The loop gates verify who applied the label.** Both `Gate and count`
+  steps (`claude-auto.yml`, `claude-auto-review.yml`) read the PR timeline and
+  require the most recent `labeled` event for `auto` to come from the machine
+  account (claude.yml's opt-in and PR-open propagation, or triage) or from an
+  account with write access. Positive evidence of an outsider disarms — the
+  label is removed as marvin and no round runs; no evidence (no labeled event,
+  or a failed permission lookup) refuses without disarming, so an API blip
+  never takes a human's label away. This covers any path that plants the
+  label, not just the one the trig check closed.
+
+The injection blast-radius argument in architecture.md → Permissions is
+unchanged.
 
 The **`auto` label is the canonical "this loop is live" state**, which makes it a
 one-click **kill-switch**: every turn re-checks the label *before* doing work, so
@@ -233,7 +266,9 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
   guarantees a human sees anything the agent can't resolve.
 - **Label kill-switch** — instant human override at any point.
 - **Opt-in only**, by a write-access author — nothing runs unattended without
-  someone asking for it.
+  someone asking for it; the trig check and the loop gates verify that the
+  asker (commenter, or labeler) actually holds write access (see Trigger
+  surface above).
 - **Stuck-detection (implemented)** — the gate records the branch tip at the
   start of each round in the sticky marker (`auto-review-head:<sha>`); if the
   next review fires with the tip unchanged, the last fix round pushed nothing,

@@ -15,7 +15,10 @@ name: Claude Auto (reusable)
 #
 # The `auto` label is the authorization gate (a write-access human opts a PR in,
 # and removing it halts the loop), NOT authorship — a human may label their own
-# PR. The machine-account login only matters for attribution in later phases.
+# PR. The gate verifies WHO applied it (issue #92): the most recent labeler
+# must be the machine account or an account with write access, else the label
+# is removed and no round runs. The machine-account login otherwise only
+# matters for attribution in later phases.
 
 on:
   workflow_call:
@@ -205,14 +208,20 @@ jobs:
           # escalation ever post and the loop silently stalls (see
           # design/auto-agent.md). Retry with backoff; a persistent failure
           # still returns non-zero so the gate-failure failsafe below surfaces
-          # it instead of dying quietly.
+          # it instead of dying quietly. Each attempt's stdout is captured
+          # and emitted only on overall success: a failed `gh api` prints the
+          # HTTP error body to STDOUT, so streaming attempts through would
+          # prefix a fail-then-succeed retry's real output with error bodies
+          # — poisoning every $(ghr …) capture in exactly the case the retry
+          # exists for. (Same ghr as claude-auto-review.yml's gate.)
           ghr() {
-            local n=0
-            until "$@"; do
+            local n=0 out
+            until out=$("$@"); do
               n=$((n+1))
               if [ "$n" -ge 4 ]; then return 1; fi
               sleep $((n*3))
             done
+            printf '%s' "$out"
           }
           if [ "$HAS_TOKEN" != "true" ]; then
             echo "No MARVIN_TOKEN; the fix loop can't push as a real identity. Skipping."
@@ -231,6 +240,42 @@ jobs:
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr")" != "true" ]; then
             echo "PR #$number is not @auto-labeled; skipping."; act skip; exit 0
           fi
+          # Who applied the label (issue #92). The label is the loop's opt-in
+          # and kill-switch, and until now nothing checked who opted in: a
+          # label planted by an account without write access armed the loop
+          # exactly like a maintainer's. The most recent `labeled` event for
+          # it must come from the machine account (claude.yml's @auto opt-in
+          # and PR-open propagation, or the triage pipeline) or from an
+          # account with write access. Timeline fetched through the retrying
+          # ghr and filtered locally (`--paginate --jq` runs per page).
+          # Positive evidence of an outsider DISARMS — the label comes off as
+          # marvin, so the PR does not stay armed for the next event; no
+          # evidence (no labeled event found, or the permission lookup
+          # failed) refuses WITHOUT disarming: fail closed, but never take a
+          # human's label away on an API blip. Twin of the block in
+          # claude-auto-review.yml's gate; keep them in step.
+          labeler=$(ghr gh api "repos/$REPO/issues/$number/timeline" --paginate \
+                      | jq -rs --arg l "$AUTO_LABEL" \
+                          '[.[][] | select(.event=="labeled" and .label.name==$l)] | last | .actor.login // empty')
+          lperm=""
+          if [ -z "$labeler" ]; then
+            echo "::warning::PR #$number carries '$AUTO_LABEL' but its timeline has no labeled event for it; cannot verify who opted in. Skipping."
+            act skip; exit 0
+          elif [ "$labeler" != "i-am-marvin" ]; then
+            lperm=$(ghr gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission') || lperm=""
+            case "$lperm" in
+              admin|maintain|write) ;;
+              "")
+                echo "::warning::could not look up the permission of $labeler (who applied '$AUTO_LABEL' to PR #$number); skipping without disarming."
+                act skip; exit 0 ;;
+              *)
+                echo "::warning::'$AUTO_LABEL' on PR #$number was applied by $labeler, who has no write access ($lperm); removing the label and skipping."
+                gh pr edit "$number" --repo "$REPO" --remove-label "$AUTO_LABEL" \
+                  || echo "::warning::could not remove '$AUTO_LABEL' from PR #$number"
+                act skip; exit 0 ;;
+            esac
+          fi
+          echo "'$AUTO_LABEL' on PR #$number was applied by $labeler${lperm:+ ($lperm)}."
           # Attempt counter: a single sticky marker comment we own.
           cid=$(ghr gh api "repos/$REPO/issues/$number/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
