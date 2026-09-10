@@ -111,7 +111,7 @@ inputs:
       Prefix the manifest's `branch` must carry when `pr-number` is empty
       (an issue run has no PR head ref to pin the branch to). Composed from
       trusted context — claude-code-action's issue branches are
-      `claude/issue-${{ github.event.issue.number }}-` — so an agent job
+      `claude/issue-<issue number>-` — so an agent job
       cannot name another issue's open PR head as `branch` and fast-forward
       it (an earlier run's still-open PR for the same issue carries the
       prefix; landing on it is the adopt path). Ignored on PR runs (the head-ref pin is stricter); empty leaves the
