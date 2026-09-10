@@ -125,7 +125,13 @@ finding 4121989) that is enforced in three layers rather than assumed:
   filter. Issue body/title match only on `issues: opened`, in the stubs and
   in trig alike: claude-code-action checks them only there, so matching
   them on `labeled` too made any later label added to a phrase-bearing
-  issue pass trig (ack, stage move, checkout) before the action no-op'd.
+  issue pass trig (ack, stage move, checkout) before the action no-op'd —
+  and on the codex path, which is gated on trig alone and never reaches the
+  action's check, each such label (including `engine:codex` itself) was a
+  real run that opened a fresh `claude/issue-N-codex-*` PR. Now, on either
+  engine, an issue runs only from an `opened` mention or the `claude`/`auto`
+  label; `engine:codex` alone never kicks one off
+  (design/codex-engine.md → Testing).
 - **The loop gates verify who applied the label.** Both loops' gates
   (`claude-auto.yml`, `claude-auto-review.yml`) run the shared
   `verify-auto-labeler` composite between their label check and their
@@ -429,9 +435,10 @@ The simple case ships first and is independently useful:
   machine-account PAT (`MARVIN_TOKEN`, owned by `marvin@meridianlabs.ai`) is
   passed as `github_token` in `claude.yml`, and the deterministic post-step
   reuses it. This gives reliable issue→PR creation *with* CI and auto-`@review`,
-  no loop yet. Stubs pass it explicitly (a one-key `secrets:` map, not `secrets:
-  inherit` — least privilege, so an external `@main`-pinned workflow never sees
-  the caller's other secrets); each caller repo's deployed stub needs that and
+  no loop yet. Stubs pass it explicitly (named in their `secrets:` map — now
+  alongside `OPENAI_API_KEY` — not `secrets: inherit`; least privilege, so an
+  external `@main`-pinned workflow never sees the caller's other secrets);
+  each caller repo's deployed stub needs that and
   the org secret scoped to it. (The roadmap called this token `AUTO_TOKEN`; the
   provisioned secret is `MARVIN_TOKEN`.)
 - **Phase 1 — CI-failure → fix trigger. _Verified on inspect_flow._** Reusable

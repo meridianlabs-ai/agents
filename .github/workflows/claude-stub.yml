@@ -42,8 +42,9 @@ jobs:
     # same thing; the action's trigger_phrase is single-valued, so
     # `with.trigger_phrase` below resolves which phrase the *event's own text*
     # contains (comment body for a comment, review body for a review, issue
-    # body/title for an issue — the same source the action checks) and this gate
-    # fires if that text has either phrase.
+    # body/title for an opened issue — the same source the action checks) and
+    # this gate fires if that text has either phrase; the `claude` label fires
+    # it on its own.
     #
     # Machine-account guard: github.actor != 'i-am-marvin' over the whole gate,
     # so a comment/review/issue authored by the machine account can't self-
@@ -120,8 +121,12 @@ jobs:
       # would mask an @i-am-marvin typed in a comment, resolving @claude and
       # then no-op'ing (the action only checks the comment body on a comment
       # event). Within a source, default @claude and only switch to
-      # @i-am-marvin when that's what's present; the trailing @claude covers the
-      # `claude` label event and is a harmless fallback.
+      # @i-am-marvin when that's what's present. On the `claude` label event
+      # the phrase is moot — the action fires on label_trigger and the reusable
+      # workflow's trig step matches the label name, neither reads the body —
+      # so the issue branch resolving @i-am-marvin from a body mention there is
+      # harmless; the trailing @claude is the fallback for an event with no
+      # matching source.
       # Caveat: this pick is substring-based (workflow expressions have no
       # regex), so it also SELECTS which phrase the action then re-checks with
       # word boundaries. In the contrived case where the other phrase appears

@@ -709,6 +709,10 @@ Create the label per repo (`gh label create engine:codex -c 8250DF -d
 "route agent runs to Codex"`), apply it to a scratch issue/PR, then
 exercise verbs exactly like the Claude paths (AGENTS.md → Testing a
 change): @claude on a labeled issue, @review on a labeled PR, the auto
-loop on a labeled PR. The codex-action step log replaces the Claude path's
+loop on a labeled PR. Applying `engine:codex` is never itself a trigger:
+an issue runs only from an `opened` mention or the `claude`/`auto` label
+(until #97, a phrase in the issue body let ANY later `labeled` event,
+this label included, start a real codex run — trig alone gates the codex
+step, so no action-side check caught it). The codex-action step log replaces the Claude path's
 model-provenance job summary as the run forensics on codex runs, and the
 job summary's "Codex usage" table has the model and token split.
