@@ -948,14 +948,17 @@ non-fast-forward push — the next round re-merges on top of the new tip. In
 `claude.yml` the backstop is additionally fenced on the agent having actually
 *started* — the composite's `require-file` input names the execution file,
 which exists only once Claude ran (the loops leave the input empty: their gate
-authorized the actor before checkout). The workflow's own
-trigger check deliberately does not mirror claude-code-action's write-access
-check on the commenter (the action is the authorizer, and it fails its step
-for an outsider), so an unfenced `always()` would have let a non-collaborator's
-`@claude` on a public repo's behind PR produce a machine-account merge push
-and a CI re-run: a deterministic, low-harm payload, but a write reachable
-without write access that did not exist before. A declined or never-started
-agent leaves the merge on the runner for the next authorized run. That push
+authorized the actor before checkout). When the fence was added the
+workflow's own trigger check did not mirror claude-code-action's write-access
+check on the commenter (the action was the sole authorizer, and it fails its
+step for an outsider), so an unfenced `always()` would have let a
+non-collaborator's `@claude` on a public repo's behind PR produce a
+machine-account merge push and a CI re-run: a deterministic, low-harm payload,
+but a write reachable without write access that did not exist before. The
+trigger check now verifies write access itself (issue #92 — see
+auto-agent.md → Trigger surface), so an outsider never reaches the sync step;
+the fence stays as defense in depth. A declined or never-started agent leaves
+the merge on the runner for the next authorized run. That push
 also posts the `@review` re-review request on a successful `@auto` run: the
 Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a

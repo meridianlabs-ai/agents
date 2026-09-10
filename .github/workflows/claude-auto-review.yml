@@ -16,7 +16,9 @@ name: Claude Auto Review (reusable)
 # the actual review + inline findings via the API.
 #
 # Only the automated reviewer's comments drive the loop (reviewer_login); the
-# `auto` label authorizes; cross-repo (fork) PRs are skipped (the agent checks
+# `auto` label authorizes — and the gate verifies who applied it (issue #92:
+# the machine account or a write-access account, else the label is removed and
+# no round runs); cross-repo (fork) PRs are skipped (the agent checks
 # out and runs PR head code under MARVIN_TOKEN — don't do that for untrusted
 # forks). Shares the per-PR `concurrency` group with claude-auto.yml so the
 # CI-fixer and review-fixer never push to the same branch at once.
@@ -155,12 +157,18 @@ jobs:
       id-token: write
       actions: read
     steps:
-      # Gate (reviewer identity, same-repo, auto label, token) and compute the
-      # round count — all via the API, before any checkout. The counter
-      # increments before the agent runs, so a crashed agent still consumes a
-      # round. Also derives the PR head branch (issue_comment doesn't carry it).
-      - name: Gate and count
-        id: gate
+      # The gate is three steps, all via the API, before any checkout: resolve
+      # the PR and check reviewer identity, same-repo, token, the auto label
+      # and not-merged; verify who applied the label (shared composite); then compute
+      # the round count and decide. The counter increments before the agent
+      # runs, so a crashed agent still consumes a round — and it is computed
+      # only AFTER the labeler check passes, so an outsider's label never
+      # burns rounds. Also derives the PR head branch (issue_comment doesn't
+      # carry it). Downstream steps read every gate output (`act`,
+      # `head_branch`, `engine`, `round`, …) from the LAST step; the resolve
+      # step hands it the PR JSON it fetched, so the split is invisible to them.
+      - name: Resolve PR and check the auto label
+        id: resolve
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -168,13 +176,11 @@ jobs:
           AUTHOR: ${{ inputs.comment_author }}
           REVIEWER: ${{ inputs.reviewer_login }}
           AUTO_LABEL: ${{ inputs.auto_label }}
-          CAP: ${{ inputs.review_round_cap }}
-          HANDOFF_MENTION: ${{ inputs.handoff_mention }}
-          ANCHOR_REPO: ${{ inputs.anchor_repo }}
           HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
-          MARKER: "<!-- auto-review-rounds -->"
         run: |
           set -euo pipefail
+          # `act` here is skip or verify (proceed to the labeler check); the
+          # final act (skip/fix/converged/escalate) is the Gate and count step's.
           act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
           # Retry a gh call on transient failure. A 5xx / secondary rate limit
           # returns an HTML error page, which `gh --jq` then rejects with
@@ -222,6 +228,71 @@ jobs:
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr_json")" != "true" ]; then
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
           fi
+          # A MERGED PR is done, whatever its labels (CLOSED is different —
+          # see the continuation logic in Gate and count). Decide it HERE,
+          # ahead of the labeler check: a merged PR still carrying the label
+          # is a state this loop has always skipped silently, and running the
+          # composite on it would cost a timeline fetch and a permission
+          # lookup per reviewer event — and, for an unverifiable labeler,
+          # post the "not running" notice (or a disarm note) on a merged PR.
+          if [ "$(jq -r '.state' <<<"$pr_json")" = "MERGED" ]; then
+            echo "PR #$PR is MERGED; nothing to continue. Skipping."; act skip; exit 0
+          fi
+          # Hand the fetched PR to the counting step (one line: gh emits
+          # compact JSON, and `-c` guarantees it for the single-line output).
+          echo "pr_json=$(jq -c . <<<"$pr_json")" >>"$GITHUB_OUTPUT"
+          act verify
+
+      # Who applied the label (issue #92): the most recent `labeled` event
+      # must come from marvin or a write-access account. An outsider's label
+      # is removed (as marvin) and noted on the PR; no evidence (no event,
+      # an App labeler, a failed lookup) refuses without disarming and posts
+      # a one-time notice. Shared composite with claude-auto.yml — the
+      # verdicts and the PR-facing text live there. Runs under MARVIN_TOKEN
+      # (the resolve step already required it). A persistent timeline fetch
+      # failure FAILS this step, which the gate-failure failsafe below
+      # surfaces like a crash of the other two.
+      - name: Verify who applied the auto label
+        id: labeler
+        if: steps.resolve.outputs.act == 'verify'
+        uses: meridianlabs-ai/agents/.github/actions/verify-auto-labeler@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          label: ${{ inputs.auto_label }}
+
+      - name: Gate and count
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          PR_JSON: ${{ steps.resolve.outputs.pr_json }}
+          RESOLVED: ${{ steps.resolve.outputs.act }}
+          LABELER_VERDICT: ${{ steps.labeler.outputs.verdict }}
+          CAP: ${{ inputs.review_round_cap }}
+          HANDOFF_MENTION: ${{ inputs.handoff_mention }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
+          MARKER: "<!-- auto-review-rounds -->"
+        run: |
+          set -euo pipefail
+          act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          # Same ghr as the resolve step (and claude-auto.yml's gate).
+          ghr() {
+            local n=0 out
+            until out=$("$@"); do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then return 1; fi
+              sleep $((n*3))
+            done
+            printf '%s' "$out"
+          }
+          if [ "$RESOLVED" != "verify" ]; then act skip; exit 0; fi
+          if [ "$LABELER_VERDICT" != "ok" ]; then
+            echo "Labeler check on PR #$PR: ${LABELER_VERDICT:-no verdict}; skipping."; act skip; exit 0
+          fi
+          pr_json="$PR_JSON"
           # Closed PR, still auto-labeled: on the fork that is a deliberate
           # continuation surface, not garbage — promotion opens the upstream
           # PR from the SAME branch (upstream runs no agents), so
@@ -238,12 +309,11 @@ jobs:
           # is done, and looping on its surviving branch would push commits
           # that never reach main while the moving tip defeats the
           # no-progress escalation that used to kill exactly that zombie.
+          # The MERGED skip itself lives in the resolve step, ahead of the
+          # labeler check, so only OPEN and CLOSED reach here.
           pr_state=$(jq -r '.state' <<<"$pr_json")
           live_tip=""
-          if [ "$pr_state" = "MERGED" ]; then
-            echo "PR #$PR is MERGED; nothing to continue. Skipping."
-            act skip; exit 0
-          elif [ "$pr_state" != "OPEN" ]; then
+          if [ "$pr_state" != "OPEN" ]; then
             # ghr emits captured stdout only on success, so a deleted branch
             # (persistent 404) yields an empty capture and the skip below
             # fires — the error body `gh api` prints to STDOUT never reaches
@@ -424,16 +494,20 @@ jobs:
           fi
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
 
-      # Failsafe: if the gate step itself errored (e.g. a transient API failure
-      # the retries above couldn't ride out), it never set `act`, so every step
-      # below skips and nothing reaches the PR — the loop would stall silently
-      # with the label still on. Surface it so a human knows to resume. Kept
-      # trigger-free ON PURPOSE: the body must not contain a literal @review or
-      # @auto, or this bot-authored comment would re-fire the loop and, on a
-      # persistent gate failure, spin (see design/auto-agent.md). The `auto`
-      # label is left on so re-running the job or a fresh review resumes cleanly.
+      # Failsafe: if any of the three gate steps errored (e.g. a transient API
+      # failure the retries above couldn't ride out), `act` was never set, so
+      # every step below skips and nothing reaches the PR — the loop would
+      # stall silently with the label still on. Surface it so a human knows to
+      # resume. Kept trigger-free ON PURPOSE: the body must not contain a
+      # literal @review or @auto, or this bot-authored comment would re-fire
+      # the loop and, on a persistent gate failure, spin (see
+      # design/auto-agent.md). The `auto` label is left on so re-running the
+      # job or a fresh review resumes cleanly.
       - name: Surface gate failure
-        if: always() && steps.gate.outcome == 'failure'
+        if: >-
+          always() &&
+          (steps.resolve.outcome == 'failure' || steps.labeler.outcome == 'failure' ||
+           steps.gate.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -442,7 +516,7 @@ jobs:
         run: |
           set -uo pipefail
           [ -z "${PR:-}" ] && { echo "No PR number; nothing to surface."; exit 0; }
-          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the review-fix run errored before it could act (a transient GitHub API failure in the gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or post a fresh review request to resume.' "$RUN_URL")" || true
+          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the review-fix run errored before it could act (a transient GitHub API failure in a gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or post a fresh review request to resume.' "$RUN_URL")" || true
 
       # Atlas tracking (design/atlas-tracking.md): a review-fix round is the
       # agent working the PR's issue; both @auto exits — converged AND
