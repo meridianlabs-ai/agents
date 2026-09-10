@@ -421,10 +421,16 @@ loop and the dev agent:
 - **The codex path splits at the push.** The old `Land codex fix` step
   keeps its commit half (reclaim-gated, hooks-pinned) and writes the
   de-fanged summary into the landing directory; the push and the post are
-  the land job's. The manifest composer runs no git and `emit-landing` runs
-  `read-only` unless the `unresolved-merge-guard` step *succeeded* — the
-  guard is itself gated on the codex step and the reclaim, so that one
-  condition withholds the push on all three failures. It has to be the
+  the land job's. On the codex path — keyed on the gate's *engine*, not on
+  the codex-user step's outcome, which is `skipped`/`failure` when the prep
+  or user-setup step failed and would let those two fall through to the
+  ancestry test — the manifest composer runs no git and `emit-landing` runs
+  `read-only` unless the `unresolved-merge-guard` step *succeeded*; the
+  guard is itself gated on the codex step and the reclaim, and those on the
+  user setup, so that one condition withholds the push on every codex-path
+  failure, a failed prep or user-setup step included (no codex process ran,
+  the base merge stays unpushed, and the round is refunded — as the Surface
+  strings say and as before the split). It has to be the
   guard, not ancestry: codex may commit locally, and a `git commit` over
   staged-but-still-marked paths completes the base merge and moves HEAD
   past the start SHA, so keying on ancestry alone (as the Claude path does)
@@ -441,6 +447,11 @@ loop and the dev agent:
   committed nothing — HEAD still at the start SHA, or exactly the runner's
   clean base merge (a merge-only round, which lands and owes its hand-back
   but carries no agent commit; the relay's first line says so) — the
+  first line, like the codex summary's, says "committed" / "base merge
+  only", never "pushed": the fix job composes it before `emit-landing`
+  runs, and a `git bundle` failure there drops the hand-back but not
+  `comments[]`, so a header asserting the push would post over lost work
+  and only the error comment that follows would correct it — the
   workflow relays its final message as a `comments[]` entry (de-fanged by
   `land`) — the Claude analogue of the codex summary that has always
   posted. (Issue #82's fourth verification item said
@@ -1082,14 +1093,17 @@ non-fast-forward push — the next round re-merges on top of the new tip. In
 `claude.yml` the backstop is additionally fenced on the agent having actually
 *started* — the composite's `require-file` input names the execution file,
 which exists only once Claude ran (the loops leave the input empty: their gate
-authorized the actor before checkout). The workflow's own
-trigger check deliberately does not mirror claude-code-action's write-access
-check on the commenter (the action is the authorizer, and it fails its step
-for an outsider), so an unfenced `always()` would have let a non-collaborator's
-`@claude` on a public repo's behind PR produce a machine-account merge push
-and a CI re-run: a deterministic, low-harm payload, but a write reachable
-without write access that did not exist before. A declined or never-started
-agent leaves the merge on the runner for the next authorized run. That push
+authorized the actor before checkout). When the fence was added the
+workflow's own trigger check did not mirror claude-code-action's write-access
+check on the commenter (the action was the sole authorizer, and it fails its
+step for an outsider), so an unfenced `always()` would have let a
+non-collaborator's `@claude` on a public repo's behind PR produce a
+machine-account merge push and a CI re-run: a deterministic, low-harm payload,
+but a write reachable without write access that did not exist before. The
+trigger check now verifies write access itself (issue #92 — see
+auto-agent.md → Trigger surface), so an outsider never reaches the sync step;
+the fence stays as defense in depth. A declined or never-started agent leaves
+the merge on the runner for the next authorized run. That push
 also posts the `@review` re-review request on a successful `@auto` run: the
 Claude path's prompt tells
 the agent not to request re-review when it made no code changes, so a

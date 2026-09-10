@@ -16,7 +16,10 @@ name: Claude Auto (reusable)
 #
 # The `auto` label is the authorization gate (a write-access human opts a PR in,
 # and removing it halts the loop), NOT authorship — a human may label their own
-# PR. The machine-account login only matters for attribution in later phases.
+# PR. The gate verifies WHO applied it (issue #92): the most recent labeler
+# must be the machine account or an account with write access, else the label
+# is removed and no round runs. The machine-account login otherwise only
+# matters for attribution in later phases.
 #
 # Three jobs (design/architecture.md → Landing job; issue #82, the first loop
 # conversion after the reviewer's in #81): `gate` resolves the PR, enforces
@@ -202,23 +205,29 @@ jobs:
       attempt: ${{ steps.gate.outputs.attempt }}
       mention: ${{ steps.who.outputs.mention }}
     steps:
-      # Resolve the PR, enforce the `auto`-label gate, and compute the attempt
-      # count (deterministically, in shell — it gates whether the agent runs).
-      # Decide: skip (no PR / not labeled / no token), escalate (over cap), or
-      # fix. The counter increments BEFORE the agent runs, so an agent that
-      # crashes still consumes an attempt rather than looping forever.
-      - name: Gate and count
-        id: gate
+      # The gate is three steps (deterministic, in shell — it decides whether
+      # the agent runs): resolve the PR and enforce the `auto`-label check;
+      # verify who applied the label (shared composite); then compute the
+      # attempt count and decide. Decide: skip (no PR / not labeled / no
+      # token / unverified or outsider labeler), escalate (over cap), or fix.
+      # The counter increments BEFORE the agent runs, so an agent that
+      # crashes still consumes an attempt rather than looping forever — and
+      # it is computed only AFTER the labeler check passes, so an outsider's
+      # label never burns attempts. Downstream steps read every gate output
+      # (`act`, `pr`, `engine`, `attempt`, `cid`) from the LAST step, which
+      # re-emits the resolve step's, so the split is invisible to them.
+      - name: Resolve PR and check the auto label
+        id: resolve
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           HEAD: ${{ inputs.head_branch }}
           AUTO_LABEL: ${{ inputs.auto_label }}
-          CAP: ${{ inputs.fix_attempt_cap }}
           HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
-          MARKER: "<!-- auto-fix-attempts -->"
         run: |
           set -euo pipefail
+          # `act` here is skip or verify (proceed to the labeler check); the
+          # final act (skip/fix/escalate) is the Gate and count step's.
           act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
           # Retry a gh call on transient failure. A 5xx / secondary rate limit
           # returns an HTML error page, which `gh --jq` then rejects with
@@ -227,14 +236,20 @@ jobs:
           # escalation ever post and the loop silently stalls (see
           # design/auto-agent.md). Retry with backoff; a persistent failure
           # still returns non-zero so the gate-failure failsafe below surfaces
-          # it instead of dying quietly.
+          # it instead of dying quietly. Each attempt's stdout is captured
+          # and emitted only on overall success: a failed `gh api` prints the
+          # HTTP error body to STDOUT, so streaming attempts through would
+          # prefix a fail-then-succeed retry's real output with error bodies
+          # — poisoning every $(ghr …) capture in exactly the case the retry
+          # exists for. (Same ghr as claude-auto-review.yml's gate.)
           ghr() {
-            local n=0
-            until "$@"; do
+            local n=0 out
+            until out=$("$@"); do
               n=$((n+1))
               if [ "$n" -ge 4 ]; then return 1; fi
               sleep $((n*3))
             done
+            printf '%s' "$out"
           }
           if [ "$HAS_TOKEN" != "true" ]; then
             echo "No MARVIN_TOKEN; the fix loop can't push as a real identity. Skipping."
@@ -253,6 +268,60 @@ jobs:
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr")" != "true" ]; then
             echo "PR #$number is not @auto-labeled; skipping."; act skip; exit 0
           fi
+          act verify
+
+      # Who applied the label (issue #92): the most recent `labeled` event
+      # must come from marvin or a write-access account. An outsider's label
+      # is removed (as marvin) and noted on the PR; no evidence (no event,
+      # an App labeler, a failed lookup) refuses without disarming and posts
+      # a one-time notice. Shared composite with claude-auto-review.yml —
+      # the verdicts and the PR-facing text live there. Runs under
+      # MARVIN_TOKEN (the resolve step already required it). A persistent
+      # timeline fetch failure FAILS this step, which the gate-failure
+      # failsafe below surfaces like a crash of the other two.
+      - name: Verify who applied the auto label
+        id: labeler
+        if: steps.resolve.outputs.act == 'verify'
+        uses: meridianlabs-ai/agents/.github/actions/verify-auto-labeler@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          pr: ${{ steps.resolve.outputs.pr }}
+          label: ${{ inputs.auto_label }}
+
+      - name: Gate and count
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.resolve.outputs.pr }}
+          ENGINE: ${{ steps.resolve.outputs.engine }}
+          RESOLVED: ${{ steps.resolve.outputs.act }}
+          LABELER_VERDICT: ${{ steps.labeler.outputs.verdict }}
+          CAP: ${{ inputs.fix_attempt_cap }}
+          MARKER: "<!-- auto-fix-attempts -->"
+        run: |
+          set -euo pipefail
+          act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          # Same ghr as the resolve step (and claude-auto-review.yml's gate).
+          ghr() {
+            local n=0 out
+            until out=$("$@"); do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then return 1; fi
+              sleep $((n*3))
+            done
+            printf '%s' "$out"
+          }
+          # Re-emit the resolve step's outputs so every downstream step keeps
+          # reading `steps.gate.outputs.pr` / `.engine` (empty when no PR).
+          echo "pr=$PR" >>"$GITHUB_OUTPUT"
+          echo "engine=$ENGINE" >>"$GITHUB_OUTPUT"
+          if [ "$RESOLVED" != "verify" ]; then act skip; exit 0; fi
+          if [ "$LABELER_VERDICT" != "ok" ]; then
+            echo "Labeler check on PR #$PR: ${LABELER_VERDICT:-no verdict}; skipping."; act skip; exit 0
+          fi
+          number="$PR"
           # Attempt counter: a single sticky marker comment we own.
           cid=$(ghr gh api "repos/$REPO/issues/$number/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
@@ -267,23 +336,27 @@ jobs:
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
 
-      # Failsafe: if the gate step itself errored (e.g. a transient API failure
-      # the retries above couldn't ride out), it never set `act`, so every step
-      # below skips and nothing reaches the PR — the loop would stall silently
-      # with the label still on. Surface it so a human knows to resume. Kept
-      # trigger-free ON PURPOSE: the body must not contain a literal @auto or
-      # @review, or this comment would re-fire the loop (see design/auto-agent.md).
+      # Failsafe: if any of the three gate steps errored (e.g. a transient API
+      # failure the retries above couldn't ride out), `act` was never set, so
+      # every step below skips and nothing reaches the PR — the loop would
+      # stall silently with the label still on. Surface it so a human knows
+      # to resume. Kept trigger-free ON PURPOSE: the body must not contain a
+      # literal @auto or @review, or this comment would re-fire the loop (see
+      # design/auto-agent.md).
       - name: Surface gate failure
-        if: always() && steps.gate.outcome == 'failure'
+        if: >-
+          always() &&
+          (steps.resolve.outcome == 'failure' || steps.labeler.outcome == 'failure' ||
+           steps.gate.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.gate.outputs.pr || inputs.pr_number }}
+          PR: ${{ steps.resolve.outputs.pr || inputs.pr_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
           [ -z "${PR:-}" ] && { echo "No PR number; nothing to surface."; exit 0; }
-          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the CI-fix run errored before it could act (a transient GitHub API failure in the gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or push a new commit to resume.' "$RUN_URL")" || true
+          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the CI-fix run errored before it could act (a transient GitHub API failure in a gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or push a new commit to resume.' "$RUN_URL")" || true
 
       # Atlas tracking (design/atlas-tracking.md): a CI-fix round is the agent
       # working the PR's issue; an escalation hands it to a human. The PR
@@ -1083,11 +1156,14 @@ jobs:
             committed=1
             # HEAD still exactly the runner's clean base merge: codex changed
             # nothing (any commit above would have moved it), so say so
-            # rather than announcing "fix pushed" over a summary that says
-            # nothing needed changing. Still lands — the push is what
-            # re-runs CI (a computable merge ref again) — and still owes the
-            # @review the manifest carries; the re-review re-reads the
-            # now-current code.
+            # rather than announcing a fix over a summary that says nothing
+            # needed changing. Still lands — the push is what re-runs CI (a
+            # computable merge ref again) — and still owes the @review the
+            # manifest carries; the re-review re-reads the now-current code.
+            # The headers say "committed", not "pushed": this step cannot
+            # know the push happened (emit-landing may still lose the bundle
+            # and drop the hand-back, and the land job posts the comments
+            # either way), so the wording claims only what is true here.
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
             echo "committed $(git rev-parse --short HEAD) on the branch${merge_only:+ (base merge only)} — the land job pushes it"
           fi
@@ -1107,11 +1183,11 @@ jobs:
           # review by the next fix round on the same PR.
           {
             if [ -n "$merge_only" ]; then
-              printf '🤖 auto (codex, CI-fix attempt %s): base merge pushed; no fix this attempt — details below.\n\n' "$ATTEMPT"
+              printf '🤖 auto (codex, CI-fix attempt %s): base merge only, no fix this attempt — details below.\n\n' "$ATTEMPT"
             elif [ -n "$committed" ]; then
-              printf '🤖 auto (codex, CI-fix attempt %s): fix pushed — summary below.\n\n' "$ATTEMPT"
+              printf '🤖 auto (codex, CI-fix attempt %s): fix committed — summary below.\n\n' "$ATTEMPT"
             else
-              printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"
+              printf '🤖 auto (codex, CI-fix attempt %s): no fix this attempt — details below.\n\n' "$ATTEMPT"
             fi
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
@@ -1395,13 +1471,21 @@ jobs:
       #   provenance_comment_file — the model-provenance note, if any
       #   error     — the Surface step's message (fail_run: true)
       # Not set -e: a manifest must come out of every path. On the codex path
-      # the git reads are skipped (handback false) unless the unresolved-merge
-      # guard SUCCEEDED — the same condition emit-landing's read-only takes,
-      # so nothing above the start SHA is packaged either. The guard is
-      # itself gated on the codex step and the reclaim having succeeded, so
-      # "guard did not succeed" covers all three: a failed codex step (its
-      # partial local commits are never pushed — as before the split, when
-      # the landing step was gated on the run step), a reclaim that did not
+      # (the ENGINE the gate resolved — not `codexuser.outcome`, which is
+      # `skipped`/`failure` when the prep or user-setup step failed and
+      # would let those two fall through to the ancestry branch, landing
+      # the runner's base merge and keeping the attempt where the Surface
+      # strings, the refund and the docs all say nothing lands) the git
+      # reads are skipped (handback false) unless the unresolved-merge guard
+      # SUCCEEDED — the same condition emit-landing's read-only takes, so
+      # nothing above the start SHA is packaged either. The guard is itself
+      # gated on the codex step and the reclaim having succeeded, and both
+      # of those on the user setup, so "guard did not succeed" covers every
+      # codex-path failure: a failed prep or user-setup step (no codex
+      # process ran; the base merge, if any, stays unpushed and the round
+      # is refunded, as before the split), a failed codex step (its partial
+      # local commits are never pushed — as before the split, when the
+      # landing step was gated on the run step), a reclaim that did not
       # succeed (nothing lands from a workspace codex still owns), and a
       # guard that FAILED — codex may commit locally, and `git commit` over
       # staged-but-still-marked paths completes the base merge, so HEAD moves
@@ -1427,7 +1511,6 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
-          CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
           PROV_NOTE: ${{ steps.provenance.outputs.note }}
@@ -1447,8 +1530,8 @@ jobs:
           extra='{}'
           moved=false
           head=""
-          if [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
-            echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed codex step or reclaim skips it); running no git — nothing lands and no hand-back is owed."
+          if [ "$ENGINE" = "codex" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
+            echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed prep, user-setup, codex or reclaim step skips it); running no git — nothing lands and no hand-back is owed."
           elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
             if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
@@ -1473,7 +1556,7 @@ jobs:
             summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 || true)
             {
               if [ -n "$merge_only" ]; then
-                printf '🤖 auto (CI-fix attempt %s): base merge pushed; no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
+                printf '🤖 auto (CI-fix attempt %s): base merge only, no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
               else
                 printf '🤖 auto (CI-fix attempt %s): no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
               fi
@@ -1495,10 +1578,11 @@ jobs:
       # manifest for the land job. The PR number is the gate job's trusted
       # lookup, the SAME value the land job gets (README → Using the pair):
       # the validator pins the manifest's pr_number to it and its branch to
-      # that PR's live head ref. read-only on the codex path unless the
-      # unresolved-merge guard succeeded (the composer's condition, see its
-      # comment): a reclaim that did not succeed skips the guard, and no git
-      # may run against a workspace codex still owns; a FAILED guard means
+      # that PR's live head ref. read-only on the codex path (the gate's
+      # engine, so a failed prep or user-setup step is covered too) unless
+      # the unresolved-merge guard succeeded (the composer's condition, see
+      # its comment): a reclaim that did not succeed skips the guard, and no
+      # git may run against a workspace codex still owns; a FAILED guard means
       # conflict markers survive in the tree, and a local commit codex made
       # over them must not be bundled — read-only packages nothing above the
       # start SHA. Either way the manifest still carries the Surface step's
@@ -1519,7 +1603,7 @@ jobs:
           branch: ${{ inputs.head_branch }}
           pr-number: ${{ needs.gate.outputs.pr }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
-          read-only: ${{ steps.codexuser.outcome == 'success' && steps.codexguard.outcome != 'success' && 'true' || 'false' }}
+          read-only: ${{ needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success' && 'true' || 'false' }}
 
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate,
