@@ -48,10 +48,11 @@ therefore moves into deterministic workflow steps:
 | task context (CI logs, review findings) | agent fetches via gh | workflow pre-fetches into the prompt/workspace |
 
 Pre-fetching covers the dev verb's PR runs too: the prompt-compose step
-embeds the PR title/body and bounded newest-last comment slices (last
-12 discussion + 40 inline, the review-fix prep's bounds), so a trigger
-like "address the feedback above" carries its referent — codex cannot
-read the thread at runtime the way the Claude path does.
+embeds the PR title/body, the top-level comments filtered and anchored
+on the newest review round, and the review threads by state (the
+review-fix prep's shape — see Limitations → Fix-round context), so a
+trigger like "address the feedback above" carries its referent — codex
+cannot read the thread at runtime the way the Claude path does.
 
 This is a feature as much as a constraint: the verdict marker and the
 hand-back become guaranteed instead of prompt-enforced, and the
@@ -75,7 +76,17 @@ round / CI-fix attempt (infra failures — e.g. a missing
 `OPENAI_API_KEY` — must not march a PR toward spurious escalation);
 the loops' hand-back backstop keys on the codex *run* step, so a push
 that landed before the comment post died still gets its owed
-`@review`.
+`@review`. Since 2026-09-09 the landing is three steps, not one: the
+`codexland` step is git-only (commit, push, `pushed`/`merge_only`
+outputs — the only step carrying the pinned git env and the push
+credential), the `resolve-reported-threads` composite consumes the final
+message's `RESOLVED-THREADS:` line (below, under Limitations), and the
+`codexpost` step composes and posts the de-fanged summary with no git
+env at all. The downstream gates that used to read "landing succeeded"
+(the dev verb's `Stage - Review (hand-back)`, the loop's self-handoff
+detector) key on `codexpost`, which implies the two before it; the
+Surface steps name a landed-but-unposted run separately from a failed
+push.
 
 ### Marker/author contract
 
@@ -385,6 +396,48 @@ Verification for a change here, all cases prompted to codex (any verb):
   verification line is composed from the provisioning outcomes (venv on
   PATH / provisioning failed / nothing to provision) rather than asserting
   a venv unconditionally.
+- **Fix-round context is filtered and stateful since 2026-09-09**: the
+  codex fix prompts (review-fix loop, dev verb on a PR) embedded the last
+  12 top-level comments and the last 40 inline comments as a flat REST
+  list. On inspect_ai#428 that was bare triggers, verdict markers, the
+  sticky counter and stale fix summaries around the one review that
+  mattered, and 36 of the 40 inline entries were threads resolved days
+  earlier with nothing marking them settled. Now: machine comments are
+  dropped (bare triggers included — but only genuinely bare ones, so a
+  short human instruction opening with the token survives; verdict
+  comments likewise only when they are the bare verdict line, so a
+  reviewer run that folds its summary into the verdict comment is still
+  embedded rather than filtered out — the prep guard's error names that
+  filter as a possible cause of an empty section), the slice is
+  anchored on the newest review round (its first marker-bearing comment
+  from a machine author — the Bot type or the marvin account — since the
+  reviewer stamps every top-level comment it posts and a round can be
+  several; kept in full with everything after it up to a bound of the
+  round's marker comments plus 25 others, plus the last five human
+  comments before it), and review threads come from GraphQL
+  `reviewThreads` by state — OPEN in full with the thread id (the handle
+  the `RESOLVED-THREADS:` ending-contract line names for the
+  `resolve-reported-threads` composite), RESOLVED as a one-line index (only
+  when there are any), resolved-and-outdated dropped; the query's page
+  bounds (newest 100 threads, first 20 comments each) print a note when
+  hit rather than truncating silently. Both sections are written by the
+  shared `.github/actions/pr-feedback-context` composite (a step ahead of
+  each compose step; the compose cats its file), so the dev verb and the
+  review-fix loop run one jq program rather than two copies; its fetches
+  are retry-then-fail, and a failure is surfaced as a pre-agent error
+  (and refunded, in the loop) like a failed prep. Both anchor
+  patterns — the Claude marker and the codex reviewer's `engine: codex`
+  footer — join the de-fanged substrings on both the prompt and the
+  output side (every codex summary that posts as marvin, the CI-fix
+  loop's included), so a codex summary echoing either cannot become a
+  false anchor (the reviewer's own footer is appended after its sed AND
+  after its comment-size cap, so a truncated review still carries the
+  anchor), and the Claude-path prompts that post on a PR — the fix
+  prompt's forbidden-substring list and the dev verb's review-etiquette
+  rule — name them too; the author restriction covers a caller's human
+  commenters, who are under neither rule. The
+  reviewer is also told not to restate regression-accepted notes an
+  earlier round already posted.
 - **Codex reviews get the PR thread since 2026-09-09**: the Claude
   reviewer reads the PR description, prior review rounds and thread state
   with `gh` at runtime; codex cannot, and its prompt had been the generic
@@ -432,8 +485,42 @@ Verification for a change here, all cases prompted to codex (any verb):
   the runner-side provisioning would execute the fork's build backend, so
   an `engine:codex` label on a fork-head PR falls through to the Claude
   engine's sandboxed review path (logged, not commented).
-- **No review-thread resolution** in codex fix rounds (needs gh); the
-  handoff notes it so humans resolve threads at sign-off.
+- **Review-thread resolution in codex fix rounds — since 2026-09-09**
+  (was a limitation: codex cannot run gh, so every thread the loop opened
+  on a codex PR stayed OPEN and the handoff asked humans to resolve them;
+  by inspect_ai#428's eighth round the fix and review prompts carried
+  dozens of settled threads nobody could tell from live). The codex
+  ending contract now ends with `RESOLVED-THREADS: <id> ...` naming the
+  OPEN threads (ids from the embedded REVIEW THREADS section) it fully
+  addressed in code, or `none`; the shared
+  `.github/actions/resolve-reported-threads` composite, run between the
+  landing push and the summary post in both `claude.yml` and
+  `claude-auto-review.yml`, resolves exactly those via the
+  `resolveReviewThread` mutation — only after a push of real changes,
+  only ids that are currently-open threads of this PR (shape-checked and
+  intersected with a fresh query, so a hallucinated id is skipped),
+  best-effort so a failed resolve never reddens a landed round (a failed
+  query or mutation logs a `::warning::` carrying the API's reason rather
+  than reading as "codex hallucinated N ids"). The tag is matched
+  tolerantly (indent, list bullet, markdown bold/backticks closed on
+  either side of the colon, and the ids rendered as a bulleted or
+  numbered list on the lines beneath the tag rather than on its line —
+  one awk pass parses and strips the same block, so the two cannot
+  disagree) because the fail-safe miss would otherwise be silent. The
+  composite also writes the final
+  message with the block stripped, and the post step publishes that copy
+  with a header stating how many threads were resolved. The stripped copy
+  lives directly under `$RUNNER_TEMP`, not in the codex-owned output dir
+  (2026-09-10): the composite runs as the runner, and a path inside
+  `$RUNNER_TEMP/codex` made its awk die on the first write — the ids were
+  lost and every one of inspect_ai#428's ten overnight rounds posted
+  "(codex produced no final message)" while codex's summary sat unread; a
+  codex-owned dir was also a symlink hazard for a runner-side write. If
+  the copy is still missing the composite warns and the post step falls
+  back to the unstripped final message (a read needs no write permission)
+  before it gives up with the placeholder. Same rule as the Claude path's
+  REVIEW_ETIQUETTE: never resolve what was declined or only answered with
+  rationale.
 - **Branch sync is deterministic, not prompted** (was a limitation; fixed
   2026-09-01 after inspect_ai#392 sat 11 commits behind `main` across 20
   commits, with CI never running because GitHub cannot compute a merge ref
@@ -496,22 +583,48 @@ Verification for a change here, all cases prompted to codex (any verb):
 
 ## Network inside the codex sandbox
 
-ON since 2026-09-09 (decision: Ransom), via `network_access = true` under
-`[sandbox_workspace_write]` in the codex user's `config.toml`, written by
-the `Create codex user` step (the `create-codex-user` composite, shared by
-all four codex steps) before codex-action runs (the action keeps a
-pre-existing config and appends its provider block; the same key is
-rejected through `codex-args`). The home and `.codex` are 755 so the
-runner-side action can read the file back — a 700 home would make it read
-"" and drop the block silently. The key's survival rides on the action
-APPENDING to the existing file (`writeProxyConfig.ts` today), and `@v1` is
-a moving tag, so a revision that overwrote instead would turn network back
-off with no symptom but trio tests failing again — the one setting whose
-loss would be silent. So the `codex-usage` composite, the one post-codex
-step every codex path runs (the review path has no reclaim step), re-reads
-the `config.toml` codex ran with and posts a `::warning::` if the key is
-gone (review round 4 of #87): a future silent revert becomes a loud one on
-every run, not only on the first live check after merge.
+ON since 2026-09-09 (decision: Ransom) — effective since 2026-09-10. The
+mechanism is a **named permission profile**: `create-codex-user` writes
+`[permissions.workspace_net]` with `extends = ":workspace"`, the checkout
+as a workspace root, and `[permissions.workspace_net.network] enabled =
+true` into the codex user's `config.toml`, and the workflows pass
+`permission-profile: workspace_net` to codex-action. The first attempt
+(#87) set the legacy `[sandbox_workspace_write] network_access = true`
+instead and changed nothing: codex-action selects the profile explicitly
+(`default_permissions=":workspace"`), and codex deliberately ignores that
+legacy table for an explicit builtin selection ("explicitly selecting
+`:workspace` intentionally ignores those legacy settings",
+`core/src/config/mod.rs`) — trio still died on `setsockopt` in every
+2026-09-10 round while the detector reported the key present. Named
+profiles may extend a builtin (`extensible_builtin_parent_profile`) and
+their `network.enabled = true` compiles straight to
+`NetworkSandboxPolicy::Enabled` (`compile_network_sandbox_policy`), which
+is the condition under which the seccomp filter is not installed. The
+action keeps a pre-existing config and appends its provider block, and
+rejects `permissions.*` through `codex-args`, so the file is the only
+route; home and `.codex` are 755 so the runner-side action can read it
+back — a 700 home would make it read "" and drop the block silently.
+
+The profile's survival rides on the action APPENDING to the existing file
+(`writeProxyConfig.ts` today), and `@v1` is a moving tag. Under #87 that
+was the one setting whose loss would have been silent (a dropped legacy
+key just left the sandbox closed, with no symptom but trio tests failing
+again), so the `codex-usage` composite carried a post-run detector that
+re-read the `config.toml` codex ran with and warned if the key was gone
+(review round 4 of #87). The named profile made that loss loud instead:
+the action still passes `default_permissions="workspace_net"`, and codex
+refuses to start when `default_permissions` names an undefined profile
+(`PermissionProfileResolutionError::UndefinedProfile`,
+`codex-rs/config/src/permissions_toml.rs`), so a revision that overwrote
+the file would fail the run at the codex step before any test runs. The
+detector was therefore dropped in #90 — it would have fired only in a
+case that had already failed loudly, and its warning ("codex ran with
+network off") would have been wrong for that case. The flip side of the
+same mechanism, accepted: any codex start against that `CODEX_HOME`
+WITHOUT `default_permissions` is now a hard error too (profiles defined
+but none selected); today the only codex invocation there is
+codex-action's, which always passes the flag when `permission-profile` is
+set.
 
 Pre-creating `.codex` has one side effect the step must compensate for
 (caught in review round 1 of #87): codex-action's `resolve-codex-home`
@@ -536,8 +649,10 @@ wakeup socketpair (it sets `SO_SNDBUF`), inspect_ai's control server
 cannot bind, asyncio thread wake-ups stall, and nothing downloads a
 tokenizer. inspect_ai#428's codex reviews (2026-09-09) lost every trio
 test and half the asyncio suite to this and fell back to timers and
-stubs. `network_access = true` on the builtin `:workspace` profile skips
-the filter entirely.
+stubs. `network.enabled = true` on the `workspace_net` profile (which
+extends the builtin `:workspace`) skips the filter entirely; the legacy
+`network_access = true` key on the builtin itself does not when the
+profile is selected explicitly, as above.
 
 Trust argument: every codex run here is a same-repo tree — the reviewer
 routes fork heads to Claude, the dev agent refuses them, the loops gate on

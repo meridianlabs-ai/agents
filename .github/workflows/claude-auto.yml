@@ -753,7 +753,7 @@ jobs:
           codex-user: codex
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
-          permission-profile: ":workspace"
+          permission-profile: workspace_net
           # workflow_run's actor is the CI run's actor: normally the machine
           # account (a User with write — passes the action's built-in check),
           # but a branch the Claude App pushed (mixed-engine PR relabeled
@@ -785,9 +785,7 @@ jobs:
       # output / reasoning counts and the model that served in the job
       # summary — the codex counterpart of Model provenance below. Runs right
       # after codex, before landing, so a landing failure can't hide the
-      # spend. Also warns if codex-action's config rewrite dropped the
-      # sandbox's `network_access = true` (design/codex-engine.md → Network).
-      # Best-effort: the script exits 0 on every path, and
+      # spend. Best-effort: the script exits 0 on every path, and
       # continue-on-error makes that structural — a failure here must never
       # trip the landing step's implicit success() gate and strand the work.
       - name: Codex usage
@@ -911,8 +909,12 @@ jobs:
           # a write-access account, and the loops match their verdict/handoff
           # markers with plain substring contains() — codex QUOTING a marker
           # would forge a verdict or suppress an owed hand-back, so break
-          # those substrings too. On a push, the backstop below posts the
-          # owed @review.
+          # those substrings too. The review-comment anchor marker and the
+          # codex reviewer's engine footer are in the list as well: this
+          # summary posts as marvin, a machine author the review-fix rounds'
+          # anchor selection trusts, so a CI-fix summary echoing either would
+          # be taken for the newest review by the next fix round on the same
+          # PR. On a push, the backstop below posts the owed @review.
           {
             if [ -n "$merge_only" ]; then
               printf '🤖 auto (codex, CI-fix attempt %s): base merge pushed; no fix this attempt — details below.\n\n' "$ATTEMPT"
@@ -922,7 +924,8 @@ jobs:
               printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"
             fi
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
-                   -e 's/claude-review-(summary|verdict)/claude-review \1/g' \
+                   -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                   -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
           } >"$RUNNER_TEMP/codex-comment.md"

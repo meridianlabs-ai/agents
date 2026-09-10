@@ -129,7 +129,8 @@ next run. Same triggers, same markers, same board tracking. Requirements:
 the repo needs the `OPENAI_API_KEY` org secret and the `engine:codex`
 label created (`gh label create engine:codex -c 8250DF -d "route agent
 runs to Codex"`). Codex v1 differences: review findings arrive as one
-summary comment (no inline comments, no thread auto-resolution), and
+summary comment (no inline comments; codex fix rounds do resolve the
+Claude reviewer's inline threads they report as addressed), and
 external proxy reviews always use Claude. Codex reviews run tests to
 verify findings like the Claude reviewer — via the repo's claude-setup
 action, or a fallback uv dev-install when the checkout has a

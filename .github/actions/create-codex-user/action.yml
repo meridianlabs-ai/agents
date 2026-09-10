@@ -59,17 +59,25 @@ description: >-
      wakeup socketpair (it sets SO_SNDBUF), inspect_ai's control server
      cannot bind, asyncio thread wake-ups stall, and nothing can download
      a tokenizer; inspect_ai#428's codex reviews (2026-09-09) lost every
-     trio test and half the asyncio suite to this. `network_access = true`
-     on the builtin `:workspace` profile skips the filter entirely. codex
-     reads it from `[sandbox_workspace_write]` in `CODEX_HOME/config.toml`;
-     codex-action keeps a pre-existing config.toml and appends its provider
-     block, and REJECTS the same key via `codex-args` — so the file is the
-     only route. Home and `.codex` are 755 and the file 644 because the
-     action reads the file back runner-side before appending; a 700 home
-     would make it read "" and silently drop the block. The key's survival
-     rides on the action appending rather than overwriting (`@v1` is a
-     moving tag), so the `codex-usage` composite re-reads the file after
-     codex and warns if the key is gone. Trust argument:
+     trio test and half the asyncio suite to this. `network.enabled = true` on a
+     named profile that `extends = ":workspace"` skips the filter entirely
+     (the legacy `[sandbox_workspace_write] network_access` key does NOT:
+     codex ignores that table when codex-action selects `:workspace`
+     explicitly — the first attempt, 2026-09-09, changed nothing). codex
+     reads the profile from `CODEX_HOME/config.toml`; codex-action keeps a
+     pre-existing config.toml and appends its provider block, and REJECTS
+     `permissions.*` via `codex-args` — so the file is the only route, and
+     the workflows pass `permission-profile: workspace_net`. Home and
+     `.codex` are 755 and the file 644 because the action reads the file
+     back runner-side before appending; a 700 home would make it read ""
+     and silently drop the block. The profile's survival rides on the
+     action appending rather than overwriting (`@v1` is a moving tag), but
+     its loss is LOUD, not silent: the action still passes
+     `default_permissions="workspace_net"`, and codex refuses to start on a
+     `default_permissions` that names an undefined profile
+     (`PermissionProfileResolutionError::UndefinedProfile`), so the run
+     fails at the codex step rather than running with network off — which
+     is why no post-run detector for it exists. Trust argument:
      every codex run here is a same-repo tree (the reviewer routes fork
      heads to Claude, the dev agent refuses them, the loops gate on
      isCrossRepository) and codex holds NO credentials — the API key sits
@@ -129,6 +137,29 @@ runs:
         #    locks it down).
         sudo touch "/home/codex/.codex/$GITHUB_RUN_ID.json"
         sudo chmod 666 "/home/codex/.codex/$GITHUB_RUN_ID.json"
-        printf '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).\n[sandbox_workspace_write]\nnetwork_access = true\n' \
+        # A NAMED profile, not `[sandbox_workspace_write] network_access`:
+        # codex-action selects the profile explicitly (`-c
+        # default_permissions=":workspace"`), and codex deliberately ignores
+        # the legacy [sandbox_workspace_write] table for an explicit builtin
+        # selection (core/src/config/mod.rs: "explicitly selecting
+        # `:workspace` intentionally ignores those legacy settings") — the
+        # 2026-09-09 attempt wrote that key and changed nothing: trio still
+        # died on setsockopt in every 2026-09-10 round while the detector
+        # reported the key present. Named profiles may `extends` a builtin
+        # (core/src/config/permissions.rs, extensible_builtin_parent_profile)
+        # and their `[..network] enabled = true` compiles straight to
+        # NetworkSandboxPolicy::Enabled (compile_network_sandbox_policy), so
+        # this inherits :workspace's filesystem rules, pins the checkout as
+        # a workspace root, and turns the seccomp network filter off.
+        # codex-action accepts a custom profile name (only three unrelated
+        # config roots are restricted for custom profiles).
+        printf '%s\n' \
+          '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).' \
+          '[permissions.workspace_net]' \
+          'extends = ":workspace"' \
+          '[permissions.workspace_net.workspace_roots]' \
+          '"." = true' \
+          '[permissions.workspace_net.network]' \
+          'enabled = true' \
           | sudo -u codex tee /home/codex/.codex/config.toml >/dev/null
         sudo chmod 644 /home/codex/.codex/config.toml
