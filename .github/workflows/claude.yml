@@ -1346,7 +1346,7 @@ jobs:
           codex-user: codex
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
-          permission-profile: ":workspace"
+          permission-profile: workspace_net
           # Authorization: codex-action's own built-in write-access check on
           # the triggering actor is the real gate here — steps.trig
           # deliberately checks trigger shape, not permissions (see its

@@ -753,7 +753,7 @@ jobs:
           codex-user: codex
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
-          permission-profile: ":workspace"
+          permission-profile: workspace_net
           # workflow_run's actor is the CI run's actor: normally the machine
           # account (a User with write — passes the action's built-in check),
           # but a branch the Claude App pushed (mixed-engine PR relabeled

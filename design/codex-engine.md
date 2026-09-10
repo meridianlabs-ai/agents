@@ -574,36 +574,27 @@ Verification for a change here, all cases prompted to codex (any verb):
 
 ## Network inside the codex sandbox
 
-ON since 2026-09-09 (decision: Ransom), via `network_access = true` under
-`[sandbox_workspace_write]` in the codex user's `config.toml`, written by
-the `Create codex user` step (the `create-codex-user` composite, shared by
-all four codex steps) before codex-action runs (the action keeps a
-pre-existing config and appends its provider block; the same key is
-rejected through `codex-args`). The home and `.codex` are 755 so the
-runner-side action can read the file back — a 700 home would make it read
-"" and drop the block silently. The key's survival rides on the action
-APPENDING to the existing file (`writeProxyConfig.ts` today), and `@v1` is
-a moving tag, so a revision that overwrote instead would turn network back
-off with no symptom but trio tests failing again — the one setting whose
-loss would be silent. So the `codex-usage` composite, the one post-codex
-step every codex path runs (the review path has no reclaim step), re-reads
-the `config.toml` codex ran with and posts a `::warning::` if the key is
-gone (review round 4 of #87): a future silent revert becomes a loud one on
-every run, not only on the first live check after merge.
-
-Pre-creating `.codex` has one side effect the step must compensate for
-(caught in review round 1 of #87): codex-action's `resolve-codex-home`
-returns early when `~codex/.codex` already exists ("assume it's correctly
-permissioned"), and only its create path pre-touches the world-writable
-`$CODEX_HOME/$GITHUB_RUN_ID.json` that `codex-responses-api-proxy` —
-launched as `runner`, no sudo — writes its server info into. Without that
-file the proxy gets EACCES in the codex-owned 755 dir and the action fails
-at "Wait for Responses API proxy" before codex runs. So the step mirrors
-the action: `sudo touch` + `chmod 666` on that path (the action's `-s`
-probe treats the empty file as "not running yet" and locks it to
-`444`/root once the proxy is up). Anyone adding another file under
-`.codex` before the action runs should check what else the skipped
-bootstrap would have done.
+ON since 2026-09-09 (decision: Ransom) — effective since 2026-09-10. The
+mechanism is a **named permission profile**: `create-codex-user` writes
+`[permissions.workspace_net]` with `extends = ":workspace"`, the checkout
+as a workspace root, and `[permissions.workspace_net.network] enabled =
+true` into the codex user's `config.toml`, and the workflows pass
+`permission-profile: workspace_net` to codex-action. The first attempt
+(#87) set the legacy `[sandbox_workspace_write] network_access = true`
+instead and changed nothing: codex-action selects the profile explicitly
+(`default_permissions=":workspace"`), and codex deliberately ignores that
+legacy table for an explicit builtin selection ("explicitly selecting
+`:workspace` intentionally ignores those legacy settings",
+`core/src/config/mod.rs`) — trio still died on `setsockopt` in every
+2026-09-10 round while the detector reported the key present. Named
+profiles may extend a builtin (`extensible_builtin_parent_profile`) and
+their `network.enabled = true` compiles straight to
+`NetworkSandboxPolicy::Enabled` (`compile_network_sandbox_policy`), which
+is the condition under which the seccomp filter is not installed. The
+action keeps a pre-existing config and appends its provider block, and
+rejects `permissions.*` through `codex-args`, so the file is the only
+route; home and `.codex` are 755 so the runner-side action can read it
+back.
 
 Why: with network off, codex's Linux sandbox installs a seccomp filter
 (`linux-sandbox/src/landlock.rs`, `Restricted` mode) that allows AF_UNIX

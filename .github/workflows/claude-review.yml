@@ -1147,7 +1147,7 @@ jobs:
           codex-user: codex
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
-          permission-profile: ":workspace"
+          permission-profile: workspace_net
           allow-bot-users: "claude"
           output-file: ${{ runner.temp }}/codex/codex-review.json
           # Written runner-owned by the setup step above; NOT the inline
