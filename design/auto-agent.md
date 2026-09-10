@@ -127,7 +127,16 @@ finding 4121989) that is enforced in three layers rather than assumed:
   label is removed as marvin and no round runs; no evidence (no labeled event,
   or a failed permission lookup) refuses without disarming, so an API blip
   never takes a human's label away. This covers any path that plants the
-  label, not just the one the trig check closed.
+  label, not just the one the trig check closed. Both refusals are surfaced
+  on the PR, not only in the job log: the disarm posts a trigger-free note
+  naming the labeler (without an @, so an outsider is not pinged) and their
+  permission; the refuse-without-disarm path posts a one-time sticky notice
+  (`<!-- auto-gate-unverified -->`) saying the label is on but unverifiable
+  and that a write-access account can remove and re-add it to arm the loop.
+  The sticky notice matters because a lookup failure can be permanent, not a
+  blip — the permission endpoint 404s for a deleted account or a `[bot]`
+  labeler — which would otherwise be the silent labeled-and-stalled state the
+  gate-failure failsafe (below) exists to prevent.
 
 The injection blast-radius argument in architecture.md → Permissions is
 unchanged.

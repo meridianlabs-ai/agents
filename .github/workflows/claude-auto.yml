@@ -247,19 +247,47 @@ jobs:
           # it must come from the machine account (claude.yml's @auto opt-in
           # and PR-open propagation, or the triage pipeline) or from an
           # account with write access. Timeline fetched through the retrying
-          # ghr and filtered locally (`--paginate --jq` runs per page).
-          # Positive evidence of an outsider DISARMS — the label comes off as
-          # marvin, so the PR does not stay armed for the next event; no
-          # evidence (no labeled event found, or the permission lookup
-          # failed) refuses WITHOUT disarming: fail closed, but never take a
-          # human's label away on an API blip. Twin of the block in
+          # ghr (a persistent fetch failure fails the gate, and the
+          # gate-failure failsafe below surfaces that) at 100 events per page
+          # — a PR timeline carries an event per commit, comment, label and
+          # cross-reference, so the default 30 would page several times on
+          # every loop event — and filtered locally (`--paginate --jq` runs
+          # per page). Positive evidence of an outsider DISARMS — the label
+          # comes off as marvin, so the PR does not stay armed for the next
+          # event; no evidence (no labeled event found, or the permission
+          # lookup failed) refuses WITHOUT disarming: fail closed, but never
+          # take a human's label away on an API blip. Both refusals are
+          # surfaced on the PR, not just in the job log: the disarm strips a
+          # label a maintainer may be watching for, and the no-evidence path
+          # leaves the PR labeled and skipped on every event — a lookup
+          # failure can be PERMANENT (the permission endpoint 404s for a
+          # deleted account or a `[bot]` labeler), which is exactly the
+          # "loop silently stalls with the label still on" state the
+          # gate-failure failsafe exists to prevent. The disarm posts a fresh
+          # comment each time (the label has to be re-applied for it to
+          # recur, and the note names who did); the no-evidence notice is
+          # sticky — posted once per PR under its own marker, since later
+          # events would only repeat it. Both bodies are trigger-free like
+          # the failsafe's (no literal @auto/@review) and name the labeler
+          # without an @ so an outsider is not pinged. Twin of the block in
           # claude-auto-review.yml's gate; keep them in step.
-          labeler=$(ghr gh api "repos/$REPO/issues/$number/timeline" --paginate \
+          labeler=$(ghr gh api "repos/$REPO/issues/$number/timeline?per_page=100" --paginate \
                       | jq -rs --arg l "$AUTO_LABEL" \
                           '[.[][] | select(.event=="labeled" and .label.name==$l)] | last | .actor.login // empty')
+          notice_unverified() {
+            local marker="<!-- auto-gate-unverified -->" posted
+            posted=$(ghr gh api "repos/$REPO/issues/$number/comments?per_page=100" --paginate \
+                       | jq -rs --arg m "$marker" 'any(.[][]; .body|contains($m))') || posted=""
+            if [ "$posted" = "true" ]; then
+              echo "Unverified-label notice already on PR #$number; not repeating it."; return 0
+            fi
+            gh pr comment "$number" --repo "$REPO" --body "$(printf '%s\n⚠️ auto: this PR carries the `%s` label, but auto could not verify who applied it (%s), so it is not running — the label is left on. To arm the loop, an account with write access can remove and re-add the label. This notice posts once; later events skip quietly until the label changes hands.' "$marker" "$AUTO_LABEL" "$1")" \
+              || echo "::warning::could not post the unverified-label notice on PR #$number"
+          }
           lperm=""
           if [ -z "$labeler" ]; then
             echo "::warning::PR #$number carries '$AUTO_LABEL' but its timeline has no labeled event for it; cannot verify who opted in. Skipping."
+            notice_unverified "its timeline has no labeled event for it"
             act skip; exit 0
           elif [ "$labeler" != "i-am-marvin" ]; then
             lperm=$(ghr gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission') || lperm=""
@@ -267,11 +295,14 @@ jobs:
               admin|maintain|write) ;;
               "")
                 echo "::warning::could not look up the permission of $labeler (who applied '$AUTO_LABEL' to PR #$number); skipping without disarming."
+                notice_unverified "the permission lookup for $labeler, who applied it, failed — a deleted account or a bot labeler cannot be looked up"
                 act skip; exit 0 ;;
               *)
                 echo "::warning::'$AUTO_LABEL' on PR #$number was applied by $labeler, who has no write access ($lperm); removing the label and skipping."
                 gh pr edit "$number" --repo "$REPO" --remove-label "$AUTO_LABEL" \
                   || echo "::warning::could not remove '$AUTO_LABEL' from PR #$number"
+                gh pr comment "$number" --repo "$REPO" --body "$(printf '⚠️ auto: the `%s` label on this PR was applied by %s, who does not have write access to this repository (permission: %s). The label opts a PR into the loop, so auto removed it and did not run. A maintainer who wants the loop on this PR can re-apply the label.' "$AUTO_LABEL" "$labeler" "$lperm")" \
+                  || echo "::warning::could not post the disarm notice on PR #$number"
                 act skip; exit 0 ;;
             esac
           fi

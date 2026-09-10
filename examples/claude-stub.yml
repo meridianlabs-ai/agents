@@ -163,7 +163,11 @@ jobs:
     # reusable workflow's trigger check (a fail-closed permission lookup on
     # the actor, before any write) remains the authority. A collaborator
     # whose association is reported looser than expected is dropped here
-    # silently; the trig check would refuse them anyway.
+    # silently; the trig check would refuse them anyway. The issue-body
+    # branch is scoped to `issues` events like the `claude` job's: an
+    # issue_comment payload also carries issue.body/author_association, so
+    # without the scope a member-authored issue mentioning @auto would let
+    # every comment from anyone spin a runner (refused by trig, but paid for).
     if: |
       ( github.event_name == 'issues' && github.event.action == 'labeled'
         && github.event.label.name == 'auto'
@@ -178,7 +182,8 @@ jobs:
               && contains(github.event.comment.body, '@auto') ) ||
             ( contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)
               && contains(github.event.review.body, '@auto') ) ||
-            ( contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+            ( github.event_name == 'issues'
+              && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
               && ( contains(github.event.issue.body, '@auto')
                 || contains(github.event.issue.title, '@auto') ) ) ||
             github.event.label.name == 'auto'
