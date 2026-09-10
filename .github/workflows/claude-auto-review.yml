@@ -157,12 +157,18 @@ jobs:
       id-token: write
       actions: read
     steps:
-      # Gate (reviewer identity, same-repo, auto label, token) and compute the
-      # round count — all via the API, before any checkout. The counter
-      # increments before the agent runs, so a crashed agent still consumes a
-      # round. Also derives the PR head branch (issue_comment doesn't carry it).
-      - name: Gate and count
-        id: gate
+      # The gate is three steps, all via the API, before any checkout: resolve
+      # the PR and check reviewer identity, same-repo, token and the auto
+      # label; verify who applied the label (shared composite); then compute
+      # the round count and decide. The counter increments before the agent
+      # runs, so a crashed agent still consumes a round — and it is computed
+      # only AFTER the labeler check passes, so an outsider's label never
+      # burns rounds. Also derives the PR head branch (issue_comment doesn't
+      # carry it). Downstream steps read every gate output (`act`,
+      # `head_branch`, `engine`, `round`, …) from the LAST step; the resolve
+      # step hands it the PR JSON it fetched, so the split is invisible to them.
+      - name: Resolve PR and check the auto label
+        id: resolve
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -170,13 +176,11 @@ jobs:
           AUTHOR: ${{ inputs.comment_author }}
           REVIEWER: ${{ inputs.reviewer_login }}
           AUTO_LABEL: ${{ inputs.auto_label }}
-          CAP: ${{ inputs.review_round_cap }}
-          HANDOFF_MENTION: ${{ inputs.handoff_mention }}
-          ANCHOR_REPO: ${{ inputs.anchor_repo }}
           HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
-          MARKER: "<!-- auto-review-rounds -->"
         run: |
           set -euo pipefail
+          # `act` here is skip or verify (proceed to the labeler check); the
+          # final act (skip/fix/converged/escalate) is the Gate and count step's.
           act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
           # Retry a gh call on transient failure. A 5xx / secondary rate limit
           # returns an HTML error page, which `gh --jq` then rejects with
@@ -224,73 +228,61 @@ jobs:
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr_json")" != "true" ]; then
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
           fi
-          # Who applied the label (issue #92). The label is the loop's opt-in
-          # and kill-switch, and until now nothing checked who opted in: a
-          # label planted by an account without write access armed the loop
-          # exactly like a maintainer's. The most recent `labeled` event for
-          # it must come from the machine account (claude.yml's @auto opt-in
-          # and PR-open propagation, or the triage pipeline) or from an
-          # account with write access. Timeline fetched through the retrying
-          # ghr (a persistent fetch failure fails the gate, and the
-          # gate-failure failsafe below surfaces that) at 100 events per page
-          # — a PR timeline carries an event per commit, comment, label and
-          # cross-reference, so the default 30 would page several times on
-          # every loop event — and filtered locally (`--paginate --jq` runs
-          # per page). Positive evidence of an outsider DISARMS — the label
-          # comes off as marvin, so the PR does not stay armed for the next
-          # event; no evidence (no labeled event found, or the permission
-          # lookup failed) refuses WITHOUT disarming: fail closed, but never
-          # take a human's label away on an API blip. Both refusals are
-          # surfaced on the PR, not just in the job log: the disarm strips a
-          # label a maintainer may be watching for, and the no-evidence path
-          # leaves the PR labeled and skipped on every event — a lookup
-          # failure can be PERMANENT (the permission endpoint 404s for a
-          # deleted account or a `[bot]` labeler), which is exactly the
-          # "loop silently stalls with the label still on" state the
-          # gate-failure failsafe exists to prevent. The disarm posts a fresh
-          # comment each time (the label has to be re-applied for it to
-          # recur, and the note names who did); the no-evidence notice is
-          # sticky — posted once per PR under its own marker, since later
-          # events would only repeat it. Both bodies are trigger-free like
-          # the failsafe's (no literal @auto/@review) and name the labeler
-          # without an @ so an outsider is not pinged. Twin of the block in
-          # claude-auto.yml's gate; keep them in step.
-          labeler=$(ghr gh api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate \
-                      | jq -rs --arg l "$AUTO_LABEL" \
-                          '[.[][] | select(.event=="labeled" and .label.name==$l)] | last | .actor.login // empty')
-          notice_unverified() {
-            local marker="<!-- auto-gate-unverified -->" posted
-            posted=$(ghr gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
-                       | jq -rs --arg m "$marker" 'any(.[][]; .body|contains($m))') || posted=""
-            if [ "$posted" = "true" ]; then
-              echo "Unverified-label notice already on PR #$PR; not repeating it."; return 0
-            fi
-            gh pr comment "$PR" --repo "$REPO" --body "$(printf '%s\n⚠️ auto: this PR carries the `%s` label, but auto could not verify who applied it (%s), so it is not running — the label is left on. To arm the loop, an account with write access can remove and re-add the label. This notice posts once; later events skip quietly until the label changes hands.' "$marker" "$AUTO_LABEL" "$1")" \
-              || echo "::warning::could not post the unverified-label notice on PR #$PR"
+          # Hand the fetched PR to the counting step (one line: gh emits
+          # compact JSON, and `-c` guarantees it for the single-line output).
+          echo "pr_json=$(jq -c . <<<"$pr_json")" >>"$GITHUB_OUTPUT"
+          act verify
+
+      # Who applied the label (issue #92): the most recent `labeled` event
+      # must come from marvin or a write-access account. An outsider's label
+      # is removed (as marvin) and noted on the PR; no evidence (no event,
+      # an App labeler, a failed lookup) refuses without disarming and posts
+      # a one-time notice. Shared composite with claude-auto.yml — the
+      # verdicts and the PR-facing text live there. Runs under MARVIN_TOKEN
+      # (the resolve step already required it). A persistent timeline fetch
+      # failure FAILS this step, which the gate-failure failsafe below
+      # surfaces like a crash of the other two.
+      - name: Verify who applied the auto label
+        id: labeler
+        if: steps.resolve.outputs.act == 'verify'
+        uses: meridianlabs-ai/agents/.github/actions/verify-auto-labeler@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN }}
+          repo: ${{ github.repository }}
+          pr: ${{ inputs.pr_number }}
+          label: ${{ inputs.auto_label }}
+
+      - name: Gate and count
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          PR_JSON: ${{ steps.resolve.outputs.pr_json }}
+          RESOLVED: ${{ steps.resolve.outputs.act }}
+          LABELER_VERDICT: ${{ steps.labeler.outputs.verdict }}
+          CAP: ${{ inputs.review_round_cap }}
+          HANDOFF_MENTION: ${{ inputs.handoff_mention }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
+          MARKER: "<!-- auto-review-rounds -->"
+        run: |
+          set -euo pipefail
+          act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          # Same ghr as the resolve step (and claude-auto.yml's gate).
+          ghr() {
+            local n=0 out
+            until out=$("$@"); do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then return 1; fi
+              sleep $((n*3))
+            done
+            printf '%s' "$out"
           }
-          lperm=""
-          if [ -z "$labeler" ]; then
-            echo "::warning::PR #$PR carries '$AUTO_LABEL' but its timeline has no labeled event for it; cannot verify who opted in. Skipping."
-            notice_unverified "its timeline has no labeled event for it"
-            act skip; exit 0
-          elif [ "$labeler" != "i-am-marvin" ]; then
-            lperm=$(ghr gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission') || lperm=""
-            case "$lperm" in
-              admin|maintain|write) ;;
-              "")
-                echo "::warning::could not look up the permission of $labeler (who applied '$AUTO_LABEL' to PR #$PR); skipping without disarming."
-                notice_unverified "the permission lookup for $labeler, who applied it, failed — a deleted account or a bot labeler cannot be looked up"
-                act skip; exit 0 ;;
-              *)
-                echo "::warning::'$AUTO_LABEL' on PR #$PR was applied by $labeler, who has no write access ($lperm); removing the label and skipping."
-                gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" \
-                  || echo "::warning::could not remove '$AUTO_LABEL' from PR #$PR"
-                gh pr comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the `%s` label on this PR was applied by %s, who does not have write access to this repository (permission: %s). The label opts a PR into the loop, so auto removed it and did not run. A maintainer who wants the loop on this PR can re-apply the label.' "$AUTO_LABEL" "$labeler" "$lperm")" \
-                  || echo "::warning::could not post the disarm notice on PR #$PR"
-                act skip; exit 0 ;;
-            esac
+          if [ "$RESOLVED" != "verify" ]; then act skip; exit 0; fi
+          if [ "$LABELER_VERDICT" != "ok" ]; then
+            echo "Labeler check on PR #$PR: ${LABELER_VERDICT:-no verdict}; skipping."; act skip; exit 0
           fi
-          echo "'$AUTO_LABEL' on PR #$PR was applied by $labeler${lperm:+ ($lperm)}."
+          pr_json="$PR_JSON"
           # Closed PR, still auto-labeled: on the fork that is a deliberate
           # continuation surface, not garbage — promotion opens the upstream
           # PR from the SAME branch (upstream runs no agents), so
@@ -493,16 +485,20 @@ jobs:
           fi
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
 
-      # Failsafe: if the gate step itself errored (e.g. a transient API failure
-      # the retries above couldn't ride out), it never set `act`, so every step
-      # below skips and nothing reaches the PR — the loop would stall silently
-      # with the label still on. Surface it so a human knows to resume. Kept
-      # trigger-free ON PURPOSE: the body must not contain a literal @review or
-      # @auto, or this bot-authored comment would re-fire the loop and, on a
-      # persistent gate failure, spin (see design/auto-agent.md). The `auto`
-      # label is left on so re-running the job or a fresh review resumes cleanly.
+      # Failsafe: if any of the three gate steps errored (e.g. a transient API
+      # failure the retries above couldn't ride out), `act` was never set, so
+      # every step below skips and nothing reaches the PR — the loop would
+      # stall silently with the label still on. Surface it so a human knows to
+      # resume. Kept trigger-free ON PURPOSE: the body must not contain a
+      # literal @review or @auto, or this bot-authored comment would re-fire
+      # the loop and, on a persistent gate failure, spin (see
+      # design/auto-agent.md). The `auto` label is left on so re-running the
+      # job or a fresh review resumes cleanly.
       - name: Surface gate failure
-        if: always() && steps.gate.outcome == 'failure'
+        if: >-
+          always() &&
+          (steps.resolve.outcome == 'failure' || steps.labeler.outcome == 'failure' ||
+           steps.gate.outcome == 'failure')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
@@ -511,7 +507,7 @@ jobs:
         run: |
           set -uo pipefail
           [ -z "${PR:-}" ] && { echo "No PR number; nothing to surface."; exit 0; }
-          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the review-fix run errored before it could act (a transient GitHub API failure in the gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or post a fresh review request to resume.' "$RUN_URL")" || true
+          gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the review-fix run errored before it could act (a transient GitHub API failure in a gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or post a fresh review request to resume.' "$RUN_URL")" || true
 
       # Atlas tracking (design/atlas-tracking.md): a review-fix round is the
       # agent working the PR's issue; both @auto exits — converged AND

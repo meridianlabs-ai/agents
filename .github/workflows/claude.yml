@@ -276,10 +276,6 @@ jobs:
           EVENT: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
           ACTOR: ${{ github.actor }}
-          # The payload's sender: on the `labeled` path that is whoever
-          # applied the label (the account the authorization check must
-          # judge); everywhere else it coincides with github.actor.
-          SENDER: ${{ github.event.sender.login }}
           COMMENT: ${{ github.event.comment.body }}
           REVIEW: ${{ github.event.review.body }}
           IBODY: ${{ github.event.issue.body }}
@@ -331,25 +327,21 @@ jobs:
           # move, no @auto opt-in, no counter reset, no checkout, no agent.
           # Same lookup the reviewer's trig step makes for @review, with the
           # job token (read is enough, and it cannot expire like a PAT). Who
-          # is judged: the event's sender — on the `labeled` path whoever
-          # applied the label (marvin for triage-applied `auto` labels; it
-          # holds write, so that kickoff still passes), on every other path
-          # the commenter/author, i.e. github.actor. Fail closed: a lookup
-          # error is `none`. Retried once like the fork-head lookup, each
-          # attempt captured and used only on success (a failed `gh api`
-          # prints its error body to STDOUT). Checked BEFORE the fork-head
-          # lookup so an outsider's trigger costs one read and produces no
-          # refusal comment: `fork_head` stays false for them, and the
-          # refusal step is gated on `authorized` as well.
+          # is judged: github.actor — the commenter/author, and on the
+          # `labeled` path the account that applied the label (the actor of
+          # a label event IS the labeler; marvin for triage-applied `auto`
+          # labels, and it holds write, so that kickoff still passes). Fail
+          # closed: a lookup error is `none`. Retried once like the fork-head
+          # lookup, each attempt captured and used only on success (a failed
+          # `gh api` prints its error body to STDOUT). Checked BEFORE the
+          # fork-head lookup so an outsider's trigger costs one read and
+          # produces no refusal comment: `fork_head` stays false for them,
+          # and the refusal step is gated on `authorized` as well.
           authorized=false
           if [ "$ok" = "true" ]; then
-            who="$ACTOR"
-            if [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] && [ -n "$SENDER" ]; then
-              who="$SENDER"
-            fi
             perm=""
             for i in 1 2; do
-              perm=$(gh api "repos/$REPO/collaborators/$who/permission" --jq '.permission' 2>/dev/null) && break
+              perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission' 2>/dev/null) && break
               perm=""
               [ "$i" -lt 2 ] && sleep 5
             done
@@ -357,7 +349,7 @@ jobs:
               admin|maintain|write) authorized=true ;;
               *)
                 ok=false
-                echo "::notice::$who does not have write access (permission: ${perm:-lookup failed}); not running, acking or staging."
+                echo "::notice::$ACTOR does not have write access (permission: ${perm:-lookup failed}); not running, acking or staging."
                 ;;
             esac
           fi
@@ -762,7 +754,8 @@ jobs:
       # meant only "the text matched", and this step (plus the counter reset
       # below) ran as marvin for ANY commenter on a public caller — arming
       # the loops, whose gates then trusted the label. The loop gates now
-      # also verify who applied the label (claude-auto*.yml, Gate and count).
+      # also verify who applied the label (claude-auto*.yml, via the
+      # verify-auto-labeler composite).
       - name: Opt existing PR into the @auto loop
         if: >-
           steps.trig.outputs.ok == 'true' &&

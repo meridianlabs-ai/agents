@@ -1,0 +1,168 @@
+name: verify-auto-labeler
+description: >-
+  Verify who applied a PR's @auto label (issue #92). The label is the loops'
+  opt-in and kill-switch, and before this check nothing asked who opted in: a
+  label planted by an account without write access armed the loop exactly
+  like a maintainer's. The most recent `labeled` event for the label must
+  come from the machine account (claude.yml's @auto opt-in and PR-open
+  propagation, or the triage pipeline) or from an account with write access.
+  Shared by claude-auto.yml and claude-auto-review.yml, between their
+  label check and their counting step, so the two gates cannot drift.
+  Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/verify-auto-labeler@main); NO post
+  step (local composite actions with post steps break teardown on the fork).
+
+  Three verdicts (design/auto-agent.md → Trigger surface):
+  - `ok`: the labeler is marvin or holds admin/maintain/write. Run.
+  - `disarmed`: positive evidence of an outsider — the labeler is a known
+    account whose permission is read/triage/none. The label comes off (as
+    the token's identity, so the PR does not stay armed for the next event)
+    and a note naming the labeler is posted. Skip.
+  - `unverified`: no evidence either way — the timeline has no labeled event
+    for the label, the labeler is a GitHub App (`*[bot]`, whose permission
+    the collaborators endpoint cannot report), or the permission lookup
+    failed. Refuse WITHOUT disarming: fail closed, but never take a human's
+    label away on an API blip. Skip.
+
+  Both refusals are surfaced on the PR, not only in the job log: the disarm
+  strips a label a maintainer may be watching for, and the unverified path
+  leaves the PR labeled and skipped on every event — a state that can be
+  PERMANENT (the permission endpoint 404s for a deleted account; an App
+  labeler stays an App), which is exactly the "loop silently stalls with the
+  label still on" state the callers' gate-failure failsafe exists to prevent.
+  The disarm posts a fresh note each time (the label has to be re-applied
+  for it to recur, and the note names who did); the unverified notice is
+  sticky — posted once per PR under `<!-- auto-gate-unverified -->`, since
+  later events would only repeat it. Both bodies are trigger-free like the
+  failsafe's (no literal @auto/@review) and name the labeler without an @ so
+  an outsider is not pinged. An App labeler is recognised from its login and
+  never looked up: the lookup would 404 through the full retry (18 s of
+  sleeps) on every loop event for that PR, and the notice can then say what
+  actually happened. `github-actions[bot]` is deliberately NOT trusted: a
+  caller's comment-driven labeler workflow running under the job token would
+  otherwise let any commenter arm the loop.
+
+  Every API call retries with backoff (same `ghr` as the gates). The one way
+  this step FAILS is a timeline fetch that never succeeds — the caller's
+  `Surface gate failure` step is gated on this step's outcome too, so that
+  lands as the existing "paused, re-run the job" comment rather than a silent
+  skip. A failed comment post or label removal is a `::warning`, not a
+  failure: the verdict is what the caller acts on.
+
+inputs:
+  token:
+    description: >-
+      Token that can read the PR's timeline, look up collaborator permissions,
+      edit the PR's labels and comment (MARVIN_TOKEN — both gates already
+      require it, and the disarm must post as a real identity).
+    required: true
+  repo:
+    description: owner/name the PR lives in.
+    required: true
+  pr:
+    description: Pull-request number whose label to verify.
+    required: true
+  label:
+    description: The loop's opt-in label (the workflow's `auto_label` input).
+    required: true
+
+outputs:
+  verdict:
+    description: '`ok`, `disarmed` or `unverified` (see the description).'
+    value: ${{ steps.verify.outputs.verdict }}
+  labeler:
+    description: Login that applied the label most recently; empty when the timeline has no labeled event.
+    value: ${{ steps.verify.outputs.labeler }}
+  permission:
+    description: The labeler's repository permission when it was looked up (admin/maintain/write/triage/read/none); empty otherwise.
+    value: ${{ steps.verify.outputs.permission }}
+
+runs:
+  using: composite
+  steps:
+    - id: verify
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+        AUTO_LABEL: ${{ inputs.label }}
+      run: |
+        set -euo pipefail
+        # Retry with backoff, same shape as the gates' ghr(): a 5xx or
+        # secondary-rate-limit response is an HTML page that makes `--jq`
+        # fail with "invalid character '<'". Each attempt's stdout is
+        # captured and emitted only on overall success — a failed `gh api`
+        # prints its error body to STDOUT, so streaming attempts through
+        # would poison a fail-then-succeed retry's capture.
+        ghr() {
+          local n=0 out
+          until out=$("$@"); do
+            n=$((n+1))
+            if [ "$n" -ge 4 ]; then return 1; fi
+            sleep $((n*3))
+          done
+          printf '%s' "$out"
+        }
+        out() { echo "$1=$2" >>"$GITHUB_OUTPUT"; }
+        # Most recent `labeled` event for the label. 100 events per page — a
+        # PR timeline carries an event per commit, comment, label and
+        # cross-reference, so the default 30 would page several times on
+        # every loop event — filtered locally (`--paginate --jq` runs per
+        # page; -s plus `.[][]` flattens both one-array and array-per-page
+        # output). A persistent fetch failure fails the step (see above).
+        labeler=$(ghr gh api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate \
+                    | jq -rs --arg l "$AUTO_LABEL" \
+                        '[.[][] | select(.event=="labeled" and .label.name==$l)] | last | .actor.login // empty')
+        out labeler "$labeler"
+        notice_unverified() {
+          local marker="<!-- auto-gate-unverified -->" posted
+          # Sticky: one notice per PR. A failed scan falls through to posting
+          # — a duplicate notice is the harmless side of that error.
+          posted=$(ghr gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+                     | jq -rs --arg m "$marker" 'any(.[][]; .body|contains($m))') || posted=""
+          if [ "$posted" = "true" ]; then
+            echo "Unverified-label notice already on PR #$PR; not repeating it."; return 0
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body "$(printf '%s\n⚠️ auto: this PR carries the `%s` label, but auto could not verify who applied it (%s), so it is not running — the label is left on. To arm the loop, an account with write access can remove and re-add the label. This notice posts once; later events skip quietly until the label changes hands.' "$marker" "$AUTO_LABEL" "$1")" \
+            || echo "::warning::could not post the unverified-label notice on PR #$PR"
+        }
+        lperm=""
+        verdict=ok
+        if [ -z "$labeler" ]; then
+          echo "::warning::PR #$PR carries '$AUTO_LABEL' but its timeline has no labeled event for it; cannot verify who opted in."
+          notice_unverified "its timeline has no labeled event for it"
+          verdict=unverified
+        elif [ "$labeler" = "i-am-marvin" ]; then
+          :
+        else
+          case "$labeler" in
+            *"[bot]")
+              # A GitHub App: the collaborators endpoint 404s for it every
+              # time, so don't spend the retry finding that out.
+              echo "::warning::'$AUTO_LABEL' on PR #$PR was applied by $labeler, a GitHub App whose permission cannot be looked up; refusing without disarming."
+              notice_unverified "it was applied by $labeler, a GitHub App — an App's permission cannot be looked up, and a caller's own automation is not a write-access human"
+              verdict=unverified ;;
+            *)
+              lperm=$(ghr gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission') || lperm=""
+              case "$lperm" in
+                admin|maintain|write) ;;
+                "")
+                  echo "::warning::could not look up the permission of $labeler (who applied '$AUTO_LABEL' to PR #$PR); refusing without disarming."
+                  notice_unverified "the permission lookup for $labeler, who applied it, failed — a deleted account cannot be looked up, and the API may have been unavailable"
+                  verdict=unverified ;;
+                *)
+                  echo "::warning::'$AUTO_LABEL' on PR #$PR was applied by $labeler, who has no write access ($lperm); removing the label."
+                  gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" \
+                    || echo "::warning::could not remove '$AUTO_LABEL' from PR #$PR"
+                  gh pr comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the `%s` label on this PR was applied by %s, who does not have write access to this repository (permission: %s). The label opts a PR into the loop, so auto removed it and did not run. A maintainer who wants the loop on this PR can re-apply the label.' "$AUTO_LABEL" "$labeler" "$lperm")" \
+                    || echo "::warning::could not post the disarm notice on PR #$PR"
+                  verdict=disarmed ;;
+              esac ;;
+          esac
+        fi
+        out permission "$lperm"
+        out verdict "$verdict"
+        if [ "$verdict" = "ok" ]; then
+          echo "'$AUTO_LABEL' on PR #$PR was applied by $labeler${lperm:+ ($lperm)}."
+        fi
