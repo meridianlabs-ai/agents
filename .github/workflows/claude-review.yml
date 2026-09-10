@@ -1318,9 +1318,10 @@ jobs:
       # @-mention target for the failure comments: without one, error
       # reports on agent/marvin-authored threads email nobody (the thread has
       # no human participants). Same derivation as claude-auto.yml: closing
-      # ref → claude/issue-N-* branch → issue author unless bot/machine
-      # account → first assignee. On issue threads (external proxies) the
-      # issue itself is the source. Job token: reads only.
+      # ref → claude/issue-N-* branch → the issue's first assignee unless
+      # bot/machine account, else its author unless bot/machine account. On
+      # issue threads (external proxies) the issue itself is the source. Job
+      # token: reads only.
       - name: Derive responsible human for error cc
         id: who
         if: always() && needs.gate.outputs.ok == 'true'
@@ -1363,7 +1364,7 @@ jobs:
             inum="$NUM"
           fi
           [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-            --jq 'if .pull_request then "" elif (.user.type=="Bot" or .user.login=="i-am-marvin") then (.assignees[0].login // "") else .user.login end' 2>/dev/null || true)
+            --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
           echo "mention=$mention" >> "$GITHUB_OUTPUT"
           echo "cc target: ${mention:-none}"
 

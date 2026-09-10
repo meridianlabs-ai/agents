@@ -492,7 +492,7 @@ The simple case ships first and is independently useful:
   `issue_comment` trigger so the clean case no longer goes silent (the Phase 2
   finding). (2) In
   `claude-auto-review.yml`, when the review has converged, it hands off: posts a
-  handoff comment @-mentioning the originating human, and does not merge or
+  handoff comment @-mentioning the responsible human, and does not merge or
   re-request. Grounding: inspect_flow's `main` requires no approvals and
   native auto-merge is off, so no `APPROVE` state or merge machinery is needed.
   _Fork:_ the handoff wording becomes "ready to promote upstream" via the fork's
@@ -510,10 +510,16 @@ The simple case ships first and is independently useful:
     `suggestions` → spend a fix round as before. Absent verdict (older reviewer,
     or a caller overriding `review_prompt`) falls back to the round-count path, so
     the change is backward-compatible. A clean review no longer consumes a round.
-  - **Handoff @-mentions the originating human** (author of the PR's
-    `Fixes/Closes #N` issue, bots skipped; overridable via the `handoff_mention`
-    input) — on **both** the convergence handoff and the cap escalation. The
-    escalation previously pinged no one.
+  - **Handoff @-mentions the responsible human** — the first assignee of the
+    PR's `Fixes/Closes #N` issue, else its author, bots and the machine account
+    skipped; overridable via the `handoff_mention` input — on **both** the
+    convergence handoff and the cap escalation. The escalation previously
+    pinged no one. Assignee-first since 2026-09-10 (decision: Ransom): the
+    assignee is the repo's responsible human (the Atlas views filter on
+    assignee), and the reporter may be a different person — inspect_ai#473's
+    handoff pinged the issue's author while the assignee had kicked off the
+    run. The same derivation feeds the error-surfacing cc in all four
+    workflows.
 - **Fork rollout — _done; verified end to end on meridianlabs-ai/inspect_ai._**
   Auto-stub on the `meridian` branch (Phase 1 keyed to the fork's `Build`; Phase
   2/3 on the `issue_comment` marker — both resolve from the default branch, so
