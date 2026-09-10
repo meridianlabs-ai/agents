@@ -21,8 +21,10 @@ description: >-
   exists, and reports through the `emitted` output. Referenced
   fully-qualified (meridianlabs-ai/agents/.github/actions/emit-landing@main);
   NO post step (local composite actions with post steps break teardown on
-  the fork). On the codex path this must run AFTER reclaim-codex-workspace
-  (it runs git in the workspace), like every other post-codex git step.
+  the fork). Unless `read-only` is "true" this runs git in the workspace, so
+  on the codex path it must then run AFTER reclaim-codex-workspace like every
+  other post-codex git step; a `read-only` caller (the reviewer) runs no git
+  here and needs no reclaim step for this action's sake.
 
 inputs:
   start-sha:
@@ -243,6 +245,11 @@ runs:
     # continue-on-error: the upload failing must not fail the agent job
     # either (the `emitted` output carries the outcome). Upload the directory
     # as-is: the workflow's body files, the manifest and the bundle.
+    # overwrite: artifacts belong to the RUN, not the attempt, and without it
+    # upload-artifact@v4 fails when the name already exists — so a re-run from
+    # the Actions UI would warn here and the land job would download the
+    # FIRST attempt's landing and re-post it. With it, attempt N replaces
+    # attempt N-1's artifact; a first upload is unaffected.
     - id: upload
       if: steps.write.outputs.wrote == 'true'
       uses: actions/upload-artifact@v4
@@ -253,6 +260,7 @@ runs:
         retention-days: 1
         if-no-files-found: error
         include-hidden-files: false
+        overwrite: true
 
     - shell: bash
       env:

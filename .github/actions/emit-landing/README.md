@@ -13,7 +13,10 @@ gate job   (trusted: trigger check + pre-agent marvin writes; job token + MARVIN
 
 - **`emit-landing`** runs last in the agent job (`if: always()`). It bundles the
   commits above the run's start SHA, writes `manifest.json`, and uploads the
-  landing directory as one artifact. It holds no token.
+  landing directory as one artifact. It holds no token. The upload sets
+  `overwrite: true`: artifacts belong to the run, not the attempt, so on a
+  re-run from the Actions UI the new attempt's landing replaces the previous
+  one instead of the land job re-landing the first attempt's manifest.
 - **`.github/scripts/validate_manifest.py`** runs first in the land job. Stdlib
   only; one line per violation; any violation refuses the whole manifest.
   Tests: `tests/test_validate_manifest.py`.
