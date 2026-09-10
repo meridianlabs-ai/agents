@@ -583,22 +583,48 @@ Verification for a change here, all cases prompted to codex (any verb):
 
 ## Network inside the codex sandbox
 
-ON since 2026-09-09 (decision: Ransom), via `network_access = true` under
-`[sandbox_workspace_write]` in the codex user's `config.toml`, written by
-the `Create codex user` step (the `create-codex-user` composite, shared by
-all four codex steps) before codex-action runs (the action keeps a
-pre-existing config and appends its provider block; the same key is
-rejected through `codex-args`). The home and `.codex` are 755 so the
-runner-side action can read the file back — a 700 home would make it read
-"" and drop the block silently. The key's survival rides on the action
-APPENDING to the existing file (`writeProxyConfig.ts` today), and `@v1` is
-a moving tag, so a revision that overwrote instead would turn network back
-off with no symptom but trio tests failing again — the one setting whose
-loss would be silent. So the `codex-usage` composite, the one post-codex
-step every codex path runs (the review path has no reclaim step), re-reads
-the `config.toml` codex ran with and posts a `::warning::` if the key is
-gone (review round 4 of #87): a future silent revert becomes a loud one on
-every run, not only on the first live check after merge.
+ON since 2026-09-09 (decision: Ransom) — effective since 2026-09-10. The
+mechanism is a **named permission profile**: `create-codex-user` writes
+`[permissions.workspace_net]` with `extends = ":workspace"`, the checkout
+as a workspace root, and `[permissions.workspace_net.network] enabled =
+true` into the codex user's `config.toml`, and the workflows pass
+`permission-profile: workspace_net` to codex-action. The first attempt
+(#87) set the legacy `[sandbox_workspace_write] network_access = true`
+instead and changed nothing: codex-action selects the profile explicitly
+(`default_permissions=":workspace"`), and codex deliberately ignores that
+legacy table for an explicit builtin selection ("explicitly selecting
+`:workspace` intentionally ignores those legacy settings",
+`core/src/config/mod.rs`) — trio still died on `setsockopt` in every
+2026-09-10 round while the detector reported the key present. Named
+profiles may extend a builtin (`extensible_builtin_parent_profile`) and
+their `network.enabled = true` compiles straight to
+`NetworkSandboxPolicy::Enabled` (`compile_network_sandbox_policy`), which
+is the condition under which the seccomp filter is not installed. The
+action keeps a pre-existing config and appends its provider block, and
+rejects `permissions.*` through `codex-args`, so the file is the only
+route; home and `.codex` are 755 so the runner-side action can read it
+back — a 700 home would make it read "" and drop the block silently.
+
+The profile's survival rides on the action APPENDING to the existing file
+(`writeProxyConfig.ts` today), and `@v1` is a moving tag. Under #87 that
+was the one setting whose loss would have been silent (a dropped legacy
+key just left the sandbox closed, with no symptom but trio tests failing
+again), so the `codex-usage` composite carried a post-run detector that
+re-read the `config.toml` codex ran with and warned if the key was gone
+(review round 4 of #87). The named profile made that loss loud instead:
+the action still passes `default_permissions="workspace_net"`, and codex
+refuses to start when `default_permissions` names an undefined profile
+(`PermissionProfileResolutionError::UndefinedProfile`,
+`codex-rs/config/src/permissions_toml.rs`), so a revision that overwrote
+the file would fail the run at the codex step before any test runs. The
+detector was therefore dropped in #90 — it would have fired only in a
+case that had already failed loudly, and its warning ("codex ran with
+network off") would have been wrong for that case. The flip side of the
+same mechanism, accepted: any codex start against that `CODEX_HOME`
+WITHOUT `default_permissions` is now a hard error too (profiles defined
+but none selected); today the only codex invocation there is
+codex-action's, which always passes the flag when `permission-profile` is
+set.
 
 Pre-creating `.codex` has one side effect the step must compensate for
 (caught in review round 1 of #87): codex-action's `resolve-codex-home`
@@ -623,8 +649,10 @@ wakeup socketpair (it sets `SO_SNDBUF`), inspect_ai's control server
 cannot bind, asyncio thread wake-ups stall, and nothing downloads a
 tokenizer. inspect_ai#428's codex reviews (2026-09-09) lost every trio
 test and half the asyncio suite to this and fell back to timers and
-stubs. `network_access = true` on the builtin `:workspace` profile skips
-the filter entirely.
+stubs. `network.enabled = true` on the `workspace_net` profile (which
+extends the builtin `:workspace`) skips the filter entirely; the legacy
+`network_access = true` key on the builtin itself does not when the
+profile is selected explicitly, as above.
 
 Trust argument: every codex run here is a same-repo tree — the reviewer
 routes fork heads to Claude, the dev agent refuses them, the loops gate on
