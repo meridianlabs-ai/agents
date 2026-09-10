@@ -1187,10 +1187,13 @@ jobs:
           # author the review-fix rounds' anchor selection trusts, so a CI-fix
           # summary echoing either would be taken for the newest review by
           # the next fix round on the same PR. The land job's `defang`
-          # (land/lib.sh) covers the same list, footer included, so the
-          # Claude-path relay and the Surface step's embedded summary — which
-          # have no sed of their own — are protected too, and this copy is
-          # the second layer (two, so neither can drift to zero).
+          # (land/lib.sh) repeats the trigger and marker rules (two layers,
+          # so neither can drift to zero) but deliberately NOT the footer:
+          # `land` is shared with claude-review.yml, which posts the codex
+          # reviewer's own footer through it as the anchor. So the footer sed
+          # lives only here and in the Claude-path bodies below (the relay's
+          # agent-summary.md and the Surface step's embedded summary); keep
+          # the three copies in step.
           {
             if [ -n "$merge_only" ]; then
               printf '🤖 auto (codex, CI-fix attempt %s): base merge only, no fix this attempt — details below.\n\n' "$ATTEMPT"
@@ -1426,10 +1429,13 @@ jobs:
             if [ -n "$dirty" ]; then
               head=$(git rev-parse HEAD 2>/dev/null || echo "$BASE_SHA")
               if [ "$head" = "$BASE_SHA" ] || { [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ]; }; then
-                # Strip the @ from trigger tokens in agent-authored text — this
-                # is embedded in a marvin-authored comment (the land job
-                # de-fangs again).
-                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
+                # Strip the @ from trigger tokens in agent-authored text and
+                # split the codex reviewer's footer — this is embedded in a
+                # marvin-authored comment, which pr-feedback-context would
+                # take for the newest review if it carried the footer (the
+                # land job de-fangs triggers and markers again, but not the
+                # footer: see the codex summary step's comment).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' -e 's/engine: codex/engine  codex/g' || true)
                 err="the agent finished but left edits to tracked files uncommitted, so no fix landed on the branch (only the runner's base merge, if there was one) — whatever its summary reports, no code change reached CI."
                 [ -n "$summary" ] && err="$err Agent summary: $summary"
               else
@@ -1566,7 +1572,17 @@ jobs:
             fi
           elif [ "${CLAUDE_OUTCOME:-}" = "success" ] && { [ "$moved" != "true" ] || [ -n "$merge_only" ]; } && [ ! -s "$ERROR_FILE" ] && [[ "$PR" =~ ^[0-9]+$ ]]; then
             file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
-            summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 || true)
+            # Same de-fang as the codex summary step: this relay posts as
+            # marvin, so a final message quoting a trigger, a loop marker or
+            # the codex reviewer's footer would fire a workflow, forge a
+            # verdict or pose as the newest review. `land` repeats the trigger
+            # and marker rules but deliberately not the footer (it posts the
+            # codex reviewer's real one), so this is the footer's only layer.
+            summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 \
+              | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                       -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                       -e 's/engine: codex/engine  codex/g' \
+                       -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' || true)
             {
               if [ -n "$merge_only" ]; then
                 printf '🤖 auto (CI-fix attempt %s): base merge only, no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"

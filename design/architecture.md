@@ -353,10 +353,13 @@ Three rules define the shape:
   **event payload** (`pr-number` / `issue-number` inputs) — trusted, unlike
   a number read from the unvalidated manifest, which could steer the note
   anywhere. Every agent-authored body passes through
-  the de-fang sed (triggers lose their `@`, loop markers and the codex
-  reviewer's `engine: codex` anchor footer are split, case-insensitively,
-  capped under the comment limit) before posting; the
+  the de-fang sed (triggers lose their `@`, loop markers are split,
+  case-insensitively, capped under the comment limit) before posting; the
   one exception is the hand-back, posted verbatim as exactly `@review`.
+  The codex reviewer's `engine: codex` anchor footer is deliberately NOT
+  on `land`'s list: the reviewer posts its real footer through this same
+  composite, so workflows whose bodies must not pose as a review (the
+  CI-fix loop's summaries) split it themselves before handing the file over.
 
 Phase 1 (#79) adds the plumbing only — the two composites, the validator and
 its tests — and changes no workflow. Six follow-on issues convert one
@@ -448,9 +451,11 @@ loop and the dev agent:
   committed nothing (HEAD still at the start SHA, or exactly the runner's
   clean base merge — a merge-only round, which lands and owes its hand-back
   but carries no agent commit; the relay's first line says so) the
-  workflow relays its final message as a `comments[]` entry (de-fanged by
-  `land`, whose list includes the codex reviewer's `engine: codex` footer
-  so the relay cannot become a false review anchor) — the Claude analogue
+  workflow relays its final message as a `comments[]` entry (de-fanged in
+  the fix job with the codex summary's sed, footer rule included, so the
+  relay cannot become a false review anchor; `land` de-fangs triggers and
+  markers again but leaves the footer alone, since the codex reviewer's
+  real footer lands through it) — the Claude analogue
   of the codex summary that has always posted. Its first line, like the
   codex summary's, says "committed" / "base merge only", never "pushed":
   the fix job composes it before `emit-landing` runs, and a `git bundle`

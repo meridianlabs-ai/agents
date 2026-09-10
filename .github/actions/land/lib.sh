@@ -11,18 +11,19 @@
 # because the stubs gate on GitHub's contains(), which ignores case. Same
 # sed the codex landing steps and model-provenance use; keep the marker list
 # in step with the `<!-- … -->` comments the workflows read. The codex
-# reviewer's `engine: codex` footer is in the list too: pr-feedback-context
-# anchors the newest review on machine-author comments carrying either the
-# review-comment marker or that footer, and everything posted here is
-# machine-authored — an agent summary quoting the footer would otherwise be
-# taken for the review by a later codex fix round. Truncation only drops
-# trailing bytes, so it cannot resurrect a trigger the sed removed.
+# reviewer's `engine: codex` footer is deliberately NOT in this list:
+# claude-review.yml lands the codex review itself through this composite,
+# and that footer is the anchor pr-feedback-context keys the next codex fix
+# round on — splitting it here would blind every codex review-fix round.
+# Callers whose bodies must not pose as a review (the CI-fix summaries in
+# claude-auto.yml) sed the footer themselves before handing the file over.
+# Truncation only drops trailing bytes, so it cannot resurrect a trigger the
+# sed removed.
 defang() {
   local src="$1" dst="$2"
   sed -E -e 's/@(review|claude|auto)/`\1`/gI' \
          -e 's/claude-review-(summary|verdict|comment|nudge)/claude-review \1/gI' \
          -e 's/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/gI' \
-         -e 's/engine: codex/engine  codex/gI' \
          "$src" >"$dst"
   if [ "$(wc -c <"$dst")" -gt 60000 ]; then
     head -c 60000 "$dst" >"$dst.trunc"
@@ -35,8 +36,7 @@ defang() {
 defang_str() {
   printf '%s' "$1" | tr -d '\n' | sed -E -e 's/@(review|claude|auto)/`\1`/gI' \
     -e 's/claude-review-(summary|verdict|comment|nudge)/claude-review \1/gI' \
-    -e 's/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/gI' \
-    -e 's/engine: codex/engine  codex/gI'
+    -e 's/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/gI'
 }
 
 # retry N WHAT CMD... — run CMD up to N times with 15/30/45… s backoff (the
