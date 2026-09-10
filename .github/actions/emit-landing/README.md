@@ -13,7 +13,10 @@ gate job   (trusted: trigger check + pre-agent marvin writes; job token + MARVIN
 
 - **`emit-landing`** runs last in the agent job (`if: always()`). It bundles the
   commits above the run's start SHA, writes `manifest.json`, and uploads the
-  landing directory as one artifact. It holds no token.
+  landing directory as one artifact. It holds no token. The upload sets
+  `overwrite: true`: artifacts belong to the run, not the attempt, so on a
+  re-run from the Actions UI the new attempt's landing replaces the previous
+  one instead of the land job re-landing the first attempt's manifest.
 - **`.github/scripts/validate_manifest.py`** runs first in the land job. Stdlib
   only; one line per violation; any violation refuses the whole manifest.
   Tests: `tests/test_validate_manifest.py`.
@@ -25,8 +28,9 @@ The manifest is the **trust boundary**. The agent job — where the agent, its
 subagents and anything it left running had a shell and the job token — can
 write anything into the artifact; the land job acts only on what the validator
 accepts, and every body it posts passes through the de-fang sed (triggers lose
-their `@`, loop markers are split) except the hand-back, which is posted
-verbatim as exactly `@review`.
+their `@`, loop markers are split) except two fixed bodies no agent text
+reaches: the hand-back, posted verbatim as exactly `@review`, and the
+reviewer's verdict comment, chosen by `review_verdict`.
 
 ## Manifest schema (version 1)
 
@@ -56,7 +60,8 @@ to this document together.
   "handback": true,
   "handoff_body_file": "handoff.md",
   "error": { "message": "…", "fail_run": true },
-  "provenance_comment_file": "prov.md"
+  "provenance_comment_file": "prov.md",
+  "review_verdict": "suggestions"
 }
 ```
 
@@ -65,7 +70,7 @@ to this document together.
 | `schema` | emit-landing | must be `1` |
 | `repo` | emit-landing (`$GITHUB_REPOSITORY`) | must equal the repo the land job operates on (case-insensitive) |
 | `run_id` | emit-landing (`$GITHUB_RUN_ID`) | must equal the land job's `$GITHUB_RUN_ID` — an artifact from another run cannot be replayed |
-| `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName`; when the run names no PR and the land job's `branch-prefix` is set, must start with it (an issue run's `claude/issue-N-`) — with no PR and no prefix the branch is agent-chosen within the bounds above |
+| `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName`; when the run names no PR and the land job's `branch-prefix` is set, must start with it (an issue run's `claude/issue-N-`) — with no PR and no prefix the branch is agent-chosen within the bounds above. Under the land job's `refuse-bundle` (the reviewer) nothing is ever pushed to `branch`, so the shape, default-branch and refused-list rules do not apply — a fork-head PR's `main`, or any head ref git accepts, passes; only the head-ref pin / `branch-prefix` and a no-control-characters, ≤ 1000 chars check remain |
 | `start_sha`, `head_sha` | emit-landing | 40 lowercase hex; equal iff `has_bundle` is false |
 | `has_bundle` | emit-landing | boolean; when true `commits.bundle` must exist and its tip must be `head_sha` and descend from `start_sha` (checked by `land`, in an empty repo) |
 | `pr_number` | emit-landing (`pr-number` input) | positive integer or null; **must equal the land job's `pr-number` input** (null when that is empty) — the PR the run's trusted context names, so on a PR run an agent job cannot steer the push, replies, thread resolutions and hand-back at a PR of its choosing, nor drop the number to skip the head-ref rule and let `pr.open` adopt another PR (on a run that names no PR, `branch-prefix` is what keeps the push off the branches of PRs opened for other issues; a still-open PR from an earlier run on the same issue carries the prefix and is adopted). Required by `replies` and `resolve_threads` |
@@ -80,6 +85,18 @@ to this document together.
 | `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line |
 | `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move, and a failed hand-back does not withhold the hand-off or the stage move either) and every planned hand-back, hand-off or stage move that never ran because the PR step failed after the push (a failed fetch or push owes nothing — the work never landed), and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
+| `review_verdict` | workflow (claude-review.yml's codex path) | `clean` or `suggestions`; needs `pr_number`. `land` posts one of two FIXED bodies — the reviewer's `🔎 Review complete …` marker comment with the `claude-review-summary` / `claude-review-verdict:<value>` markers live — after `comments[]` (which carries the de-fanged review body) and only when the Post step lost nothing, so the @auto loop never sees a verdict over a review that did not land. The second body posted verbatim besides the hand-back; no agent text reaches it |
+
+`emit-landing`'s `read-only` input and `land`'s `refuse-bundle` input are the
+pair for a caller whose agent never commits (claude-review.yml): the former
+runs no git at all and writes `head_sha` = `start_sha`, `has_bundle` false;
+the latter makes the validator refuse any manifest that carries commits,
+claims HEAD moved or ships a `commits.bundle` — whatever the agent job
+uploaded — so the reviewer's land job cannot become the push channel its own
+`contents: read` token denies it. With no push, `branch` is only the pin that
+ties the manifest to the run's PR (its live head ref) or, in external mode,
+to the `branch-prefix`: the push-side branch rules are off, so a review of a
+fork-head PR whose branch is `main` lands (see the `branch` row above).
 
 File references: relative, `^[A-Za-z0-9._/-]{1,200}$`, no `..`, no path
 component starting with `.` (emit-landing uploads with

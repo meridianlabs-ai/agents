@@ -98,6 +98,7 @@ def run(
     event_pr=EVENT_PR,
     event_issue=EVENT_ISSUE,
     branch_prefix="",
+    refuse_bundle=False,
 ):
     return vm.validate(
         manifest,
@@ -111,6 +112,7 @@ def run(
         event_pr_number=event_pr,
         event_issue_number=event_issue,
         branch_prefix=branch_prefix,
+        refuse_bundle=refuse_bundle,
     )
 
 
@@ -609,6 +611,170 @@ def test_pr_title_too_long(tmp_path):
     assert any("pr: title exceeds 256" in e for e in errs)
 
 
+# --- review_verdict (claude-review.yml's codex path) --------------------------
+
+
+@pytest.mark.parametrize("verdict", vm.VERDICTS)
+def test_every_review_verdict(tmp_path, verdict):
+    assert run(tmp_path, base_manifest(tmp_path, review_verdict=verdict)) == []
+
+
+@pytest.mark.parametrize("verdict", ["Clean", "approved", "", 1, True])
+def test_bad_review_verdict(tmp_path, verdict):
+    errs = run(tmp_path, base_manifest(tmp_path, review_verdict=verdict))
+    assert any("review_verdict" in e for e in errs)
+
+
+def test_review_verdict_needs_pr_number(tmp_path):
+    # The verdict is posted on pr_number (never pr.open: the reviewer's land
+    # job opens no PRs).
+    m = base_manifest(tmp_path, pr_number=None, replies=[], resolve_threads=[], handback=False, review_verdict="clean")
+    errs = run(tmp_path, m, pr_head_ref="", event_pr="")
+    assert any("review_verdict needs pr_number" in e for e in errs)
+
+
+# --- refuse_bundle (a land job whose agent never commits) --------------------
+
+
+def review_manifest(d: Path, **overrides) -> dict:
+    """What claude-review.yml's read-only emit-landing produces on a PR run."""
+    m = {
+        "schema": 1,
+        "repo": REPO,
+        "run_id": int(RUN_ID),
+        "branch": BRANCH,
+        "start_sha": START,
+        "head_sha": START,
+        "has_bundle": False,
+        "pr_number": 456,
+        "issue_number": None,
+        "comments": [{"number": 456, "body_file": write(d, "codex-review.md")}],
+        "review_verdict": "suggestions",
+        "stage": "Review",
+        "provenance_comment_file": write(d, "prov.md"),
+        "error": {"message": "the review step failed", "fail_run": True},
+    }
+    m.update(overrides)
+    return m
+
+
+def test_refuse_bundle_accepts_the_reviewers_manifest(tmp_path):
+    assert run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True) == []
+
+
+def test_refuse_bundle_refuses_commits(tmp_path):
+    # A manifest claiming HEAD moved (with the bundle to match) is exactly
+    # what a compromised review job would upload to turn the land job into a
+    # push channel; both the flag and the file are refused.
+    (tmp_path / "commits.bundle").write_bytes(b"# v2 git bundle\n")
+    m = review_manifest(tmp_path, head_sha=HEAD, has_bundle=True)
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True)
+    assert any("refuses bundles" in e and "carries commits" in e for e in errs)
+    assert any("refuses bundles" in e and "commits.bundle is present" in e for e in errs)
+    # Without the flag the same manifest is a normal landing.
+    assert run(tmp_path, m, event_issue="") == []
+
+
+def test_refuse_bundle_refuses_a_moved_head_even_without_a_bundle(tmp_path):
+    # has_bundle false but head_sha != start_sha is already inconsistent;
+    # under refuse_bundle it is ALSO named as carrying commits.
+    m = review_manifest(tmp_path, head_sha=HEAD)
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True)
+    assert any("refuses bundles" in e and "carries commits" in e for e in errs)
+
+
+def test_refuse_bundle_refuses_a_stray_bundle_file(tmp_path):
+    (tmp_path / "commits.bundle").write_bytes(b"# v2 git bundle\n")
+    errs = run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True)
+    assert errs == ["manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact"]
+
+
+def test_refuse_bundle_accepts_a_fork_heads_main_as_branch(tmp_path):
+    # The fork_head path (issue #59): an outside contributor's PR whose head
+    # branch is `main`. Nothing is ever pushed to `branch` under
+    # refuse_bundle, so neither the default-branch rule nor the refused list
+    # may fail the reviewer's landing over it …
+    m = review_manifest(tmp_path, branch="main")
+    assert run(tmp_path, m, pr_head_ref="main", event_issue="", refuse_bundle=True) == []
+    # … while the same manifest on a pushing land job is refused by both.
+    errs = run(tmp_path, m, pr_head_ref="main", event_issue="")
+    assert any("must not be the default branch" in e for e in errs)
+    assert any("is on the land job's refused list" in e for e in errs)
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "feature+1",
+        "user@host/fix",
+        "issue#81",
+        "corrección-ñ",
+        "refs/heads/odd-but-legal",
+        "release.lock",
+        "x" * 300,
+    ],
+)
+def test_refuse_bundle_accepts_any_head_ref_git_accepts(tmp_path, branch):
+    # Legal git branch characters outside BRANCH_RE (and names the push-side
+    # rules refuse): the head ref is whatever the PR's author named it, and
+    # the pin below is what ties the manifest to the run.
+    m = review_manifest(tmp_path, branch=branch)
+    assert run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True) == []
+    errs = run(tmp_path, m, pr_head_ref=branch, event_issue="")
+    assert errs, "the same name must still be refused on a pushing land job"
+
+
+def test_refuse_bundle_keeps_the_head_ref_pin(tmp_path):
+    # Relaxing the shape rules must not loosen the pin: a review job may not
+    # name any branch but the run's PR head ref.
+    m = review_manifest(tmp_path, branch="main")
+    errs = run(tmp_path, m, pr_head_ref="feature", event_issue="", refuse_bundle=True)
+    assert errs == ["manifest: branch 'main' is not PR #456's head ref ('feature')"]
+
+
+@pytest.mark.parametrize("branch", ["main\npr_number=999", "main\n", "a\x7fb", "tab\there", "", "x" * 1001])
+def test_refuse_bundle_still_refuses_unsafe_branch_values(tmp_path, branch):
+    # What is left of the shape rule: the land job echoes `branch` into
+    # $GITHUB_OUTPUT and reads it into shell variables, so a control character
+    # (a newline would inject a second output line) or an unbounded value is
+    # refused even though nothing is pushed. "main\n" is the case `$` alone
+    # would let through (it matches before a final newline); the validator
+    # uses fullmatch so the trailing newline is refused like an embedded one.
+    m = review_manifest(tmp_path, branch=branch)
+    errs = run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True)
+    assert errs, repr(branch)
+    assert all("is not PR" not in e for e in errs), "refused by shape, not merely by the pin"
+
+
+@pytest.mark.parametrize(
+    "field, value, expect",
+    [
+        ("branch", "feature\n", "branch has characters outside"),
+        ("start_sha", "a" * 40 + "\n", "must be 40 lowercase hex characters"),
+        ("resolve_threads", ["PRRT_abc\n"], "must match ^PRRT_"),
+    ],
+)
+def test_anchored_regexes_refuse_a_trailing_newline(tmp_path, field, value, expect):
+    # re.match with `^…$` accepts a value that ends in "\n" (`$` matches
+    # before a final newline); every shape rule is a fullmatch so a trailing
+    # newline never reaches the shell that reads the value.
+    m = base_manifest(tmp_path, **{field: value})
+    errs = run(tmp_path, m, pr_head_ref=value if field == "branch" else BRANCH)
+    assert any(expect in e for e in errs), errs
+
+
+def test_refuse_bundle_external_mode_keeps_the_branch_prefix(tmp_path):
+    # External mode names no PR of ours: the review job emits a fixed
+    # `review/external-<issue>` name and the land job pins the prefix. Under
+    # refuse_bundle that pin is the only branch rule left besides shape.
+    m = review_manifest(tmp_path, branch="review/external-12", pr_number=None, issue_number=12, comments=[], review_verdict=None)
+    common = {"pr_head_ref": "", "event_pr": "", "event_issue": "12", "branch_prefix": "review/external-12", "refuse_bundle": True}
+    assert run(tmp_path, m, **common) == []
+    m["branch"] = "review/external-13"
+    errs = run(tmp_path, m, **common)
+    assert any("does not start with the prefix" in e for e in errs)
+
+
 # --- CLI ---------------------------------------------------------------------
 
 
@@ -690,6 +856,32 @@ def test_cli_branch_prefix(tmp_path, capsys):
     assert "does not start with the prefix this run's branches must carry ('claude/issue-79-'" in capsys.readouterr().out
     # The flag's own default: no prefix rule on a no-PR run.
     assert cli(tmp_path, pr_head_ref="", event_pr="") == 0
+
+
+def test_cli_refuse_bundle(tmp_path, capsys):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path) == 0
+    assert cli(tmp_path, "--refuse-bundle") == 1
+    out = capsys.readouterr().out
+    assert "refuses bundles" in out
+    (tmp_path / "commits.bundle").unlink()
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(base_manifest(tmp_path, head_sha=START, has_bundle=False, pr=None, handback=False))
+    )
+    (tmp_path / "commits.bundle").unlink()
+    assert cli(tmp_path, "--refuse-bundle") == 0
+
+
+def test_cli_refuse_bundle_relaxes_the_branch_rules(tmp_path, capsys):
+    # The reviewer's landing on a fork-head PR whose branch is `main`: the
+    # composite passes --default-branch main and --refused-branches main, and
+    # the manifest must still validate.
+    m = base_manifest(tmp_path, branch="main", head_sha=START, has_bundle=False, pr=None, handback=False)
+    (tmp_path / "commits.bundle").unlink()
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path, pr_head_ref="main") == 1
+    assert "must not be the default branch" in capsys.readouterr().out
+    assert cli(tmp_path, "--refuse-bundle", pr_head_ref="main") == 0
 
 
 def test_cli_missing_manifest(tmp_path, capsys):

@@ -224,6 +224,9 @@ def test_remote_branch_exists_fails_when_the_error_persists(tmp_path):
         ("pr, stage", "1",
          "The agent's commits were pushed; only what follows the push is affected. Move the Atlas stage by hand."),
         ("handoff", "", "Post the hand-off by hand."),
+        # The reviewer's land job: nothing is ever pushed, so a failed
+        # verdict post owes exactly the verdict.
+        ("verdict", "", "Post the review verdict by hand."),
         ("pr", "", ""),
     ],
 )
@@ -258,6 +261,10 @@ PUSHED_PREFIX = "The agent's commits were pushed; only what follows the push is 
         ("stage", "1", "stage", f"{PUSHED_PREFIX} Move the Atlas stage by hand."),
         # Nothing withheld (the common case): unchanged.
         ("pr", "1", "", PUSHED_PREFIX),
+        # The reviewer's codex path: the Post step lost the review body, so
+        # the verdict was withheld (a verdict over a missing review would
+        # spend an @auto round on nothing) — owed, and named.
+        ("post (comment on #456 failed after 5 attempts)", "", "verdict", "Post the review verdict by hand."),
     ],
 )
 def test_landing_failure_hint_names_withheld_steps(failed, pushed, withheld, expected):
@@ -265,6 +272,33 @@ def test_landing_failure_hint_names_withheld_steps(failed, pushed, withheld, exp
     assert r.returncode == 0, r.stderr
     assert r.stdout == expected
     assert "@" not in r.stdout
+
+
+def test_verdict_step_is_withheld_when_a_comment_was_lost():
+    # The verdict (claude-review.yml's codex path) is the only marker-bearing
+    # body besides the hand-back, and it must never post over a review body
+    # the Post step failed to land: gated on `failed` being empty, and posted
+    # before the hand-back so a workflow that used both would order them.
+    text = LAND.read_text()
+    block = text[text.index("    - id: verdict\n"):]
+    cond = block.splitlines()[1].strip()
+    assert cond == "if: steps.plan.outputs.verdict != '' && steps.post.outputs.failed == ''"
+    assert text.index("    - id: post\n") < text.index("    - id: verdict\n") < text.index("    - id: handback\n")
+    # Both fixed bodies are the exact lines the review prompt and the @auto
+    # loop's gates key on.
+    assert "'🔎 Review complete — no outstanding suggestions. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->'" in block
+    assert "'🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->'" in block
+
+
+def test_verdict_bodies_would_not_survive_the_defang(tmp_path):
+    # Why review_verdict exists: a verdict sent through comments[] would have
+    # its markers split by defang, and the loop would never see it.
+    src = tmp_path / "v.md"
+    src.write_text("🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->\n")
+    dst = tmp_path / "out.md"
+    r = bash_lib(f"defang '{src}' '{dst}'")
+    assert r.returncode == 0, r.stderr
+    assert "claude-review-summary" not in dst.read_text()
 
 
 def test_stage_and_handoff_steps_run_after_a_failed_hand_back():
@@ -429,6 +463,85 @@ def test_emit_landing_references_no_secret():
     text = EMIT.read_text()
     assert "secrets." not in text
     assert "GIT_TOKEN" not in text  # not even a token input: nothing to leak
+
+
+def emit_landing_script() -> str:
+    """The `write` step's bash, lifted from the action so it runs here.
+
+    Text extraction rather than a YAML parser (PyYAML is not a test
+    dependency): the block scalar under `run: |` is every following line
+    indented by at least its 8 spaces, up to the first that is not.
+    """
+    lines = EMIT.read_text().splitlines()
+    start = lines.index("    - id: write")
+    run_at = next(i for i in range(start, len(lines)) if lines[i] == "      run: |")
+    body = []
+    for line in lines[run_at + 1:]:
+        if line.strip() == "":
+            body.append("")
+        elif line.startswith("        "):
+            body.append(line[8:])
+        else:
+            break
+    return "\n".join(body) + "\n"
+
+
+def run_emit_landing(tmp_path, *, cwd, read_only, start_sha, extra=None):
+    landing = tmp_path / "landing"
+    out = tmp_path / "out.txt"
+    out.write_text("")
+    env = {
+        "START_SHA": start_sha,
+        "BRANCH": "claude/issue-81-review",
+        "PR_NUMBER": "456",
+        "ISSUE_NUMBER": "",
+        "EXTRA": str(extra) if extra else "",
+        "DIR": str(landing),
+        "READ_ONLY": "true" if read_only else "false",
+        "REPO": "meridianlabs-ai/agents",
+        "RUN_ID": "123",
+        "GITHUB_OUTPUT": str(out),
+        # A git that cannot run: the read-only path must never need it.
+        "PATH": str(tmp_path / "nobin") if read_only else os.environ["PATH"],
+    }
+    r = sh("bash", "-c", emit_landing_script(), cwd=cwd, check=False, env=env)
+    return r, landing, out.read_text()
+
+
+def test_emit_landing_read_only_runs_no_git_and_never_bundles(repos):
+    # claude-review.yml's shape: HEAD moved (the agent checked out the base
+    # branch, say) but the run is read-only — no bundle, head_sha is the
+    # start SHA, and no git binary was needed at all.
+    r = repos
+    nobin = r["tmp"] / "nobin"
+    nobin.mkdir()
+    for tool in ("bash", "jq", "echo", "mkdir", "rm", "cat"):
+        p = sh("bash", "-c", f"command -v {tool}").stdout.strip()
+        if p and p.startswith("/"):
+            (nobin / tool).symlink_to(p)
+    res, landing, output = run_emit_landing(r["tmp"], cwd=r["work"], read_only=True, start_sha=r["start"])
+    assert res.returncode == 0, res.stderr
+    import json
+
+    m = json.loads((landing / "manifest.json").read_text())
+    assert m["has_bundle"] is False
+    assert m["head_sha"] == r["start"] == m["start_sha"]
+    assert "error" not in m
+    assert not (landing / "commits.bundle").exists()
+    assert "wrote=true" in output
+    assert "read-only run; no bundle, no git" in res.stdout
+
+
+def test_emit_landing_default_path_still_bundles(repos):
+    r = repos
+    res, landing, output = run_emit_landing(r["tmp"], cwd=r["work"], read_only=False, start_sha=r["start"])
+    assert res.returncode == 0, res.stderr
+    import json
+
+    m = json.loads((landing / "manifest.json").read_text())
+    assert m["has_bundle"] is True
+    assert m["head_sha"] == r["head"]
+    assert (landing / "commits.bundle").is_file()
 
 
 def test_land_tokens_are_step_scoped():

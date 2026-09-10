@@ -21,8 +21,10 @@ description: >-
   exists, and reports through the `emitted` output. Referenced
   fully-qualified (meridianlabs-ai/agents/.github/actions/emit-landing@main);
   NO post step (local composite actions with post steps break teardown on
-  the fork). On the codex path this must run AFTER reclaim-codex-workspace
-  (it runs git in the workspace), like every other post-codex git step.
+  the fork). Unless `read-only` is "true" this runs git in the workspace, so
+  on the codex path it must then run AFTER reclaim-codex-workspace like every
+  other post-codex git step; a `read-only` caller (the reviewer) runs no git
+  here and needs no reclaim step for this action's sake.
 
 inputs:
   start-sha:
@@ -79,6 +81,18 @@ inputs:
     description: Artifact name; the land job downloads the same name.
     required: false
     default: landing
+  read-only:
+    description: >-
+      "true" when the agent never commits (claude-review.yml: the reviewer
+      has contents:read and git commit denied). No git command runs at all —
+      the manifest gets `head_sha` = `start-sha` and `has_bundle` false — so
+      a reviewer that merely moved HEAD (checked out the base branch to
+      compare, say) is not reported as "rewrote history", and on the codex
+      path nothing here touches the workspace codex had write access to.
+      Convenience only: the enforcing side is `land`'s `refuse-bundle`,
+      which refuses any manifest carrying commits whatever this job uploaded.
+    required: false
+    default: "false"
 
 outputs:
   emitted:
@@ -106,6 +120,7 @@ runs:
         ISSUE_NUMBER: ${{ inputs.issue-number }}
         EXTRA: ${{ inputs.manifest-extra }}
         DIR: ${{ inputs.landing-dir }}
+        READ_ONLY: ${{ inputs.read-only }}
         REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
         # No hooks, no fsmonitor: on the codex path the reclaim step already
@@ -130,42 +145,55 @@ runs:
         # manifest or bundle would be mistaken for this run's).
         rm -f "$DIR/manifest.json" "$DIR/commits.bundle"
         note=""
-        head_sha=$(git rev-parse HEAD 2>/dev/null) || head_sha=""
-        if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
-          note="emit-landing: could not read HEAD (git rev-parse failed); nothing to push."
-          echo "::warning::$note"
-          head_sha="$START_SHA"
-        fi
-        if ! [[ "$START_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-          note="${note:+$note }emit-landing: start-sha '$START_SHA' is not a full SHA; nothing to push."
-          echo "::warning::emit-landing: start-sha '$START_SHA' is not a full SHA."
-          START_SHA="$head_sha"
-        fi
         has_bundle=false
-        if [ "$head_sha" != "$START_SHA" ]; then
-          # Only the commits above the start SHA: the land job fetches the
-          # start SHA from origin itself and refuses a bundle whose tip does
-          # not descend from it. A HEAD that is NOT a descendant (the agent
-          # reset or rebased) produces an empty or foreign bundle — verify
-          # catches a broken one here; the land job's ancestry check catches
-          # the rest. `..HEAD`, not `..$head_sha`: bundle create records REFS
-          # and refuses a bare SHA on the positive side; HEAD was read above,
-          # so the bundle's HEAD ref IS head_sha.
-          if git merge-base --is-ancestor "$START_SHA" "$head_sha" 2>/dev/null \
-             && git bundle create --quiet "$DIR/commits.bundle" "$START_SHA..HEAD" 2>&1 \
-             && git bundle verify --quiet "$DIR/commits.bundle" 2>&1; then
-            has_bundle=true
-            echo "emit-landing: bundled $(git rev-list --count "$START_SHA..$head_sha") commit(s) $START_SHA..$head_sha"
-          else
-            rm -f "$DIR/commits.bundle"
-            note="${note:+$note }emit-landing: HEAD ($head_sha) moved from the start SHA ($START_SHA) but is not a descendant of it, or the bundle could not be written — the agent's commits were NOT packaged and will not land."
-            echo "::error::$note"
-            # The land job pushes nothing without a bundle; make the
-            # manifest consistent (head_sha == start_sha ⇔ has_bundle false).
+        if [ "$READ_ONLY" = "true" ]; then
+          # The agent never commits: no git at all (see the input's note),
+          # head_sha is the start SHA and there is never a bundle. A bad
+          # start-sha still has to be reported — the validator refuses a
+          # non-SHA — but it is the caller's, not the agent's, doing.
+          head_sha="$START_SHA"
+          if ! [[ "$START_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            note="emit-landing: start-sha '$START_SHA' is not a full SHA (read-only run); the manifest will be refused."
+            echo "::warning::$note"
+          fi
+          echo "emit-landing: read-only run; no bundle, no git."
+        else
+          head_sha=$(git rev-parse HEAD 2>/dev/null) || head_sha=""
+          if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            note="emit-landing: could not read HEAD (git rev-parse failed); nothing to push."
+            echo "::warning::$note"
             head_sha="$START_SHA"
           fi
-        else
-          echo "emit-landing: HEAD is still the start SHA; no commits to bundle."
+          if ! [[ "$START_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            note="${note:+$note }emit-landing: start-sha '$START_SHA' is not a full SHA; nothing to push."
+            echo "::warning::emit-landing: start-sha '$START_SHA' is not a full SHA."
+            START_SHA="$head_sha"
+          fi
+          if [ "$head_sha" != "$START_SHA" ]; then
+            # Only the commits above the start SHA: the land job fetches the
+            # start SHA from origin itself and refuses a bundle whose tip does
+            # not descend from it. A HEAD that is NOT a descendant (the agent
+            # reset or rebased) produces an empty or foreign bundle — verify
+            # catches a broken one here; the land job's ancestry check catches
+            # the rest. `..HEAD`, not `..$head_sha`: bundle create records REFS
+            # and refuses a bare SHA on the positive side; HEAD was read above,
+            # so the bundle's HEAD ref IS head_sha.
+            if git merge-base --is-ancestor "$START_SHA" "$head_sha" 2>/dev/null \
+               && git bundle create --quiet "$DIR/commits.bundle" "$START_SHA..HEAD" 2>&1 \
+               && git bundle verify --quiet "$DIR/commits.bundle" 2>&1; then
+              has_bundle=true
+              echo "emit-landing: bundled $(git rev-list --count "$START_SHA..$head_sha") commit(s) $START_SHA..$head_sha"
+            else
+              rm -f "$DIR/commits.bundle"
+              note="${note:+$note }emit-landing: HEAD ($head_sha) moved from the start SHA ($START_SHA) but is not a descendant of it, or the bundle could not be written — the agent's commits were NOT packaged and will not land."
+              echo "::error::$note"
+              # The land job pushes nothing without a bundle; make the
+              # manifest consistent (head_sha == start_sha ⇔ has_bundle false).
+              head_sha="$START_SHA"
+            fi
+          else
+            echo "emit-landing: HEAD is still the start SHA; no commits to bundle."
+          fi
         fi
         echo "head_sha=$head_sha" >>"$GITHUB_OUTPUT"
         echo "has_bundle=$has_bundle" >>"$GITHUB_OUTPUT"
@@ -217,6 +245,11 @@ runs:
     # continue-on-error: the upload failing must not fail the agent job
     # either (the `emitted` output carries the outcome). Upload the directory
     # as-is: the workflow's body files, the manifest and the bundle.
+    # overwrite: artifacts belong to the RUN, not the attempt, and without it
+    # upload-artifact@v4 fails when the name already exists — so a re-run from
+    # the Actions UI would warn here and the land job would download the
+    # FIRST attempt's landing and re-post it. With it, attempt N replaces
+    # attempt N-1's artifact; a first upload is unaffected.
     - id: upload
       if: steps.write.outputs.wrote == 'true'
       uses: actions/upload-artifact@v4
@@ -227,6 +260,7 @@ runs:
         retention-days: 1
         if-no-files-found: error
         include-hidden-files: false
+        overwrite: true
 
     - shell: bash
       env:

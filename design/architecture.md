@@ -364,8 +364,52 @@ that must happen *before* the agent runs (the stage move to Agent, the
 "working on it" comment) — those stay trusted because they run before any
 untrusted code is checked out. What moves to `land`: everything after.
 `model-provenance` splits along the same line — the agent job runs it with
-an empty token (job summary only) and the workflow turns its note into
-`provenance_comment_file`.
+an empty token (job summary only) and the workflow turns its `note` output
+into `provenance_comment_file`.
+
+**The reviewer (#81, 2026-09-10) is the first conversion.** `claude-review.yml`
+is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`
+(checkout, provisioning, the agent; names no GitHub-write secret — the codex
+engine's `OPENAI_API_KEY` is the one secret it holds, unavoidably) → `land`
+(the `land` composite, then the posted-review check as marvin with the job
+token as fallback — in external mode the nudge's target is the proxy issue,
+and the job token has `issues: read` only: a reusable workflow cannot request
+more than the callers' stubs grant). Two things the reviewer needed that the
+dev-agent shape did not:
+
+- **It never commits, so its land job must never be a push channel.**
+  `emit-landing`'s `read-only` input skips git entirely (`head_sha` =
+  `start_sha`, no bundle — so a reviewer that checked out the base branch to
+  compare is not reported as a rewrite, and on the codex path nothing runs
+  git in the workspace codex had write access to, which is why the reviewer
+  needs no reclaim step); `land`'s `refuse-bundle` input is the enforcing
+  side: the validator refuses any manifest that carries commits, claims
+  HEAD moved or ships a `commits.bundle`, whatever the review job uploaded.
+  The same flag turns the push-side branch rules off (charset, default
+  branch, refused list): with nothing pushed, `branch` is only the pin to
+  the run's PR head ref, and a fork-head PR whose branch is `main` — the
+  common outside-contributor shape — must review green, not fail at
+  `validate` after the review posted (found in review of #91).
+- **The codex verdict comment must carry live markers.** Every `comments[]`
+  body is de-fanged, which would split `claude-review-summary` /
+  `claude-review-verdict:…` and the @auto loop would never see the verdict.
+  The manifest's `review_verdict` (`clean` | `suggestions`) makes `land`
+  post one of two fixed bodies verbatim — the second such body after the
+  hand-back; no agent text reaches it — after `comments[]` and only when the
+  Post step lost nothing, so a verdict never posts over a review body that
+  did not land (Report names it as withheld instead).
+
+The review job's `Surface agent errors` no longer posts: its message is the
+manifest's `error` (fail_run true) and the land job posts it, de-fanged, and
+fails the run after the stage move — a failed review still owes the board
+its move back to Review. The `pr_number` pin comes from the event payload,
+the PR head ref from the gate job's API lookup (`head_ref`, a gate output
+computed before any untrusted code ran), and external mode — which names no
+PR of ours — uses a fixed `review/external-<issue>` branch name that the
+land job's `branch-prefix` pins. MARVIN_TOKEN is absent from the `review`
+job; a marvin-less caller's land job falls back to the job token (posts from
+`github-actions[bot]`, which trigger nothing — as the codex posting step's
+fallback already did).
 
 ## Model selection: prefer Fable, fall back gracefully
 

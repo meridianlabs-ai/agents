@@ -97,10 +97,11 @@ open_or_adopt_pr() {
 # landing_failure_hint FAILED PUSHED [WITHHELD] — the one-line consequence
 # the Report step adds under "Landing failed at step(s): FAILED" (a
 # comma-separated list of step names, `post (…)` included): whether the
-# agent's commits reached the branch, and which hand-back / hand-off / stage
-# move a human now owes. WITHHELD is a second list, in the same format, of
-# the planned `handback` / `handoff` / `stage` steps that never ran (skipped,
-# not failed, because the PR step failed after the push) — each owed just
+# agent's commits reached the branch, and which hand-back / verdict /
+# hand-off / stage move a human now owes. WITHHELD is a second list, in the
+# same format, of the planned `handback` / `verdict` / `handoff` / `stage`
+# steps that never ran (skipped, not failed, because the PR step failed after
+# the push — or, for the verdict, because the Post step lost a comment) — each owed just
 # like a failed one, and named once even when it appears in both lists. Our
 # own text, so it names no live trigger token.
 landing_failure_hint() {
@@ -117,6 +118,7 @@ landing_failure_hint() {
   # Each owed action independently: a failed hand-back and a withheld stage
   # can coincide, and the human must hear about both.
   case "$owed" in *,handback,*) hint="${hint:+$hint }Post the re-review request by hand." ;; esac
+  case "$owed" in *,verdict,*) hint="${hint:+$hint }Post the review verdict by hand." ;; esac
   case "$owed" in *,handoff,*) hint="${hint:+$hint }Post the hand-off by hand." ;; esac
   case "$owed" in *,stage,*) hint="${hint:+$hint }Move the Atlas stage by hand." ;; esac
   printf '%s' "$hint"

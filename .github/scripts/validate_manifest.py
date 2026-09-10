@@ -21,7 +21,19 @@ manifest. Usage:
         --allowed-issue-repos owner/name,owner/other \
         --event-pr-number "$EVENT_PR" --event-issue-number "$EVENT_ISSUE" \
         [--pr-head-ref <headRefName of that PR, from the API>] \
-        [--branch-prefix "claude/issue-$EVENT_ISSUE-"]
+        [--branch-prefix "claude/issue-$EVENT_ISSUE-"] [--refuse-bundle]
+
+`--refuse-bundle` is for callers whose agent never commits (the reviewer):
+a manifest that carries commits, claims HEAD moved, or ships a
+`commits.bundle` is refused, so that land job can never become a push
+channel however the artifact was produced. Because nothing is ever pushed
+to `branch` there, the push-side branch rules (charset, not the default
+branch, not on the refused list, not `refs/…`) do not apply under the flag:
+`branch` is the PR's live head ref as the trusted context reports it, and a
+fork-head PR's `main` or a `+`/`@`/`#`/non-ASCII name must pass. The pin to
+`--pr-head-ref` (or `--branch-prefix`) still holds, and the value must
+still be safe to read into a shell variable and a step output (no control
+characters, bounded length).
 
 `--event-pr-number` / `--event-issue-number` are the numbers the run's
 TRUSTED context names (the event payload, or a gate-job output computed
@@ -57,6 +69,14 @@ MAX_TITLE_CHARS = 256
 MAX_MESSAGE_CHARS = MAX_BODY_FILE_BYTES
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+# Under --refuse-bundle `branch` is never pushed to, so any name git accepts
+# must pass; the only shape rule left is what keeps the value safe to echo
+# into $GITHUB_OUTPUT and read into a shell variable — no C0 control
+# characters (a newline would inject a second output) or DEL, bounded length.
+# Every shape regex here is applied with fullmatch: `$` alone matches before
+# a final "\n", so re.match would let "main\n" through the control-character
+# rule.
+READ_ONLY_BRANCH_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,1000}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 THREAD_RE = re.compile(r"^PRRT_[A-Za-z0-9_-]+$")
 FILE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
@@ -89,7 +109,12 @@ KNOWN_TOP_LEVEL = {
     "handoff_body_file",
     "error",
     "provenance_comment_file",
+    "review_verdict",
 }
+# The reviewer's verdict marker comment (claude-review.yml's codex path): the
+# land job posts one of two FIXED bodies chosen by this value, so the loop's
+# markers stay live without any agent text passing the de-fang un-broken.
+VERDICTS = ("clean", "suggestions")
 KNOWN_PR = {"open", "title", "body_file", "base", "labels", "issue"}
 # No `target`: the issues endpoint serves PRs and issues alike, so `number`
 # is all the land job needs; a field it never reads would only mislead.
@@ -123,6 +148,7 @@ class Validator:
         event_pr_number: str = "",
         event_issue_number: str = "",
         branch_prefix: str = "",
+        refuse_bundle: bool = False,
     ) -> None:
         self.m = manifest
         self.dir = Path(artifact_dir)
@@ -136,6 +162,7 @@ class Validator:
         self.event_pr_number = event_pr_number.strip()
         self.event_issue_number = event_issue_number.strip()
         self.branch_prefix = branch_prefix.strip()
+        self.refuse_bundle = refuse_bundle
         self.errors: list[str] = []
 
     def err(self, msg: str) -> None:
@@ -194,7 +221,7 @@ class Validator:
         # A tight charset: the land job reads these names line by line from
         # jq output, so a newline (or any other oddity) in a name must never
         # get that far.
-        if not FILE_REF_RE.match(ref):
+        if not FILE_REF_RE.fullmatch(ref):
             self.err(f"{label} has characters outside [A-Za-z0-9._/-] or is longer than 200")
             return
         parts = ref.split("/")
@@ -249,7 +276,7 @@ class Validator:
         manifest may neither name a PR/issue the event did not, nor drop the
         one it did (which would let `pr.open` adopt an arbitrary open PR).
         """
-        if event and not EVENT_NUMBER_RE.match(event):
+        if event and not EVENT_NUMBER_RE.fullmatch(event):
             self.err(f"manifest: {flag} {event!r} is not a positive integer (caller misconfiguration; failing closed)")
             return
         if value is None:
@@ -301,8 +328,18 @@ class Validator:
             if not isinstance(pr, dict):
                 self.err("manifest: pr must be an object")
                 pr = None
-        if branch is not None:
-            if not BRANCH_RE.match(branch):
+        if branch is not None and self.refuse_bundle:
+            # Never pushed to (the reviewer's land job — see the `refuse_bundle`
+            # block below): `branch` is kept only so the pin to the run's PR
+            # head ref (or the external-mode prefix) below still ties the
+            # manifest to the run. A fork-head PR whose branch is `main`, or
+            # any head ref git accepts (`+`, `@`, `#`, non-ASCII), must pass,
+            # so the push-side rules in the other arm do not apply; only the
+            # shell/step-output safety check does.
+            if not READ_ONLY_BRANCH_RE.fullmatch(branch):
+                self.err("manifest: branch has control characters or is longer than 1000")
+        elif branch is not None:
+            if not BRANCH_RE.fullmatch(branch):
                 self.err("manifest: branch has characters outside [A-Za-z0-9._/-] or is longer than 200")
             if ".." in branch:
                 self.err("manifest: branch must not contain '..'")
@@ -345,7 +382,7 @@ class Validator:
         start_sha = self._str(m, "start_sha", "manifest", required=True)
         head_sha = self._str(m, "head_sha", "manifest", required=True)
         for name, sha in (("start_sha", start_sha), ("head_sha", head_sha)):
-            if sha is not None and not SHA_RE.match(sha):
+            if sha is not None and not SHA_RE.fullmatch(sha):
                 self.err(f"manifest: {name} must be 40 lowercase hex characters")
         has_bundle = self._bool(m, "has_bundle", "manifest", required=True)
         if has_bundle is not None and start_sha and head_sha:
@@ -357,6 +394,16 @@ class Validator:
             bundle = self.dir / "commits.bundle"
             if bundle.is_symlink() or not bundle.is_file():
                 self.err("manifest: has_bundle is true but commits.bundle is missing or not a regular file")
+        if self.refuse_bundle:
+            # The caller's agent never commits (the reviewer: contents:read,
+            # git commit denied). Its land job must never become a push
+            # channel, so a manifest that carries commits — or merely claims
+            # HEAD moved, or ships a bundle file — is refused outright,
+            # whatever the agent job (or anything running in it) uploaded.
+            if has_bundle or (start_sha and head_sha and head_sha != start_sha):
+                self.err("manifest: this land job refuses bundles (--refuse-bundle) but the manifest carries commits (has_bundle / head_sha != start_sha)")
+            if (self.dir / "commits.bundle").exists() or (self.dir / "commits.bundle").is_symlink():
+                self.err("manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact")
 
         if pr is not None:
             self._unknown_keys(pr, KNOWN_PR, "pr")
@@ -368,7 +415,7 @@ class Validator:
             # defaults when claude.yml passes no --base.
             pr_base = self._str(pr, "base", "pr", required=False) or None
             if pr_base is not None:
-                if not BRANCH_RE.match(pr_base):
+                if not BRANCH_RE.fullmatch(pr_base):
                     self.err("pr: base has characters outside [A-Za-z0-9._/-] or is longer than 200")
                 if branch is not None and pr_base == branch:
                     self.err("manifest: branch must not equal pr.base")
@@ -411,7 +458,7 @@ class Validator:
                 self.err("manifest: resolve_threads must be a list")
             else:
                 for i, t in enumerate(threads):
-                    if not isinstance(t, str) or not THREAD_RE.match(t):
+                    if not isinstance(t, str) or not THREAD_RE.fullmatch(t):
                         self.err(f"resolve_threads[{i}]: must match ^PRRT_[A-Za-z0-9_-]+$")
                 if threads and pr_number is None:
                     self.err("manifest: resolve_threads need pr_number (the PR the threads belong to)")
@@ -429,7 +476,7 @@ class Validator:
                     self._unknown_keys(it, KNOWN_ISSUE, where)
                     irepo = self._str(it, "repo", where, required=True)
                     if irepo is not None:
-                        if not REPO_RE.match(irepo):
+                        if not REPO_RE.fullmatch(irepo):
                             self.err(f"{where}: repo {irepo!r} is not owner/name")
                         elif irepo.lower() not in self.allowed_issue_repos:
                             self.err(f"{where}: repo {irepo!r} is not in the allowed issue repos")
@@ -448,6 +495,13 @@ class Validator:
 
         self._file_ref(m, "handoff_body_file", "manifest", required=False)
         self._file_ref(m, "provenance_comment_file", "manifest", required=False)
+
+        verdict = self._str(m, "review_verdict", "manifest", required=False)
+        if verdict is not None:
+            if verdict not in VERDICTS:
+                self.err(f"manifest: review_verdict must be one of {', '.join(VERDICTS)}")
+            if pr_number is None:
+                self.err("manifest: review_verdict needs pr_number (the PR the verdict is for)")
 
         error = m.get("error")
         if error is not None:
@@ -518,6 +572,11 @@ def main(argv=None) -> int:
         default="",
         help="when --event-pr-number is empty, manifest.branch must start with this (e.g. claude/issue-N-); empty leaves the branch agent-chosen on such runs",
     )
+    ap.add_argument(
+        "--refuse-bundle",
+        action="store_true",
+        help="refuse a manifest that carries commits (the caller's agent never commits — the reviewer); has_bundle must be false, head_sha must equal start_sha and no commits.bundle may be present. `branch` is then never pushed to, so only the head-ref pin / --branch-prefix and a control-character/length check apply to it (a fork-head PR's `main` passes)",
+    )
     args = ap.parse_args(argv)
 
     manifest, errors = load_manifest(Path(args.dir))
@@ -534,6 +593,7 @@ def main(argv=None) -> int:
             event_pr_number=args.event_pr_number,
             event_issue_number=args.event_issue_number,
             branch_prefix=args.branch_prefix,
+            refuse_bundle=args.refuse_bundle,
         )
     for line in errors:
         print(f"manifest violation: {line}")

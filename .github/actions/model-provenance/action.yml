@@ -33,7 +33,10 @@ inputs:
     description: >-
       Token for the provenance comment (MARVIN_TOKEN so it posts as the
       machine account, like the other deterministic posts). Empty skips the
-      comment; the job summary and log lines still happen.
+      comment; the job summary and log lines still happen, and the `note`
+      output carries the text so a workflow that keeps its agent job
+      secret-free (claude-review.yml) can hand it to its land job as the
+      manifest's `provenance_comment_file`.
     required: false
     default: ""
   repo:
@@ -45,10 +48,20 @@ inputs:
     required: false
     default: ""
 
+outputs:
+  note:
+    description: >-
+      The note this action would post (fallback / refusal text, WITHOUT the
+      `<!-- model-provenance -->` first-line marker — the poster adds it);
+      empty when there is nothing to flag. Written whether or not `token`
+      was given, so a land job can post it later.
+    value: ${{ steps.prov.outputs.note }}
+
 runs:
   using: composite
   steps:
-    - shell: bash
+    - id: prov
+      shell: bash
       env:
         EXEC: ${{ inputs.exec-file }}
         REQUESTED: ${{ inputs.requested }}
@@ -57,6 +70,9 @@ runs:
         NUM: ${{ inputs.number }}
       run: |
         set -uo pipefail
+        # Every early exit below leaves the `note` output empty; the one
+        # path that has something to flag overwrites it (last write wins).
+        echo "note=" >>"$GITHUB_OUTPUT"
         file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
         [ -f "$file" ] || { echo "model-provenance: no execution file; nothing to report."; exit 0; }
         msgs='(if type=="array" then . else .messages end)'
@@ -164,6 +180,13 @@ runs:
         # Blank line first: GFM only ends a table at a blank line, so a bare
         # line under the last row would render as one more (single-cell) row.
         printf '\n%s\n' "$note" >>"$GITHUB_STEP_SUMMARY"
+        # The `note` output, for callers that post from a separate land job.
+        # Heredoc form: the note is multi-line when both shapes fire.
+        {
+          echo "note<<MODEL_PROVENANCE_NOTE_EOF"
+          printf '%s\n' "$note"
+          echo "MODEL_PROVENANCE_NOTE_EOF"
+        } >>"$GITHUB_OUTPUT"
         if [ -n "$GH_TOKEN" ] && [ -n "$NUM" ]; then
           # First-line marker: the note posts as the machine account, and
           # claude-review.yml's "Verify the review was posted" counts machine-
