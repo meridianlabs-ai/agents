@@ -369,9 +369,13 @@ into `provenance_comment_file`.
 
 **The reviewer (#81, 2026-09-10) is the first conversion.** `claude-review.yml`
 is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`
-(checkout, provisioning, the agent; names no secret) → `land` (the `land`
-composite, then the posted-review check with the job token). Two things the
-reviewer needed that the dev-agent shape did not:
+(checkout, provisioning, the agent; names no GitHub-write secret — the codex
+engine's `OPENAI_API_KEY` is the one secret it holds, unavoidably) → `land`
+(the `land` composite, then the posted-review check as marvin with the job
+token as fallback — in external mode the nudge's target is the proxy issue,
+and the job token has `issues: read` only: a reusable workflow cannot request
+more than the callers' stubs grant). Two things the reviewer needed that the
+dev-agent shape did not:
 
 - **It never commits, so its land job must never be a push channel.**
   `emit-landing`'s `read-only` input skips git entirely (`head_sha` =

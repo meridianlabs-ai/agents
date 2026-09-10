@@ -518,11 +518,13 @@ jobs:
           echo "engine=$engine" >>"$GITHUB_OUTPUT"
 
   # UNTRUSTED: checks out the PR head (or the upstream head in external
-  # mode), provisions, runs the agent. Names NO secret — the only
-  # secret-shaped values are the WIF inputs on the action step, which are
-  # identifiers (AGENTS.md) — and never posts as marvin: everything that
-  # must be posted or moved afterwards goes into the landing manifest the
-  # last step uploads, for the `land` job to act on.
+  # mode), provisions, runs the agent. Names NO GitHub-write secret —
+  # MARVIN_TOKEN is absent (the invariant at the top of this file); the
+  # codex engine's OPENAI_API_KEY is named at its Run step because codex
+  # must hold its own key, and the WIF inputs on the action step are
+  # identifiers, not secrets (AGENTS.md) — and never posts as marvin:
+  # everything that must be posted or moved afterwards goes into the
+  # landing manifest the last step uploads, for the `land` job to act on.
   review:
     needs: gate
     if: needs.gate.outputs.ok == 'true'
@@ -612,8 +614,9 @@ jobs:
       # has to be a real SHA. On pull_request events it is the merge ref's
       # commit, on comment runs the pinned head — either is fine. rev-parse
       # on its own line under -e, so a failure is this step's (not echo's
-      # success with an empty sha, which the land job would refuse with only
-      # a generic "validate" note); Surface agent errors reads the outcome.
+      # success with an empty sha); Surface agent errors reads the outcome,
+      # and the emit step falls back to github.sha so the manifest carrying
+      # that error still validates.
       - name: Record checkout SHA
         id: base
         if: needs.gate.outputs.ok == 'true'
@@ -1590,7 +1593,16 @@ jobs:
         if: always() && needs.gate.outputs.ok == 'true'
         uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
         with:
-          start-sha: ${{ steps.base.outputs.sha }}
+          # When the checkout (or the SHA step) failed, `steps.base` is empty
+          # and an empty start_sha would be refused at `validate` — and the
+          # land composite posts the manifest's error and moves the stage
+          # only from a VALIDATED manifest, so the Surface step's
+          # checkout-failure message and the hand-back to Review would both
+          # be lost to the log. Under refuse-bundle the start SHA is never
+          # fetched or compared (nothing is pushed); it only has to be a
+          # well-formed SHA, and github.sha (always 40 hex; the default-branch
+          # head on comment runs) is a trusted placeholder.
+          start-sha: ${{ steps.base.outputs.sha || github.sha }}
           # The admitted PR's head ref (the validator pins a PR run's branch
           # to it — and under the land job's refuse-bundle that pin is the
           # only branch rule, so a fork-head PR's `main` passes); external
@@ -1607,8 +1619,8 @@ jobs:
   # (refusing any manifest that carries commits: the reviewer's land job is
   # never a push channel), post the codex review and verdict, move the stage,
   # post the provenance note, report the agent error and fail the run when
-  # it says so — then the posted-review check, which reads with the job
-  # token. Skipped when the review job was cancelled (newest-wins
+  # it says so — then the posted-review check, as marvin (job-token
+  # fallback). Skipped when the review job was cancelled (newest-wins
   # concurrency): there is no artifact, and a "landing failed" note about
   # a superseded run would be noise.
   land:
@@ -1617,7 +1629,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write    # the posted-review check's nudge (job token)
+      pull-requests: write    # the posted-review check's job-token fallback
+      # NOT write: a reusable workflow cannot request more than its caller
+      # grants, and every stub grants issues: read (examples/). In external
+      # mode the posted-review nudge targets the proxy ISSUE, so it posts as
+      # marvin (MARVIN_TOKEN, as before this job split); a marvin-less
+      # caller's fallback nudge 403s there — the pre-existing gap.
       issues: read
       actions: read           # artifact download
     steps:
@@ -1658,12 +1675,14 @@ jobs:
       # after the landing (always(): a failed landing must not hide a stall,
       # and the land step fails the run when the manifest's error says so —
       # then the agent step was not a success and this is skipped anyway).
-      # Job token: it reads comments and reviews, and its nudge — backticked
-      # trigger, so inert from any account — needs no machine identity.
+      # Marvin's token, as before the job split: the nudge is inert from any
+      # account (backticked trigger), but in external mode it posts on the
+      # proxy ISSUE and this job's token has issues: read only (the callers'
+      # stubs grant no more) — the job token is the marvin-less fallback.
       - name: Verify the review was posted
         if: always() && needs.review.outputs.claude_outcome == 'success'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           MODE: ${{ needs.gate.outputs.mode }}
           EVENT: ${{ github.event_name }}
