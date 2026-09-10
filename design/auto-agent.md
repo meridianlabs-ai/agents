@@ -122,7 +122,10 @@ finding 4121989) that is enforced in three layers rather than assumed:
 - **The loop gates verify who applied the label.** Both loops' gates
   (`claude-auto.yml`, `claude-auto-review.yml`) run the shared
   `verify-auto-labeler` composite between their label check and their
-  counting step. It reads the PR timeline and requires the most recent
+  counting step (the review loop's merged-PR skip also precedes it, so a
+  merged PR still carrying the label costs no timeline fetch and gets no
+  notice; the CI-fix loop lists open PRs only). It reads the PR timeline and
+  requires the most recent
   `labeled` event for `auto` to come from the machine account (claude.yml's
   opt-in and PR-open propagation, or triage) or from an account with write
   access, and returns one of three verdicts. `ok` runs the round. `disarmed`

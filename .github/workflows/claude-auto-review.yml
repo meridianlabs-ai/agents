@@ -158,8 +158,8 @@ jobs:
       actions: read
     steps:
       # The gate is three steps, all via the API, before any checkout: resolve
-      # the PR and check reviewer identity, same-repo, token and the auto
-      # label; verify who applied the label (shared composite); then compute
+      # the PR and check reviewer identity, same-repo, token, the auto label
+      # and not-merged; verify who applied the label (shared composite); then compute
       # the round count and decide. The counter increments before the agent
       # runs, so a crashed agent still consumes a round — and it is computed
       # only AFTER the labeler check passes, so an outsider's label never
@@ -227,6 +227,16 @@ jobs:
           fi
           if [ "$(jq -r --arg l "$AUTO_LABEL" 'any(.labels[]; .name==$l)' <<<"$pr_json")" != "true" ]; then
             echo "PR #$PR is not @auto-labeled; skipping."; act skip; exit 0
+          fi
+          # A MERGED PR is done, whatever its labels (CLOSED is different —
+          # see the continuation logic in Gate and count). Decide it HERE,
+          # ahead of the labeler check: a merged PR still carrying the label
+          # is a state this loop has always skipped silently, and running the
+          # composite on it would cost a timeline fetch and a permission
+          # lookup per reviewer event — and, for an unverifiable labeler,
+          # post the "not running" notice (or a disarm note) on a merged PR.
+          if [ "$(jq -r '.state' <<<"$pr_json")" = "MERGED" ]; then
+            echo "PR #$PR is MERGED; nothing to continue. Skipping."; act skip; exit 0
           fi
           # Hand the fetched PR to the counting step (one line: gh emits
           # compact JSON, and `-c` guarantees it for the single-line output).
@@ -299,12 +309,11 @@ jobs:
           # is done, and looping on its surviving branch would push commits
           # that never reach main while the moving tip defeats the
           # no-progress escalation that used to kill exactly that zombie.
+          # The MERGED skip itself lives in the resolve step, ahead of the
+          # labeler check, so only OPEN and CLOSED reach here.
           pr_state=$(jq -r '.state' <<<"$pr_json")
           live_tip=""
-          if [ "$pr_state" = "MERGED" ]; then
-            echo "PR #$PR is MERGED; nothing to continue. Skipping."
-            act skip; exit 0
-          elif [ "$pr_state" != "OPEN" ]; then
+          if [ "$pr_state" != "OPEN" ]; then
             # ghr emits captured stdout only on success, so a deleted branch
             # (persistent 404) yields an empty capture and the skip below
             # fires — the error body `gh api` prints to STDOUT never reaches
