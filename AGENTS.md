@@ -24,12 +24,20 @@ take effect on every repo's next run.
   `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
   `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `post-pr-comment`,
-  `resolve-reported-threads`, `pr-feedback-context`). Referenced
-  fully-qualified
+  `resolve-reported-threads`, `pr-feedback-context`, `emit-landing`, `land`).
+  Referenced fully-qualified
   (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
   regardless of what the job checked out; put step bodies that would otherwise
   be copied between `claude.yml`, `claude-auto.yml` and `claude-auto-review.yml`
   here rather than letting the copies drift.
+  `emit-landing` (end of the untrusted agent job: bundle + manifest →
+  artifact) and `land` (the trusted land job's body: validate, push, post,
+  stage) are the landing plumbing from #79 — design/architecture.md → Landing
+  job; the manifest schema is in `.github/actions/emit-landing/README.md`.
+- `.github/scripts/validate_manifest.py` — the land job's manifest validator
+  (stdlib only; fails closed). `tests/` holds its pytest suite and the
+  `land` helpers' tests — the repo's only unit tests: `python3 -m pytest`
+  from the root.
 - `examples/` — stubs copied into caller repos by `scripts/enable-claude.sh`.
 - `design/` — rationale and history; read [design/architecture.md](design/architecture.md)
   before changing how the agents work.
@@ -133,7 +141,10 @@ take effect on every repo's next run.
 
 ## Testing a change
 
-There is no unit-test suite — changes are validated by triggering the agents:
+The only unit tests are in `tests/` — `python3 -m pytest` from the root
+covers the land job's manifest validator and the `land` composite's `lib.sh`
+helpers and git contract; run it when touching either. Everything else (the
+workflows and the other composites) is validated by triggering the agents:
 
 - Comment `@claude …` (or add the `claude` label) on an issue/PR in the
   inspect_ai fork to exercise the dev agent; `@review` on a PR for the reviewer.

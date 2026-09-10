@@ -1,0 +1,38 @@
+# Unit tests for the landing plumbing (tests/README.md). Move this file to
+# .github/workflows/tests.yml — it is staged here because the agent that
+# opened PR #79's branch cannot write under .github/workflows/.
+name: tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/**"
+      - ".github/actions/land/**"
+      - ".github/actions/emit-landing/**"
+      - "tests/**"
+      - "pytest.ini"
+  pull_request:
+    paths:
+      - ".github/scripts/**"
+      - ".github/actions/land/**"
+      - ".github/actions/emit-landing/**"
+      - "tests/**"
+      - "pytest.ini"
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python3 -m pytest

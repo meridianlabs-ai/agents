@@ -1,0 +1,151 @@
+# Smoke test for the landing plumbing (issue #79 → Verification 2). NOT a
+# caller stub: copy it to .github/workflows/landing-smoke.yml on a branch to
+# run it, and delete that copy before merging. It runs the three-job shape
+# on a throwaway branch with a plain `git commit` standing in for the agent:
+#
+#   gate  (trusted)   -> records nothing here; in real workflows: trigger check
+#   agent (untrusted) -> checkout, commit a file, emit-landing (job token only)
+#   land  (trusted)   -> fresh runner, no checkout: land pushes and comments
+#
+# Confirms: the pushed tip equals the manifest's head_sha; the push
+# authenticates as marvin (check the branch's commit pusher / the run log);
+# a second run against a branch someone pushed to in between refuses with
+# "moved during the run"; and `tamper: main` shows a manifest naming `main`
+# as branch is rejected by the validator before any network call — on every
+# repo, whether `main` is the default branch or (the inspect_ai fork) the
+# pristine non-default one, since `main` is on the land job's default
+# `refused-branches` (and off the `branch-prefix` the land job pins a
+# no-PR run's branch to) — with the refusal reported on `issue` (the land
+# job's trusted `issue-number` input), not only in the run log.
+
+name: landing smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Throwaway branch to land on (created if missing).
+        default: scratch/landing-smoke
+      issue:
+        description: Issue number to comment on (empty skips the comment).
+        default: ""
+      tamper:
+        description: >-
+          "" runs the honest path; "main" rewrites the manifest's branch to
+          `main` after emit-landing to prove the validator refuses it.
+        default: ""
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "gate — nothing to do in the smoke test"
+
+  agent:
+    needs: gate
+    runs-on: ubuntu-latest
+    # No `secrets.` anywhere in this job: it holds the job token only.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
+      - name: Check out or create the throwaway branch
+        id: base
+        env:
+          BRANCH: ${{ inputs.branch }}
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+        run: |
+          set -euo pipefail
+          if git fetch --quiet origin "$BRANCH" 2>/dev/null; then
+            git checkout --quiet -B "$BRANCH" FETCH_HEAD
+          else
+            git checkout --quiet -b "$BRANCH"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+      - name: Stand-in for the agent — commit a file, compose the extra fields
+        env:
+          ISSUE: ${{ inputs.issue }}
+          DIR: ${{ runner.temp }}/landing
+        run: |
+          set -euo pipefail
+          git config user.name "landing-smoke"
+          git config user.email "landing-smoke@users.noreply.github.com"
+          date -u +%FT%TZ >>smoke.txt
+          git add smoke.txt
+          git commit --quiet -m "landing smoke: $(date -u +%FT%TZ)"
+          mkdir -p "$DIR"
+          printf 'Landing smoke run %s: this comment was posted by the land job, not the agent job. Live token: @review (must arrive de-fanged).\n' "$GITHUB_RUN_ID" >"$DIR/c1.md"
+          if [ -n "$ISSUE" ]; then
+            jq -n --argjson n "$ISSUE" '{comments: [{number: $n, body_file: "c1.md"}]}' >"$RUNNER_TEMP/extra.json"
+          else
+            echo '{}' >"$RUNNER_TEMP/extra.json"
+          fi
+      - id: emit
+        if: always()
+        uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
+        with:
+          start-sha: ${{ steps.base.outputs.sha }}
+          branch: ${{ inputs.branch }}
+          issue-number: ${{ inputs.issue }}
+          manifest-extra: ${{ runner.temp }}/extra.json
+          # Tamper mode uploads its own edited copy below.
+          artifact-name: ${{ inputs.tamper == 'main' && 'landing-honest' || 'landing' }}
+      - name: Tamper — rewrite branch to main
+        if: inputs.tamper == 'main'
+        env:
+          DIR: ${{ runner.temp }}/landing
+        run: |
+          set -euo pipefail
+          jq '.branch = "main"' "$DIR/manifest.json" >"$DIR/m.json" && mv "$DIR/m.json" "$DIR/manifest.json"
+      - if: inputs.tamper == 'main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: landing
+          path: ${{ runner.temp }}/landing
+          retention-days: 1
+
+  land:
+    needs: agent
+    if: always()
+    runs-on: ubuntu-latest
+    # Fresh runner, NO checkout: the land composite is the only code that
+    # runs, fetched from this repo @main by the runner.
+    steps:
+      - id: land
+        uses: meridianlabs-ai/agents/.github/actions/land@main
+        with:
+          token: ${{ secrets.MARVIN_TOKEN }}
+          allowed-issue-repos: ${{ github.repository }}
+          # From the (trusted) dispatch input, not the manifest — the same
+          # expression emit-landing got above: the validator pins the
+          # manifest's issue_number to it, and it is where the final report
+          # goes when the validator refused the manifest.
+          issue-number: ${{ inputs.issue }}
+          # No PR names a head ref to pin the branch to, so the trusted
+          # dispatch input plays the role an issue run's `claude/issue-N-`
+          # does in the conversions: the manifest's branch must start with
+          # it (here: equal it), so the tamper run is refused by this rule
+          # as well as by `refused-branches`.
+          branch-prefix: ${{ inputs.branch }}
+      - name: Confirm the pushed tip is head_sha
+        if: steps.land.outputs.pushed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ inputs.branch }}
+          LANDED: ${{ steps.land.outputs.landed_head }}
+        run: |
+          set -euo pipefail
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq '.commit.sha')
+          [ "$tip" = "$LANDED" ] && echo "origin/$BRANCH is at $tip == landed_head" \
+            || { echo "::error::origin/$BRANCH is at $tip, landed_head is $LANDED"; exit 1; }

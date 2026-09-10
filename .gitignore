@@ -1,0 +1,3 @@
+# pytest (tests/) scratch
+__pycache__/
+.pytest_cache/

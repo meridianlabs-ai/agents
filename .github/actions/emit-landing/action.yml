@@ -1,0 +1,240 @@
+name: emit-landing
+description: >-
+  Last step of the UNTRUSTED agent job (design/architecture.md → "Landing
+  job"): package what the agent left on the runner — the commits above the
+  run's start SHA as a git bundle, plus a `manifest.json` describing what the
+  trusted land job should push, post, resolve and stage — into ONE artifact.
+  The agent job references no secret; this action holds no token and makes
+  no network call beyond the artifact upload. The land job (the `land`
+  composite, on a fresh runner) downloads the artifact, runs
+  .github/scripts/validate_manifest.py over it and only then acts, with the
+  privileged token, on what the manifest says. The manifest is DATA: this
+  action never interpolates a workflow-composed field into a shell command,
+  and the workflow-specific fields (comment bodies, PR title/body, replies,
+  thread IDs, issues, stage, hand-back) arrive as a JSON file the workflow
+  composed (`manifest-extra`) and are merged with jq. Body text goes in as
+  files under the landing directory, referenced by name; see README.md next
+  to this file for the schema.
+
+  Best-effort by design: this runs under `if: always()` and must never fail
+  the agent job on its own account — it writes what it can, uploads what
+  exists, and reports through the `emitted` output. Referenced
+  fully-qualified (meridianlabs-ai/agents/.github/actions/emit-landing@main);
+  NO post step (local composite actions with post steps break teardown on
+  the fork). On the codex path this must run AFTER reclaim-codex-workspace
+  (it runs git in the workspace), like every other post-codex git step.
+
+inputs:
+  start-sha:
+    description: >-
+      The SHA recorded before the agent ran (sync-branch's start_sha, or a
+      `git rev-parse HEAD` taken after checkout). Commits above it are the
+      run's landable work.
+    required: true
+  branch:
+    description: >-
+      Target branch name the land job pushes to (sync-branch's branch output,
+      or claude-code-action's branch_name). A bare name, not a ref.
+    required: true
+  pr-number:
+    description: >-
+      Pull-request number the run operates on; empty on issue runs. The SAME
+      expression the workflow passes to `land`'s `pr-number`: the validator
+      refuses a manifest whose pr_number differs from the land job's input.
+      On a PR comment the number is `github.event.issue.number`, not
+      `github.event.pull_request.number` — README.md → "Using the pair" has
+      the one expression that covers both shapes.
+    required: false
+    default: ""
+  issue-number:
+    description: >-
+      Issue number the run was triggered from (issue runs); empty otherwise.
+      The land job posts errors here when there is no PR — and pins the
+      manifest's issue_number to its own `issue-number` input the same way,
+      so pass the same expression to both.
+    required: false
+    default: ""
+  manifest-extra:
+    description: >-
+      Optional path to a JSON object the workflow composed with the
+      workflow-specific manifest fields (pr, comments, replies,
+      resolve_threads, issues, stage, handback, handoff_body_file, error,
+      provenance_comment_file). Merged UNDER the core fields this action
+      computes (schema, repo, run_id, branch, start_sha, head_sha,
+      has_bundle, pr_number, issue_number), which always win. Any `*_file`
+      value is a path relative to `landing-dir`, so the workflow writes the
+      body files there before this step runs. An unparsable file is
+      reported into the manifest as an `error` with fail_run=true rather
+      than silently dropped.
+    required: false
+    default: ""
+  landing-dir:
+    description: >-
+      Directory that becomes the artifact. The workflow writes its body
+      files here before this step; this action adds manifest.json and
+      commits.bundle. Never cleared.
+    required: false
+    default: ${{ runner.temp }}/landing
+  artifact-name:
+    description: Artifact name; the land job downloads the same name.
+    required: false
+    default: landing
+
+outputs:
+  emitted:
+    description: >-
+      `true` when manifest.json was written AND the artifact upload
+      succeeded; `false` otherwise (the land job then has nothing to land
+      and fails its download loudly).
+    value: ${{ steps.write.outputs.wrote == 'true' && steps.upload.outcome == 'success' && 'true' || 'false' }}
+  head_sha:
+    description: HEAD at the end of the agent job (what the land job pushes).
+    value: ${{ steps.write.outputs.head_sha }}
+  has_bundle:
+    description: "`true` when HEAD moved past start-sha and a bundle was written."
+    value: ${{ steps.write.outputs.has_bundle }}
+
+runs:
+  using: composite
+  steps:
+    - id: write
+      shell: bash
+      env:
+        START_SHA: ${{ inputs.start-sha }}
+        BRANCH: ${{ inputs.branch }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        EXTRA: ${{ inputs.manifest-extra }}
+        DIR: ${{ inputs.landing-dir }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        # No hooks, no fsmonitor: on the codex path the reclaim step already
+        # pinned these in .git/config, but `git bundle create` / `rev-parse`
+        # must not depend on that ordering to be hook-free. Pinned by env
+        # like the landing steps (design/codex-engine.md → Hook-safe landing).
+        GIT_CONFIG_GLOBAL: /dev/null
+        GIT_CONFIG_COUNT: "2"
+        GIT_CONFIG_KEY_0: core.hooksPath
+        GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+        GIT_CONFIG_KEY_1: core.fsmonitor
+        GIT_CONFIG_VALUE_1: "false"
+      run: |
+        # Deliberately NOT set -e: every failure below degrades to a note in
+        # the manifest (or the log) and the step still exits 0 — the agent
+        # job's outcome must reflect the agent, not this packaging step.
+        set -uo pipefail
+        wrote=false
+        echo "wrote=false" >>"$GITHUB_OUTPUT"
+        mkdir -p "$DIR" || { echo "::warning::emit-landing: cannot create $DIR; nothing emitted."; exit 0; }
+        # Nothing this action writes may pre-exist from the workflow (a stale
+        # manifest or bundle would be mistaken for this run's).
+        rm -f "$DIR/manifest.json" "$DIR/commits.bundle"
+        note=""
+        head_sha=$(git rev-parse HEAD 2>/dev/null) || head_sha=""
+        if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+          note="emit-landing: could not read HEAD (git rev-parse failed); nothing to push."
+          echo "::warning::$note"
+          head_sha="$START_SHA"
+        fi
+        if ! [[ "$START_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          note="${note:+$note }emit-landing: start-sha '$START_SHA' is not a full SHA; nothing to push."
+          echo "::warning::emit-landing: start-sha '$START_SHA' is not a full SHA."
+          START_SHA="$head_sha"
+        fi
+        has_bundle=false
+        if [ "$head_sha" != "$START_SHA" ]; then
+          # Only the commits above the start SHA: the land job fetches the
+          # start SHA from origin itself and refuses a bundle whose tip does
+          # not descend from it. A HEAD that is NOT a descendant (the agent
+          # reset or rebased) produces an empty or foreign bundle — verify
+          # catches a broken one here; the land job's ancestry check catches
+          # the rest. `..HEAD`, not `..$head_sha`: bundle create records REFS
+          # and refuses a bare SHA on the positive side; HEAD was read above,
+          # so the bundle's HEAD ref IS head_sha.
+          if git merge-base --is-ancestor "$START_SHA" "$head_sha" 2>/dev/null \
+             && git bundle create --quiet "$DIR/commits.bundle" "$START_SHA..HEAD" 2>&1 \
+             && git bundle verify --quiet "$DIR/commits.bundle" 2>&1; then
+            has_bundle=true
+            echo "emit-landing: bundled $(git rev-list --count "$START_SHA..$head_sha") commit(s) $START_SHA..$head_sha"
+          else
+            rm -f "$DIR/commits.bundle"
+            note="${note:+$note }emit-landing: HEAD ($head_sha) moved from the start SHA ($START_SHA) but is not a descendant of it, or the bundle could not be written — the agent's commits were NOT packaged and will not land."
+            echo "::error::$note"
+            # The land job pushes nothing without a bundle; make the
+            # manifest consistent (head_sha == start_sha ⇔ has_bundle false).
+            head_sha="$START_SHA"
+          fi
+        else
+          echo "emit-landing: HEAD is still the start SHA; no commits to bundle."
+        fi
+        echo "head_sha=$head_sha" >>"$GITHUB_OUTPUT"
+        echo "has_bundle=$has_bundle" >>"$GITHUB_OUTPUT"
+
+        # Core manifest. Numbers via tonumber only after a digits check —
+        # jq's tonumber would die on a non-numeric input.
+        pr_json=null; issue_json=null
+        [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && pr_json="$PR_NUMBER"
+        [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] && issue_json="$ISSUE_NUMBER"
+        core=$(jq -n \
+          --arg repo "$REPO" --argjson run_id "$RUN_ID" --arg branch "$BRANCH" \
+          --arg start "$START_SHA" --arg head "$head_sha" --argjson has_bundle "$has_bundle" \
+          --argjson pr "$pr_json" --argjson issue "$issue_json" \
+          '{schema: 1, repo: $repo, run_id: $run_id, branch: $branch,
+            start_sha: $start, head_sha: $head, has_bundle: $has_bundle,
+            pr_number: $pr, issue_number: $issue}') \
+          || { echo "::error::emit-landing: could not compose the core manifest."; exit 0; }
+        extra='{}'
+        if [ -n "$EXTRA" ]; then
+          if [ -f "$EXTRA" ] && extra=$(jq -c 'if type=="object" then . else error("manifest-extra is not a JSON object") end' "$EXTRA" 2>&1); then
+            :
+          else
+            echo "::error::emit-landing: manifest-extra '$EXTRA' is missing or not a JSON object: $extra"
+            note="${note:+$note }emit-landing: the workflow's manifest-extra file was missing or not valid JSON; its comments, replies, hand-back and stage were dropped."
+            extra='{}'
+          fi
+        fi
+        # Core fields win: `extra + core` lets the extra supply only what the
+        # core does not define. A packaging failure is surfaced through the
+        # manifest's own error channel so the land job reports it on the
+        # PR/issue and fails the run — but never overrides an error the
+        # workflow itself set; it is appended to that one.
+        if [ -n "$note" ]; then
+          extra=$(jq -c --arg n "$note" \
+            '.error = (if .error and (.error|type)=="object" then
+                         {message: ((.error.message // "") + "\n\n" + $n), fail_run: true}
+                       else {message: $n, fail_run: true} end)' <<<"$extra")
+        fi
+        if jq -n --argjson extra "$extra" --argjson core "$core" '$extra + $core' >"$DIR/manifest.json" 2>&1; then
+          wrote=true
+          echo "wrote=true" >>"$GITHUB_OUTPUT"
+          echo "emit-landing: wrote manifest.json (branch=$BRANCH has_bundle=$has_bundle pr=${PR_NUMBER:-none})"
+        else
+          echo "::error::emit-landing: could not write manifest.json."
+          rm -f "$DIR/manifest.json"
+        fi
+        exit 0
+
+    # continue-on-error: the upload failing must not fail the agent job
+    # either (the `emitted` output carries the outcome). Upload the directory
+    # as-is: the workflow's body files, the manifest and the bundle.
+    - id: upload
+      if: steps.write.outputs.wrote == 'true'
+      uses: actions/upload-artifact@v4
+      continue-on-error: true
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.landing-dir }}
+        retention-days: 1
+        if-no-files-found: error
+        include-hidden-files: false
+
+    - shell: bash
+      env:
+        WROTE: ${{ steps.write.outputs.wrote }}
+        UPLOAD: ${{ steps.upload.outcome }}
+      run: |
+        if [ "$WROTE" = "true" ] && [ "$UPLOAD" = "success" ]; then
+          echo "emit-landing: artifact uploaded."
+        else
+          echo "::warning::emit-landing: nothing landed (manifest written: $WROTE, upload: $UPLOAD) — the land job will fail on download."
+        fi
