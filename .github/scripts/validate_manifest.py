@@ -73,6 +73,9 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 # must pass; the only shape rule left is what keeps the value safe to echo
 # into $GITHUB_OUTPUT and read into a shell variable — no C0 control
 # characters (a newline would inject a second output) or DEL, bounded length.
+# Every shape regex here is applied with fullmatch: `$` alone matches before
+# a final "\n", so re.match would let "main\n" through the control-character
+# rule.
 READ_ONLY_BRANCH_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,1000}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 THREAD_RE = re.compile(r"^PRRT_[A-Za-z0-9_-]+$")
@@ -218,7 +221,7 @@ class Validator:
         # A tight charset: the land job reads these names line by line from
         # jq output, so a newline (or any other oddity) in a name must never
         # get that far.
-        if not FILE_REF_RE.match(ref):
+        if not FILE_REF_RE.fullmatch(ref):
             self.err(f"{label} has characters outside [A-Za-z0-9._/-] or is longer than 200")
             return
         parts = ref.split("/")
@@ -273,7 +276,7 @@ class Validator:
         manifest may neither name a PR/issue the event did not, nor drop the
         one it did (which would let `pr.open` adopt an arbitrary open PR).
         """
-        if event and not EVENT_NUMBER_RE.match(event):
+        if event and not EVENT_NUMBER_RE.fullmatch(event):
             self.err(f"manifest: {flag} {event!r} is not a positive integer (caller misconfiguration; failing closed)")
             return
         if value is None:
@@ -333,10 +336,10 @@ class Validator:
             # any head ref git accepts (`+`, `@`, `#`, non-ASCII), must pass,
             # so the push-side rules in the other arm do not apply; only the
             # shell/step-output safety check does.
-            if not READ_ONLY_BRANCH_RE.match(branch):
+            if not READ_ONLY_BRANCH_RE.fullmatch(branch):
                 self.err("manifest: branch has control characters or is longer than 1000")
         elif branch is not None:
-            if not BRANCH_RE.match(branch):
+            if not BRANCH_RE.fullmatch(branch):
                 self.err("manifest: branch has characters outside [A-Za-z0-9._/-] or is longer than 200")
             if ".." in branch:
                 self.err("manifest: branch must not contain '..'")
@@ -379,7 +382,7 @@ class Validator:
         start_sha = self._str(m, "start_sha", "manifest", required=True)
         head_sha = self._str(m, "head_sha", "manifest", required=True)
         for name, sha in (("start_sha", start_sha), ("head_sha", head_sha)):
-            if sha is not None and not SHA_RE.match(sha):
+            if sha is not None and not SHA_RE.fullmatch(sha):
                 self.err(f"manifest: {name} must be 40 lowercase hex characters")
         has_bundle = self._bool(m, "has_bundle", "manifest", required=True)
         if has_bundle is not None and start_sha and head_sha:
@@ -412,7 +415,7 @@ class Validator:
             # defaults when claude.yml passes no --base.
             pr_base = self._str(pr, "base", "pr", required=False) or None
             if pr_base is not None:
-                if not BRANCH_RE.match(pr_base):
+                if not BRANCH_RE.fullmatch(pr_base):
                     self.err("pr: base has characters outside [A-Za-z0-9._/-] or is longer than 200")
                 if branch is not None and pr_base == branch:
                     self.err("manifest: branch must not equal pr.base")
@@ -455,7 +458,7 @@ class Validator:
                 self.err("manifest: resolve_threads must be a list")
             else:
                 for i, t in enumerate(threads):
-                    if not isinstance(t, str) or not THREAD_RE.match(t):
+                    if not isinstance(t, str) or not THREAD_RE.fullmatch(t):
                         self.err(f"resolve_threads[{i}]: must match ^PRRT_[A-Za-z0-9_-]+$")
                 if threads and pr_number is None:
                     self.err("manifest: resolve_threads need pr_number (the PR the threads belong to)")
@@ -473,7 +476,7 @@ class Validator:
                     self._unknown_keys(it, KNOWN_ISSUE, where)
                     irepo = self._str(it, "repo", where, required=True)
                     if irepo is not None:
-                        if not REPO_RE.match(irepo):
+                        if not REPO_RE.fullmatch(irepo):
                             self.err(f"{where}: repo {irepo!r} is not owner/name")
                         elif irepo.lower() not in self.allowed_issue_repos:
                             self.err(f"{where}: repo {irepo!r} is not in the allowed issue repos")

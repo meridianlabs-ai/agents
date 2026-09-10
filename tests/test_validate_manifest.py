@@ -732,16 +732,35 @@ def test_refuse_bundle_keeps_the_head_ref_pin(tmp_path):
     assert errs == ["manifest: branch 'main' is not PR #456's head ref ('feature')"]
 
 
-@pytest.mark.parametrize("branch", ["main\npr_number=999", "a\x7fb", "tab\there", "", "x" * 1001])
+@pytest.mark.parametrize("branch", ["main\npr_number=999", "main\n", "a\x7fb", "tab\there", "", "x" * 1001])
 def test_refuse_bundle_still_refuses_unsafe_branch_values(tmp_path, branch):
     # What is left of the shape rule: the land job echoes `branch` into
     # $GITHUB_OUTPUT and reads it into shell variables, so a control character
     # (a newline would inject a second output line) or an unbounded value is
-    # refused even though nothing is pushed.
+    # refused even though nothing is pushed. "main\n" is the case `$` alone
+    # would let through (it matches before a final newline); the validator
+    # uses fullmatch so the trailing newline is refused like an embedded one.
     m = review_manifest(tmp_path, branch=branch)
     errs = run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True)
-    assert errs, branch
+    assert errs, repr(branch)
     assert all("is not PR" not in e for e in errs), "refused by shape, not merely by the pin"
+
+
+@pytest.mark.parametrize(
+    "field, value, expect",
+    [
+        ("branch", "feature\n", "branch has characters outside"),
+        ("start_sha", "a" * 40 + "\n", "must be 40 lowercase hex characters"),
+        ("resolve_threads", ["PRRT_abc\n"], "must match ^PRRT_"),
+    ],
+)
+def test_anchored_regexes_refuse_a_trailing_newline(tmp_path, field, value, expect):
+    # re.match with `^…$` accepts a value that ends in "\n" (`$` matches
+    # before a final newline); every shape rule is a fullmatch so a trailing
+    # newline never reaches the shell that reads the value.
+    m = base_manifest(tmp_path, **{field: value})
+    errs = run(tmp_path, m, pr_head_ref=value if field == "branch" else BRANCH)
+    assert any(expect in e for e in errs), errs
 
 
 def test_refuse_bundle_external_mode_keeps_the_branch_prefix(tmp_path):

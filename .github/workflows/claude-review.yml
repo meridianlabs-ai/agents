@@ -1396,10 +1396,13 @@ jobs:
       # as the machine account — and fails the run AFTER everything else
       # landed (the stage move back to Review is what a failed review owes
       # the board; it must not be withheld by the report). So this step exits
-      # 0 on every path: the red X is the land job's. The trigger token is
-      # written BARE in the messages below on purpose — the land job's
-      # de-fang backticks it, so it renders as `review` and never fires a
-      # run (a backticked source would render as a double-backtick span).
+      # 0 on every path: the red X is the land job's. The messages below
+      # never write the trigger token as `@review` in any form: the land
+      # job's de-fang rewrites that to `review` (a backticked source would
+      # render as a double-backtick span, a bare one loses its `@`), and the
+      # human has to see what to type — so the re-trigger instruction is
+      # spelled `@`review, which the de-fang sed leaves alone and which
+      # renders with the `@` visible.
       - name: Surface agent errors
         id: surface
         if: always() && needs.gate.outputs.ok == 'true'
@@ -1483,7 +1486,7 @@ jobs:
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
           echo "::error::Review did not complete: $err — the land job posts the note and fails the run."
-          printf '⚠️ The @review run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload, or a GitHub-side outage). Re-trigger with @review; if it persists check https://status.claude.com and https://githubstatus.com.%s\n' "$err" "$cc" >"$ERROR_FILE"
+          printf '⚠️ The review run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload, or a GitHub-side outage). Re-trigger by posting a top-level `@`review comment; if it persists check https://status.claude.com and https://githubstatus.com.%s\n' "$err" "$cc" >"$ERROR_FILE"
 
       # Whether the agent launched at all, for the land job's posted-review
       # check: the execution file exists only on this runner. No file = the
@@ -1693,6 +1696,13 @@ jobs:
           CONTINUATION: ${{ needs.gate.outputs.continuation }}
         run: |
           set -uo pipefail
+          # MENTION is the one review-job value this step interpolates into a
+          # machine-account body without the manifest's de-fang, and the
+          # review job computed it AFTER the agent ran (a $GITHUB_PATH shadow
+          # of `gh` makes it whatever the agent wants). GitHub login shape
+          # only, and never a trigger word — a value of review/claude/auto
+          # after the `cc @` would turn a nudge into a live trigger.
+          [[ "${MENTION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] && ! [[ "${MENTION,,}" =~ ^(review|claude|auto)$ ]] || MENTION=""
           # The agent never launched (the review job recorded no execution
           # file): a pre-launch self-skip (the action's actor check rejecting
           # a bot-authored PR open, or workflow validation on a pull_request
