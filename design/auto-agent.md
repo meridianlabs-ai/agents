@@ -95,9 +95,66 @@ Anthropic seat**.
 - an **`auto` label** on an issue or PR, or
 - an **`@auto` mention** in a comment.
 
-The same write-access-author boundary as the other agents applies (an outsider's
-label/mention does nothing) — the injection blast-radius argument in
-architecture.md → Permissions is unchanged.
+The same write-access-author boundary as the other agents applies — an
+outsider's label/mention does nothing — and since issue #92 (Claude Security
+finding 4121989) that is enforced in three layers rather than assumed:
+
+- **The dev workflow's trigger check verifies write access before any write.**
+  `claude.yml`'s `Check trigger` used to check only trigger-phrase shape, and
+  claude-code-action's built-in write-access check ran *after* two
+  machine-account writes — the `@auto` opt-in label on an existing PR and the
+  counter reset. On a public caller any account could comment `@auto` on a
+  same-repo PR, arm the loops and reset their caps before the action declined
+  it. The trig step now looks up the actor's permission
+  (`repos/{repo}/collaborators/{actor}/permission`, job token, fail-closed —
+  a lookup error is `none`) for every event it accepts. The account judged is
+  `github.actor`, which on the `issues` `labeled` path is whoever applied the
+  label (marvin for triage-applied labels; it holds write). An
+  unauthorized actor gets nothing: no 👀, no stage move, no label, no reset,
+  no checkout, no agent, and no refusal comment (the fork-head refusal is
+  gated on the same `authorized` output).
+- **The stubs filter on `author_association`.** The `claude-auto` job in the
+  caller stubs requires `OWNER`/`MEMBER`/`COLLABORATOR` on the comment,
+  review or issue that carries the `@auto` text, so an outsider's comment does
+  not start a workflow run at all. This is a *cost* filter, not the gate:
+  `CONTRIBUTOR` is anyone with a merged commit and `MEMBER` visibility depends
+  on org settings, so the trig lookup stays the authority.
+- **The loop gates verify who applied the label.** Both loops' gates
+  (`claude-auto.yml`, `claude-auto-review.yml`) run the shared
+  `verify-auto-labeler` composite between their label check and their
+  counting step (the review loop's merged-PR skip also precedes it, so a
+  merged PR still carrying the label costs no timeline fetch and gets no
+  notice; the CI-fix loop lists open PRs only). It reads the PR timeline and
+  requires the most recent
+  `labeled` event for `auto` to come from the machine account (claude.yml's
+  opt-in and PR-open propagation, or triage) or from an account with write
+  access, and returns one of three verdicts. `ok` runs the round. `disarmed`
+  is positive evidence of an outsider — the label is removed as marvin and no
+  round runs. `unverified` is no evidence either way — no labeled event, a
+  GitHub App labeler (`*[bot]`, recognised from its login and never looked up:
+  the collaborators endpoint 404s for Apps, and `github-actions[bot]` is
+  deliberately not trusted, since a caller's comment-driven labeler workflow
+  under the job token would otherwise let any commenter arm the loop), or a
+  failed permission lookup — and refuses without disarming, so an API blip
+  never takes a human's label away. The verification runs before the counter
+  is read, so a refused label burns no rounds or attempts. This covers any
+  path that plants the label, not just the one the trig check closed. Both
+  refusals are surfaced on the PR, not only in the job log: the disarm posts a
+  trigger-free note naming the labeler (without an @, so an outsider is not
+  pinged) and their permission — the verdict is decided on the collaborators
+  endpoint's base `permission` (admin/write/read/none; `maintain` reports as
+  `write`, `triage` as `read`), and the note also names the fine-grained
+  `role_name` when it differs, so a triage-level labeler reads "read, role:
+  triage"; the unverified path posts a one-time sticky
+  notice (`<!-- auto-gate-unverified -->`) saying what could not be verified
+  and that a write-access account can remove and re-add the label to arm the
+  loop. The sticky notice matters because an unverifiable label can be
+  permanent, not a blip — a deleted account 404s forever and an App stays an
+  App — which would otherwise be the silent labeled-and-stalled state the
+  gate-failure failsafe (below) exists to prevent.
+
+The injection blast-radius argument in architecture.md → Permissions is
+unchanged.
 
 The **`auto` label is the canonical "this loop is live" state**, which makes it a
 one-click **kill-switch**: every turn re-checks the label *before* doing work, so
@@ -201,7 +258,8 @@ outright step failure in the disarm or reset (not the handled "could not"
 outcomes) must not skip the comment on a PR whose label may already be gone;
 empty outputs route to the conservative wording. Each of the three steps is a
 shared composite (`disarm-auto-loop`, `reset-auto-counters`, `post-pr-comment`)
-so the two loops cannot drift; `post-pr-comment` is also what the loops' "Ensure
+so the two loops cannot drift — as is the gates' labeler check
+(`verify-auto-labeler`, Trigger surface above); `post-pr-comment` is also what the loops' "Ensure
 hand-back after push" backstop posts the `@review` with, since that comment is
 the loop's other unlosable one. The
 reset body carries no `rounds:`/`attempts:` number and, for the review loop, no
@@ -233,7 +291,9 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
   guarantees a human sees anything the agent can't resolve.
 - **Label kill-switch** — instant human override at any point.
 - **Opt-in only**, by a write-access author — nothing runs unattended without
-  someone asking for it.
+  someone asking for it; the trig check and the loop gates verify that the
+  asker (commenter, or labeler) actually holds write access (see Trigger
+  surface above).
 - **Stuck-detection (implemented)** — the gate records the branch tip at the
   start of each round in the sticky marker (`auto-review-head:<sha>`); if the
   next review fires with the tip unchanged, the last fix round pushed nothing,
@@ -244,16 +304,17 @@ quality gate. `@auto` opens the loop, so it must replace those protections:
 - **Flake handling** — don't treat infra/flaky CI failures as fix work; retry
   once, then escalate, so the loop doesn't chase non-determinism.
 - **Gate resilience — no silent stall (implemented)** — the deterministic
-  "Gate and count" step runs under `set -euo pipefail`, so an unguarded `gh`
-  call that fails is fatal. A transient GitHub API failure (5xx / secondary
-  rate limit) returns an HTML error page, which `gh --jq` rejects with
-  `invalid character '<'`; that aborted the gate *before* it set `act`, so the
-  fix/escalate/error-surfacing steps (all gated on `act`) skipped and the loop
-  stalled with nothing posted and the label still on — indistinguishable from
-  "converged" to an observer (seen on inspect_ai#101 round 4). Two-part fix:
-  (a) a `ghr` retry wrapper rides out transient blips on every gate `gh` call;
-  (b) a `Surface gate failure` step (`if: always() && steps.gate.outcome ==
-  'failure'`) posts a comment when the gate crashes anyway, so a stall is
+  gate steps (resolve, labeler check, "Gate and count") run under
+  `set -euo pipefail`, so an unguarded `gh` call that fails is fatal. A
+  transient GitHub API failure (5xx / secondary rate limit) returns an HTML
+  error page, which `gh --jq` rejects with `invalid character '<'`; that
+  aborted the gate *before* it set `act`, so the fix/escalate/error-surfacing
+  steps (all gated on `act`) skipped and the loop stalled with nothing posted
+  and the label still on — indistinguishable from "converged" to an observer
+  (seen on inspect_ai#101 round 4). Two-part fix: (a) a `ghr` retry wrapper
+  rides out transient blips on every gate `gh` call; (b) a `Surface gate
+  failure` step (`always()`, gated on any of the three gate steps' outcome
+  being `failure`) posts a comment when the gate crashes anyway, so a stall is
   visible and recoverable. That comment is deliberately **trigger-free** (no
   literal `@review`/`@auto`): a bot-authored comment carrying a live trigger
   would re-fire the loop and, on a persistent gate failure, spin.
