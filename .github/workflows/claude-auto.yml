@@ -1324,15 +1324,15 @@ jobs:
                 issue_repo="$ANCHOR_REPO"
               fi
             fi
-            # First assignee (the machine account excluded), else the author
-            # unless bot or machine account (marvin is a User, not a Bot —
-            # triage issues are marvin-authored). Assignee first since
+            # First assignee that is neither a Bot nor the machine account,
+            # else the author unless bot or machine account (marvin is a User,
+            # not a Bot — triage issues are marvin-authored). Assignee first since
             # 2026-09-10: the assignee is the repo's "responsible human"
             # (Atlas views filter on assignee), and the reporter may be a
             # different person — inspect_ai#473's handoff pinged the issue's
             # author while the assignee had kicked off the run.
             [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-              --jq 'if .pull_request then "" else (([.assignees[].login | select(. != "i-am-marvin")] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+              --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
             cc=""
             [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
             gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.%s' "$err" "$cc")" || true

@@ -1363,7 +1363,7 @@ jobs:
             inum="$NUM"
           fi
           [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-            --jq 'if .pull_request then "" else (([.assignees[].login | select(. != "i-am-marvin")] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+            --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
           echo "mention=$mention" >> "$GITHUB_OUTPUT"
           echo "cc target: ${mention:-none}"
 

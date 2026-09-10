@@ -2046,7 +2046,7 @@ jobs:
                 fi
               fi
               [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-                --jq 'if .pull_request then "" else (([.assignees[].login | select(. != "i-am-marvin")] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+                --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
               [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
             fi
             gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ This Claude run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload or a model-availability blip). Re-trigger to retry; if it persists see https://status.claude.com.%s' "$err" "$cc")" || true

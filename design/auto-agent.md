@@ -485,7 +485,7 @@ The simple case ships first and is independently useful:
   `issue_comment` trigger so the clean case no longer goes silent (the Phase 2
   finding). (2) In
   `claude-auto-review.yml`, when the review has converged, it hands off: posts a
-  handoff comment @-mentioning the originating human, and does not merge or
+  handoff comment @-mentioning the responsible human, and does not merge or
   re-request. Grounding: inspect_flow's `main` requires no approvals and
   native auto-merge is off, so no `APPROVE` state or merge machinery is needed.
   _Fork:_ the handoff wording becomes "ready to promote upstream" via the fork's
