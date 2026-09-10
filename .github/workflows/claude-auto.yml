@@ -190,7 +190,17 @@ jobs:
     # agent's commits lost with it. The land composite's own non-fast-forward
     # guard covers the residual overlap (a landing pushing while the next
     # run's agent already checked out): the later push is refused loudly and
-    # reported, never forced.
+    # reported, never forced. The same arbitrary ordering has a second,
+    # accepted consequence (review round 7): when gate N finishes while gate
+    # N+1 already pends, fix N joins the group and one of the two pending
+    # jobs is cancelled — if it is gate N+1, that run vanishes silently
+    # (`Surface gate failure` keys on failure, not cancelled, and its land
+    # job is skipped by the gate-success gate). Callers with several named
+    # CI workflows hit this when two workflow_run completions for one PR
+    # land close together; it only costs a round when fix N lands NOTHING
+    # (no push, so no CI re-run re-fires the loop) — a landed fix re-runs
+    # CI on the new tip and the loop resumes, and a human push resumes it
+    # otherwise.
     concurrency:
       group: claude-auto-${{ github.repository }}-pr-${{ inputs.pr_number }}
       cancel-in-progress: false
@@ -1308,11 +1318,14 @@ jobs:
           rm -f "$ERROR_FILE"
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
-          # The checkout or the SHA step failed: nothing else ran. The SHA
-          # step has no always(), so a failed checkout leaves it SKIPPED, not
-          # failed — test for anything but success.
+          # The checkout, the persisted-credential assertion or the SHA step
+          # failed: nothing else ran. The SHA step has no always(), so a
+          # failed checkout OR a tripped assertion (the composite exits 1)
+          # leaves it SKIPPED, not failed — test for anything but success,
+          # and name all three causes so a tripped security invariant is not
+          # read as a checkout hiccup and blindly re-triggered.
           if [ "${BASE_OUTCOME:-}" != "success" ]; then
-            err="checking out the PR branch (or reading its SHA) failed before the agent started — see the job logs; no fix was attempted. Re-trigger to retry."
+            err="checking out the PR branch, verifying no credential was persisted in the workspace, or reading the branch SHA failed before the agent started — see the job logs for which; no fix was attempted. Re-trigger to retry only if it was the checkout or the SHA read; a persisted credential is a workflow bug, not a transient."
           fi
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every
