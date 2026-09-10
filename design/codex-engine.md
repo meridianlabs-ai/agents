@@ -74,9 +74,15 @@ path throughout: a failed codex step *or* any of its prep steps
 surfaces a visible error comment and, in the loops, refunds the review
 round / CI-fix attempt (infra failures — e.g. a missing
 `OPENAI_API_KEY` — must not march a PR toward spurious escalation);
-the loops' hand-back backstop keys on the codex *run* step, so a push
-that landed before the comment post died still gets its owed
-`@review`. Since 2026-09-09 the landing is three steps, not one: the
+the review loop's hand-back backstop keys on the codex *run* step, so a
+push that landed before the comment post died still gets its owed
+`@review`. In `claude-auto.yml` (since #82) the codex step only *commits*:
+the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)
+commits the tree and writes the de-fanged summary into the landing
+directory, `emit-landing` bundles the commits, and the `land` job — a
+fresh runner holding `MARVIN_TOKEN` — pushes, posts the summary and the
+`@review` the manifest carries; the push and the hand-back cannot come
+apart there. Since 2026-09-09 the landing is three steps, not one: the
 `codexland` step is git-only (commit, push, `pushed`/`merge_only`
 outputs — the only step carrying the pinned git env and the push
 credential), the `resolve-reported-threads` composite consumes the final

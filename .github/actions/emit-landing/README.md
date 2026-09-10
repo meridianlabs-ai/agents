@@ -134,6 +134,13 @@ pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_requ
 issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
 ```
 
+A `workflow_run` event (claude-auto.yml) names no PR in a usable shape
+(`workflow_run.pull_requests` is empty for many runs), so there the trusted
+value is the **gate job's** API lookup — `gh pr list --head <branch>` run
+before any PR code was checked out — passed as `needs.gate.outputs.pr` to
+both composites; `pr-head-ref` is the event's head branch, which is what the
+gate resolved the PR by.
+
 Agent job, last step. It runs git in the workspace, so on the codex path it
 is gated on the reclaim step having **succeeded** — `== 'success'`, never
 `!= 'failure'`: a reclaim cancelled mid-run must skip every later git call

@@ -377,7 +377,14 @@ The simple case ships first and is independently useful:
   F401, PR authored by a human, `auto`-labeled): marvin fixed it on attempt 1 and
   turned CI green, confirming the prompt-mode push goes out as marvin (so CI
   re-triggers). _Not yet exercised:_ the cap/escalation path (no failure has
-  survived 3 attempts) and the fork (only inspect_flow so far).
+  survived 3 attempts) and the fork (only inspect_flow so far). **Since #82
+  (2026-09-10) the agent no longer pushes or posts itself**: `claude-auto.yml`
+  is three jobs — `gate` (the label gate, the attempt counter, stage → Agent,
+  escalation; marvin), `fix` (checkout + agent with the job token only;
+  commits locally) and `land` (a fresh runner that pushes the commits as
+  marvin, posts the `@review` hand-back and the error/summary comments, and
+  refunds the attempt when the agent never ran) — see architecture.md →
+  Landing job. The push still goes out as marvin, so CI still re-triggers.
 - **Phase 2 — review→fix loop. _Verified on inspect_flow via the unified
   `issue_comment` trigger._** Reusable `claude-auto-review.yml`: on the
   reviewer's **dedicated marker comment** (`issue_comment`, body contains
