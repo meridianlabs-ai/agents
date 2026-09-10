@@ -380,14 +380,22 @@ loop and the dev agent:
   --log-failed` still works without the PAT; the job token is read-only
   (`contents: read`). The action's App token is *not* scoped to the job's
   permissions (it carries the App's contents/PR/issues write), so the
-  "no push, no post" boundary is the settings `deny` list — `Bash(git
-  push:*)` stripped from the caller's allow-list and denied together with
-  the gh comment/review/create verbs, composed at runtime so a caller's
-  `settings` cannot re-enable them — plus the prompt, whose ending contract
-  is now "a run that changed anything ends with those changes committed on
-  the branch, nothing more". Agent mode installs no MCP server without
-  explicit tool grants, so there is no API-side commit or comment tool to
-  deny.
+  agent's push and posting channels are closed by the settings `deny` list
+  — `Bash(git push:*)` stripped from the caller's allow-list and denied
+  together with the gh comment/review/create verbs, composed at runtime
+  (from a JSON object or the action's path form) so a caller's `settings`
+  cannot re-enable them — plus the prompt, whose ending contract is now "a
+  run that changed anything ends with those changes committed on the
+  branch, nothing more". Those are guard rails, not the security boundary:
+  `Bash(gh:*)` stays allowed (the log and PR reads need it), so `gh api -X
+  POST …/comments`, `gh api -X PATCH …/git/refs/…`, `gh pr edit|close|ready`
+  and `git -C . push` all pass the listed prefixes with a write-capable
+  token in reach. The load-bearing property is the split's invariant:
+  nothing the agent can reach is marvin's identity, so a write that slipped
+  past would be claude[bot]'s — attributable, and no more than the dev agent
+  already holds on a marvin-less `claude.yml` caller — never the loop's.
+  Agent mode installs no MCP server without explicit tool grants, so there
+  is no API-side commit or comment tool to deny.
 - **The hand-back is a manifest field, not a backstop.** `handback: true`
   and `stage: Review` whenever HEAD moved past the start SHA and descends
   from it (the same test `emit-landing` applies before bundling), which
@@ -405,9 +413,12 @@ loop and the dev agent:
   any git running against a workspace codex still owns.
 - **A no-change Claude round is not silent.** The agent can no longer post
   the blocker comment the old prompt asked for, so when it succeeded and
-  committed nothing, the workflow relays its final message as a `comments[]`
-  entry (de-fanged by `land`) — the Claude analogue of the codex summary
-  that has always posted. (Issue #82's fourth verification item said
+  committed nothing — HEAD still at the start SHA, or exactly the runner's
+  clean base merge (a merge-only round, which lands and owes its hand-back
+  but carries no agent commit; the relay's first line says so) — the
+  workflow relays its final message as a `comments[]` entry (de-fanged by
+  `land`) — the Claude analogue of the codex summary that has always
+  posted. (Issue #82's fourth verification item said
   "posts nothing otherwise"; the relay is a deliberate deviation so a round
   that gave up leaves a trace beyond the counter bump.)
 - **`Record attempt` moved before the sync and provisioning steps** (it is a
@@ -416,7 +427,14 @@ loop and the dev agent:
   broadened from "the agent step failed with no execution output" to "the
   agent step did not succeed, produced no execution output, and the landing
   pushed nothing" — a skipped agent is refunded whatever skipped it, and a
-  cancelled job whose commits `emit-landing` still bundled is not.
+  round whose commits landed is not, whatever the agent step's outcome. The
+  refund is the one marvin write outside the per-PR group (next bullet), so
+  it is not serialized against the next run's gate: it decrements the
+  sticky comment's *current* count rather than the gate's stale value,
+  which keeps a record the next gate made in between; only the two
+  read-modify-writes crossing inside one window still leaves the count one
+  off — accepted (rare trigger, one attempt of slack in either direction,
+  and an escalation still drops the label and posts).
 - **Concurrency covers `gate` and `fix`, not `land`.** Ordering inside a
   concurrency group is arbitrary and at most one job pends, so a land job
   that had to wait behind the next run's gate could be cancelled as the
@@ -424,7 +442,14 @@ loop and the dev agent:
   residual overlap (a landing pushing while the next run's agent has
   already checked out the old tip) ends in the land composite's
   non-fast-forward refusal — reported on the PR, never forced — and the
-  landed push re-runs CI, which re-triggers the loop on the new tip.
+  landed push re-runs CI, which re-triggers the loop on the new tip. The
+  same arbitrary ordering can cancel a *pending `fix`* instead (it lost the
+  group to the next run's gate, then was the older pending job when that
+  run's `fix` queued), so the land job's `Land` step is skipped when the
+  fix job's result is `cancelled` — as `claude-review.yml`'s land job is —
+  rather than failing its artifact download and reporting "Landing failed"
+  on the PR for a round whose agent never started; the refund step still
+  runs. A run cancelled by hand mid-agent lands nothing either.
 
 **The reviewer (#81, 2026-09-10) is the first conversion.** `claude-review.yml`
 is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`

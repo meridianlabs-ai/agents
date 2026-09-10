@@ -129,9 +129,11 @@ on:
           the fix agent needs the same edit + verify-loop + git/gh allow-list,
           MINUS `Bash(git push:*)`: the fix agent commits locally and the land
           job pushes (issue #82). The "Compose fix settings" step strips that
-          rule from whatever a caller passes here and adds it (plus the gh
-          comment/review/create verbs) to a `deny` list, so a caller's
-          settings cannot re-enable the agent's own push or posts.
+          rule from whatever a caller passes here (a JSON object, or the
+          action's other documented form, a path to a settings file) and
+          adds it (plus the gh comment/review/create verbs) to a `deny` list,
+          so a caller's settings cannot re-enable the direct push and posting
+          commands.
         required: false
         type: string
         default: >-
@@ -702,21 +704,43 @@ jobs:
       # in the prompt: `Bash(git push:*)` is stripped from the caller's allow
       # list and put on a `deny` list together with the gh verbs that post or
       # open things (deny beats allow in Claude Code, so this holds against a
-      # caller's `settings` and any claude_args override). The action's own
-      # App token is NOT scoped to this job's read-only permissions (it gets
-      # the App's contents/PR/issues write), so this deny list — plus the
-      # prompt — is what keeps the agent from pushing as claude[bot] or
-      # commenting; `gh api` stays allowed because the log and PR reads the
-      # fix needs go through it. No MCP server is installed in agent mode
-      # without explicit tool grants (none are given), so there is no API-side
-      # commit or comment tool to deny.
+      # caller's `settings` and any claude_args override). Guard rails, not
+      # a security boundary: `Bash(gh:*)` stays allowed because the log and
+      # PR reads the fix needs go through it, so `gh api -X POST/PATCH`,
+      # `gh pr edit|close|ready` or a `git -C . push` pass the listed
+      # prefixes while the action's own App token — NOT scoped to this
+      # job's read-only permissions; it carries the App's contents/PR/issues
+      # write — is in reach. What holds structurally is the invariant at the
+      # top of this file: nothing the agent can reach is marvin's identity,
+      # so a write that slipped past the deny list and the prompt would be
+      # claude[bot]'s — attributable, and the same identity the dev agent
+      # already writes under on a marvin-less claude.yml caller — never the
+      # loop's. No MCP server is installed in agent mode without explicit
+      # tool grants (none are given), so there is no API-side commit or
+      # comment tool to deny. Claude path only: codex composes its own
+      # prompt and holds no settings, so a failure here must not skip it.
       - name: Compose fix settings (deny pushes and posts)
         id: fixsettings
+        if: needs.gate.outputs.engine != 'codex'
         env:
           SETTINGS: ${{ inputs.settings }}
         run: |
           set -euo pipefail
+          # The action documents `settings` as a JSON string OR a path to a
+          # settings file (its setupClaudeCodeSettings tries JSON.parse
+          # first, then reads the path relative to the workspace — i.e. a
+          # file from this PR checkout, which the deny overlay below then
+          # covers like any other). Mirror that, since the value is
+          # transformed here before the action sees it; anything else fails
+          # loudly and the Surface step reports it (FIXSETTINGS_OUTCOME) —
+          # the action step is skipped, not failed, so nothing else would.
           [ -n "$SETTINGS" ] || SETTINGS='{}'
+          is_object() { printf '%s' "$1" | jq -e 'type == "object"' >/dev/null 2>&1; }
+          if ! is_object "$SETTINGS" && [ -f "$SETTINGS" ]; then
+            echo "settings input is a path; reading $SETTINGS"
+            SETTINGS=$(cat "$SETTINGS")
+          fi
+          is_object "$SETTINGS" || { echo "::error::the settings input is neither a JSON object nor a path to a file holding one"; exit 1; }
           deny='["Bash(git push:*)","Bash(gh pr comment:*)","Bash(gh issue comment:*)","Bash(gh pr review:*)","Bash(gh pr create:*)","Bash(gh pr merge:*)","Bash(gh issue create:*)"]'
           merged=$(printf '%s' "$SETTINGS" | jq -c --argjson d "$deny" '
             .permissions.allow = ((.permissions.allow // []) - $d)
@@ -733,11 +757,17 @@ jobs:
       # actions: read — the exchange grants contents/PR/issues by default,
       # and `gh run view --log-failed` on the failed CI run is the first
       # thing the fix does (the job's own actions: read covers the job token,
-      # not the App token). The GIT_CONFIG_* env is the step-scoped fallback
-      # credential (issue #61) for any git call that does not go through the
-      # action's rewritten origin URL — the JOB token now: the agent never
-      # pushes, and the helper is scoped to this server's URL, so a `git
-      # fetch` the agent aims at any other host gets no credential.
+      # not the App token). First use of additional_permissions in this repo:
+      # if the exchange or a caller's App installation does not grant
+      # `actions`, this step fails before Claude starts on EVERY Claude-engine
+      # round — loud (the Surface step reports "failed before producing a
+      # result" and the attempt is refunded), but confirm on the first caller
+      # round after merge; the PAT used to cover the log read. The
+      # GIT_CONFIG_* env is the step-scoped fallback credential (issue #61)
+      # for any git call that does not go through the action's rewritten
+      # origin URL — the JOB token now: the agent never pushes, and the
+      # helper is scoped to this server's URL, so a `git fetch` the agent
+      # aims at any other host gets no credential.
       - uses: anthropics/claude-code-action@v1
         if: needs.gate.outputs.engine != 'codex'
         id: claude
@@ -1154,8 +1184,10 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
+          FIXSETTINGS_OUTCOME: ${{ steps.fixsettings.outcome }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
@@ -1231,6 +1263,15 @@ jobs:
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the fix agent started — a transient dependency-download/network error, the project not dev-installing on a bare runner, or this PR's own dependency change no longer installing (either of those fails identically on every trigger: fix it by hand — check the job logs); no fix was attempted, though the runner's clean base merge, if there was one, was still landed on the branch. Re-trigger if it looks transient."
           fi
+          # The settings composer failed (a caller's `settings` that is
+          # neither a JSON object nor a path to a file holding one): the
+          # action step is SKIPPED, not failed, so without this clause the
+          # round ends "No agent error detected" with a red job on every
+          # trigger and nothing on the PR. Deterministic — the caller's stub
+          # is what needs fixing, so no "re-trigger" advice.
+          if [ -z "$err" ] && [ "${FIXSETTINGS_OUTCOME:-}" = "failure" ]; then
+            err="composing the fix agent's settings failed before the agent started — the caller's \`settings\` input is neither a JSON object nor a path to a file holding one (see the job logs); no fix was attempted. This fails identically on every trigger: fix the caller stub's settings input."
+          fi
           # The agent's own error text is free-form (and unbounded — it is
           # the final message when is_error is set); cap it so the manifest's
           # error.message stays well under the validator's 64 KiB limit.
@@ -1273,19 +1314,25 @@ jobs:
           # commits its changes (the land job pushes them) or makes none at
           # all (its final message explains why, relayed by the land job).
           # Untracked files are normal scratch (test caches, venvs) — only
-          # tracked-file edits count. Flagged only when nothing is landable
-          # (HEAD still at the start SHA): with commits above it the fix
-          # lands and the leftovers are a warning, as before the split when a
-          # pushed round was never second-guessed.
+          # tracked-file edits count. Flagged only when nothing of the
+          # AGENT's is landable: HEAD still at the start SHA, or exactly the
+          # runner's clean base merge (a merge-only round — the one commit
+          # above the start SHA is the runner's, and the agent's own work is
+          # the edits dying here; the merge still lands and owes its
+          # hand-back, so the wording says "no fix", not "nothing"). With an
+          # agent commit above it the fix lands and the leftovers are a
+          # warning, as before the split when a pushed round was never
+          # second-guessed.
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "success" ] && [ -n "${BASE_SHA:-}" ]; then
             dirty=$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)
             if [ -n "$dirty" ]; then
-              if [ "$(git rev-parse HEAD 2>/dev/null || echo "$BASE_SHA")" = "$BASE_SHA" ]; then
+              head=$(git rev-parse HEAD 2>/dev/null || echo "$BASE_SHA")
+              if [ "$head" = "$BASE_SHA" ] || { [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ]; }; then
                 # Strip the @ from trigger tokens in agent-authored text — this
                 # is embedded in a marvin-authored comment (the land job
                 # de-fangs again).
                 summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
-                err="the agent finished but left edits to tracked files uncommitted, so nothing landed on the branch — whatever its summary reports, no code change reached CI."
+                err="the agent finished but left edits to tracked files uncommitted, so no fix landed on the branch (only the runner's base merge, if there was one) — whatever its summary reports, no code change reached CI."
                 [ -n "$summary" ] && err="$err Agent summary: $summary"
               else
                 echo "::warning::the agent committed a fix but also left uncommitted edits to tracked files behind; the commits land, the leftovers die with the runner: $(printf '%s' "$dirty" | head -5 | tr '\n' ' ')"
@@ -1317,9 +1364,13 @@ jobs:
       #               wrote it, de-fanged), or — the Claude path's analogue,
       #               so a round that gave up is not silent — the agent's
       #               final message when it committed nothing and the run
-      #               succeeded (the blocker explanation the prompt asks for;
-      #               when the Surface step already reported the round, its
-      #               message carries the summary instead).
+      #               succeeded: HEAD still at the start SHA, or exactly the
+      #               runner's clean base merge (a merge-only round: the
+      #               merge lands and owes its hand-back, but the agent
+      #               committed nothing — the codex path's merge_only header
+      #               is the same rule). The blocker explanation the prompt
+      #               asks for; when the Surface step already reported the
+      #               round, its message carries the summary instead.
       #   provenance_comment_file — the model-provenance note, if any
       #   error     — the Surface step's message (fail_run: true)
       # Not set -e: a manifest must come out of every path. The git reads
@@ -1335,6 +1386,7 @@ jobs:
           ATTEMPT: ${{ needs.gate.outputs.attempt }}
           ENGINE: ${{ needs.gate.outputs.engine }}
           START_SHA: ${{ steps.base.outputs.sha }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
@@ -1353,6 +1405,7 @@ jobs:
           mkdir -p "$DIR"
           extra='{}'
           moved=false
+          head=""
           if [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXRECLAIM_OUTCOME:-}" != "success" ]; then
             echo "landing: the codex reclaim did not succeed; running no git — nothing lands and no hand-back is owed."
           elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -1364,15 +1417,25 @@ jobs:
           if [ "$moved" = "true" ]; then
             extra=$(jq -c '.handback = true | .stage = "Review"' <<<"$extra")
           fi
+          # Merge-only: HEAD moved, but only to the runner's clean base merge
+          # — any agent commit would have moved it further — so the agent
+          # committed nothing and its final message is owed to the PR just
+          # as on a round where nothing moved at all.
+          merge_only=""
+          [ "$moved" = "true" ] && [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ] && merge_only=1
           if [ "$ENGINE" = "codex" ]; then
             if [ "${CODEXCOMMIT_OUTCOME:-}" = "success" ] && [ -s "$DIR/codex-comment.md" ] && [[ "$PR" =~ ^[0-9]+$ ]]; then
               extra=$(jq -c --argjson n "$PR" '.comments = [{number: $n, body_file: "codex-comment.md"}]' <<<"$extra")
             fi
-          elif [ "${CLAUDE_OUTCOME:-}" = "success" ] && [ "$moved" != "true" ] && [ ! -s "$ERROR_FILE" ] && [[ "$PR" =~ ^[0-9]+$ ]]; then
+          elif [ "${CLAUDE_OUTCOME:-}" = "success" ] && { [ "$moved" != "true" ] || [ -n "$merge_only" ]; } && [ ! -s "$ERROR_FILE" ] && [[ "$PR" =~ ^[0-9]+$ ]]; then
             file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
             summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 || true)
             {
-              printf '🤖 auto (CI-fix attempt %s): no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
+              if [ -n "$merge_only" ]; then
+                printf '🤖 auto (CI-fix attempt %s): base merge pushed; no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
+              else
+                printf '🤖 auto (CI-fix attempt %s): no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
+              fi
               printf '%s\n' "${summary:-(the agent produced no final message)}"
             } >"$DIR/agent-summary.md"
             extra=$(jq -c --argjson n "$PR" '.comments = [{number: $n, body_file: "agent-summary.md"}]' <<<"$extra")
@@ -1419,9 +1482,10 @@ jobs:
   # no-change summary, post exactly `@review` when a commit landed, move the
   # stage to Review, post the provenance note, report the agent error and
   # fail the run when it says so — then the attempt refund. always(): a fix
-  # job that failed or was cancelled still gets its error posted and its
-  # attempt refunded; with no artifact at all (runner killed mid-agent) the
-  # composite fails its download, lands nothing, and says so on the PR.
+  # job that failed still gets its error posted and its attempt refunded;
+  # with no artifact at all (runner killed mid-agent) the composite fails
+  # its download, lands nothing, and says so on the PR. A CANCELLED fix job
+  # skips the Land step but still gets its refund (see the step gates).
   land:
     needs: [gate, fix]
     if: always() && needs.gate.outputs.act == 'fix'
@@ -1435,8 +1499,19 @@ jobs:
       issues: read
       actions: read           # artifact download
     steps:
+      # Skipped when the fix job was cancelled (claude-review.yml's land job
+      # skips the same way). The usual cause is the concurrency group: its
+      # ordering is arbitrary, so run N's pending `fix` can lose the group to
+      # run N+1's `gate` and then be cancelled as the OLDER pending job when
+      # N+1's `fix` queues — a round whose agent never started. Landing it
+      # would fail the artifact download and post "Landing failed" on the PR
+      # for nothing. A run cancelled by hand mid-agent is skipped too: its
+      # partial commits are not pushed and re-reviewed on the strength of an
+      # always(). The step is gated, not the job, so the refund below still
+      # runs and gives back the attempt the gate recorded.
       - name: Land
         id: land
+        if: needs.fix.result != 'cancelled'
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
           # The machine account, no fallback: the gate already exited on a
@@ -1472,9 +1547,22 @@ jobs:
       # Three conditions: the agent step did not succeed (a successful codex
       # run has no execution file), it never produced execution output (a
       # Claude run that reached a result counts, failed or not), and the
-      # landing pushed nothing (a cancelled job whose commits emit-landing
-      # still bundled did land a fix). Safe from races: the gate and fix
-      # jobs' per-PR concurrency group serializes the rounds.
+      # landing pushed nothing (a round whose commits landed keeps its
+      # attempt whatever the agent step's outcome).
+      #
+      # NOT serialized: this job is outside the per-PR concurrency group (the
+      # gate's comment says why), so this write can interleave with the next
+      # run's gate re-recording the same sticky comment — two workflow_run
+      # completions for one PR close together (several named CI workflows)
+      # plus an infra-crashed agent. Narrowed, not closed: the step
+      # decrements the comment's CURRENT count instead of writing the gate's
+      # stale `attempt - 1`, so a record the next gate made in between
+      # survives in either order (refund after gate: k+1 → k, the live
+      # attempt still counted; gate after refund: it reads k-1 and records
+      # k). Only the two read-modify-writes crossing inside one window still
+      # leaves the count one off. Accepted: the trigger is rare, the cost is
+      # one attempt of slack in either direction, and an escalation still
+      # drops the label and posts — never a silent stall.
       - name: Refund infra-crashed attempt
         if: >-
           always() && needs.gate.outputs.act == 'fix' &&
@@ -1490,11 +1578,18 @@ jobs:
           MARKER: "<!-- auto-fix-attempts -->"
         run: |
           set -uo pipefail
-          prev=$((ATTEMPT - 1))
           cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' 2>/dev/null || true)
           [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
+          # Re-read the count (same parse as the gate's) rather than trusting
+          # the gate's value: the next run's gate may have re-recorded since.
+          # Falls back to the gate's value when the body does not parse;
+          # never below zero (an escalation's reset may have zeroed it).
+          cur=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null \
+                  | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p' || true)
+          [[ "$cur" =~ ^[0-9]+$ ]] || cur=$ATTEMPT
+          prev=$(( cur > 0 ? cur - 1 : 0 ))
           body="$MARKER
           🤖 auto CI-fix attempts: $prev (cap $CAP). (one attempt refunded — the fix agent never ran to a result and nothing landed: infrastructure, not the fix)"
           gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
-          echo "Refunded attempt $ATTEMPT -> $prev."
+          echo "Refunded attempt: counter $cur -> $prev (this run was attempt $ATTEMPT)."
