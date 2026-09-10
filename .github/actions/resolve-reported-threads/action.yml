@@ -98,7 +98,17 @@ runs:
         # The last tag block wins. The id filter below already tolerates any
         # decoration on the ids.
         ids=
+        # STRIPPED must be runner-writable: the codex output dir
+        # ($RUNNER_TEMP/codex) is codex-owned 755, so a stripped path inside
+        # it made awk die on `printf "" > out` ("cannot redirect ...
+        # Permission denied"), the ids were lost with it, and every landing
+        # comment on inspect_ai#428's ten overnight rounds read "(codex
+        # produced no final message)" while codex's summary sat unread in
+        # FINAL. Callers now pass a path under $RUNNER_TEMP itself; this
+        # guards the same failure shape anyway — a missing STRIPPED after
+        # the awk means the final message must still reach the PR.
         if [ -f "$FINAL" ]; then
+          mkdir -p "$(dirname "$STRIPPED")" 2>/dev/null || true
           ids=$(awk -v out="$STRIPPED" '
             function flush() { for (; held > 0; held--) print "" > out }
             BEGIN { printf "" > out }
@@ -112,6 +122,10 @@ runs:
             END { print ids }
           ' "$FINAL" | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
                   | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
+          if [ ! -f "$STRIPPED" ]; then
+            echo "::warning::could not write the stripped final message to $STRIPPED; posting codex's final message unstripped"
+            cp -f "$FINAL" "$STRIPPED" 2>/dev/null || true
+          fi
         fi
         resolved=0
         if [ "$RESOLVE" = "true" ]; then

@@ -1252,7 +1252,7 @@ jobs:
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           final-message: ${{ runner.temp }}/codex/codex-final.md
-          stripped: ${{ runner.temp }}/codex/codex-final.stripped.md
+          stripped: ${{ runner.temp }}/codex-final.stripped.md
           resolve: ${{ steps.codexland.outputs.pushed == '1' && steps.codexland.outputs.merge_only != '1' }}
 
       # One comment either way, de-fanged (posts from a write-access
@@ -1278,7 +1278,7 @@ jobs:
           PR: ${{ inputs.pr_number }}
           ROUND: ${{ steps.gate.outputs.round }}
           MENTION: ${{ steps.gate.outputs.mention }}
-          OUT: ${{ runner.temp }}/codex/codex-final.stripped.md
+          OUT: ${{ runner.temp }}/codex-final.stripped.md
           PUSHED: ${{ steps.codexland.outputs.pushed }}
           MERGE_ONLY: ${{ steps.codexland.outputs.merge_only }}
           RESOLVED: ${{ steps.codexthreads.outputs.resolved }}

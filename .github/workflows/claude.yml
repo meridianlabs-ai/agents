@@ -1536,7 +1536,7 @@ jobs:
           repo: ${{ github.repository }}
           pr: ${{ github.event.issue.number || github.event.pull_request.number }}
           final-message: ${{ runner.temp }}/codex/codex-final.md
-          stripped: ${{ runner.temp }}/codex/codex-final.stripped.md
+          stripped: ${{ runner.temp }}/codex-final.stripped.md
           resolve: >-
             ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') &&
                 steps.codexland.outputs.pushed == '1' && steps.codexland.outputs.merge_only != '1' }}
@@ -1557,7 +1557,7 @@ jobs:
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
-          OUT: ${{ runner.temp }}/codex/codex-final.stripped.md
+          OUT: ${{ runner.temp }}/codex-final.stripped.md
           TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           PUSHED: ${{ steps.codexland.outputs.pushed }}
           MERGE_ONLY: ${{ steps.codexland.outputs.merge_only }}
