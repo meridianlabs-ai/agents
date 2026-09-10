@@ -47,17 +47,21 @@ def test_defang_breaks_triggers_and_markers_case_insensitively(tmp_path):
         "Please @review this and @Claude too; @AUTO.\n"
         "<!-- claude-review-verdict --> <!-- Claude-Review-Summary --> claude-review-comment claude-review-nudge\n"
         "<!-- AUTO-HANDOFF --> auto-converged auto-review-rounds auto-review-head auto-fix-attempts\n"
+        "🤖 engine: codex · Engine: Codex\n"
     )
     dst = tmp_path / "out.md"
     r = bash_lib(f"defang '{src}' '{dst}'")
     assert r.returncode == 0, r.stderr
     out = dst.read_text()
     for live in ("@review", "@Claude", "@AUTO", "claude-review-", "AUTO-HANDOFF", "auto-converged",
-                 "auto-review-rounds", "auto-review-head", "auto-fix-attempts"):
+                 "auto-review-rounds", "auto-review-head", "auto-fix-attempts", "engine: codex"):
         assert live.lower() not in out.lower(), out
     assert "`review`" in out and "`Claude`" in out and "`AUTO`" in out
     # The replacement text is literal (lowercase); the captured suffix keeps its case.
     assert "claude-review verdict" in out and "auto HANDOFF" in out
+    # The codex reviewer's footer (pr-feedback-context's second anchor pattern) is split
+    # too, case-insensitively; the replacement is literal lowercase.
+    assert out.count("engine  codex") == 2 and "🤖 engine  codex" in out
 
 
 def test_defang_caps_oversized_bodies(tmp_path):

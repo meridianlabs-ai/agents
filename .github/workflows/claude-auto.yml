@@ -1176,17 +1176,21 @@ jobs:
           # The summary goes to the PR either way (a no-change round IS the
           # blocker comment the ending contract calls for) — posted by the
           # land job AFTER its push succeeded (its Post step follows the
-          # push, so "pushed" below is true when read), de-fanged: it posts
-          # from a write-access account, and the loops match their
-          # verdict/handoff markers with plain substring contains() — codex
-          # QUOTING a marker would forge a verdict or suppress an owed
-          # hand-back, so break those substrings too. The land job de-fangs
-          # again (two layers, so neither can drift to zero), but not the
-          # review-comment anchor marker and the codex reviewer's engine
-          # footer, which are in the list here: this summary posts as marvin,
-          # a machine author the review-fix rounds' anchor selection trusts,
-          # so a CI-fix summary echoing either would be taken for the newest
-          # review by the next fix round on the same PR.
+          # push; the headers below still say "committed", not "pushed",
+          # because a lost bundle drops the push but not the comment),
+          # de-fanged: it posts from a write-access account, and the loops
+          # match their verdict/handoff markers with plain substring
+          # contains() — codex QUOTING a marker would forge a verdict or
+          # suppress an owed hand-back, so break those substrings too. The
+          # list here includes the review-comment anchor marker and the codex
+          # reviewer's engine footer: this summary posts as marvin, a machine
+          # author the review-fix rounds' anchor selection trusts, so a CI-fix
+          # summary echoing either would be taken for the newest review by
+          # the next fix round on the same PR. The land job's `defang`
+          # (land/lib.sh) covers the same list, footer included, so the
+          # Claude-path relay and the Surface step's embedded summary — which
+          # have no sed of their own — are protected too, and this copy is
+          # the second layer (two, so neither can drift to zero).
           {
             if [ -n "$merge_only" ]; then
               printf '🤖 auto (codex, CI-fix attempt %s): base merge only, no fix this attempt — details below.\n\n' "$ATTEMPT"
@@ -1394,7 +1398,10 @@ jobs:
             err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was landed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
           fi
           if [ -z "$err" ] && [ "${CODEXCOMMIT_OUTCOME:-}" = "failure" ]; then
-            err="codex finished but committing its edits failed — the fix did not reach the branch (see the job logs)."
+            # The guard succeeded on this path, so codex's own local commits
+            # (if any) still land through ancestry; only the runner's commit
+            # of its leftover edits is lost — say so, rather than "nothing".
+            err="codex finished but committing its leftover edits failed — codex's own local commits, if any, still land; its uncommitted edits did not (see the job logs)."
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the CI-fix step failed before producing a result (see the job logs)."

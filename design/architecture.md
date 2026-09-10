@@ -353,8 +353,9 @@ Three rules define the shape:
   **event payload** (`pr-number` / `issue-number` inputs) — trusted, unlike
   a number read from the unvalidated manifest, which could steer the note
   anywhere. Every agent-authored body passes through
-  the de-fang sed (triggers lose their `@`, loop markers are split,
-  case-insensitively, capped under the comment limit) before posting; the
+  the de-fang sed (triggers lose their `@`, loop markers and the codex
+  reviewer's `engine: codex` anchor footer are split, case-insensitively,
+  capped under the comment limit) before posting; the
   one exception is the hand-back, posted verbatim as exactly `@review`.
 
 Phase 1 (#79) adds the plumbing only — the two composites, the validator and
@@ -444,17 +445,18 @@ loop and the dev agent:
   PR through the manifest.
 - **A no-change Claude round is not silent.** The agent can no longer post
   the blocker comment the old prompt asked for, so when it succeeded and
-  committed nothing — HEAD still at the start SHA, or exactly the runner's
-  clean base merge (a merge-only round, which lands and owes its hand-back
-  but carries no agent commit; the relay's first line says so) — the
-  first line, like the codex summary's, says "committed" / "base merge
-  only", never "pushed": the fix job composes it before `emit-landing`
-  runs, and a `git bundle` failure there drops the hand-back but not
-  `comments[]`, so a header asserting the push would post over lost work
-  and only the error comment that follows would correct it — the
+  committed nothing (HEAD still at the start SHA, or exactly the runner's
+  clean base merge — a merge-only round, which lands and owes its hand-back
+  but carries no agent commit; the relay's first line says so) the
   workflow relays its final message as a `comments[]` entry (de-fanged by
-  `land`) — the Claude analogue of the codex summary that has always
-  posted. (Issue #82's fourth verification item said
+  `land`, whose list includes the codex reviewer's `engine: codex` footer
+  so the relay cannot become a false review anchor) — the Claude analogue
+  of the codex summary that has always posted. Its first line, like the
+  codex summary's, says "committed" / "base merge only", never "pushed":
+  the fix job composes it before `emit-landing` runs, and a `git bundle`
+  failure there drops the hand-back but not `comments[]`, so a header
+  asserting the push would post over lost work and only the error comment
+  that follows would correct it. (Issue #82's fourth verification item said
   "posts nothing otherwise"; the relay is a deliberate deviation so a round
   that gave up leaves a trace beyond the counter bump.)
 - **`Record attempt` moved before the sync and provisioning steps** (it is a
