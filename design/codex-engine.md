@@ -594,7 +594,42 @@ is the condition under which the seccomp filter is not installed. The
 action keeps a pre-existing config and appends its provider block, and
 rejects `permissions.*` through `codex-args`, so the file is the only
 route; home and `.codex` are 755 so the runner-side action can read it
-back.
+back — a 700 home would make it read "" and drop the block silently.
+
+The profile's survival rides on the action APPENDING to the existing file
+(`writeProxyConfig.ts` today), and `@v1` is a moving tag. Under #87 that
+was the one setting whose loss would have been silent (a dropped legacy
+key just left the sandbox closed, with no symptom but trio tests failing
+again), so the `codex-usage` composite carried a post-run detector that
+re-read the `config.toml` codex ran with and warned if the key was gone
+(review round 4 of #87). The named profile made that loss loud instead:
+the action still passes `default_permissions="workspace_net"`, and codex
+refuses to start when `default_permissions` names an undefined profile
+(`PermissionProfileResolutionError::UndefinedProfile`,
+`codex-rs/config/src/permissions_toml.rs`), so a revision that overwrote
+the file would fail the run at the codex step before any test runs. The
+detector was therefore dropped in #90 — it would have fired only in a
+case that had already failed loudly, and its warning ("codex ran with
+network off") would have been wrong for that case. The flip side of the
+same mechanism, accepted: any codex start against that `CODEX_HOME`
+WITHOUT `default_permissions` is now a hard error too (profiles defined
+but none selected); today the only codex invocation there is
+codex-action's, which always passes the flag when `permission-profile` is
+set.
+
+Pre-creating `.codex` has one side effect the step must compensate for
+(caught in review round 1 of #87): codex-action's `resolve-codex-home`
+returns early when `~codex/.codex` already exists ("assume it's correctly
+permissioned"), and only its create path pre-touches the world-writable
+`$CODEX_HOME/$GITHUB_RUN_ID.json` that `codex-responses-api-proxy` —
+launched as `runner`, no sudo — writes its server info into. Without that
+file the proxy gets EACCES in the codex-owned 755 dir and the action fails
+at "Wait for Responses API proxy" before codex runs. So the step mirrors
+the action: `sudo touch` + `chmod 666` on that path (the action's `-s`
+probe treats the empty file as "not running yet" and locks it to
+`444`/root once the proxy is up). Anyone adding another file under
+`.codex` before the action runs should check what else the skipped
+bootstrap would have done.
 
 Why: with network off, codex's Linux sandbox installs a seccomp filter
 (`linux-sandbox/src/landlock.rs`, `Restricted` mode) that allows AF_UNIX
@@ -605,8 +640,10 @@ wakeup socketpair (it sets `SO_SNDBUF`), inspect_ai's control server
 cannot bind, asyncio thread wake-ups stall, and nothing downloads a
 tokenizer. inspect_ai#428's codex reviews (2026-09-09) lost every trio
 test and half the asyncio suite to this and fell back to timers and
-stubs. `network_access = true` on the builtin `:workspace` profile skips
-the filter entirely.
+stubs. `network.enabled = true` on the `workspace_net` profile (which
+extends the builtin `:workspace`) skips the filter entirely; the legacy
+`network_access = true` key on the builtin itself does not when the
+profile is selected explicitly, as above.
 
 Trust argument: every codex run here is a same-repo tree — the reviewer
 routes fork heads to Claude, the dev agent refuses them, the loops gate on

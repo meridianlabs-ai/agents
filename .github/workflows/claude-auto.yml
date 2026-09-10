@@ -785,9 +785,7 @@ jobs:
       # output / reasoning counts and the model that served in the job
       # summary — the codex counterpart of Model provenance below. Runs right
       # after codex, before landing, so a landing failure can't hide the
-      # spend. Also warns if codex-action's config rewrite dropped the
-      # sandbox's `network_access = true` (design/codex-engine.md → Network).
-      # Best-effort: the script exits 0 on every path, and
+      # spend. Best-effort: the script exits 0 on every path, and
       # continue-on-error makes that structural — a failure here must never
       # trip the landing step's implicit success() gate and strand the work.
       - name: Codex usage

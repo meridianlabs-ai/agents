@@ -71,9 +71,13 @@ description: >-
      `.codex` are 755 and the file 644 because the action reads the file
      back runner-side before appending; a 700 home would make it read ""
      and silently drop the block. The profile's survival rides on the
-     action appending rather than overwriting (`@v1` is a moving tag), so
-     the `codex-usage` composite re-reads the file after codex and warns if
-     it is gone. Trust argument:
+     action appending rather than overwriting (`@v1` is a moving tag), but
+     its loss is LOUD, not silent: the action still passes
+     `default_permissions="workspace_net"`, and codex refuses to start on a
+     `default_permissions` that names an undefined profile
+     (`PermissionProfileResolutionError::UndefinedProfile`), so the run
+     fails at the codex step rather than running with network off — which
+     is why no post-run detector for it exists. Trust argument:
      every codex run here is a same-repo tree (the reviewer routes fork
      heads to Claude, the dev agent refuses them, the loops gate on
      isCrossRepository) and codex holds NO credentials — the API key sits
