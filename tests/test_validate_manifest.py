@@ -98,6 +98,7 @@ def run(
     event_pr=EVENT_PR,
     event_issue=EVENT_ISSUE,
     branch_prefix="",
+    refuse_bundle=False,
 ):
     return vm.validate(
         manifest,
@@ -111,6 +112,7 @@ def run(
         event_pr_number=event_pr,
         event_issue_number=event_issue,
         branch_prefix=branch_prefix,
+        refuse_bundle=refuse_bundle,
     )
 
 
@@ -609,6 +611,84 @@ def test_pr_title_too_long(tmp_path):
     assert any("pr: title exceeds 256" in e for e in errs)
 
 
+# --- review_verdict (claude-review.yml's codex path) --------------------------
+
+
+@pytest.mark.parametrize("verdict", vm.VERDICTS)
+def test_every_review_verdict(tmp_path, verdict):
+    assert run(tmp_path, base_manifest(tmp_path, review_verdict=verdict)) == []
+
+
+@pytest.mark.parametrize("verdict", ["Clean", "approved", "", 1, True])
+def test_bad_review_verdict(tmp_path, verdict):
+    errs = run(tmp_path, base_manifest(tmp_path, review_verdict=verdict))
+    assert any("review_verdict" in e for e in errs)
+
+
+def test_review_verdict_needs_pr_number(tmp_path):
+    # The verdict is posted on pr_number (never pr.open: the reviewer's land
+    # job opens no PRs).
+    m = base_manifest(tmp_path, pr_number=None, replies=[], resolve_threads=[], handback=False, review_verdict="clean")
+    errs = run(tmp_path, m, pr_head_ref="", event_pr="")
+    assert any("review_verdict needs pr_number" in e for e in errs)
+
+
+# --- refuse_bundle (a land job whose agent never commits) --------------------
+
+
+def review_manifest(d: Path, **overrides) -> dict:
+    """What claude-review.yml's read-only emit-landing produces on a PR run."""
+    m = {
+        "schema": 1,
+        "repo": REPO,
+        "run_id": int(RUN_ID),
+        "branch": BRANCH,
+        "start_sha": START,
+        "head_sha": START,
+        "has_bundle": False,
+        "pr_number": 456,
+        "issue_number": None,
+        "comments": [{"number": 456, "body_file": write(d, "codex-review.md")}],
+        "review_verdict": "suggestions",
+        "stage": "Review",
+        "provenance_comment_file": write(d, "prov.md"),
+        "error": {"message": "the review step failed", "fail_run": True},
+    }
+    m.update(overrides)
+    return m
+
+
+def test_refuse_bundle_accepts_the_reviewers_manifest(tmp_path):
+    assert run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True) == []
+
+
+def test_refuse_bundle_refuses_commits(tmp_path):
+    # A manifest claiming HEAD moved (with the bundle to match) is exactly
+    # what a compromised review job would upload to turn the land job into a
+    # push channel; both the flag and the file are refused.
+    (tmp_path / "commits.bundle").write_bytes(b"# v2 git bundle\n")
+    m = review_manifest(tmp_path, head_sha=HEAD, has_bundle=True)
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True)
+    assert any("refuses bundles" in e and "carries commits" in e for e in errs)
+    assert any("refuses bundles" in e and "commits.bundle is present" in e for e in errs)
+    # Without the flag the same manifest is a normal landing.
+    assert run(tmp_path, m, event_issue="") == []
+
+
+def test_refuse_bundle_refuses_a_moved_head_even_without_a_bundle(tmp_path):
+    # has_bundle false but head_sha != start_sha is already inconsistent;
+    # under refuse_bundle it is ALSO named as carrying commits.
+    m = review_manifest(tmp_path, head_sha=HEAD)
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True)
+    assert any("refuses bundles" in e and "carries commits" in e for e in errs)
+
+
+def test_refuse_bundle_refuses_a_stray_bundle_file(tmp_path):
+    (tmp_path / "commits.bundle").write_bytes(b"# v2 git bundle\n")
+    errs = run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True)
+    assert errs == ["manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact"]
+
+
 # --- CLI ---------------------------------------------------------------------
 
 
@@ -690,6 +770,20 @@ def test_cli_branch_prefix(tmp_path, capsys):
     assert "does not start with the prefix this run's branches must carry ('claude/issue-79-'" in capsys.readouterr().out
     # The flag's own default: no prefix rule on a no-PR run.
     assert cli(tmp_path, pr_head_ref="", event_pr="") == 0
+
+
+def test_cli_refuse_bundle(tmp_path, capsys):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path) == 0
+    assert cli(tmp_path, "--refuse-bundle") == 1
+    out = capsys.readouterr().out
+    assert "refuses bundles" in out
+    (tmp_path / "commits.bundle").unlink()
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(base_manifest(tmp_path, head_sha=START, has_bundle=False, pr=None, handback=False))
+    )
+    (tmp_path / "commits.bundle").unlink()
+    assert cli(tmp_path, "--refuse-bundle") == 0
 
 
 def test_cli_missing_manifest(tmp_path, capsys):

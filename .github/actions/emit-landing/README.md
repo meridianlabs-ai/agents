@@ -25,8 +25,9 @@ The manifest is the **trust boundary**. The agent job — where the agent, its
 subagents and anything it left running had a shell and the job token — can
 write anything into the artifact; the land job acts only on what the validator
 accepts, and every body it posts passes through the de-fang sed (triggers lose
-their `@`, loop markers are split) except the hand-back, which is posted
-verbatim as exactly `@review`.
+their `@`, loop markers are split) except two fixed bodies no agent text
+reaches: the hand-back, posted verbatim as exactly `@review`, and the
+reviewer's verdict comment, chosen by `review_verdict`.
 
 ## Manifest schema (version 1)
 
@@ -56,7 +57,8 @@ to this document together.
   "handback": true,
   "handoff_body_file": "handoff.md",
   "error": { "message": "…", "fail_run": true },
-  "provenance_comment_file": "prov.md"
+  "provenance_comment_file": "prov.md",
+  "review_verdict": "suggestions"
 }
 ```
 
@@ -80,6 +82,15 @@ to this document together.
 | `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line |
 | `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move, and a failed hand-back does not withhold the hand-off or the stage move either) and every planned hand-back, hand-off or stage move that never ran because the PR step failed after the push (a failed fetch or push owes nothing — the work never landed), and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
+| `review_verdict` | workflow (claude-review.yml's codex path) | `clean` or `suggestions`; needs `pr_number`. `land` posts one of two FIXED bodies — the reviewer's `🔎 Review complete …` marker comment with the `claude-review-summary` / `claude-review-verdict:<value>` markers live — after `comments[]` (which carries the de-fanged review body) and only when the Post step lost nothing, so the @auto loop never sees a verdict over a review that did not land. The second body posted verbatim besides the hand-back; no agent text reaches it |
+
+`emit-landing`'s `read-only` input and `land`'s `refuse-bundle` input are the
+pair for a caller whose agent never commits (claude-review.yml): the former
+runs no git at all and writes `head_sha` = `start_sha`, `has_bundle` false;
+the latter makes the validator refuse any manifest that carries commits,
+claims HEAD moved or ships a `commits.bundle` — whatever the agent job
+uploaded — so the reviewer's land job cannot become the push channel its own
+`contents: read` token denies it.
 
 File references: relative, `^[A-Za-z0-9._/-]{1,200}$`, no `..`, no path
 component starting with `.` (emit-landing uploads with

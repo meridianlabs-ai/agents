@@ -9,8 +9,9 @@ description: >-
   a branch that moved during the run), open or adopt the PR, post the
   de-fanged comments and review replies, resolve review threads that belong
   to that PR, file follow-up issues in allow-listed repos and add them to
-  Atlas, post the `@review` hand-back or the escalation hand-off, move the
-  board stage, post the model-provenance note, and finally report the
+  Atlas, post the reviewer's verdict comment (a fixed marker body chosen by
+  `review_verdict`), the `@review` hand-back or the escalation hand-off,
+  move the board stage, post the model-provenance note, and finally report the
   manifest's error (failing the run when it says so — after everything else
   ran). Steps run in this order and stop at the first failure, with two
   deliberate exceptions, both for the same reason — by then the push has
@@ -143,6 +144,16 @@ inputs:
       report's fallback target when there is no PR.
     required: false
     default: ""
+  refuse-bundle:
+    description: >-
+      "true" for callers whose agent never commits (claude-review.yml: the
+      reviewer has contents:read and git commit denied). The validator then
+      refuses a manifest that carries commits, claims HEAD moved, or ships a
+      commits.bundle — whatever the agent job uploaded — so this land job
+      can never become the push channel the agent's own token denies it.
+      Pair with `emit-landing`'s `read-only`, the convenience side.
+    required: false
+    default: "false"
 
 outputs:
   pushed:
@@ -212,6 +223,7 @@ runs:
         EVENT_PR_NUMBER: ${{ inputs.pr-number }}
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         BRANCH_PREFIX: ${{ inputs.branch-prefix }}
+        REFUSE_BUNDLE: ${{ inputs.refuse-bundle == 'true' && '1' || '' }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
@@ -219,7 +231,7 @@ runs:
           --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
           --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
-          --branch-prefix "$BRANCH_PREFIX" \
+          --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.
@@ -242,6 +254,7 @@ runs:
           echo "handoff=$(jq -r 'if .handoff_body_file then "true" else "false" end' "$m")"
           echo "stage=$(jq -r '.stage // ""' "$m")"
           echo "provenance=$(jq -r 'if .provenance_comment_file then "true" else "false" end' "$m")"
+          echo "verdict=$(jq -r '.review_verdict // ""' "$m")"
           echo "has_error=$(jq -r 'if .error then "true" else "false" end' "$m")"
           echo "fail_run=$(jq -r '.error.fail_run // false' "$m")"
         } >>"$GITHUB_OUTPUT"
@@ -535,6 +548,39 @@ runs:
         echo "failed=$failed" >>"$GITHUB_OUTPUT"
         exit 0
 
+    # Review verdict (claude-review.yml's codex path): the loop's marker
+    # comment, one of two FIXED bodies chosen by the manifest's
+    # `review_verdict` — the only body besides the hand-back that carries
+    # live markers, and no agent text reaches it, so there is nothing for
+    # the de-fang to break (the review body itself went through `comments`
+    # above, de-fanged, so the verdict is the only marker-bearing comment).
+    # Gated on the Post step having lost nothing: the review body precedes
+    # the verdict in `comments`, and a verdict over a review that never
+    # landed would spend an @auto fix round on nothing — Report names it as
+    # withheld instead.
+    - id: verdict
+      if: steps.plan.outputs.verdict != '' && steps.post.outputs.failed == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        LIB: ${{ github.action_path }}/lib.sh
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
+        VERDICT: ${{ steps.plan.outputs.verdict }}
+      run: |
+        set -euo pipefail
+        . "$LIB"
+        [ -n "$PR_NUMBER" ] || { echo "::error::land: review_verdict is set but the manifest names no PR to post it on."; exit 1; }
+        case "$VERDICT" in
+          clean) body='🔎 Review complete — no outstanding suggestions. <!-- claude-review-summary --><!-- claude-review-verdict:clean -->' ;;
+          suggestions) body='🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->' ;;
+          *) echo "::error::land: review_verdict '$VERDICT' is neither clean nor suggestions (the validator should have refused it)."; exit 1 ;;
+        esac
+        printf '%s\n' "$body" >"$RUNNER_TEMP/verdict.md"
+        retry 5 "review verdict on #$PR_NUMBER" post_comment_file "$REPO" "$PR_NUMBER" "$RUNNER_TEMP/verdict.md" \
+          || { echo "::error::land: the review verdict on #$PR_NUMBER failed after 5 attempts — the review posted but the loop has no verdict; post it by hand."; exit 1; }
+        echo "land: posted the '$VERDICT' verdict on #$PR_NUMBER."
+
     # Hand-back: exactly `@review`, verbatim — the ONLY body that carries a
     # live trigger. Through post-pr-comment so the retry loop is the one the
     # @auto loops already rely on.
@@ -655,6 +701,10 @@ runs:
         HANDBACK_PLANNED: ${{ steps.plan.outputs.handback }}
         HANDOFF_PLANNED: ${{ steps.plan.outputs.handoff }}
         STAGE_PLANNED: ${{ steps.plan.outputs.stage }}
+        # The verdict is also withheld (skipped, not failed) when the Post
+        # step lost a comment — the review body it would have ruled on.
+        VERDICT_PLANNED: ${{ steps.plan.outputs.verdict }}
+        VERDICT_OUTCOME: ${{ steps.verdict.outcome }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         OUTCOMES: >-
           download=${{ steps.download.outcome }}
@@ -665,6 +715,7 @@ runs:
           push=${{ steps.push.outcome }}
           pr=${{ steps.pr.outcome }}
           post=${{ steps.post.outcome }}
+          verdict=${{ steps.verdict.outcome }}
           handback=${{ steps.handback.outcome }}
           handoff=${{ steps.handoff.outcome }}
           stage=${{ steps.stage.outcome }}
@@ -685,6 +736,9 @@ runs:
           [ "$HANDBACK_PLANNED" != "true" ] || withheld="handback"
           [ "$HANDOFF_PLANNED" != "true" ] || withheld="${withheld:+$withheld, }handoff"
           [ -z "$STAGE_PLANNED" ] || withheld="${withheld:+$withheld, }stage"
+        fi
+        if [ -n "$VERDICT_PLANNED" ] && [ "$VERDICT_OUTCOME" = "skipped" ] && { [ -n "$PR_FAILED" ] || [ -n "$POST_FAILED" ]; }; then
+          withheld="${withheld:+$withheld, }verdict"
         fi
         [ -z "$withheld" ] || echo "::error::land: planned step(s) never ran: $withheld"
         rc=0

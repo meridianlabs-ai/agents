@@ -21,7 +21,12 @@ manifest. Usage:
         --allowed-issue-repos owner/name,owner/other \
         --event-pr-number "$EVENT_PR" --event-issue-number "$EVENT_ISSUE" \
         [--pr-head-ref <headRefName of that PR, from the API>] \
-        [--branch-prefix "claude/issue-$EVENT_ISSUE-"]
+        [--branch-prefix "claude/issue-$EVENT_ISSUE-"] [--refuse-bundle]
+
+`--refuse-bundle` is for callers whose agent never commits (the reviewer):
+a manifest that carries commits, claims HEAD moved, or ships a
+`commits.bundle` is refused, so that land job can never become a push
+channel however the artifact was produced.
 
 `--event-pr-number` / `--event-issue-number` are the numbers the run's
 TRUSTED context names (the event payload, or a gate-job output computed
@@ -89,7 +94,12 @@ KNOWN_TOP_LEVEL = {
     "handoff_body_file",
     "error",
     "provenance_comment_file",
+    "review_verdict",
 }
+# The reviewer's verdict marker comment (claude-review.yml's codex path): the
+# land job posts one of two FIXED bodies chosen by this value, so the loop's
+# markers stay live without any agent text passing the de-fang un-broken.
+VERDICTS = ("clean", "suggestions")
 KNOWN_PR = {"open", "title", "body_file", "base", "labels", "issue"}
 # No `target`: the issues endpoint serves PRs and issues alike, so `number`
 # is all the land job needs; a field it never reads would only mislead.
@@ -123,6 +133,7 @@ class Validator:
         event_pr_number: str = "",
         event_issue_number: str = "",
         branch_prefix: str = "",
+        refuse_bundle: bool = False,
     ) -> None:
         self.m = manifest
         self.dir = Path(artifact_dir)
@@ -136,6 +147,7 @@ class Validator:
         self.event_pr_number = event_pr_number.strip()
         self.event_issue_number = event_issue_number.strip()
         self.branch_prefix = branch_prefix.strip()
+        self.refuse_bundle = refuse_bundle
         self.errors: list[str] = []
 
     def err(self, msg: str) -> None:
@@ -357,6 +369,16 @@ class Validator:
             bundle = self.dir / "commits.bundle"
             if bundle.is_symlink() or not bundle.is_file():
                 self.err("manifest: has_bundle is true but commits.bundle is missing or not a regular file")
+        if self.refuse_bundle:
+            # The caller's agent never commits (the reviewer: contents:read,
+            # git commit denied). Its land job must never become a push
+            # channel, so a manifest that carries commits — or merely claims
+            # HEAD moved, or ships a bundle file — is refused outright,
+            # whatever the agent job (or anything running in it) uploaded.
+            if has_bundle or (start_sha and head_sha and head_sha != start_sha):
+                self.err("manifest: this land job refuses bundles (--refuse-bundle) but the manifest carries commits (has_bundle / head_sha != start_sha)")
+            if (self.dir / "commits.bundle").exists() or (self.dir / "commits.bundle").is_symlink():
+                self.err("manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact")
 
         if pr is not None:
             self._unknown_keys(pr, KNOWN_PR, "pr")
@@ -449,6 +471,13 @@ class Validator:
         self._file_ref(m, "handoff_body_file", "manifest", required=False)
         self._file_ref(m, "provenance_comment_file", "manifest", required=False)
 
+        verdict = self._str(m, "review_verdict", "manifest", required=False)
+        if verdict is not None:
+            if verdict not in VERDICTS:
+                self.err(f"manifest: review_verdict must be one of {', '.join(VERDICTS)}")
+            if pr_number is None:
+                self.err("manifest: review_verdict needs pr_number (the PR the verdict is for)")
+
         error = m.get("error")
         if error is not None:
             if not isinstance(error, dict):
@@ -518,6 +547,11 @@ def main(argv=None) -> int:
         default="",
         help="when --event-pr-number is empty, manifest.branch must start with this (e.g. claude/issue-N-); empty leaves the branch agent-chosen on such runs",
     )
+    ap.add_argument(
+        "--refuse-bundle",
+        action="store_true",
+        help="refuse a manifest that carries commits (the caller's agent never commits — the reviewer); has_bundle must be false, head_sha must equal start_sha and no commits.bundle may be present",
+    )
     args = ap.parse_args(argv)
 
     manifest, errors = load_manifest(Path(args.dir))
@@ -534,6 +568,7 @@ def main(argv=None) -> int:
             event_pr_number=args.event_pr_number,
             event_issue_number=args.event_issue_number,
             branch_prefix=args.branch_prefix,
+            refuse_bundle=args.refuse_bundle,
         )
     for line in errors:
         print(f"manifest violation: {line}")
