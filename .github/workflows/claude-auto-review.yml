@@ -1252,7 +1252,7 @@ jobs:
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           final-message: ${{ runner.temp }}/codex/codex-final.md
-          stripped: ${{ runner.temp }}/codex/codex-final.stripped.md
+          stripped: ${{ runner.temp }}/codex-final.stripped.md
           resolve: ${{ steps.codexland.outputs.pushed == '1' && steps.codexland.outputs.merge_only != '1' }}
 
       # One comment either way, de-fanged (posts from a write-access
@@ -1268,7 +1268,11 @@ jobs:
       # the board and "Ensure hand-back" sees the hand-off already posted.
       # Gated on the resolve step (which is gated on the landing): the
       # summary states the resolved count, and OUT is the stripped copy it
-      # wrote. Runs no git, so it carries no git env or credential.
+      # wrote — falling back to FINAL, codex's message unstripped, when that
+      # copy is missing (the composite warned; a read needs no write
+      # permission, and a stray RESOLVED-THREADS line in a comment beats the
+      # summary going unread — inspect_ai#428's ten blind rounds). Runs no
+      # git, so it carries no git env or credential.
       - name: Post codex summary
         id: codexpost
         if: steps.codexthreads.outcome == 'success'
@@ -1278,12 +1282,14 @@ jobs:
           PR: ${{ inputs.pr_number }}
           ROUND: ${{ steps.gate.outputs.round }}
           MENTION: ${{ steps.gate.outputs.mention }}
-          OUT: ${{ runner.temp }}/codex/codex-final.stripped.md
+          OUT: ${{ runner.temp }}/codex-final.stripped.md
+          FINAL: ${{ runner.temp }}/codex/codex-final.md
           PUSHED: ${{ steps.codexland.outputs.pushed }}
           MERGE_ONLY: ${{ steps.codexland.outputs.merge_only }}
           RESOLVED: ${{ steps.codexthreads.outputs.resolved }}
         run: |
           set -euo pipefail
+          src="$OUT"; [ -f "$src" ] || src="$FINAL"
           {
             if [ -z "$PUSHED" ] || [ -n "$MERGE_ONLY" ]; then
               echo "<!-- auto-handoff -->"
@@ -1296,7 +1302,7 @@ jobs:
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
                    -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
-                   "$OUT" 2>/dev/null || echo "(codex produced no final message)"
+                   "$src" 2>/dev/null || echo "(codex produced no final message)"
           } >"$RUNNER_TEMP/codex-comment.md"
           # GitHub caps comment bodies at 65,536 characters and codex's final
           # message is unbounded; here the post failing lands AFTER the push,

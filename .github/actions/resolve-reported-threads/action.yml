@@ -47,8 +47,14 @@ inputs:
   stripped:
     description: >-
       Path to write the final message with the `RESOLVED-THREADS:` line
-      removed. Not written when the final message is missing, so the caller's
-      "(codex produced no final message)" fallback still fires.
+      removed. MUST be runner-writable — directly under $RUNNER_TEMP, never
+      inside the codex-owned output dir: there the write fails with
+      "Permission denied" (taking the parsed ids with it), and codex could
+      pre-plant the name as a symlink for the runner-side write to follow.
+      Not written when the final message is missing or the write fails
+      (a `::warning::` names the path); the caller's post step then falls
+      back to the unstripped final message, and only when that is missing
+      too to "(codex produced no final message)".
     required: true
   resolve:
     description: >-
@@ -98,7 +104,24 @@ runs:
         # The last tag block wins. The id filter below already tolerates any
         # decoration on the ids.
         ids=
+        # STRIPPED must be runner-writable (the input's contract): the codex
+        # output dir ($RUNNER_TEMP/codex) is codex-owned 755, so a stripped
+        # path inside it made awk die on `printf "" > out` ("cannot redirect
+        # ... Permission denied"), the ids were lost with it, and every
+        # landing comment on inspect_ai#428's ten overnight rounds read
+        # "(codex produced no final message)" while codex's summary sat
+        # unread in FINAL. That location was also a symlink hazard: codex
+        # owned the dir, so it could have pre-planted the stripped filename
+        # as a symlink to any runner-writable file (the GITHUB_ENV /
+        # GITHUB_OUTPUT command files, say) for the runner-side `> out` to
+        # follow and overwrite with codex-controlled text. Callers now pass
+        # a path directly under $RUNNER_TEMP (runner-only). No write-side
+        # fallback here: a copy into the same unwritable target would fail
+        # exactly as the awk did. Instead the callers' post step reads FINAL
+        # when STRIPPED is missing (a read needs no write permission), so
+        # this action's part is to warn, not to promise the post.
         if [ -f "$FINAL" ]; then
+          mkdir -p "$(dirname "$STRIPPED")" 2>/dev/null || true
           ids=$(awk -v out="$STRIPPED" '
             function flush() { for (; held > 0; held--) print "" > out }
             BEGIN { printf "" > out }
@@ -112,6 +135,11 @@ runs:
             END { print ids }
           ' "$FINAL" | tr -c 'A-Za-z0-9_-' ' ' | tr ' ' '\n' \
                   | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u || true)
+          # awk's BEGIN write is the first thing it does, so a missing file
+          # here means it died before parsing: ids is empty as well.
+          if [ ! -f "$STRIPPED" ]; then
+            echo "::warning::stripped final message not written to $STRIPPED (not runner-writable?); no RESOLVED-THREADS ids parsed — the caller's post step falls back to the unstripped final message"
+          fi
         fi
         resolved=0
         if [ "$RESOLVE" = "true" ]; then
