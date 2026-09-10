@@ -13,16 +13,25 @@ description: >-
   step (local composite actions with post steps break teardown on the fork).
 
   Three verdicts (design/auto-agent.md → Trigger surface):
-  - `ok`: the labeler is marvin or holds admin/maintain/write. Run.
+  - `ok`: the labeler is marvin or holds admin/write. Run.
   - `disarmed`: positive evidence of an outsider — the labeler is a known
-    account whose permission is read/triage/none. The label comes off (as
-    the token's identity, so the PR does not stay armed for the next event)
-    and a note naming the labeler is posted. Skip.
+    account whose permission is read/none. The label comes off (as the
+    token's identity, so the PR does not stay armed for the next event) and
+    a note naming the labeler and their role is posted. Skip.
   - `unverified`: no evidence either way — the timeline has no labeled event
     for the label, the labeler is a GitHub App (`*[bot]`, whose permission
     the collaborators endpoint cannot report), or the permission lookup
     failed. Refuse WITHOUT disarming: fail closed, but never take a human's
     label away on an API blip. Skip.
+
+  Permission values are the collaborators endpoint's `.permission`, which
+  reports only the legacy base roles — `admin`, `write`, `read`, `none` —
+  with `maintain` folded into `write`, `triage` into `read` and a custom
+  role into its base. That is the right field to DECIDE on (it answers
+  "can this account write?" for every role shape); the fine-grained
+  `.role_name` (`triage`, `maintain`, a custom role's name) is read
+  alongside it only so the disarm note can say what the account actually
+  holds.
 
   Both refusals are surfaced on the PR, not only in the job log: the disarm
   strips a label a maintainer may be watching for, and the unverified path
@@ -74,8 +83,17 @@ outputs:
     description: Login that applied the label most recently; empty when the timeline has no labeled event.
     value: ${{ steps.verify.outputs.labeler }}
   permission:
-    description: The labeler's repository permission when it was looked up (admin/maintain/write/triage/read/none); empty otherwise.
+    description: >-
+      The labeler's base repository permission when it was looked up
+      (admin/write/read/none — the endpoint's legacy `.permission`, see the
+      description); empty otherwise.
     value: ${{ steps.verify.outputs.permission }}
+  role:
+    description: >-
+      The labeler's fine-grained role when it was looked up (`.role_name`:
+      admin/maintain/write/triage/read or a custom role's name); empty
+      otherwise.
+    value: ${{ steps.verify.outputs.role }}
 
 runs:
   using: composite
@@ -127,7 +145,7 @@ runs:
           gh pr comment "$PR" --repo "$REPO" --body "$(printf '%s\n⚠️ auto: this PR carries the `%s` label, but auto could not verify who applied it (%s), so it is not running — the label is left on. To arm the loop, an account with write access can remove and re-add the label. This notice posts once; later events skip quietly until the label changes hands.' "$marker" "$AUTO_LABEL" "$1")" \
             || echo "::warning::could not post the unverified-label notice on PR #$PR"
         }
-        lperm=""
+        lperm="" lrole=""
         verdict=ok
         if [ -z "$labeler" ]; then
           echo "::warning::PR #$PR carries '$AUTO_LABEL' but its timeline has no labeled event for it; cannot verify who opted in."
@@ -144,7 +162,20 @@ runs:
               notice_unverified "it was applied by $labeler, a GitHub App — an App's permission cannot be looked up, and a caller's own automation is not a write-access human"
               verdict=unverified ;;
             *)
-              lperm=$(ghr gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission') || lperm=""
+              # One read for both fields: `.permission` is the legacy base
+              # role (admin/write/read/none — maintain reports as write,
+              # triage as read, a custom role as its base) and is what the
+              # verdict is decided on; `.role_name` is the fine-grained role,
+              # kept only so the disarm note can say e.g. `triage` rather
+              # than the `read` it maps to. Split on the tab @tsv emits (a
+              # failed lookup leaves both empty). `maintain` in the arm is
+              # defense in depth, same as the two trig steps: the field is
+              # not documented to report it today.
+              resp=$(ghr gh api "repos/$REPO/collaborators/$labeler/permission" \
+                       --jq '[.permission, .role_name // ""] | @tsv') || resp=""
+              lperm=${resp%%$'\t'*}
+              lrole=${resp#*$'\t'}
+              [ "$lrole" = "$resp" ] && lrole=""
               case "$lperm" in
                 admin|maintain|write) ;;
                 "")
@@ -152,17 +183,22 @@ runs:
                   notice_unverified "the permission lookup for $labeler, who applied it, failed — a deleted account cannot be looked up, and the API may have been unavailable"
                   verdict=unverified ;;
                 *)
-                  echo "::warning::'$AUTO_LABEL' on PR #$PR was applied by $labeler, who has no write access ($lperm); removing the label."
+                  # Name the role when it is more specific than the base
+                  # permission (`triage` → "read, role: triage").
+                  shown="$lperm"
+                  if [ -n "$lrole" ] && [ "$lrole" != "$lperm" ]; then shown="$lperm, role: $lrole"; fi
+                  echo "::warning::'$AUTO_LABEL' on PR #$PR was applied by $labeler, who has no write access ($shown); removing the label."
                   gh pr edit "$PR" --repo "$REPO" --remove-label "$AUTO_LABEL" \
                     || echo "::warning::could not remove '$AUTO_LABEL' from PR #$PR"
-                  gh pr comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the `%s` label on this PR was applied by %s, who does not have write access to this repository (permission: %s). The label opts a PR into the loop, so auto removed it and did not run. A maintainer who wants the loop on this PR can re-apply the label.' "$AUTO_LABEL" "$labeler" "$lperm")" \
+                  gh pr comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the `%s` label on this PR was applied by %s, who does not have write access to this repository (permission: %s). The label opts a PR into the loop, so auto removed it and did not run. A maintainer who wants the loop on this PR can re-apply the label.' "$AUTO_LABEL" "$labeler" "$shown")" \
                     || echo "::warning::could not post the disarm notice on PR #$PR"
                   verdict=disarmed ;;
               esac ;;
           esac
         fi
         out permission "$lperm"
+        out role "$lrole"
         out verdict "$verdict"
         if [ "$verdict" = "ok" ]; then
-          echo "'$AUTO_LABEL' on PR #$PR was applied by $labeler${lperm:+ ($lperm)}."
+          echo "'$AUTO_LABEL' on PR #$PR was applied by $labeler${lperm:+ ($lperm${lrole:+, role: $lrole})}."
         fi

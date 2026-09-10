@@ -141,7 +141,11 @@ finding 4121989) that is enforced in three layers rather than assumed:
   path that plants the label, not just the one the trig check closed. Both
   refusals are surfaced on the PR, not only in the job log: the disarm posts a
   trigger-free note naming the labeler (without an @, so an outsider is not
-  pinged) and their permission; the unverified path posts a one-time sticky
+  pinged) and their permission — the verdict is decided on the collaborators
+  endpoint's base `permission` (admin/write/read/none; `maintain` reports as
+  `write`, `triage` as `read`), and the note also names the fine-grained
+  `role_name` when it differs, so a triage-level labeler reads "read, role:
+  triage"; the unverified path posts a one-time sticky
   notice (`<!-- auto-gate-unverified -->`) saying what could not be verified
   and that a write-access account can remove and re-add the label to arm the
   loop. The sticky notice matters because an unverifiable label can be
