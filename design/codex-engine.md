@@ -86,7 +86,15 @@ apart there: `land` posts the hand-back only after the push landed, and
 `emit-landing` drops `handback` and `stage` whenever it had to drop the
 bundle (HEAD moved, but a non-descendant or a `git bundle` failure left
 nothing to push), so the manifest never carries a hand-back over lost
-work. Since 2026-09-09 the landing is three steps, not one: the
+work. The HEAD-moved test is gated on the `unresolved-merge-guard` step
+having *succeeded* (the manifest composer runs no git and `emit-landing`
+is `read-only` otherwise — the guard is gated on the codex step and the
+reclaim, so one condition covers a failed run step, a failed reclaim and
+a failed guard): codex's local commits are exactly what makes ancestry
+alone unsafe here, since a `git commit` over staged-but-still-marked
+paths completes the base merge and moves HEAD, and the old `Land codex
+fix` step's guard gate is what kept that off the branch. Since
+2026-09-09 the landing is three steps, not one: the
 `codexland` step is git-only (commit, push, `pushed`/`merge_only`
 outputs — the only step carrying the pinned git env and the push
 credential), the `resolve-reported-threads` composite consumes the final

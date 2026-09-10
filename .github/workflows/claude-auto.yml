@@ -988,8 +988,13 @@ jobs:
       # produce a valid merge commit containing them, so this check is the
       # only thing between a half-resolved merge and the PR branch. A separate
       # step so the commit step below is skipped, not entered, on failure;
-      # the Surface step reads this step's outcome. Also gated on the reclaim:
-      # a refused (redirected) git dir must not be read at all.
+      # the Surface step reads this step's outcome, and so do the manifest
+      # composer and emit-landing (read-only unless this step SUCCEEDED):
+      # codex may commit locally, and a commit over staged-but-still-marked
+      # paths completes the merge and moves HEAD past the start SHA, so the
+      # push must key on this step, not on ancestry alone — as the old Land
+      # codex fix step did. Also gated on the reclaim: a refused (redirected)
+      # git dir must not be read at all.
       - name: Guard against an unresolved merge (codex)
         id: codexguard
         if: steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'
@@ -1288,8 +1293,9 @@ jobs:
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
           fi
           # A reclaim that did not succeed SKIPS the guard, the commit step
-          # and every later git call (the manifest composer skips git, and
-          # emit-landing runs read-only): on this path .git is still the
+          # and every later git call (the manifest composer skips git and
+          # emit-landing runs read-only whenever the guard did not succeed,
+          # which a skipped guard is): on this path .git is still the
           # codex-written one (a refusal, a failed restore, or a job cancel
           # that landed mid-reclaim — outcome `cancelled`, not `failure`, with
           # the kill/chown/restore only partly done). `!= success` mirrors
@@ -1299,6 +1305,9 @@ jobs:
             err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed. Inspect the codex run's transcript before re-triggering."
           fi
           # A failed guard SKIPS the commit step, so it needs its own check.
+          # "nothing was landed" holds because the manifest composer and
+          # emit-landing go read-only on a guard that did not succeed: a
+          # local commit codex made over the markers is never bundled.
           if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then
             err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was landed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
           fi
@@ -1385,9 +1394,26 @@ jobs:
       #               round, its message carries the summary instead.
       #   provenance_comment_file — the model-provenance note, if any
       #   error     — the Surface step's message (fail_run: true)
-      # Not set -e: a manifest must come out of every path. The git reads
-      # are skipped (handback false) when the codex reclaim did not succeed:
-      # nothing lands from a workspace codex still owns.
+      # Not set -e: a manifest must come out of every path. On the codex path
+      # the git reads are skipped (handback false) unless the unresolved-merge
+      # guard SUCCEEDED — the same condition emit-landing's read-only takes,
+      # so nothing above the start SHA is packaged either. The guard is
+      # itself gated on the codex step and the reclaim having succeeded, so
+      # "guard did not succeed" covers all three: a failed codex step (its
+      # partial local commits are never pushed — as before the split, when
+      # the landing step was gated on the run step), a reclaim that did not
+      # succeed (nothing lands from a workspace codex still owns), and a
+      # guard that FAILED — codex may commit locally, and `git commit` over
+      # staged-but-still-marked paths completes the base merge, so HEAD moves
+      # past the start SHA with conflict markers in the tree; keying on
+      # ancestry alone would bundle and push that as marvin, request the
+      # re-review and only then post an error saying nothing landed. The
+      # guard is the enforcement point (design/architecture.md → The landing
+      # step is the enforcement point), so its failure withholds the push
+      # here as it withheld the old Land codex fix step. Post-codex git, so
+      # the git dir is pinned by env like the guard and the commit step
+      # (AGENTS.md; the reclaim's refusal of a redirect is the primary
+      # defence, this is belt and braces).
       - name: Compose landing manifest
         id: landing
         if: always()
@@ -1402,10 +1428,13 @@ jobs:
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
-          CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
+          CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
           PROV_NOTE: ${{ steps.provenance.outputs.note }}
           ERROR_FILE: ${{ runner.temp }}/agent-error.md
+          GIT_DIR: ${{ github.workspace }}/.git
+          GIT_COMMON_DIR: ${{ github.workspace }}/.git
+          GIT_WORK_TREE: ${{ github.workspace }}
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: core.hooksPath
@@ -1418,8 +1447,8 @@ jobs:
           extra='{}'
           moved=false
           head=""
-          if [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXRECLAIM_OUTCOME:-}" != "success" ]; then
-            echo "landing: the codex reclaim did not succeed; running no git — nothing lands and no hand-back is owed."
+          if [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
+            echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed codex step or reclaim skips it); running no git — nothing lands and no hand-back is owed."
           elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
             if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
@@ -1466,11 +1495,15 @@ jobs:
       # manifest for the land job. The PR number is the gate job's trusted
       # lookup, the SAME value the land job gets (README → Using the pair):
       # the validator pins the manifest's pr_number to it and its branch to
-      # that PR's live head ref. read-only when the codex reclaim did not
-      # succeed: no git runs against a workspace codex still owns, and the
-      # manifest still carries the Surface step's error for the land job to
-      # post (the README's snippet skips the step outright there; here the
-      # report matters more than the empty bundle).
+      # that PR's live head ref. read-only on the codex path unless the
+      # unresolved-merge guard succeeded (the composer's condition, see its
+      # comment): a reclaim that did not succeed skips the guard, and no git
+      # may run against a workspace codex still owns; a FAILED guard means
+      # conflict markers survive in the tree, and a local commit codex made
+      # over them must not be bundled — read-only packages nothing above the
+      # start SHA. Either way the manifest still carries the Surface step's
+      # error for the land job to post (the README's snippet skips the step
+      # outright there; here the report matters more than the empty bundle).
       - name: Emit landing manifest
         if: always()
         uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
@@ -1486,7 +1519,7 @@ jobs:
           branch: ${{ inputs.head_branch }}
           pr-number: ${{ needs.gate.outputs.pr }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
-          read-only: ${{ steps.codexuser.outcome == 'success' && steps.codexreclaim.outcome != 'success' && 'true' || 'false' }}
+          read-only: ${{ steps.codexuser.outcome == 'success' && steps.codexguard.outcome != 'success' && 'true' || 'false' }}
 
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate,
