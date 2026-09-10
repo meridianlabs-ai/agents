@@ -82,7 +82,11 @@ commits the tree and writes the de-fanged summary into the landing
 directory, `emit-landing` bundles the commits, and the `land` job — a
 fresh runner holding `MARVIN_TOKEN` — pushes, posts the summary and the
 `@review` the manifest carries; the push and the hand-back cannot come
-apart there. Since 2026-09-09 the landing is three steps, not one: the
+apart there: `land` posts the hand-back only after the push landed, and
+`emit-landing` drops `handback` and `stage` whenever it had to drop the
+bundle (HEAD moved, but a non-descendant or a `git bundle` failure left
+nothing to push), so the manifest never carries a hand-back over lost
+work. Since 2026-09-09 the landing is three steps, not one: the
 `codexland` step is git-only (commit, push, `pushed`/`merge_only`
 outputs — the only step carrying the pinned git env and the push
 credential), the `resolve-reported-threads` composite consumes the final

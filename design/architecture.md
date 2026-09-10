@@ -404,7 +404,20 @@ loop and the dev agent:
   from this workflow: the "pushed but no hand-back" state they existed for
   cannot occur when the push and the hand-back travel in one validated
   manifest and the land composite posts the hand-back only after the push
-  landed.
+  landed. The converse — a hand-back with no push — is closed in
+  `emit-landing`: when HEAD moved but the bundle could not be written (a
+  non-descendant HEAD, or a `git bundle` failure) it drops `handback` and
+  `stage` along with the bundle and records the drop in the manifest's
+  `error`, so the validator's tolerance of `handback` on a bundle-less
+  manifest never turns into a bare `@review` over lost work. Two deliberate
+  consequences of keying on ancestry alone: a rebased HEAD lands nothing
+  and owes nothing, and a Claude step that ended `failure` *after*
+  committing (max-turns, an `is_error` result mid-fix) lands those commits
+  and requests the re-review, with the Surface step's error posted alongside
+  and failing the run — before the split only the agent's own push landed,
+  so a failed step landed nothing. Dropping committed work is the worse
+  outcome, the push is what re-runs CI, and the ⚠️ tells the reviewer the
+  round did not finish cleanly.
 - **The codex path splits at the push.** The old `Land codex fix` step
   keeps its commit half (reclaim-gated, hooks-pinned) and writes the
   de-fanged summary into the landing directory; the push and the post are
@@ -449,7 +462,15 @@ loop and the dev agent:
   fix job's result is `cancelled` — as `claude-review.yml`'s land job is —
   rather than failing its artifact download and reporting "Landing failed"
   on the PR for a round whose agent never started; the refund step still
-  runs. A run cancelled by hand mid-agent lands nothing either.
+  runs. A run cancelled by hand mid-agent lands nothing either. The land
+  job as a whole is additionally gated on the gate job's *success*, not only
+  on its `act` output: a gate that failed after deciding `fix` (a
+  `Record attempt` API write that did not go through) skips the fix job,
+  leaving the same no-artifact shape — and whether the attempt was ever
+  recorded is then unknown, so the refund must not run either (an
+  unrecorded attempt refunded would put the count one below the truth).
+  That case ends as it did before the split: a red gate job with nothing on
+  the PR.
 
 **The reviewer (#81, 2026-09-10) is the first conversion.** `claude-review.yml`
 is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`

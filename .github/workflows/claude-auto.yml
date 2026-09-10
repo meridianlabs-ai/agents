@@ -1358,7 +1358,19 @@ jobs:
       #               counts (a merge-only round moves HEAD), so the
       #               "pushed but no hand-back" failure mode the deleted
       #               backstops covered cannot occur — the hand-back is a
-      #               field of the same manifest as the push.
+      #               field of the same manifest as the push — and the
+      #               converse holds too: emit-landing drops handback and
+      #               stage when it drops the bundle (HEAD moved, no bundle
+      #               written), so no bare `@review` posts for a round whose
+      #               work was lost. Owed on ancestry ALONE, whatever the
+      #               agent step's outcome: a Claude step that ended
+      #               `failure` after committing (max-turns, an is_error
+      #               result mid-fix) lands those commits and requests the
+      #               re-review, with the Surface step's error posted
+      #               alongside — before the split only the agent's own
+      #               push landed and a failed step landed nothing.
+      #               Deliberate: dropping committed work is worse, the push
+      #               is what re-runs CI, and the ⚠️ says the round failed.
       #   stage     — Review, in that case (the reviewer takes over).
       #   comments  — codex's final message (engine codex; the commit step
       #               wrote it, de-fanged), or — the Claude path's analogue,
@@ -1486,9 +1498,19 @@ jobs:
   # with no artifact at all (runner killed mid-agent) the composite fails
   # its download, lands nothing, and says so on the PR. A CANCELLED fix job
   # skips the Land step but still gets its refund (see the step gates).
+  #
+  # Gated on the gate job having SUCCEEDED, not only on its `act` output: a
+  # gate that failed after writing act=fix — `Record attempt` is the
+  # realistic case, one un-retried `gh api` write under set -e — skips the
+  # fix job (`needs.fix.result` is `skipped`), so there is no artifact to
+  # land, and whether the attempt was recorded is unknown; landing would
+  # post "Landing failed at step(s): download" on the PR for a round that
+  # never started, and refunding might write one BELOW the true count
+  # (weakening the kill-switch). Neither runs: a red gate job with nothing
+  # on the PR, as a Record-attempt failure was before the split.
   land:
     needs: [gate, fix]
-    if: always() && needs.gate.outputs.act == 'fix'
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.act == 'fix'
     runs-on: ubuntu-latest
     # Every write here is marvin's (the land composite's `token`, the refund's
     # GH_TOKEN); the job token only reads — the artifact, the PR head ref
@@ -1508,10 +1530,14 @@ jobs:
       # for nothing. A run cancelled by hand mid-agent is skipped too: its
       # partial commits are not pushed and re-reviewed on the strength of an
       # always(). The step is gated, not the job, so the refund below still
-      # runs and gives back the attempt the gate recorded.
+      # runs and gives back the attempt the gate recorded. `skipped` is
+      # excluded too — the job-level gate on the gate job's success already
+      # rules it out (a fix job is skipped only when its gate did not
+      # succeed), so the test is belt and braces for the same "no artifact,
+      # no agent" shape should the job gate ever loosen.
       - name: Land
         id: land
-        if: needs.fix.result != 'cancelled'
+        if: needs.fix.result != 'cancelled' && needs.fix.result != 'skipped'
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
           # The machine account, no fallback: the gate already exited on a
@@ -1548,7 +1574,10 @@ jobs:
       # run has no execution file), it never produced execution output (a
       # Claude run that reached a result counts, failed or not), and the
       # landing pushed nothing (a round whose commits landed keeps its
-      # attempt whatever the agent step's outcome).
+      # attempt whatever the agent step's outcome). Never on a FAILED gate
+      # (the job gate above): whether `Record attempt` ever incremented is
+      # then unknown, and an unrecorded attempt refunded would put the count
+      # one below the truth — not refunding is the conservative side.
       #
       # NOT serialized: this job is outside the per-PR concurrency group (the
       # gate's comment says why), so this write can interleave with the next
