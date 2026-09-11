@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
-"""Hourly Atlas sync — external-review discovery + upstream state sync.
+"""Hourly Atlas sync — upstream state sync for board items with an Upstream PR.
 
-Two tasks (design: meridianlabs-ai/agents design/atlas-tracking.md → "The
+One task (design: meridianlabs-ai/agents design/atlas-tracking.md → "The
 hourly Atlas sync"):
 
-1. Discovery: open upstream PRs review-requested-to / assigned-to REVIEWER,
-   authored by external community contributors (not org members, not bots),
-   not already tracked -> create a proxy issue in the fork (External label,
-   Stage=Review, Upstream PR field), then post @review on it so the external
-   review is already running before a human opens the proxy.
-2. State sync: every fork issue on Atlas with a non-empty "Upstream PR"
-   field — OPEN ones, plus CLOSED ones whose Stage is still set (the
-   Development-panel auto-close signature; such an issue is reopened while
-   its upstream PR is open, unless a human closed it by hand — the
-   ClosedEvent's closer discriminates) -> read the upstream PR and advance
-   the stage:
-     - External proxies: merged/closed -> close proxy (Done); APPROVED ->
-       Merge (the merge-approved-prs queue; dismiss the approval or request
-       changes to pull one back, sticky APPROVED re-queues a moved card);
-       in Merge without a standing approval -> Review; while in Contributor,
-       contributor activity newer than the reviewer's last activity (or a
-       re-review request) -> Review.
-     - Promotions: APPROVED -> Merge (gated on any ts-mono companion
-       being merged or approved); CHANGES_REQUESTED -> Review;
-       approval dismissed -> Merge->Sign-off only; reviewer
-       comment/question while at Sign-off (no verdict) -> Review;
-       merged -> close (Done); closed unmerged -> Review + comment.
+State sync: every fork issue on Atlas with a non-empty "Upstream PR"
+field — OPEN ones, plus CLOSED ones whose Stage is still set (the
+Development-panel auto-close signature; such an issue is reopened while
+its upstream PR is open, unless a human closed it by hand — the
+ClosedEvent's closer discriminates) -> read the upstream PR and advance
+the stage:
+  - External proxies: merged/closed -> close proxy (Done); APPROVED ->
+    Merge (the merge-approved-prs queue; dismiss the approval or request
+    changes to pull one back, sticky APPROVED re-queues a moved card);
+    in Merge without a standing approval -> Review; while in Contributor,
+    contributor activity newer than the reviewer's last activity (or a
+    re-review request) -> Review.
+  - Promotions: APPROVED -> Merge (gated on any ts-mono companion
+    being merged or approved); CHANGES_REQUESTED -> Review;
+    approval dismissed -> Merge->Sign-off only; reviewer
+    comment/question while at Sign-off (no verdict) -> Review;
+    merged -> close (Done); closed unmerged -> Review + comment.
+
+Retired 2026-09-11 (decision: Ransom): the discovery task that seeded a
+proxy issue for each open upstream PR review-requested-to / assigned-to
+REVIEWER from an external contributor, and the auto-@review it posted on
+each new proxy and on every Contributor -> Review transition. Automated
+external reviews now run locally through Orca (orca-pr-sync mirrors the
+PRs into workspaces; a local review skill runs the review). Existing
+proxies keep their Upstream PR field, so this sync still drives their
+lifecycle; a new proxy is seeded by hand (or by the Orca side) when one is
+wanted, and @review on a proxy remains the manual re-run path.
 
 Deterministic; runs as the machine account (GH_TOKEN=MARVIN_TOKEN). Per-item
-failures warn and continue. Every write is idempotent except the @review
-trigger comment, which is at-most-once PER STATE CHANGE: the create path
-posts it for the first review, and the Contributor -> Review transition posts
-it for each new contributor round (dedup skips tracked proxies, and heal
-never re-requests), so a failure there is
-surfaced as a "review request FAILED" action + warning rather than retried —
-the manual re-run path is commenting @review on the proxy.
+failures warn and continue. Every write is idempotent (skip when already at
+the target).
 """
 
 import json
@@ -47,7 +47,6 @@ from datetime import datetime, timezone
 UPSTREAM = "UKGovernmentBEIS/inspect_ai"
 FORK = "meridianlabs-ai/inspect_ai"
 TS_MONO = "meridianlabs-ai/ts-mono"
-ORG = "meridianlabs-ai"
 REVIEWER = os.environ.get("REVIEWER", "ransomr")
 MACHINE_ACCOUNT = "i-am-marvin"  # the login this sync (and the loop) writes as
 
@@ -69,7 +68,6 @@ UPSTREAM_PR_FIELD = "PVTF_lADOC7YMCM4BU68pzhYZp9Q"
 TAIL_STAGES = ("Sign-off", "Merge")
 
 actions: list = []  # human-readable log for the job summary
-pending_chips: list = []
 
 
 def gh(*args: str) -> str:
@@ -95,24 +93,6 @@ def gql(query: str, **variables):
     return out["data"]
 
 
-def is_org_member(login: str) -> bool:
-    """Only a real 404 means "not a member".
-
-    Any other failure (rate limit, 5xx, network) raises, so per-item isolation
-    retries next run instead of misclassifying a teammate as external.
-    """
-    res = subprocess.run(
-        ["gh", "api", f"orgs/{ORG}/members/{login}"], capture_output=True, text=True
-    )
-    if res.returncode == 0:
-        return True
-    if "HTTP 404" in res.stderr:
-        return False
-    raise RuntimeError(
-        f"org membership check failed for {login}: {res.stderr.strip()[:200]}"
-    )
-
-
 def set_single_select(item_id: str, field_id: str, option_id: str) -> None:
     gql(
         """mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
@@ -122,18 +102,6 @@ def set_single_select(item_id: str, field_id: str, option_id: str) -> None:
         i=item_id,
         f=field_id,
         o=option_id,
-    )
-
-
-def set_text(item_id: str, field_id: str, text: str) -> None:
-    gql(
-        """mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){
-             updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,
-               value:{text:$t}}){projectV2Item{id}}}""",
-        p=PROJECT_ID,
-        i=item_id,
-        f=field_id,
-        t=text,
     )
 
 
@@ -155,139 +123,6 @@ def set_stage(item_id: str, stage: str, current) -> bool:
     set_single_select(item_id, STAGE_FIELD, STAGE_OPTIONS[stage])
     set_single_select(item_id, STATUS_FIELD, STATUS_OPTIONS["In progress"])
     return True
-
-
-# ---------------------------------------------------------------- discovery
-
-
-def tracked_proxies() -> dict:
-    """Upstream URL -> proxy info for every External proxy, open OR closed.
-
-    Closed ones are included to keep a Done proxy from being recreated.
-    """
-    out = {}
-    issues = gh_json(
-        "api",
-        f"repos/{FORK}/issues?labels=External&state=all&per_page=100",
-        "--paginate",
-    )
-    for i in issues:
-        m = re.search(r"https://github\.com/\S+/pull/\d+", i.get("body") or "")
-        if m:
-            out[m.group(0)] = {
-                "number": i["number"],
-                "node_id": i["node_id"],
-                "open": i["state"] == "open",
-            }
-    return out
-
-
-def ensure_on_board(node_id: str, url: str):
-    """Idempotently make sure a proxy is on Atlas with its field and a stage.
-
-    Heals a previous run that created the issue but died before the board
-    writes (the URL is already in the body, so dedup alone would skip it
-    forever and state sync would never see it).
-    """
-    item = gql(
-        """mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}""",
-        p=PROJECT_ID,
-        c=node_id,
-    )["addProjectV2ItemById"]["item"]["id"]
-    cur = gql(
-        """query($i:ID!){ node(id:$i){ ... on ProjectV2Item {
-             stage: fieldValueByName(name:"Stage"){
-               ... on ProjectV2ItemFieldSingleSelectValue{name}}
-             up: fieldValueByName(name:"Upstream PR"){
-               ... on ProjectV2ItemFieldTextValue{text}} }}}""",
-        i=item,
-    )["node"]
-    healed = False
-    if not ((cur.get("up") or {}).get("text") or "").strip():
-        set_text(item, UPSTREAM_PR_FIELD, url)
-        healed = True
-    if not (cur.get("stage") or {}).get("name"):
-        set_stage(item, "Review", None)
-        healed = True
-    return healed
-
-
-def candidate_prs():
-    seen, out = set(), []
-    for q in (f"review-requested:{REVIEWER}", f"assignee:{REVIEWER}"):
-        res = gh_json(
-            "api",
-            f"search/issues?q=repo:{UPSTREAM}+type:pr+state:open+{q}&per_page=100",
-        )
-        for item in res.get("items", []):
-            if item["number"] in seen:
-                continue
-            seen.add(item["number"])
-            out.append(item)
-    return out
-
-
-def discover() -> None:
-    tracked = tracked_proxies()
-    for pr in candidate_prs():
-        num, title = pr["number"], pr["title"]
-        url = f"https://github.com/{UPSTREAM}/pull/{num}"
-        author = pr["user"]["login"]
-        try:
-            if url in tracked:
-                # Heal a partially-seeded OPEN proxy (issue exists, board
-                # writes failed); closed proxies stay untouched.
-                if tracked[url]["open"] and ensure_on_board(
-                    tracked[url]["node_id"], url
-                ):
-                    actions.append(
-                        f"healed proxy #{tracked[url]['number']} for upstream #{num}"
-                    )
-                continue
-            if author.endswith("[bot]") or author == REVIEWER or is_org_member(author):
-                continue
-            body = (
-                f"Tracking review of external contributor PR by {author} in upstream inspect_ai.\n\n"
-                f"Upstream PR: {url}\n\n"
-                "Labeled `External`; created by the hourly Atlas sync, which also "
-                "requests an automated external review below — its findings land on "
-                "this issue. Stage starts at **Review**; move it to **Contributor** "
-                "after relaying feedback."
-            )
-            issue = gh_json(
-                "api",
-                f"repos/{FORK}/issues",
-                "-f",
-                f"title=Review upstream #{num}: {title}",
-                "-f",
-                f"body={body}",
-                "-f",
-                "labels[]=External",
-                "-f",
-                f"assignees[]={REVIEWER}",
-            )
-            ensure_on_board(issue["node_id"], url)
-            # Kick off the automated external review immediately: marvin's
-            # @review comment fires the reviewer's external mode (word-boundary
-            # trigger; External label + upstream URL already in the body), so
-            # findings are waiting on the proxy by the time a human looks.
-            # Isolated try: this is the one write the heal path cannot recover
-            # (dedup skips fully-boarded proxies), and a transient failure here
-            # must not mislabel the successful creation as a failed item.
-            try:
-                comment(issue["number"], "@review")
-                review_note = "review requested"
-            except Exception as e:  # noqa: BLE001
-                review_note = "review request FAILED — trigger @review manually"
-                print(
-                    f"::warning::auto-@review failed on proxy #{issue['number']}: {e}"
-                )
-            actions.append(
-                f"created proxy #{issue['number']} for upstream #{num} ({author}); {review_note}"
-            )
-            pending_chips.append(f"#{issue['number']} -> {url}")
-        except Exception as e:  # noqa: BLE001 — per-item isolation
-            print(f"::warning::discovery failed for upstream #{num}: {e}")
 
 
 # --------------------------------------------------------------- state sync
@@ -749,8 +584,8 @@ def retire_stale_field(issue: int, item, url: str, stage, external: bool) -> Non
     reflect_companion_loops' Agent/Review domain, where the new
     generation's loop state can move it. External proxies reset to Review
     instead: Agent isn't in their Review/Contributor/Merge lifecycle, and
-    Review is where discovery seeds them — the human who reopened the
-    proxy is driving from there.
+    Review is where a proxy's lifecycle starts — the human who reopened
+    the proxy is driving from there.
     """
     refresh = (
         "set it to the successor upstream PR by hand to resume tracking"
@@ -976,32 +811,12 @@ def sync_item(row) -> None:
                 and pr["_req_ts"] > reviewer_ts
             )
             if (author_ts and author_ts > reviewer_ts) or rerequested_to_me:
+                # Stage flip only. This transition used to post @review so
+                # each contributor round got an automated re-review (added
+                # after #360, 2026-08-31); retired 2026-09-11 with discovery —
+                # automated external reviews run locally through Orca now.
                 if set_stage(item, "Review", stage):
                     actions.append(f"#{issue}: contributor responded -> Review")
-                    # The stage move alone leaves the reviewer ignorant: the
-                    # creation-path @review is at-most-once, so without this
-                    # the new contributor round never gets an automated
-                    # review (observed: #360, 2026-08-31). Posting inside the
-                    # set_stage(...) success branch keeps the same
-                    # once-per-state-change property — the transition fires
-                    # once per contributor round, not hourly. Best-effort,
-                    # like the creation path: a failure is surfaced, and the
-                    # manual fallback is commenting the trigger by hand.
-                    try:
-                        comment(
-                            issue,
-                            "@review — the contributor has responded on the "
-                            "upstream PR since the last review; re-review "
-                            "the current head. (Atlas sync)",
-                        )
-                        actions.append(f"#{issue}: re-review requested")
-                    except Exception as e:  # noqa: BLE001
-                        print(
-                            f"::warning::re-review request failed on proxy #{issue}: {e}"
-                        )
-                        actions.append(
-                            f"#{issue}: re-review request FAILED — trigger @review manually"
-                        )
         return
 
     # The one transition allowed OUT of Review: the driver re-requested
@@ -1312,7 +1127,6 @@ def retrigger_stale_handbacks() -> None:
 
 
 def main() -> int:
-    discover()
     for row in board_items():
         try:
             sync_item(row)
@@ -1330,20 +1144,12 @@ def main() -> int:
     print("\n=== Atlas sync summary ===")
     for a in actions or ["no changes"]:
         print(f"- {a}")
-    if pending_chips:
-        print("\nProxies pending a clickable chip (run link-upstream-chips locally):")
-        for p in pending_chips:
-            print(f"- {p}")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write("### Atlas sync\n")
             for a in actions or ["no changes"]:
                 f.write(f"- {a}\n")
-            if pending_chips:
-                f.write("\n**Pending chips** (run `link-upstream-chips` locally):\n")
-                for p in pending_chips:
-                    f.write(f"- {p}\n")
     return 0
 
 

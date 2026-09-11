@@ -1,6 +1,6 @@
 ---
 name: resolve-board
-description: Bring the Atlas board current in one shot — dispatch the hourly Atlas sync workflow (hosted in this agents repo) now (external-PR discovery + upstream state sync) and run the local link-upstream-chips sweep (clickable issue↔PR chips). Use when the board looks stale or after a batch of agent/upstream activity.
+description: Bring the Atlas board current in one shot — dispatch the hourly Atlas sync workflow (hosted in this agents repo) now (upstream state sync) and run the local link-upstream-chips sweep (clickable issue↔PR chips). Use when the board looks stale or after a batch of agent/upstream activity.
 ---
 
 # Resolve the Atlas board
@@ -29,7 +29,7 @@ RID=$(gh run list --repo meridianlabs-ai/agents --workflow atlas-sync.yml \
 gh run watch "$RID" --repo meridianlabs-ai/agents --exit-status || true
 ```
 
-Pull its summary — the actions it took (stage moves, proxies created/healed,
+Pull its summary — the actions it took (stage moves, closes/reopens,
 skips) live in the run output:
 
 ```sh

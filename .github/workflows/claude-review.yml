@@ -279,8 +279,9 @@ jobs:
       # authors only — covers claude[bot]'s loop-posted @review on agent
       # branches) or a commenter WITH WRITE ACCESS (the explicit fork-PR
       # escape hatch the stub documents). External mode always requires the
-      # trusted commenter — its checkout is an untrusted upstream head
-      # (discovery's auto-@review posts as marvin, which has write). `ack`
+      # trusted commenter — its checkout is an untrusted upstream head, and
+      # the trigger is a write-access human's (or marvin's) manual @review
+      # on the proxy. `ack`
       # additionally requires that trusted non-bot commenter before the
       # marvin-authenticated 👀 / stage steps run — a drive-by @review must
       # not move the board or spend reactions. Marvin has write, so
