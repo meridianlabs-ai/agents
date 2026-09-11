@@ -246,6 +246,22 @@ concept — we don't control upstream's merge timing.
 
 ## External review tracking
 
+> **Retired 2026-09-11 (decision: Ransom): discovery and auto-`@review`.**
+> The hourly sync no longer seeds proxy issues for external contributors'
+> upstream PRs, and no longer posts `@review` — neither on a new proxy nor
+> on the Contributor → Review flip. Automated external reviews moved to a
+> local Orca workflow: `orca-pr-sync` mirrors every PR Ransom authors, is
+> assigned, or reviews into an Orca workspace with a board column derived
+> from PR facts, and a local review skill runs the review there (designs:
+> demerzel `context/orca-pr-sync-design.md`, `context/review-pr-design.md`).
+> **Existing proxies are still synced**: anything with an `Upstream PR`
+> field keeps the lifecycle below (Contributor → Review on contributor
+> activity, Merge on approval, close on upstream merge/close). A new proxy,
+> when one is wanted, is seeded by hand (issue + `External` label + board
+> item + `Upstream PR` field), and a manual `@review` on a proxy still runs
+> the CI reviewer's external mode. The rest of this section describes the
+> proxy model as it still applies, with the retired pieces marked.
+
 Separate from the issue pipeline: **upstream PRs you review** (as an
 `inspect_ai` maintainer) should show up as in-progress work too. These live in
 `UKGovernmentBEIS/inspect_ai`, which can't be a board item directly, so each is
@@ -265,22 +281,19 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   decides what to relay) and never the `claude-review-summary` marker (it's
   for the human, not the `@auto` loop). Eyes ack + `Agent` while
   running; back to `Review` when the findings post.
-- **New proxies auto-request their review**: discovery posts `@review` on each
-  proxy it creates (marvin's comment fires external mode), so the automated
-  findings are already on the proxy when the maintainer first looks.
-  The Contributor → Review transition posts a fresh `@review` too — once per
-  contributor round, inside the stage move's success branch, so a new round
-  gets an automated re-review without any hourly re-posting (added after
-  #360's contributor update went back to Review unreviewed, 2026-08-31). A
-  manual `@review` remains the anytime re-run path.
+- **Auto-requested reviews — retired 2026-09-11.** Discovery used to post
+  `@review` on each proxy it created, and the Contributor → Review
+  transition posted a fresh `@review` once per contributor round (added
+  after #360's contributor update went back to Review unreviewed,
+  2026-08-31). Both are gone with discovery; the Orca local workflow owns
+  automated external reviews. A manual `@review` remains the re-run path.
 - **Stage lifecycle** (decided when the hourly sync was specced): a new proxy
   starts in **Review** — a review request means the ball is with *you*.
   After you review, *you* move it to **Contributor** (waiting on them
   to address feedback). The sync flips it back to **Review** when the
   contributor responds — deterministically approximated as *any contributor
   activity (comment or re-review request) newer than your last activity on the
-  PR* (no intent-parsing of comment text) — and requests the automated
-  re-review in the same breath (above). Merged/closed upstream → proxy
+  PR* (no intent-parsing of comment text). Merged/closed upstream → proxy
   closes → **Done**.
 - **Approval queues at Merge**: upstream `reviewDecision == APPROVED` moves
   the proxy to **Merge**, the same queue the merge-approved-prs skill drains
@@ -328,10 +341,12 @@ Development-panel link on external ones). The two mechanisms are complementary,
 not redundant: field = machine-readable everywhere; native link = clickable
 where it exists.
 
-**Scope:** open upstream PRs where you're a requested reviewer or assignee,
-authored by **external community contributors** — *not* teammates' upstream PRs
-(determined by org membership, not a hardcoded name list), and *not* our own
-promotions (those are already tracked via their fork issue).
+**Scope (of the retired discovery):** open upstream PRs where you're a
+requested reviewer or assignee, authored by **external community
+contributors** — *not* teammates' upstream PRs (determined by org membership,
+not a hardcoded name list), and *not* our own promotions (those are already
+tracked via their fork issue). The same population is what `orca-pr-sync`
+now mirrors into Orca's `review-external` column.
 
 ## The hourly Atlas sync
 
@@ -366,16 +381,19 @@ A single scheduled workflow hosted in the agents repo (migrated from the
 fork's `meridian` branch 2026-08-26 — org-wide board infrastructure;
 hosting only provides cron + script + secret visibility), hourly cron +
 `workflow_dispatch`, running as the machine account. Fully deterministic
-(`gh` + a script) — no agent invocation. Two tasks per run:
+(`gh` + a script) — no agent invocation. One task per run (two until
+2026-09-11):
 
-**1. Discovery** — find open upstream PRs review-requested-to / assigned-to the
-reviewer, exclude org members' PRs and our own, dedup against already-tracked
-upstream URLs (open *and closed* proxies, so a Done proxy is never recreated),
-and seed each new one: proxy issue (template body with the upstream URL),
-`External` label, assignee, Atlas item, `Stage = Review`,
-`Status = In progress`, `Upstream PR` field. The chip stays a local
-`link-upstream-chips` run (no API); the job summary lists proxies pending a
-chip.
+**1. Discovery — retired 2026-09-11 (decision: Ransom).** It found open
+upstream PRs review-requested-to / assigned-to the reviewer, excluded org
+members' PRs and our own, deduped against already-tracked upstream URLs (open
+*and closed* proxies, so a Done proxy was never recreated), and seeded each
+new one: proxy issue (template body with the upstream URL), `External` label,
+assignee, Atlas item, `Stage = Review`, `Status = In progress`, `Upstream PR`
+field, plus an `@review` comment. Replaced by the Orca local workflow — see
+[External review tracking](#external-review-tracking). Removed from the
+script rather than switched off; `git log` on `atlas_sync.py` has the code
+if it is ever wanted back.
 
 **2. State sync** — enumerate open issues on Atlas with a non-empty
 `Upstream PR` field (this is the field's core job), read each upstream PR, and
@@ -677,7 +695,7 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
   cards are additionally invisible to the sync's board query, which
   reads Issue content only.) The
   sync assumes fork-anchored work: `FORK` is
-  hardcoded as the anchor repo (discovery seeds proxies there,
+  hardcoded as the anchor repo (proxies live there,
   `lifecycle_item()` resolves issue numbers against it, pilot scoping
   checks fork assignees). A ts-mono issue on the Atlas board gets
   event-time staging (the agent workflows are installed there) and

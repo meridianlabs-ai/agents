@@ -4,14 +4,17 @@
 # repos/{owner}/{repo} API call under MARVIN_TOKEN, so the hosting repo is
 # just the cron + script + secret surface.
 #
-# Task 1: discover open upstream PRs review-requested-to / assigned-to the
-# reviewer from external contributors and seed proxy issues (External label,
-# Stage=Review, Upstream PR field), auto-posting @review on each new proxy so
-# the external review is running before a human opens it.
-# Task 2: sync every open fork issue on Atlas that has an Upstream PR field —
+# Syncs every open fork issue on Atlas that has an Upstream PR field —
 # promotions follow the upstream reviewDecision tail; External proxies close
 # on upstream merge/close, queue at Merge on maintainer approval, and return
 # to Review on contributor response.
+#
+# Retired 2026-09-11 (decision: Ransom): the discovery task that seeded a
+# proxy issue for each external contributor's upstream PR review-requested-to
+# / assigned-to the reviewer, and the auto-@review it posted on new proxies
+# and on Contributor -> Review flips. Automated external reviews run locally
+# through Orca now (orca-pr-sync + a local review skill). Existing proxies
+# keep their Upstream PR field and are still synced here.
 #
 # Runs as the machine account: MARVIN_TOKEN needs the `project` scope to write
 # the org board (preflight enforces this). Deterministic — no agent invocation.
