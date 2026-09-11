@@ -47,6 +47,7 @@ def test_defang_breaks_triggers_and_markers_case_insensitively(tmp_path):
         "Please @review this and @Claude too; @AUTO.\n"
         "<!-- claude-review-verdict --> <!-- Claude-Review-Summary --> claude-review-comment claude-review-nudge\n"
         "<!-- AUTO-HANDOFF --> auto-converged auto-review-rounds auto-review-head auto-fix-attempts\n"
+        "🤖 engine: codex · Engine: Codex\n"
     )
     dst = tmp_path / "out.md"
     r = bash_lib(f"defang '{src}' '{dst}'")
@@ -58,6 +59,10 @@ def test_defang_breaks_triggers_and_markers_case_insensitively(tmp_path):
     assert "`review`" in out and "`Claude`" in out and "`AUTO`" in out
     # The replacement text is literal (lowercase); the captured suffix keeps its case.
     assert "claude-review verdict" in out and "auto HANDOFF" in out
+    # The codex reviewer's footer SURVIVES: claude-review.yml lands the codex review
+    # through this composite, and the footer is pr-feedback-context's anchor for the
+    # next codex fix round. Callers that must not pose as a review sed it themselves.
+    assert "🤖 engine: codex · Engine: Codex" in out
 
 
 def test_defang_caps_oversized_bodies(tmp_path):

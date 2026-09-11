@@ -2,9 +2,10 @@ name: Claude Auto (reusable)
 
 # @auto Phase 1: the CI-failure -> fix loop. A caller stub triggers this on
 # `workflow_run` (completed) of the repo's CI workflow(s). When CI fails on a PR
-# that carries the `auto` label, this wakes the dev agent (as the machine
-# account) with the failing run to push a fix; marvin's push re-runs CI, closing
-# the loop. Bounded by fix_attempt_cap: at the cap it drops the `auto` label
+# that carries the `auto` label, this wakes the dev agent with the failing run
+# to commit a fix; a trusted landing job then pushes that commit as the machine
+# account (marvin's push re-runs CI, closing the loop) and posts the re-review
+# request. Bounded by fix_attempt_cap: at the cap it drops the `auto` label
 # (the kill-switch) and pings a human. See design/auto-agent.md.
 #
 # Why workflow_run, not check_suite: check_suite/check_run events are NOT
@@ -19,6 +20,22 @@ name: Claude Auto (reusable)
 # must be the machine account or an account with write access, else the label
 # is removed and no round runs. The machine-account login otherwise only
 # matters for attribution in later phases.
+#
+# Three jobs (design/architecture.md → Landing job; issue #82, the first loop
+# conversion after the reviewer's in #81): `gate` resolves the PR, enforces
+# the label gate and the attempt cap, and does the pre-agent marvin writes
+# (stage → Agent, the attempt counter, or the escalation hand-off) — no
+# checkout; `fix` checks out the PR branch and runs the agent with the JOB
+# TOKEN ONLY, commits locally, never pushes or posts, and ends by packaging
+# its commits and everything the land job should post into the landing
+# manifest (emit-landing); `land` — a fresh runner, no checkout — pushes the
+# commits as marvin (which re-runs CI), posts the codex summary / the
+# provenance note / the error report, posts exactly `@review` when a commit
+# landed, moves the stage, and refunds the attempt when the agent never ran.
+# MARVIN_TOKEN is named in `gate` and `land` and nowhere else: a process the
+# agent left running, or a PATH/ENV edit it made through $GITHUB_PATH /
+# $GITHUB_ENV, can observe later steps of its own job but not another job
+# (Claude Security finding 4122321).
 
 on:
   workflow_call:
@@ -112,7 +129,14 @@ on:
       settings:
         description: >-
           Claude Code settings JSON. Keep in sync with claude.yml's default —
-          the fix agent needs the same edit + verify-loop + git/gh allow-list.
+          the fix agent needs the same edit + verify-loop + git/gh allow-list,
+          MINUS `Bash(git push:*)`: the fix agent commits locally and the land
+          job pushes (issue #82). The "Compose fix settings" step strips that
+          rule from whatever a caller passes here (a JSON object, or the
+          action's other documented form, a path to a settings file) and
+          adds it (plus the gh comment/review/create verbs) to a `deny` list,
+          so a caller's settings cannot re-enable the direct push and posting
+          commands.
         required: false
         type: string
         default: >-
@@ -121,7 +145,7 @@ on:
           "Bash(pip3:*)","Bash(uv:*)","Bash(python:*)","Bash(python3:*)",
           "Bash(gh:*)",
           "Bash(git fetch:*)","Bash(git merge:*)","Bash(git rebase:*)",
-          "Bash(git push:*)","Bash(git checkout:*)","Bash(git switch:*)",
+          "Bash(git checkout:*)","Bash(git switch:*)",
           "Bash(git branch:*)","Bash(git status:*)","Bash(git log:*)",
           "Bash(git diff:*)","Bash(git show:*)","Bash(git rev-parse:*)",
           "Bash(git remote:*)",
@@ -129,10 +153,14 @@ on:
     secrets:
       MARVIN_TOKEN:
         description: >-
-          Machine-account PAT. Required for this loop: the fix push must come
-          from a real identity so the re-run of CI actually fires (a
-          GITHUB_TOKEN push wouldn't — recursion guard), and the same identity
-          drove the PR. Without it the loop can't function, so the job no-ops.
+          Machine-account PAT, consumed ONLY by the `gate` job (the PR lookup,
+          the attempt counter, stage → Agent, the escalation hand-off) and the
+          `land` job (the push of the agent's commits — it must come from a
+          real identity so the re-run of CI actually fires; a GITHUB_TOKEN
+          push wouldn't — recursion guard — plus the `@review` hand-back, the
+          codex summary, the stage move and the attempt refund). It is NEVER
+          present in the `fix` job, where the PR's code runs. Without it the
+          loop can't function, so the gate no-ops.
         required: false
       OPENAI_API_KEY:
         description: >-
@@ -141,48 +169,52 @@ on:
         required: false
 
 jobs:
-  auto-ci-fix:
+  # TRUSTED, first: the PR lookup, the `auto`-label gate, the attempt cap and
+  # every marvin write that must happen BEFORE the agent runs — stage → Agent,
+  # the attempt counter, or the escalation (disarm, reset, hand-off). Checks
+  # out nothing: every value it emits is computed from the API before any PR
+  # code ran, which is what makes its outputs the trusted context the other
+  # two jobs run on (`pr` pins the landing manifest to this PR).
+  gate:
     runs-on: ubuntu-latest
     # Serialize per PR branch so the attempt counter's read-modify-write can't
     # race: overlapping runs (a human push mid-fix, multiple named CI workflows,
     # a re-run) would otherwise both read the same count and slip past the cap,
-    # defeating the kill-switch. cancel-in-progress: false lets an in-flight fix
-    # finish (cancelling mid-push would corrupt the branch) and queues the next.
+    # defeating the kill-switch. The same group is on the `fix` job (so two
+    # agents never work the same branch at once) and on claude-auto-review.yml
+    # (so the CI-fixer and the review-fixer never overlap). cancel-in-progress:
+    # false lets an in-flight fix finish and queues the next. The `land` job
+    # is deliberately NOT in the group: ordering inside a group is arbitrary
+    # and at most one job pends, so a landing that had to wait behind the
+    # next run's gate could be cancelled as the older pending job and the
+    # agent's commits lost with it. The land composite's own non-fast-forward
+    # guard covers the residual overlap (a landing pushing while the next
+    # run's agent already checked out): the later push is refused loudly and
+    # reported, never forced. The same arbitrary ordering has a second,
+    # accepted consequence (review round 7): when gate N finishes while gate
+    # N+1 already pends, fix N joins the group and one of the two pending
+    # jobs is cancelled — if it is gate N+1, that run vanishes silently
+    # (`Surface gate failure` keys on failure, not cancelled, and its land
+    # job is skipped by the gate-success gate). Callers with several named
+    # CI workflows hit this when two workflow_run completions for one PR
+    # land close together; it only costs a round when fix N lands NOTHING
+    # (no push, so no CI re-run re-fires the loop) — a landed fix re-runs
+    # CI on the new tip and the loop resumes, and a human push resumes it
+    # otherwise.
     concurrency:
       group: claude-auto-${{ github.repository }}-pr-${{ inputs.pr_number }}
       cancel-in-progress: false
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: write    # job-token fallbacks of the counter/hand-off posts
       issues: write
-      id-token: write
-      actions: read # read the failed CI run's logs
+    outputs:
+      act: ${{ steps.gate.outputs.act }}
+      pr: ${{ steps.gate.outputs.pr }}
+      engine: ${{ steps.gate.outputs.engine }}
+      attempt: ${{ steps.gate.outputs.attempt }}
+      mention: ${{ steps.who.outputs.mention }}
     steps:
-      # Check out the PR branch so the agent fixes in place and pushes back to
-      # it. persist-credentials:false (issue #61): checkout otherwise writes
-      # its token into .git/config for the rest of the job — and this job's
-      # codex path group-grants the whole workspace to the codex user, which
-      # could then read the machine account's PAT off disk. Nothing is
-      # persisted now; every later git network call authenticates itself
-      # (design/architecture.md → "No persisted git credentials"): the
-      # runner-side steps through a step-scoped credential helper, the agent
-      # through claude-code-action's own origin-URL credential (its
-      # github_token, MARVIN_TOKEN — the push re-triggers CI as before; a
-      # GITHUB_TOKEN push would be dropped by the recursion guard). The fetch
-      # itself is a read, so the job token is enough for it.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ inputs.head_branch }}
-          token: ${{ github.token }}
-          persist-credentials: false
-
-      # Regression guard for the invariant above (shared composite — one copy
-      # for all three workflows): asks git, which follows includes, for the
-      # header checkout would have persisted, keyed on the server URL.
-      - name: Assert no credential persisted in the workspace
-        uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
-
       # The gate is three steps (deterministic, in shell — it decides whether
       # the agent runs): resolve the PR and enforce the `auto`-label check;
       # verify who applied the label (shared composite); then compute the
@@ -339,6 +371,8 @@ jobs:
       # Atlas tracking (design/atlas-tracking.md): a CI-fix round is the agent
       # working the PR's issue; an escalation hands it to a human. The PR
       # branch resolves to its issue via claude/issue-N-* (then a Fixes ref).
+      # The move back to Review after a landed fix is the land job's (the
+      # manifest's `stage`).
       - name: Stage - Agent
         if: steps.gate.outputs.act == 'fix'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
@@ -451,121 +485,14 @@ jobs:
             and reset (ok=${{ steps.reset.outputs.ok || 'skipped' }}) above have
             already run, so nobody was told.
 
-      # Capture the branch tip and a timestamp before the agent runs so later
-      # steps can tell whether the agent's fix landed and what it posted.
-      - name: Record base SHA
-        if: steps.gate.outputs.act == 'fix'
-        id: base
-        run: |
-          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
-          echo "ts=$(date -u +%FT%TZ)" >>"$GITHUB_OUTPUT"
-
-      # ---- Deterministic base-branch sync (design/architecture.md) ---------
-      # The base merge happens HERE, on the runner, for BOTH engines — not in a
-      # prompt. The codex sandbox holds no credentials and is told not to fetch,
-      # so it cannot be asked to merge (instruction, not structure, since its
-      # sandbox gained network on 2026-09-09; the in-progress hand-off means it
-      # never needs to), and a prompted merge is advisory, so branches drifted
-      # anyway: inspect_ai#392 sat 11 commits behind main across 20 commits,
-      # and because GitHub cannot compute a merge ref for a conflicted PR, CI
-      # never ran and every fix round was written against stale code.
-      #
-      # A CONFLICTED merge is handed on differently per engine: the Claude path
-      # gets a CLEAN index and re-merges inside the agent (it has network and
-      # the git allow-list); codex gets the merge still IN PROGRESS and resolves
-      # the markers in the tree, and its landing step refuses to push while any
-      # survive. In claude.yml the split is forced — tag mode's setupBranch runs
-      # `git checkout <branch> --`, which aborts on an unmerged index. This
-      # workflow runs the action in agent mode (bare `prompt:`, no
-      # track_progress), which does NOT run setupBranch, so the action would
-      # tolerate an in-progress merge here. The split is mirrored anyway: one
-      # mental model and one merge instruction across all three workflows (here
-      # the inline merge_note in "Compose fix prompt"; claude.yml's is its
-      # branch_sync_prompt input).
-      #
-      # The step body is the shared sync-branch composite (one copy for all
-      # three workflows). checkout stays false: this job's actions/checkout
-      # already put the PR head branch in the workspace (the gate handled
-      # closed and fork PRs), and "Record base SHA" above stamped its
-      # PRE-merge tip — which is what makes a round whose only product is the
-      # base merge still count as landable work and push. The job token: the
-      # composite only reads (a PR lookup and fetches), and it is what its
-      # step-scoped git credential is built from.
-      - name: Sync branch with base
-        id: sync
-        if: steps.gate.outputs.act == 'fix'
-        uses: meridianlabs-ai/agents/.github/actions/sync-branch@main
-        with:
-          pr: ${{ steps.gate.outputs.pr }}
-          engine: ${{ steps.gate.outputs.engine }}
-          token: ${{ github.token }}
-
-      # Provision the project environment BEFORE the fix agent starts, so its
-      # pytest/ruff/pyright actually run — the same two steps the reviewer
-      # has (claude-review.yml; rationale there and in design/architecture.md
-      # → "Provisioning the environment for the verify loop"). Until
-      # 2026-09-09 the loops had neither, and the
-      # gap was invisible on the Claude engine, which installs what it needs
-      # from inside the agent, but total on codex, whose sandbox had NO
-      # network until 2026-09-09: every codex fix round ran in a bare
-      # checkout — "No module named inspect_ai / pytest / ruff / pyright" —
-      # pushed changes verified only by whatever tests import nothing, and
-      # finally declined to fix at all (inspect_flow#824, 2026-09-09). Placed
-      # after the base sync (so a dependency file the merge touched is what
-      # gets installed) and BEFORE the Record attempt step, mirroring the sync's
-      # own ordering: a provisioning failure then SKIPS the agent and the
-      # attempt is never recorded, so nothing needs refunding — the Surface
-      # step reports it. Fatal on failure, like the reviewer's: a broken
-      # setup must be loud, not a silent static-only fix round.
-      #
-      # ONE exception: the codex conflict path. sync-branch hands codex the
-      # base merge still IN PROGRESS, with conflict markers in the tree, and
-      # provisioning runs over that tree — so when pyproject.toml or the
-      # lockfile is among the conflicted files the install fails
-      # DETERMINISTICALLY, and a fatal failure here would skip the very round
-      # that exists to resolve the markers (every re-trigger failing the
-      # same way). So when the sync left conflicts (non-empty only on the
-      # codex path — the Claude path aborts its conflicted merge), a
-      # provisioning failure is tolerated: the round runs static-only, as
-      # every codex round did before 2026-09-09, codex is told in its prompt
-      # that provisioning failed, and the next round — on the resolved
-      # branch — provisions normally. `outcome` still reads `failure` on the
-      # tolerated path (only `conclusion` is neutralized), which is what the
-      # prompt composer and the Surface step key on.
-      - name: Provision project environment
-        id: setup
-        if: >-
-          steps.gate.outputs.act == 'fix' &&
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
-        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
-        uses: ./.github/actions/claude-setup
-
-      # Fallback where claude-setup is absent (PR heads on the inspect_ai
-      # fork, whose branches are cut from pristine main; Python caller repos
-      # that never added the action — NOT cross-repository fork heads, which
-      # never reach this step: the CI-fix stub filters on
-      # `head_repository.full_name == github.repository`): the same
-      # provision-fallback composite the reviewer runs (uv version, retry,
-      # extras/`--group dev`, PATH and `.venv/`-exclude reasoning in its
-      # description) — the exclude matters here because, unlike the
-      # reviewer, the Claude-engine agent commits and pushes from this tree.
-      # Same conflicted-round tolerance as above.
-      - name: Provision project environment (fallback)
-        id: setupfb
-        timeout-minutes: 10
-        if: >-
-          steps.gate.outputs.act == 'fix' &&
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
-          hashFiles('pyproject.toml') != ''
-        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
-        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
-
       # Record the attempt (idempotent sticky comment) before invoking the
-      # agent — but AFTER the sync and provisioning steps, matching the review
-      # loop's ordering: a sync or provisioning failure (transient gh/fetch or
-      # download error) skips the agent steps rather than failing them, so the
-      # refund step would never fire, and an attempt recorded up front would
-      # stay burned with no fix ever tried.
+      # agent. Until the job split this ran AFTER the fix job's sync and
+      # provisioning steps, so a sync or provisioning failure — which skips
+      # the agent — never burned an attempt; it cannot follow them any more
+      # (they run in the untrusted job, and this is a marvin write), so the
+      # land job's refund step now covers that case too: an attempt whose
+      # agent never launched and whose landing pushed nothing is refunded,
+      # whatever skipped it.
       - name: Record attempt
         if: steps.gate.outputs.act == 'fix'
         env:
@@ -586,14 +513,257 @@ jobs:
             gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
           fi
 
-      - name: Compose fix prompt
+      # @-mention target for the error report the land job may post: without
+      # one, error reports on agent/marvin-authored PRs generate no email for
+      # anyone. Closing ref → claude/issue-N-* branch → the issue's first
+      # assignee (bots and the machine account skipped), else its non-bot
+      # author — the same derivation as the other three workflows. Here in
+      # the gate job, not the fix job, for two reasons: the companion-repo
+      # branch check reads the ANCHOR repo, which the fix job's job token
+      # cannot see when that repo is private (it would fall back to resolving
+      # the number against this repo and cc the wrong person), and a value
+      # computed before any PR code ran needs no shape check before it
+      # reaches a marvin-posted body. Best-effort: exits 0 with an empty
+      # mention on any lookup failure.
+      - name: Derive responsible human for error cc
+        id: who
         if: steps.gate.outputs.act == 'fix'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ steps.gate.outputs.pr }}
+          HEAD_BRANCH: ${{ inputs.head_branch }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
+        run: |
+          set -uo pipefail
+          mention=""
+          ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
+                  | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
+                  | head -1 || true)
+          inum=""
+          issue_repo="$REPO"
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          if [ -n "$ref" ]; then
+            refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
+            if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
+              inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+            elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
+              inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              issue_repo="$ANCHOR_REPO"
+            fi
+          fi
+          # Mention-only fallback: non-closing refs (deliberate "Refs ...#N")
+          # or no ref — derive from the claude/issue-N-* branch convention.
+          # On a companion repo the number references the anchor repo's
+          # tracker, but only when the twin branch exists there.
+          if [ -z "$inum" ]; then
+            inum=$(printf '%s' "$HEAD_BRANCH" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+            if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
+               gh api "repos/$ANCHOR_REPO/branches/$HEAD_BRANCH" --silent >/dev/null 2>&1; then
+              issue_repo="$ANCHOR_REPO"
+            fi
+          fi
+          # First assignee that is neither a Bot nor the machine account,
+          # else the author unless bot or machine account (marvin is a User,
+          # not a Bot — triage issues are marvin-authored). Assignee first since
+          # 2026-09-10: the assignee is the repo's "responsible human"
+          # (Atlas views filter on assignee), and the reporter may be a
+          # different person — inspect_ai#473's handoff pinged the issue's
+          # author while the assignee had kicked off the run.
+          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
+            --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+          echo "mention=$mention" >>"$GITHUB_OUTPUT"
+          echo "cc target: ${mention:-none}"
+
+  # UNTRUSTED: checks out the PR head, provisions, runs the agent. Names NO
+  # GitHub-write secret — MARVIN_TOKEN is absent (the invariant at the top of
+  # this file); the codex engine's OPENAI_API_KEY is named at its Run step
+  # because codex must hold its own key, and the WIF inputs on the action
+  # step are identifiers, not secrets (AGENTS.md). The agent commits locally
+  # and never pushes or posts: the job token is read-only (permissions below),
+  # the settings deny `git push` and the gh posting verbs, and everything
+  # that must be pushed, posted or moved afterwards goes into the landing
+  # manifest the last step uploads, for the `land` job to act on.
+  fix:
+    needs: gate
+    if: needs.gate.outputs.act == 'fix'
+    runs-on: ubuntu-latest
+    # Same group as the gate (rationale there): one agent per PR branch at a
+    # time, and never alongside a review-fix round.
+    concurrency:
+      group: claude-auto-${{ github.repository }}-pr-${{ inputs.pr_number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read          # checkout, sync fetches; cannot push
+      pull-requests: read     # the PR lookups; cannot comment
+      issues: read
+      id-token: write         # WIF auth (and the action's own App token)
+      actions: read           # the failed CI run's logs
+    outputs:
+      # What the land job's refund step needs from this job: whether the
+      # agent step ran to a result, and whether it launched at all (the
+      # execution file exists only on this runner). `agent_outcome` is
+      # `failure` when any codex step that precedes or is the codex run
+      # failed, `success` when the codex run succeeded, and the Claude step's
+      # outcome otherwise (`skipped` on a run whose sync or provisioning
+      # failed before either engine started).
+      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || (steps.codexfix.outcome == 'success' && 'success') || steps.claude.outcome }}
+      agent_started: ${{ steps.launched.outputs.value }}
+    steps:
+      # Check out the PR branch so the agent fixes in place; the land job
+      # pushes the result. persist-credentials:false (issue #61): checkout
+      # otherwise writes its token into .git/config for the rest of the job —
+      # and this job's codex path group-grants the whole workspace to the
+      # codex user. Nothing is persisted; every later git network call
+      # authenticates itself (design/architecture.md → "No persisted git
+      # credentials"): the runner-side steps through a step-scoped credential
+      # helper on the job token, the agent through claude-code-action's own
+      # origin-URL credential (its App token — the agent never pushes, so
+      # the identity behind it no longer matters here). The fetch itself is a
+      # read, so the job token is enough for it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.head_branch }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      # Regression guard for the invariant above (shared composite — one copy
+      # for all three workflows): asks git, which follows includes, for the
+      # header checkout would have persisted, keyed on the server URL.
+      - name: Assert no credential persisted in the workspace
+        uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
+
+      # Capture the branch tip before the agent runs: emit-landing's start-sha
+      # (commits above it are the run's landable work), and what "Compose
+      # landing manifest" compares HEAD against to decide whether a hand-back
+      # is owed. Stamped BEFORE the base sync below, so a round whose only
+      # product is the runner's base merge still counts as landable work.
+      # rev-parse on its own line under -e, so a failure is this step's (not
+      # echo's success with an empty sha); Surface agent errors reads the
+      # outcome, and the emit step falls back to github.sha so the manifest
+      # carrying that error still validates.
+      - name: Record base SHA
+        id: base
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+
+      # ---- Deterministic base-branch sync (design/architecture.md) ---------
+      # The base merge happens HERE, on the runner, for BOTH engines — not in a
+      # prompt. The codex sandbox holds no credentials and is told not to fetch,
+      # so it cannot be asked to merge (instruction, not structure, since its
+      # sandbox gained network on 2026-09-09; the in-progress hand-off means it
+      # never needs to), and a prompted merge is advisory, so branches drifted
+      # anyway: inspect_ai#392 sat 11 commits behind main across 20 commits,
+      # and because GitHub cannot compute a merge ref for a conflicted PR, CI
+      # never ran and every fix round was written against stale code.
+      #
+      # A CONFLICTED merge is handed on differently per engine: the Claude path
+      # gets a CLEAN index and re-merges inside the agent (it has network and
+      # the git allow-list); codex gets the merge still IN PROGRESS and resolves
+      # the markers in the tree, and its commit step refuses to proceed while
+      # any survive. In claude.yml the split is forced — tag mode's setupBranch
+      # runs `git checkout <branch> --`, which aborts on an unmerged index.
+      # This workflow runs the action in agent mode (bare `prompt:`, no
+      # track_progress), which does NOT run setupBranch, so the action would
+      # tolerate an in-progress merge here. The split is mirrored anyway: one
+      # mental model and one merge instruction across all three workflows (here
+      # the inline merge_note in "Compose fix prompt"; claude.yml's is its
+      # branch_sync_prompt input).
+      #
+      # The step body is the shared sync-branch composite (one copy for all
+      # three workflows). checkout stays false: this job's actions/checkout
+      # already put the PR head branch in the workspace (the gate handled
+      # closed and fork PRs), and "Record base SHA" above stamped its
+      # PRE-merge tip — which is what makes a merge-only round land (the
+      # merge commit is above the start SHA, so the land job pushes it and
+      # posts the re-review request; there is no separate backstop any more).
+      # The job token: the composite only reads (a PR lookup and fetches),
+      # and it is what its step-scoped git credential is built from.
+      - name: Sync branch with base
+        id: sync
+        uses: meridianlabs-ai/agents/.github/actions/sync-branch@main
+        with:
+          pr: ${{ needs.gate.outputs.pr }}
+          engine: ${{ needs.gate.outputs.engine }}
+          token: ${{ github.token }}
+
+      # Provision the project environment BEFORE the fix agent starts, so its
+      # pytest/ruff/pyright actually run — the same two steps the reviewer
+      # has (claude-review.yml; rationale there and in design/architecture.md
+      # → "Provisioning the environment for the verify loop"). Until
+      # 2026-09-09 the loops had neither, and the
+      # gap was invisible on the Claude engine, which installs what it needs
+      # from inside the agent, but total on codex, whose sandbox had NO
+      # network until 2026-09-09: every codex fix round ran in a bare
+      # checkout — "No module named inspect_ai / pytest / ruff / pyright" —
+      # pushed changes verified only by whatever tests import nothing, and
+      # finally declined to fix at all (inspect_flow#824, 2026-09-09). Placed
+      # after the base sync (so a dependency file the merge touched is what
+      # gets installed). A provisioning failure SKIPS the agent; the attempt
+      # the gate already recorded is refunded by the land job (the agent
+      # never launched and nothing lands), and the Surface step reports it.
+      # Fatal on failure, like the reviewer's: a broken setup must be loud,
+      # not a silent static-only fix round.
+      #
+      # ONE exception: the codex conflict path. sync-branch hands codex the
+      # base merge still IN PROGRESS, with conflict markers in the tree, and
+      # provisioning runs over that tree — so when pyproject.toml or the
+      # lockfile is among the conflicted files the install fails
+      # DETERMINISTICALLY, and a fatal failure here would skip the very round
+      # that exists to resolve the markers (every re-trigger failing the
+      # same way). So when the sync left conflicts (non-empty only on the
+      # codex path — the Claude path aborts its conflicted merge), a
+      # provisioning failure is tolerated: the round runs static-only, as
+      # every codex round did before 2026-09-09, codex is told in its prompt
+      # that provisioning failed, and the next round — on the resolved
+      # branch — provisions normally. `outcome` still reads `failure` on the
+      # tolerated path (only `conclusion` is neutralized), which is what the
+      # prompt composer and the Surface step key on.
+      - name: Provision project environment
+        id: setup
+        if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
+        uses: ./.github/actions/claude-setup
+
+      # Fallback where claude-setup is absent (PR heads on the inspect_ai
+      # fork, whose branches are cut from pristine main; Python caller repos
+      # that never added the action — NOT cross-repository fork heads, which
+      # never reach this step: the CI-fix stub filters on
+      # `head_repository.full_name == github.repository`): the same
+      # provision-fallback composite the reviewer runs (uv version, retry,
+      # extras/`--group dev`, PATH and `.venv/`-exclude reasoning in its
+      # description) — the exclude matters here because, unlike the
+      # reviewer, the Claude-engine agent commits from this tree. Same
+      # conflicted-round tolerance as above.
+      - name: Provision project environment (fallback)
+        id: setupfb
+        timeout-minutes: 10
+        if: >-
+          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
+          hashFiles('pyproject.toml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
+        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+
+      # The agent commits and stops: it holds no credential that may push or
+      # post as the loop's identity, so the prompt says so plainly and hands
+      # the landing (push as marvin, the `@review` hand-back) to the workflow.
+      # The ENVIRONMENT and ENDING CONTRACT paragraphs stay — restated for a
+      # run that ends with commits on the branch and nothing more. The
+      # backtick discipline for trigger tokens and loop markers stays too,
+      # aimed at commit messages and the final message now: the commit list
+      # renders on the PR, and the final message of a no-change round is
+      # relayed to the PR by the land job (de-fanged there as well — two
+      # layers, so neither can drift to zero).
+      - name: Compose fix prompt
         id: prompt
         env:
-          PR: ${{ steps.gate.outputs.pr }}
+          PR: ${{ needs.gate.outputs.pr }}
           HEAD: ${{ inputs.head_branch }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          ATTEMPT: ${{ needs.gate.outputs.attempt }}
           CAP: ${{ inputs.fix_attempt_cap }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}
           AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
@@ -611,32 +781,87 @@ jobs:
           # mis-merge, so a clean runner merge is exactly when it applies.
           merge_note=""
           if [ "${AGENT_MERGE:-}" = "1" ]; then
-            merge_note=" FIRST TASK, before any of the above: this branch conflicts with its base branch $SYNC_BASE, and a workflow step could not merge it for you. Merge origin/$SYNC_BASE into this branch and resolve every conflict, preserving both sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale — then include that merge when you push. Until that lands GitHub cannot compute a merge ref for this PR, so CI does not run and the failing job you are asked to fix cannot even be re-evaluated."
+            merge_note=" FIRST TASK, before any of the above: this branch conflicts with its base branch $SYNC_BASE, and a workflow step could not merge it for you. Merge origin/$SYNC_BASE into this branch and resolve every conflict, preserving both sides' intent — the base side is other people's merged work, so never resolve by discarding it wholesale — and leave that merge committed on the branch; the workflow lands it with your other commits. Until that lands GitHub cannot compute a merge ref for this PR, so CI does not run and the failing job you are asked to fix cannot even be re-evaluated."
             # Flattened: a newline would corrupt the value= output line below.
             [ -n "${SYNC_APPEND:-}" ] && merge_note="$merge_note $(tr '\n' ' ' <<<"$SYNC_APPEND")"
           elif [ -n "${MERGE_SHA:-}" ] && [ -n "${SYNC_APPEND:-}" ]; then
             merge_note=" NOTE: a workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before your other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
           fi
-          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then commit and push to the current branch with git (you are pushing as the machine account, which re-runs CI) — do NOT open a new PR. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until committed and pushed, and a run can NEVER resume after your final turn — background tasks do not re-invoke you and their completion notifications never arrive, so never end your turn waiting on anything (subagents, background commands, test suites): collect results in the foreground, and if a final validation is long-running, commit and push FIRST and let the PR's own CI be the gate (observed loss: a fix round ended with tests 'running in the background' and everything evaporated with the runner). ENDING CONTRACT (mandatory): if ANY commit reached the branch during this run — a test fix, a merge of main, a doc-only change, anything — your FINAL action is a top-level PR comment of exactly @review. This is not conditional on whether you consider the push a 'fix': any push invalidates the standing review verdict, the reviewer does not run on push, and skipping the comment strands the board at Agent with no hand-back. The ONLY case where you skip @review is when you pushed nothing at all. If after investigating you cannot fix it, post a PR comment explaining what's blocking and stop. In any comment you post, refer to this automation as \`auto\` without an @ prefix; a literal @auto would re-trigger the loop. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in any comment — they are matched by plain substring, so quoting one (e.g. when citing a reviewer comment) would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary').${merge_note}" >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then COMMIT to the current branch with git and stop. Do NOT push, do NOT open a PR, and do NOT post any comment, review or reaction: you hold no credential that may push or post as the loop's identity, and the workflow lands your work after your run ends — it pushes the branch's new commits as the machine account (which re-runs CI) and posts the re-review request itself. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn: background tasks do not re-invoke you and their completion notifications never arrive, so never end your turn waiting on anything (subagents, background commands, test suites): collect results in the foreground, and if a final validation is long-running, commit FIRST and let the PR's own CI be the gate (observed loss: a fix round ended with tests 'running in the background' and everything evaporated with the runner). ENDING CONTRACT (mandatory): a run that changed anything ends with those changes COMMITTED on the current branch — nothing more, nothing less. Uncommitted edits to tracked files are lost with the runner and are reported to the PR as a failed round, so commit everything you mean to keep, and revert scratch edits to tracked files you do not. If after investigating you cannot fix it, leave the tree unchanged and make your final message a plain explanation of what is blocking — the workflow relays it to the PR. In commit messages and in that final message, refer to this automation as \`auto\` without an @ prefix, and never write the review or dev-agent trigger tokens bare (backtick them): the commit list and the relayed text render on the PR, where a bare trigger token would start a workflow. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim — they are matched by plain substring, so quoting one would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary').${merge_note}" >>"$GITHUB_OUTPUT"
 
-      # The agent's own pushes authenticate through the action: its prepare
-      # step (agent mode too — configureGitAuth in src/modes/agent/index.ts)
-      # rewrites the origin URL to carry github_token, so `git push origin`
-      # inside the agent runs as the machine account with nothing persisted
-      # by checkout. The GIT_CONFIG_* env is belt and braces for that
-      # (issue #61 asked for it as the fallback): a credential helper that
-      # answers a 401 from the same token, for any git call that does not go
-      # through the rewritten origin URL. URL credentials take precedence
-      # over helpers, so it never changes the push identity — and it adds
-      # nothing to the agent's reach: the same token is already in its
-      # environment as GITHUB_TOKEN (that is what its `gh` calls use). The
+      # The agent's push and posting channels are closed in settings, not only
+      # in the prompt: `Bash(git push:*)` is stripped from the caller's allow
+      # list and put on a `deny` list together with the gh verbs that post or
+      # open things (deny beats allow in Claude Code, so this holds against a
+      # caller's `settings` and any claude_args override). Guard rails, not
+      # a security boundary: `Bash(gh:*)` stays allowed because the log and
+      # PR reads the fix needs go through it, so `gh api -X POST/PATCH`,
+      # `gh pr edit|close|ready` or a `git -C . push` pass the listed
+      # prefixes while the action's own App token — NOT scoped to this
+      # job's read-only permissions; it carries the App's contents/PR/issues
+      # write — is in reach. What holds structurally is the invariant at the
+      # top of this file: nothing the agent can reach is marvin's identity,
+      # so a write that slipped past the deny list and the prompt would be
+      # claude[bot]'s — attributable, and the same identity the dev agent
+      # already writes under on a marvin-less claude.yml caller — never the
+      # loop's. No MCP server is installed in agent mode without explicit
+      # tool grants (none are given), so there is no API-side commit or
+      # comment tool to deny. Claude path only: codex composes its own
+      # prompt and holds no settings, so a failure here must not skip it.
+      - name: Compose fix settings (deny pushes and posts)
+        id: fixsettings
+        if: needs.gate.outputs.engine != 'codex'
+        env:
+          SETTINGS: ${{ inputs.settings }}
+        run: |
+          set -euo pipefail
+          # The action documents `settings` as a JSON string OR a path to a
+          # settings file (its setupClaudeCodeSettings tries JSON.parse
+          # first, then reads the path relative to the workspace — i.e. a
+          # file from this PR checkout, which the deny overlay below then
+          # covers like any other). Mirror that, since the value is
+          # transformed here before the action sees it; anything else fails
+          # loudly and the Surface step reports it (FIXSETTINGS_OUTCOME) —
+          # the action step is skipped, not failed, so nothing else would.
+          [ -n "$SETTINGS" ] || SETTINGS='{}'
+          is_object() { printf '%s' "$1" | jq -e 'type == "object"' >/dev/null 2>&1; }
+          if ! is_object "$SETTINGS" && [ -f "$SETTINGS" ]; then
+            echo "settings input is a path; reading $SETTINGS"
+            SETTINGS=$(cat "$SETTINGS")
+          fi
+          is_object "$SETTINGS" || { echo "::error::the settings input is neither a JSON object nor a path to a file holding one"; exit 1; }
+          deny='["Bash(git push:*)","Bash(gh pr comment:*)","Bash(gh issue comment:*)","Bash(gh pr review:*)","Bash(gh pr create:*)","Bash(gh pr merge:*)","Bash(gh issue create:*)"]'
+          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson d "$deny" '
+            .permissions.allow = ((.permissions.allow // []) - $d)
+            | .permissions.deny = (((.permissions.deny // []) + $d) | unique)')
+          {
+            echo "value<<SETTINGS_EOF"
+            printf '%s\n' "$merged"
+            echo "SETTINGS_EOF"
+          } >>"$GITHUB_OUTPUT"
+
+      # No github_token: the action mints its own App token through the OIDC
+      # exchange (as claude-review.yml's does), so the machine-account PAT is
+      # nowhere in this job. additional_permissions asks that token for
+      # actions: read — the exchange grants contents/PR/issues by default,
+      # and `gh run view --log-failed` on the failed CI run is the first
+      # thing the fix does (the job's own actions: read covers the job token,
+      # not the App token). First use of additional_permissions in this repo:
+      # if the exchange or a caller's App installation does not grant
+      # `actions`, this step fails before Claude starts on EVERY Claude-engine
+      # round — loud (the Surface step reports "failed before producing a
+      # result" and the attempt is refunded), but confirm on the first caller
+      # round after merge; the PAT used to cover the log read. The
+      # GIT_CONFIG_* env is the step-scoped fallback credential (issue #61)
+      # for any git call that does not go through the action's rewritten
+      # origin URL — the JOB token now: the agent never pushes, and the
       # helper is scoped to this server's URL, so a `git fetch` the agent
       # aims at any other host gets no credential.
       - uses: anthropics/claude-code-action@v1
-        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
+        if: needs.gate.outputs.engine != 'codex'
         id: claude
         env:
-          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          GIT_TOKEN: ${{ github.token }}
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
           GIT_CONFIG_VALUE_0: ""
@@ -647,66 +872,39 @@ jobs:
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
-          github_token: ${{ secrets.MARVIN_TOKEN }}
+          additional_permissions: "actions: read"
           prompt: ${{ steps.prompt.outputs.value }}
-          settings: ${{ inputs.settings }}
+          settings: ${{ steps.fixsettings.outputs.value }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
 
-      # The action leaves MARVIN_TOKEN in remote.origin.url; reset the URL so
-      # the later runner-side fetches (backstop, hand-back, Surface) reach
-      # their own step-scoped helpers — git never consults a helper when the
-      # URL carries a credential — and so the PAT does not sit in .git/config
-      # for the rest of the job. Same identity either way here (this loop
-      # always has MARVIN_TOKEN); hygiene, and one mechanism across the three
-      # workflows. always(): a failed agent leaves the URL rewritten too.
+      # The action leaves its App token in remote.origin.url; reset the URL so
+      # the token does not sit in .git/config for the rest of the job and so
+      # any later runner-side fetch reaches its own step-scoped helper — git
+      # never consults a helper when the URL carries a credential. One
+      # mechanism across the three workflows. always(): a failed agent leaves
+      # the URL rewritten too.
       - name: Reset origin URL after the agent
         if: always() && steps.claude.outcome != 'skipped'
         uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
 
-      # If the runner's base merge is STILL the branch tip, the agent finished
-      # without committing anything of its own and nothing else will push it.
-      # Land it anyway: restoring the PR to mergeable is what lets GitHub
-      # compute a merge ref again, which is what lets CI run at all. Gated on
-      # HEAD being EXACTLY that merge commit, so an agent that committed on top
-      # — pushed, or deliberately not — is never second-guessed. always(), so a
-      # failed or cancelled agent still leaves the branch current.
-      # Shared push-base-merge composite (exact-SHA gate, non-fast-forward
-      # guard, push). push-token is the machine account: nothing is persisted
-      # by this job's checkout, so the composite authenticates its own push
-      # (step-scoped), and it must run as marvin to re-trigger CI. The gate
-      # already guaranteed the secret is set on this path.
-      # The id is for "Surface agent errors": without it a failed push here is
-      # misdiagnosed — the runner's merge sits in rev-list BASE_SHA..HEAD while
-      # origin still equals BASE_SHA, so the unlanded-work check would blame
-      # the agent for edits it never made.
-      - name: Push base merge if unpushed
-        id: backstop
-        if: >-
-          always() && steps.gate.outputs.act == 'fix' &&
-          steps.gate.outputs.engine != 'codex' && steps.sync.outputs.merge_sha != ''
-        uses: meridianlabs-ai/agents/.github/actions/push-base-merge@main
-        with:
-          branch: ${{ inputs.head_branch }}
-          merge_sha: ${{ steps.sync.outputs.merge_sha }}
-          push-token: ${{ secrets.MARVIN_TOKEN }}
-
       # ---- Codex engine CI-fix round (design/codex-engine.md) ----------------
       # The codex sandbox has no GitHub credentials, so the failing CI logs are
-      # pre-fetched into the prompt file; commit/push/post are deterministic.
-      # A push then owes the @review hand-back, which the backstop below posts.
+      # pre-fetched into the prompt file (job token: reads only); the commit
+      # is deterministic (below), and the push and the summary comment are
+      # the land job's, through the manifest.
       - name: Prepare codex CI-fix context
         id: codexprep
-        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        if: needs.gate.outputs.engine == 'codex'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.gate.outputs.pr }}
+          PR: ${{ needs.gate.outputs.pr }}
           HEAD: ${{ inputs.head_branch }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          ATTEMPT: ${{ needs.gate.outputs.attempt }}
           CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SYNC_BASE: ${{ steps.sync.outputs.base }}
@@ -714,6 +912,7 @@ jobs:
           CAP: ${{ inputs.fix_attempt_cap }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
+          LANDING_DIR: ${{ runner.temp }}/landing
         run: |
           set -euo pipefail
           # Retry-then-fail on context fetches — never swallow: the embedded
@@ -741,6 +940,11 @@ jobs:
           }
           git config user.name "i-am-marvin"
           git config user.email "i-am-marvin@users.noreply.github.com"
+          # The landing directory is created runner-owned BEFORE codex gets its
+          # workspace grants, so the codex user (a member of the runner group
+          # under the create-codex-user recipe) cannot pre-create it or plant
+          # a file the later commit and compose steps write next to.
+          mkdir -p "$LANDING_DIR"
           # What the sandbox actually has depends on what the provisioning
           # steps did: both are conditional (no claude-setup and no
           # pyproject.toml means neither ran), and on a conflicted round a
@@ -768,7 +972,7 @@ jobs:
           fi
           {
             echo "You are auto, fixing failing CI on PR #$PR in $REPO (branch $HEAD, fix attempt $ATTEMPT of $CAP), running on the Codex engine in a local checkout of the branch."
-            echo "CONSTRAINTS: you have NO GitHub credentials — nothing you run can push or post, and you must NOT run gh, git fetch or git push at all (an anonymous fetch might succeed on a public repo; do not try it — the checked-out tree is the one to work on). Network access IS available inside your sandbox for package downloads and test fixtures (install into the project venv if a tool is missing; keep installs minimal, never install from a git+ URL — an editable VCS install clones a repo into the venv, and a nested checkout fails the run — and do not edit dependency files the task does not call for), but nothing you do can push to or post on GitHub. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (the landing step lands local commits too); a deterministic workflow step commits leftover edits, pushes (which re-runs CI), and posts for you. $verify"
+            echo "CONSTRAINTS: you have NO GitHub credentials — nothing you run can push or post, and you must NOT run gh, git fetch or git push at all (an anonymous fetch might succeed on a public repo; do not try it — the checked-out tree is the one to work on). Network access IS available inside your sandbox for package downloads and test fixtures (install into the project venv if a tool is missing; keep installs minimal, never install from a git+ URL — an editable VCS install clones a repo into the venv, and a nested checkout fails the run — and do not edit dependency files the task does not call for), but nothing you do can push to or post on GitHub. Fix in the working tree on the checked-out branch only — do NOT create or switch branches or check out other commits. Committing locally is unnecessary but harmless (local commits land too); a deterministic workflow step commits leftover edits, and the workflow's landing job then pushes the branch (which re-runs CI) and posts your final message for you. $verify"
             if [ -n "${CONFLICTS:-}" ]; then
               echo "MERGE CONFLICT RESOLUTION — do this FIRST, before the task below. A merge of origin/$SYNC_BASE into this branch is already IN PROGRESS in your working tree and conflicts in these files:"
               sed 's/^/  /' <<<"$CONFLICTS"
@@ -786,7 +990,7 @@ jobs:
             fetch "$RUNNER_TEMP/codex-ci-log.txt" run view "$CI_RUN_ID" --repo "$REPO" --log-failed
             tail -c 100000 "$RUNNER_TEMP/codex-ci-log.txt"
           } >.codex-prompt.md
-          # The landing step stages with a blanket `git add -A`, so exclude
+          # The commit step stages with a blanket `git add -A`, so exclude
           # the prompt file and the scratch codex's verification runs leave
           # behind on repos whose .gitignore doesn't cover it (caches, venvs,
           # the egg-info a setuptools editable install — claude-setup's or
@@ -813,12 +1017,12 @@ jobs:
       # on `steps.codexuser.outcome`.
       - name: Create codex user
         id: codexuser
-        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        if: needs.gate.outputs.engine == 'codex'
         uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
 
       - name: Run Codex CI fix
         id: codexfix
-        if: steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        if: needs.gate.outputs.engine == 'codex'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -841,12 +1045,11 @@ jobs:
       # codex user, refuse a redirected git dir (.git/commondir, symlinked
       # .git), and restore the pre-codex .git/config that `Create codex user`
       # snapshotted (design/codex-engine.md → Hook-safe landing). Runs BEFORE
-      # the guard and the landing so that every later step — guard, landing,
-      # the hand-back fetch, Surface — reads a clean config regardless of how
-      # codex, the guard or the landing ended; when this lived inside the
-      # landing step, a failed guard or a landing refusal left the hand-back
-      # step's `git fetch` running through codex's config (remote URL,
-      # core.sshCommand) with MARVIN_TOKEN in its env. Runs no git itself.
+      # the guard, the commit step, the manifest composer and emit-landing so
+      # that every later git-running step reads a clean config regardless of
+      # how codex ended; each of them is gated on this step having SUCCEEDED
+      # (`== 'success'`, never `!= 'failure'`: a reclaim cancelled mid-run
+      # must skip every later git call). Runs no git itself.
       - name: Reclaim workspace from codex
         id: codexreclaim
         if: always() && steps.codexuser.outcome == 'success'
@@ -857,25 +1060,30 @@ jobs:
       # rollout codex wrote under its CODEX_HOME and puts input / cached /
       # output / reasoning counts and the model that served in the job
       # summary — the codex counterpart of Model provenance below. Runs right
-      # after codex, before landing, so a landing failure can't hide the
-      # spend. Best-effort: the script exits 0 on every path, and
+      # after codex, before the commit step, so a commit failure can't hide
+      # the spend. Best-effort: the script exits 0 on every path, and
       # continue-on-error makes that structural — a failure here must never
-      # trip the landing step's implicit success() gate and strand the work.
+      # trip the commit step's implicit success() gate and strand the work.
       - name: Codex usage
-        if: always() && steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine == 'codex'
+        if: always() && needs.gate.outputs.engine == 'codex'
         continue-on-error: true
         uses: meridianlabs-ai/agents/.github/actions/codex-usage@main
         with:
           requested-model: ${{ inputs.codex_model }}
           requested-effort: ${{ inputs.codex_effort }}
 
-      # Unresolved-merge guard (shared composite): the landing step's `git add
+      # Unresolved-merge guard (shared composite): the commit step's `git add
       # -A` would happily stage conflict markers and `git commit` would then
       # produce a valid merge commit containing them, so this check is the
       # only thing between a half-resolved merge and the PR branch. A separate
-      # step so the landing step below is skipped, not entered, on failure;
-      # the Surface step reads this step's outcome. Also gated on the reclaim:
-      # a refused (redirected) git dir must not be read at all.
+      # step so the commit step below is skipped, not entered, on failure;
+      # the Surface step reads this step's outcome, and so do the manifest
+      # composer and emit-landing (read-only unless this step SUCCEEDED):
+      # codex may commit locally, and a commit over staged-but-still-marked
+      # paths completes the merge and moves HEAD past the start SHA, so the
+      # push must key on this step, not on ancestry alone — as the old Land
+      # codex fix step did. Also gated on the reclaim: a refused (redirected)
+      # git dir must not be read at all.
       - name: Guard against an unresolved merge (codex)
         id: codexguard
         if: steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'
@@ -883,62 +1091,57 @@ jobs:
         with:
           conflicts: ${{ steps.sync.outputs.conflicts }}
 
-      # First credentialed step after codex had write access to the
-      # workspace. The reclaim step above already took .git back and restored
-      # the pre-codex .git/config (remote URLs, credential/http keys, filter
-      # drivers, fsmonitor, hooksPath — anything codex wrote there is gone),
-      # and this step trusts nothing else under .git (design/codex-engine.md
-      # → hook-safe landing): the git dir is pinned by env
-      # (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a .git/commondir file
-      # could not redirect git to a config codex owns even if the reclaim's
-      # refusal had missed it (gitrepository-layout(5): that file sets
-      # GIT_COMMON_DIR unless the env already does), and the GIT_CONFIG_* env
-      # below re-pins the two things a config restore cannot: hooks live as
-      # FILES in .git/hooks, so hooksPath points at an empty, runner-only
-      # path; and the index may carry the fsmonitor extension, so fsmonitor
-      # is off. The reclaim already moved .git/hooks aside and appended the
-      # same two keys to the restored config for every later step; the env
-      # pin here is belt and braces on the step that pushes. GIT_CONFIG_GLOBAL
-      # skips the runner's ~/.gitconfig as well: codex is in the runner
-      # group, and a group-writable home file would sit outside the restore
-      # (the hosted image ships it runner-only; this makes that structural —
-      # identity for the commit is in the repo config the reclaim restored).
-      # The credential helper is the machine account — the push must
-      # re-trigger CI, and the gate above already exited on a missing
-      # MARVIN_TOKEN, so there is no job-token fallback here — it is scoped
-      # to this server's URL, and it lives only in this step's environment.
-      - name: Land codex fix
-        id: codexland
+      # The commit half of what used to be "Land codex fix": commit whatever
+      # codex left in the tree, then write the de-fanged summary comment into
+      # the landing directory for the land job to post. No push and no
+      # credential here — the push is the land job's, from the bundle
+      # emit-landing writes at the end of this job. First git-running step
+      # after codex had write access to the workspace: the reclaim step above
+      # already took .git back and restored the pre-codex .git/config (remote
+      # URLs, credential/http keys, filter drivers, fsmonitor, hooksPath —
+      # anything codex wrote there is gone), and this step trusts nothing
+      # else under .git (design/codex-engine.md → hook-safe landing): the git
+      # dir is pinned by env (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a
+      # .git/commondir file could not redirect git to a config codex owns
+      # even if the reclaim's refusal had missed it (gitrepository-layout(5):
+      # that file sets GIT_COMMON_DIR unless the env already does), and the
+      # GIT_CONFIG_* env below re-pins the two things a config restore cannot:
+      # hooks live as FILES in .git/hooks, so hooksPath points at an empty,
+      # runner-only path; and the index may carry the fsmonitor extension, so
+      # fsmonitor is off. The reclaim already moved .git/hooks aside and
+      # appended the same two keys to the restored config for every later
+      # step; the env pin here is belt and braces on the step that commits.
+      # GIT_CONFIG_GLOBAL skips the runner's ~/.gitconfig as well: codex is
+      # in the runner group, and a group-writable home file would sit outside
+      # the restore (the hosted image ships it runner-only; this makes that
+      # structural — identity for the commit is in the repo config the
+      # reclaim restored).
+      - name: Commit codex fix
+        id: codexcommit
         if: steps.codexguard.outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ steps.gate.outputs.pr }}
-          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          PR: ${{ needs.gate.outputs.pr }}
+          ATTEMPT: ${{ needs.gate.outputs.attempt }}
           OUT: ${{ runner.temp }}/codex/codex-final.md
+          DIR: ${{ runner.temp }}/landing
           START_SHA: ${{ steps.base.outputs.sha }}
-          HEAD_BRANCH: ${{ inputs.head_branch }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           GIT_DIR: ${{ github.workspace }}/.git
           GIT_COMMON_DIR: ${{ github.workspace }}/.git
           GIT_WORK_TREE: ${{ github.workspace }}
           GIT_CONFIG_GLOBAL: /dev/null
-          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN }}
-          GIT_CONFIG_COUNT: "4"
-          GIT_CONFIG_KEY_0: credential.helper
-          GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
-          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
-          GIT_CONFIG_KEY_2: core.hooksPath
-          GIT_CONFIG_VALUE_2: ${{ runner.temp }}/no-hooks
-          GIT_CONFIG_KEY_3: core.fsmonitor
-          GIT_CONFIG_VALUE_3: "false"
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_1: core.fsmonitor
+          GIT_CONFIG_VALUE_1: "false"
         run: |
           set -euo pipefail
+          mkdir -p "$DIR"
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge
           # is still in progress — commit anyway so the merge completes,
-          # HEAD moves past START_SHA, and the push gate lands it.
+          # HEAD moves past START_SHA, and the landing lands it.
           # --ignore-submodules=dirty: never spawn `git status` inside an
           # embedded repo (is_submodule_modified) — its nested .git/config
           # is codex-writable and outside the restore and the pins. The
@@ -959,237 +1162,227 @@ jobs:
           # Landable work = HEAD moved since the run started, not just a
           # dirty tree: the prompt calls local commits unnecessary but they
           # are possible, and a status-only check would silently discard
-          # them with the runner. Explicit refspec so the PR head branch is
-          # what gets updated even if codex left HEAD on some other local
-          # branch; a diverted HEAD that isn't genuinely new work fails the
-          # push non-fast-forward — loud, not lossy.
-          pushed=""
+          # them with the runner. emit-landing bundles START_SHA..HEAD at the
+          # end of the job and the land job pushes it to the PR head branch
+          # (refusing a HEAD that does not descend from START_SHA — loud, not
+          # lossy); here the outcome only shapes the summary's first line.
+          committed=""
           merge_only=""
           if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
-            git push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"
-            pushed=1
+            committed=1
             # HEAD still exactly the runner's clean base merge: codex changed
             # nothing (any commit above would have moved it), so say so
-            # rather than announcing "fix pushed" over a summary that says
-            # nothing needed changing. Still a push, so the backstop below
-            # owes the @review — the push is what re-runs CI (a computable
-            # merge ref again); the re-review re-reads the now-current code.
+            # rather than announcing a fix over a summary that says nothing
+            # needed changing. Still lands — the push is what re-runs CI (a
+            # computable merge ref again) — and still owes the @review the
+            # manifest carries; the re-review re-reads the now-current code.
+            # The headers say "committed", not "pushed": this step cannot
+            # know the push happened (emit-landing may still lose the bundle
+            # and drop the hand-back, and the land job posts the comments
+            # either way), so the wording claims only what is true here.
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
-            echo "pushed $(git rev-parse --short HEAD) to $HEAD_BRANCH${merge_only:+ (base merge only)}"
+            echo "committed $(git rev-parse --short HEAD) on the branch${merge_only:+ (base merge only)} — the land job pushes it"
           fi
-          # Post the summary either way (a no-change round IS the blocker
-          # comment the ending contract calls for), de-fanged: it posts from
-          # a write-access account, and the loops match their verdict/handoff
-          # markers with plain substring contains() — codex QUOTING a marker
-          # would forge a verdict or suppress an owed hand-back, so break
-          # those substrings too. The review-comment anchor marker and the
-          # codex reviewer's engine footer are in the list as well: this
-          # summary posts as marvin, a machine author the review-fix rounds'
-          # anchor selection trusts, so a CI-fix summary echoing either would
-          # be taken for the newest review by the next fix round on the same
-          # PR. On a push, the backstop below posts the owed @review.
+          # The summary goes to the PR either way (a no-change round IS the
+          # blocker comment the ending contract calls for) — posted by the
+          # land job AFTER its push succeeded (its Post step follows the
+          # push; the headers below still say "committed", not "pushed",
+          # because a lost bundle drops the push but not the comment),
+          # de-fanged: it posts from a write-access account, and the loops
+          # match their verdict/handoff markers with plain substring
+          # contains() — codex QUOTING a marker would forge a verdict or
+          # suppress an owed hand-back, so break those substrings too. The
+          # list here includes the review-comment anchor marker and the codex
+          # reviewer's engine footer: this summary posts as marvin, a machine
+          # author the review-fix rounds' anchor selection trusts, so a CI-fix
+          # summary echoing either would be taken for the newest review by
+          # the next fix round on the same PR. The land job's `defang`
+          # (land/lib.sh) repeats the trigger and marker rules (two layers,
+          # so neither can drift to zero) but deliberately NOT the footer:
+          # `land` is shared with claude-review.yml, which posts the codex
+          # reviewer's own footer through it as the anchor. So the footer sed
+          # lives only here and in the Claude-path bodies below (the relay's
+          # agent-summary.md and the Surface step's embedded summary); keep
+          # the three copies in step.
           {
             if [ -n "$merge_only" ]; then
-              printf '🤖 auto (codex, CI-fix attempt %s): base merge pushed; no fix this attempt — details below.\n\n' "$ATTEMPT"
-            elif [ -n "$pushed" ]; then
-              printf '🤖 auto (codex, CI-fix attempt %s): fix pushed — summary below.\n\n' "$ATTEMPT"
+              printf '🤖 auto (codex, CI-fix attempt %s): base merge only, no fix this attempt — details below.\n\n' "$ATTEMPT"
+            elif [ -n "$committed" ]; then
+              printf '🤖 auto (codex, CI-fix attempt %s): fix committed — summary below.\n\n' "$ATTEMPT"
             else
-              printf '🤖 auto (codex, CI-fix attempt %s): no fix pushed — details below.\n\n' "$ATTEMPT"
+              printf '🤖 auto (codex, CI-fix attempt %s): no fix this attempt — details below.\n\n' "$ATTEMPT"
             fi
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
                    -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$OUT" 2>/dev/null || echo "(codex produced no final message)"
-          } >"$RUNNER_TEMP/codex-comment.md"
+          } >"$DIR/codex-comment.md"
           # GitHub caps comment bodies at 65,536 characters and codex's final
-          # message is unbounded; here the post failing lands AFTER the push,
-          # losing the summary for work that already landed. Truncate with a
-          # note instead — cutting the de-fanged body can't resurrect a
-          # trigger or marker (the sed removed the @ / split the substrings,
-          # and truncation only drops trailing bytes).
-          if [ "$(wc -c <"$RUNNER_TEMP/codex-comment.md")" -gt 60000 ]; then
-            head -c 60000 "$RUNNER_TEMP/codex-comment.md" >"$RUNNER_TEMP/codex-comment.trunc"
-            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-comment.trunc"
-            mv "$RUNNER_TEMP/codex-comment.trunc" "$RUNNER_TEMP/codex-comment.md"
+          # message is unbounded; a post failing there would lose the summary
+          # for work that already landed. Truncate with a note instead —
+          # cutting the de-fanged body can't resurrect a trigger or marker
+          # (the sed removed the @ / split the substrings, and truncation
+          # only drops trailing bytes). 59,000, not 60,000: the land job's
+          # own de-fang re-caps at 60,000, and the note below must fit under
+          # THAT cap or the second truncation would drop it.
+          if [ "$(wc -c <"$DIR/codex-comment.md")" -gt 59000 ]; then
+            head -c 59000 "$DIR/codex-comment.md" >"$DIR/codex-comment.trunc"
+            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$DIR/codex-comment.trunc"
+            mv "$DIR/codex-comment.trunc" "$DIR/codex-comment.md"
           fi
-          gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
+          echo "codex summary: $(wc -c <"$DIR/codex-comment.md") bytes — posted by the land job."
       # ---- end Codex engine ---------------------------------------------------
 
-      # Backstop for the ending contract above: a fix round that pushed ANY
-      # commit must re-request review — the push invalidates the standing
-      # verdict, and without the @review comment (the loop's only hand-back
-      # from a CI fix) the board strands at Agent with nothing running
-      # (observed: inspect_ai#195 — a post-convergence fix pushed a main-merge
-      # + doc move and posted nothing). The remedy is mechanical, so complete
-      # the contract deterministically instead of failing red: post the
-      # re-review request as the machine account (whose comments trigger the
-      # reviewer). Exact-body comment; the reviewer's word-boundary gate and
-      # per-PR newest-wins concurrency make a duplicate harmless.
-      # Codex gate is codexfix + codexreclaim, not codexland: a landing that
-      # pushed and then died posting its comment still owes the @review —
-      # this step detects the push itself, so gating on the earlier steps
-      # closes that gap. The reclaim half is what makes the fetch below safe
-      # to run: it is the step that restored the pre-codex .git/config, and
-      # it precedes the landing, so a landing that pushed always passes it;
-      # a reclaim that refused (redirected git dir) means nothing pushed and
-      # nothing is owed, and this step must not run git through codex's
-      # config with the machine-account token in its env.
-      # Two steps: this one decides whether a hand-back is owed; the shared
-      # post-pr-comment composite posts it with retry/backoff and fails the
-      # run loudly if it never lands — this comment IS the hand-back, and a
-      # swallowed failure (observed: GitHub 503 during an outage) strands the
-      # board at Agent with green CI and nobody notified.
-      - name: Check whether a hand-back is owed
-        if: >-
-          always() && steps.gate.outputs.act == 'fix' &&
-          (steps.claude.outcome == 'success' ||
-           (steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'))
-        id: handback
+      # Whether the Claude agent launched at all, for the land job's refund
+      # step: the execution file exists only on this runner, and the action
+      # writes it only after the Claude session (or on an SDK error mid-run)
+      # — never when it dies before starting Claude. Bash builtins only (the
+      # value flows into a marvin write's condition; nothing on PATH is
+      # consulted). Codex runs never have one: their success is read from the
+      # codex step's outcome (see the job outputs).
+      - name: Record whether the agent launched
+        id: launched
+        if: always()
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ steps.gate.outputs.pr }}
-          HEAD_BRANCH: ${{ inputs.head_branch }}
-          BASE_SHA: ${{ steps.base.outputs.sha }}
-          SINCE: ${{ steps.base.outputs.ts }}
-          # Step-scoped credential for the best-effort fetch: with nothing
-          # persisted by checkout it would otherwise fail silently on a
-          # private caller and the tip would always read as unmoved.
-          GIT_TOKEN: ${{ github.token }}
-          GIT_CONFIG_COUNT: "2"
-          GIT_CONFIG_KEY_0: credential.helper
-          GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
-          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+          EXEC: ${{ steps.claude.outputs.execution_file }}
         run: |
-          set -uo pipefail
-          git fetch --quiet origin "$HEAD_BRANCH" 2>/dev/null || true
-          tip=$(git rev-parse "origin/$HEAD_BRANCH" 2>/dev/null || echo "$BASE_SHA")
-          [ "$tip" = "$BASE_SHA" ] && { echo "No push this round; no hand-back owed."; exit 0; }
-          # Hand-off marker matched as the leading line (same shape as the
-          # selfhandoff detector), not as a substring: the action's tracking
-          # comment is rewritten with the agent's summary, which may mention
-          # the marker in prose without being a hand-off.
-          posted=$(gh api "repos/$REPO/issues/$PR/comments?since=$SINCE" \
-            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
-          if [ "${posted:-0}" -gt 0 ]; then
-            echo "Hand-back already posted this round."
-          else
-            echo "Agent pushed ($BASE_SHA -> $tip) without a hand-back; posting the re-review request."
-            echo "owed=1" >>"$GITHUB_OUTPUT"
-          fi
-
-      - name: Ensure hand-back after push
-        if: always() && steps.handback.outputs.owed == '1'
-        uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
-        with:
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
-          repo: ${{ github.repository }}
-          pr: ${{ steps.gate.outputs.pr }}
-          body: "@review"
-          what: hand-back @review
+          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+          if [ -s "$file" ]; then echo "value=true"; else echo "value=false"; fi >>"$GITHUB_OUTPUT"
 
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
-      # --fallback-model fires, so this parses modelUsage and posts a note on
-      # the PR when a non-requested model served tokens or the result
-      # reads like a classifier refusal. Best-effort, always exits 0. Codex
+      # --fallback-model fires, so this parses modelUsage, writes the served-
+      # model table to THIS job's summary, and — when a non-requested model
+      # served tokens or the result reads like a classifier refusal — hands
+      # the note it would have posted back as its `note` output. No token:
+      # this job names no secret, so the note travels to the land job as the
+      # manifest's provenance_comment_file (composed below) and posts from
+      # there as the machine account. Best-effort, always exits 0. Codex
       # runs have no execution file — the Codex usage step above covers them.
       - name: Model provenance
-        if: always() && steps.gate.outputs.act == 'fix' && steps.gate.outputs.engine != 'codex'
+        id: provenance
+        if: always() && needs.gate.outputs.engine != 'codex'
         uses: meridianlabs-ai/agents/.github/actions/model-provenance@main
         with:
           exec-file: ${{ steps.claude.outputs.execution_file }}
           requested: ${{ inputs.model }}
-          token: ${{ secrets.MARVIN_TOKEN }}
-          repo: ${{ github.repository }}
-          number: ${{ steps.gate.outputs.pr }}
 
       # Surface agent errors the action swallows (model overload/529, 404, etc.),
-      # which otherwise leave the fix run green with nothing pushed. Also catches
-      # the "completed-but-blocked" case: the agent finishes with no error but
-      # left its fix unlanded (see the landed/pending check below).
+      # which otherwise leave the fix run green with nothing landed. Also
+      # catches the "completed-but-blocked" case: the agent finishes with no
+      # error but left uncommitted edits (see below). This job cannot post the
+      # ⚠️ itself any more (the comment must come from an account whose posts
+      # are read, and this job holds no such token): the message is written
+      # to a file the landing manifest carries as `error` with fail_run true,
+      # and the LAND job posts it — de-fanged, as the machine account — and
+      # fails the run AFTER everything else landed. So this step exits 0 on
+      # every path: the red X is the land job's.
       - name: Surface agent errors
-        if: always() && steps.gate.outputs.act == 'fix'
+        id: surface
+        if: always()
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
-          NUM: ${{ steps.gate.outputs.pr }}
-          HEAD_BRANCH: ${{ inputs.head_branch }}
-          ANCHOR_REPO: ${{ inputs.anchor_repo }}
+          BASE_OUTCOME: ${{ steps.base.outcome }}
           BASE_SHA: ${{ steps.base.outputs.sha }}
-          SINCE: ${{ steps.base.outputs.ts }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
-          BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
+          FIXSETTINGS_OUTCOME: ${{ steps.fixsettings.outcome }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
           CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
-          CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
-          # Step-scoped credential for the unlanded-work fetch below (nothing
-          # is persisted by checkout; see "Ensure hand-back after push").
-          GIT_TOKEN: ${{ github.token }}
+          CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
+          # The gate job's lookup (trusted: computed as marvin before any PR
+          # code ran); the land job de-fangs the body it lands in anyway.
+          MENTION: ${{ needs.gate.outputs.mention }}
+          ERROR_FILE: ${{ runner.temp }}/agent-error.md
+          # The tree check below runs git on the Claude path only (the codex
+          # path's commit step already committed the tree, and a reclaim
+          # that did not succeed sets err before any git call); pinned like
+          # the landing steps anyway (design/codex-engine.md → Hook-safe
+          # landing) so the ordering never becomes load-bearing.
+          GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_COUNT: "2"
-          GIT_CONFIG_KEY_0: credential.helper
-          GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
-          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_1: core.fsmonitor
+          GIT_CONFIG_VALUE_1: "false"
         run: |
           set -uo pipefail
+          rm -f "$ERROR_FILE"
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
+          # The checkout, the persisted-credential assertion or the SHA step
+          # failed: nothing else ran. The SHA step has no always(), so a
+          # failed checkout OR a tripped assertion (the composite exits 1)
+          # leaves it SKIPPED, not failed — test for anything but success,
+          # and name all three causes so a tripped security invariant is not
+          # read as a checkout hiccup and blindly re-triggered.
+          if [ "${BASE_OUTCOME:-}" != "success" ]; then
+            err="checking out the PR branch, verifying no credential was persisted in the workspace, or reading the branch SHA failed before the agent started — see the job logs for which; no fix was attempted. Re-trigger to retry only if it was the checkout or the SHA read; a persisted credential is a workflow bug, not a transient."
+          fi
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every
           # downstream step is SKIPPED, not failed, so no other branch below
-          # fires; the attempt was deliberately not recorded (Record attempt
-          # runs after the sync), so the refund path does not apply either —
-          # without this the failure is a silent stall with the board at Agent.
-          if [ "${SYNC_OUTCOME:-}" = "failure" ]; then
+          # fires; the attempt the gate recorded is refunded by the land job
+          # (the agent never launched, nothing lands) — without this the
+          # failure is a silent stall with the board at Agent.
+          if [ -z "$err" ] && [ "${SYNC_OUTCOME:-}" = "failure" ]; then
             err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); no fix was attempted. Re-trigger to retry."
           fi
           # Provisioning died before the agent started: same shape as the sync
-          # failure above — the agent and landing steps are SKIPPED (the
-          # attempt was not recorded, so no refund applies) and without this
-          # the job is a silent red with the board parked at Agent. Unlike the
-          # sync failure (which exits before merge_sha is written), ONE
-          # downstream step still fires here on the Claude path: `Push base
-          # merge if unpushed` is always()-gated on merge_sha alone, so the
-          # runner's clean base merge is pushed — re-running CI — even though
-          # no fix was attempted. That is the right outcome (the branch stays
-          # current, and the re-run finds nothing left to merge, so a
-          # deterministic failure repeats this comment at most once more and
-          # then stops rather than looping), but the wording below says so
-          # instead of claiming nothing moved. A DETERMINISTIC cause is named
-          # too: on this loop, red CI can be caused by the PR's own dependency
-          # change (a pyproject.toml that no longer installs), which now fails
-          # provisioning on every trigger — before 2026-09-09 the Claude engine
-          # would have attempted that class of fix; accepted, it mirrors the
-          # dev agent's and reviewer's fatal stance, but "re-trigger" is wrong
-          # advice for it, so the message says to fix it by hand. EXCEPT on the
-          # codex conflict path (SYNC_CONFLICTS non-empty): there the
-          # provisioning steps are continue-on-error, the round ran
-          # static-only with the failure spelled out in codex's prompt, and
-          # the later clauses judge what it did — so a failure there is a log
-          # warning, not an error, and "re-trigger to retry" (wrong advice for
-          # a conflicted dependency file, which fails identically every time)
-          # is never given for it.
+          # failure above — the agent steps are SKIPPED and without this the
+          # job is a silent red with the board parked at Agent. Unlike the
+          # sync failure (which exits before merge_sha is written), the
+          # runner's clean base merge, if there was one, is still above the
+          # start SHA here, so emit-landing bundles it and the land job
+          # pushes it — re-running CI — and posts the re-review request, even
+          # though no fix was attempted. That is the right outcome (the
+          # branch stays current, and the re-run finds nothing left to merge,
+          # so a deterministic failure repeats this comment at most once more
+          # and then stops rather than looping), but the wording below says
+          # so instead of claiming nothing moved. A DETERMINISTIC cause is
+          # named too: on this loop, red CI can be caused by the PR's own
+          # dependency change (a pyproject.toml that no longer installs),
+          # which now fails provisioning on every trigger — before 2026-09-09
+          # the Claude engine would have attempted that class of fix;
+          # accepted, it mirrors the dev agent's and reviewer's fatal stance,
+          # but "re-trigger" is wrong advice for it, so the message says to
+          # fix it by hand. EXCEPT on the codex conflict path (SYNC_CONFLICTS
+          # non-empty): there the provisioning steps are continue-on-error,
+          # the round ran static-only with the failure spelled out in codex's
+          # prompt, and the later clauses judge what it did — so a failure
+          # there is a log warning, not an error, and "re-trigger to retry"
+          # (wrong advice for a conflicted dependency file, which fails
+          # identically every time) is never given for it.
           if [ -n "${SYNC_CONFLICTS:-}" ]; then
             if [ "${SETUP_OUTCOME:-}" = "failure" ] || [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
               echo "::warning::environment provisioning failed on a conflicted round (conflicts in: $(tr '\n' ' ' <<<"$SYNC_CONFLICTS" | sed 's/ *$//')); the fix agent ran static-only and was told so."
             fi
           elif [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
-            err="environment provisioning (claude-setup) failed before the fix agent started — a transient dependency-download/network error, a dependency file the base merge touched, or this PR's own dependency change no longer installing (that one fails identically on every trigger: fix it by hand); no fix was attempted, though on the Claude engine the runner's clean base merge, if there was one, was still pushed to the branch. Re-trigger if it looks transient."
+            err="environment provisioning (claude-setup) failed before the fix agent started — a transient dependency-download/network error, a dependency file the base merge touched, or this PR's own dependency change no longer installing (that one fails identically on every trigger: fix it by hand); no fix was attempted, though the runner's clean base merge, if there was one, was still landed on the branch. Re-trigger if it looks transient."
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            err="fallback environment provisioning (uv dev-install) failed before the fix agent started — a transient dependency-download/network error, the project not dev-installing on a bare runner, or this PR's own dependency change no longer installing (either of those fails identically on every trigger: fix it by hand — check the job logs); no fix was attempted, though on the Claude engine the runner's clean base merge, if there was one, was still pushed to the branch. Re-trigger if it looks transient."
+            err="fallback environment provisioning (uv dev-install) failed before the fix agent started — a transient dependency-download/network error, the project not dev-installing on a bare runner, or this PR's own dependency change no longer installing (either of those fails identically on every trigger: fix it by hand — check the job logs); no fix was attempted, though the runner's clean base merge, if there was one, was still landed on the branch. Re-trigger if it looks transient."
           fi
-          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          # The settings composer failed (a caller's `settings` that is
+          # neither a JSON object nor a path to a file holding one): the
+          # action step is SKIPPED, not failed, so without this clause the
+          # round ends "No agent error detected" with a red job on every
+          # trigger and nothing on the PR. Deterministic — the caller's stub
+          # is what needs fixing, so no "re-trigger" advice.
+          if [ -z "$err" ] && [ "${FIXSETTINGS_OUTCOME:-}" = "failure" ]; then
+            err="composing the fix agent's settings failed before the agent started — the caller's \`settings\` input is neither a JSON object nor a path to a file holding one (see the job logs); no fix was attempted. This fails identically on every trigger: fix the caller stub's settings input."
+          fi
+          # The agent's own error text is free-form (and unbounded — it is
+          # the final message when is_error is set); cap it so the manifest's
+          # error.message stays well under the validator's 64 KiB limit.
+          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
           if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
             err="the codex context-preparation step failed before the agent started — no fix was attempted (see the job logs)."
           fi
@@ -1201,183 +1394,390 @@ jobs:
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
           fi
-          # A reclaim that did not succeed SKIPS the guard and the landing.
-          # Checked before the git commands below on purpose: on this path
-          # .git is still the codex-written one (a refusal, a failed restore,
-          # or a job cancel that landed mid-reclaim — outcome `cancelled`,
-          # not `failure`, with the kill/chown/restore only partly done), so
-          # this step must not run git through it — a non-empty err skips
-          # every git call below. `!= success` mirrors the guard's and the
-          # hand-back's step gates; the codexuser test keeps the Claude
-          # path's `skipped` reclaim from tripping it.
+          # A reclaim that did not succeed SKIPS the guard, the commit step
+          # and every later git call (the manifest composer skips git and
+          # emit-landing runs read-only whenever the guard did not succeed,
+          # which a skipped guard is): on this path .git is still the
+          # codex-written one (a refusal, a failed restore, or a job cancel
+          # that landed mid-reclaim — outcome `cancelled`, not `failure`, with
+          # the kill/chown/restore only partly done). `!= success` mirrors
+          # the other step gates; the codexuser test keeps the Claude path's
+          # `skipped` reclaim from tripping it.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXRECLAIM_OUTCOME:-}" != "success" ]; then
-            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was pushed. Inspect the codex run's transcript before re-triggering."
+            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed. Inspect the codex run's transcript before re-triggering."
           fi
-          # A failed guard SKIPS the landing step, so it needs its own check.
+          # A failed guard SKIPS the commit step, so it needs its own check.
+          # "nothing was landed" holds because the manifest composer and
+          # emit-landing go read-only on a guard that did not succeed: a
+          # local commit codex made over the markers is never bundled.
           if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then
-            err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was pushed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
+            err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was landed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
           fi
-          if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
-            err="codex finished but its landing step failed — the fix may not have reached the branch (see the job logs)."
+          if [ -z "$err" ] && [ "${CODEXCOMMIT_OUTCOME:-}" = "failure" ]; then
+            # The guard succeeded on this path, so codex's own local commits
+            # (if any) still land through ancestry; only the runner's commit
+            # of its leftover edits is lost — say so, rather than "nothing".
+            err="codex finished but committing its leftover edits failed — codex's own local commits, if any, still land; its uncommitted edits did not (see the job logs)."
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the CI-fix step failed before producing a result (see the job logs)."
           fi
-          # The base-merge backstop's push failed after a healthy agent run
-          # (token scope, transient network). Checked BEFORE the unlanded-work
-          # check below: the runner's merge commit is in rev-list
-          # BASE_SHA..HEAD while origin still equals BASE_SHA, so without this
-          # clause that check would report agent edits that never landed —
-          # the wrong diagnosis for a round where the agent changed nothing.
-          # "Changed nothing" means COMMITTED nothing, though: the agent can
-          # still have left uncommitted edits to tracked files (edited, then
-          # ran out of turns or hit a tool denial before committing), and
-          # this clause preempts the check that would have reported them —
-          # so say so here when the tree is dirty instead of asserting that
-          # nothing was lost.
-          if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
-            err="the agent finished, but pushing the runner's base-branch merge failed (see the job logs) — the PR branch is still behind its base."
-            if [ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)" ]; then
-              err="$err The agent also left uncommitted edits to tracked files that never reached the branch."
-            else
-              err="$err No fix was lost: the agent made no changes this attempt."
-            fi
-          fi
-          # Completed-but-blocked: the action reports success, but the agent did
-          # work that never reached the branch — uncommitted edits or local
-          # commits it couldn't push (e.g. a git command outside the allow-list).
-          # A healthy fix either lands its changes (commit+push, or a server-side
-          # API commit — both advance the remote tip) or makes none at all
-          # (posting a blocker comment instead), so unlanded local work means the
-          # fix silently stalled and never reached CI. See design/auto-agent.md.
-          if [ -z "$err" ] && [ -n "${BASE_SHA:-}" ]; then
-            git fetch origin "$HEAD_BRANCH" --quiet 2>/dev/null || true
-            remote=$(git rev-parse "origin/$HEAD_BRANCH" 2>/dev/null || echo "$BASE_SHA")
-            pending=""
-            # untracked files are normal scratch (test caches, venvs) — only
-            # tracked-file edits count as unlanded work (see claude-auto-review)
-            [ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)" ] && pending=1
-            [ -n "$(git rev-list "$BASE_SHA..HEAD" 2>/dev/null || true)" ] && pending=1
-            handed=0
-            if [ "$remote" = "$BASE_SHA" ] && [ -n "$pending" ]; then
-              # A hand-off posted this round explains unpushed local edits —
-              # the agent hit a push wall and said so (see claude-auto-review).
-              # In THIS loop that should essentially never happen: the CI-fix
-              # prompt's ending contract is @review-or-blocker, never a
-              # hand-off, and nothing here moves the board on the marker. So
-              # match strictly (machine account + marker as the leading line,
-              # per the documented hand-off contract, mirroring the review
-              # loop's selfhandoff detector) — a hit means the agent improvised
-              # a hand-off, not prose quoting the marker. The outcome gate also
-              # mirrors that detector's success-only condition: a cancelled
-              # claude step (empty err, non-success outcome) must fall through
-              # to flagging, not suppression. Accepted trade-off: unlike the
-              # review loop, suppression here has no compensating board move or
-              # taught @-mention — the improvised hand-off comment on the PR is
-              # the only human-visible trace, hence the ::warning:: below.
-              if [ -n "${NUM:-}" ] && [ "$CLAUDE_OUTCOME" = "success" ]; then
-                handed=$(gh api "repos/$REPO/issues/$NUM/comments?since=${SINCE:-}" \
-                  --jq '[.[] | select(.user.login=="i-am-marvin" and (.body|startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
-              fi
-              if [ "${handed:-0}" -gt 0 ]; then
-                echo "::warning::unpushed local edits, but a hand-off comment posted this round explains them; not flagging. (Off-contract for this loop — the CI-fix ending contract is @review-or-blocker, never a hand-off.)"
-              else
-                # Strip the @ from trigger tokens in agent-authored text — this
-                # is embedded in a marvin-authored comment (see claude-auto-review).
-                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E 's/@(review|claude|auto)/\1/g' || true)
-                err="the agent finished but left edits to tracked files (or unpushed commits) that never landed on the branch — whatever its summary reports, no code change reached CI."
+          # Completed-but-blocked (Claude path): the action reports success,
+          # but the agent left edits to tracked files uncommitted — they die
+          # with the runner, whatever its summary says. A healthy fix either
+          # commits its changes (the land job pushes them) or makes none at
+          # all (its final message explains why, relayed by the land job).
+          # Untracked files are normal scratch (test caches, venvs) — only
+          # tracked-file edits count. Flagged only when nothing of the
+          # AGENT's is landable: HEAD still at the start SHA, or exactly the
+          # runner's clean base merge (a merge-only round — the one commit
+          # above the start SHA is the runner's, and the agent's own work is
+          # the edits dying here; the merge still lands and owes its
+          # hand-back, so the wording says "no fix", not "nothing"). With an
+          # agent commit above it the fix lands and the leftovers are a
+          # warning, as before the split when a pushed round was never
+          # second-guessed.
+          if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "success" ] && [ -n "${BASE_SHA:-}" ]; then
+            dirty=$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)
+            if [ -n "$dirty" ]; then
+              head=$(git rev-parse HEAD 2>/dev/null || echo "$BASE_SHA")
+              if [ "$head" = "$BASE_SHA" ] || { [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ]; }; then
+                # Strip the @ from trigger tokens in agent-authored text and
+                # split the codex reviewer's footer — this is embedded in a
+                # marvin-authored comment, which pr-feedback-context would
+                # take for the newest review if it carried the footer (the
+                # land job de-fangs triggers and markers again, but not the
+                # footer: see the codex summary step's comment).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' -e 's/engine: codex/engine  codex/g' || true)
+                err="the agent finished but left edits to tracked files uncommitted, so no fix landed on the branch (only the runner's base merge, if there was one) — whatever its summary reports, no code change reached CI."
                 [ -n "$summary" ] && err="$err Agent summary: $summary"
+              else
+                echo "::warning::the agent committed a fix but also left uncommitted edits to tracked files behind; the commits land, the leftovers die with the runner: $(printf '%s' "$dirty" | head -5 | tr '\n' ' ')"
               fi
             fi
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
-          echo "::error::CI-fix run did not complete: $err"
-          if [ -n "${NUM:-}" ]; then
-            # @-mention the responsible human (the Fixes-ref issue's first
-            # assignee, else its author; same-repo refs only, bots and the
-            # machine account skipped): without a mention, these error
-            # reports on agent-authored PRs generate no email for anyone —
-            # non-participants never hear about the failure.
-            mention=""
-            ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
-                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
-                    | head -1 || true)
-            inum=""
-            issue_repo="$REPO"
-            lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-            if [ -n "$ref" ]; then
-              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
-                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
-                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-                issue_repo="$ANCHOR_REPO"
-              fi
-            fi
-            # Mention-only fallback: non-closing refs (deliberate "Refs ...#N")
-            # or no ref — derive from the claude/issue-N-* branch convention.
-            # On a companion repo the number references the anchor repo's
-            # tracker, but only when the twin branch exists there.
-            if [ -z "$inum" ]; then
-              inum=$(printf '%s' "$HEAD_BRANCH" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
-              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
-                 gh api "repos/$ANCHOR_REPO/branches/$HEAD_BRANCH" --silent >/dev/null 2>&1; then
-                issue_repo="$ANCHOR_REPO"
-              fi
-            fi
-            # First assignee that is neither a Bot nor the machine account,
-            # else the author unless bot or machine account (marvin is a User,
-            # not a Bot — triage issues are marvin-authored). Assignee first since
-            # 2026-09-10: the assignee is the repo's "responsible human"
-            # (Atlas views filter on assignee), and the reporter may be a
-            # different person — inspect_ai#473's handoff pinged the issue's
-            # author while the assignee had kicked off the run.
-            [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-              --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
-            cc=""
-            [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.%s' "$err" "$cc")" || true
-          fi
-          exit 1
+          echo "::error::CI-fix run did not complete: $err — the land job posts the note and fails the run."
+          cc=""
+          [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
+          printf '⚠️ The auto CI-fix run did not complete:\n\n> %s\n\nIf this looks transient (model API capacity/overload), CI will re-trigger it on the next push or you can re-run the workflow; otherwise it likely needs a human.%s\n' "$err" "$cc" >"$ERROR_FILE"
 
-      # Infra crashes must not burn fix attempts: the counter increments
-      # BEFORE the agent runs (so real crashes still consume attempts), but a
-      # step that died with NO execution output at all (bootstrap failure —
-      # observed: "socket hang up" before the agent started) attempted no fix,
-      # and two such blips nearly escalated a PR spuriously. Roll the sticky
-      # counter back one; any run that produced execution output still counts.
-      # A failed codex step is the same class — its landing step never ran,
-      # so no fix reached the branch (a persistently missing OPENAI_API_KEY
-      # must not burn attempts toward spurious escalation) — and so are a
-      # failed codex PREP or user-setup step, which die before the agent
-      # starts and skip codexfix outright; no execution file ever exists on
-      # the codex path, so the guard below refunds it.
-      # Safe from races: the job's per-PR concurrency group serializes us.
+      # Everything the land job pushes, posts or moves, as ONE JSON object for
+      # emit-landing's manifest-extra (schema: .github/actions/emit-landing/
+      # README.md). Body text goes in as files under the landing directory,
+      # referenced by name; the manifest itself is DATA the land job
+      # validates before acting. Fields:
+      #   handback  — true when HEAD moved past the start SHA (and descends
+      #               from it, the same test emit-landing applies before it
+      #               bundles — a rebased HEAD lands nothing and must owe
+      #               nothing): the loop's rule, a run that landed a commit
+      #               owes exactly one `@review`. The runner's base merge
+      #               counts (a merge-only round moves HEAD), so the
+      #               "pushed but no hand-back" failure mode the deleted
+      #               backstops covered cannot occur — the hand-back is a
+      #               field of the same manifest as the push — and the
+      #               converse holds too: emit-landing drops handback and
+      #               stage when it drops the bundle (HEAD moved, no bundle
+      #               written), so no bare `@review` posts for a round whose
+      #               work was lost. Owed on ancestry ALONE, whatever the
+      #               agent step's outcome: a Claude step that ended
+      #               `failure` after committing (max-turns, an is_error
+      #               result mid-fix) lands those commits and requests the
+      #               re-review, with the Surface step's error posted
+      #               alongside — before the split only the agent's own
+      #               push landed and a failed step landed nothing.
+      #               Deliberate: dropping committed work is worse, the push
+      #               is what re-runs CI, and the ⚠️ says the round failed.
+      #   stage     — Review, in that case (the reviewer takes over).
+      #   comments  — codex's final message (engine codex; the commit step
+      #               wrote it, de-fanged), or — the Claude path's analogue,
+      #               so a round that gave up is not silent — the agent's
+      #               final message when it committed nothing and the run
+      #               succeeded: HEAD still at the start SHA, or exactly the
+      #               runner's clean base merge (a merge-only round: the
+      #               merge lands and owes its hand-back, but the agent
+      #               committed nothing — the codex path's merge_only header
+      #               is the same rule). The blocker explanation the prompt
+      #               asks for; when the Surface step already reported the
+      #               round, its message carries the summary instead.
+      #   provenance_comment_file — the model-provenance note, if any
+      #   error     — the Surface step's message (fail_run: true)
+      # Not set -e: a manifest must come out of every path. On the codex path
+      # (the ENGINE the gate resolved — not `codexuser.outcome`, which is
+      # `skipped`/`failure` when the prep or user-setup step failed and
+      # would let those two fall through to the ancestry branch, landing
+      # the runner's base merge and keeping the attempt where the Surface
+      # strings, the refund and the docs all say nothing lands) the git
+      # reads are skipped (handback false) unless the unresolved-merge guard
+      # SUCCEEDED — the same condition emit-landing's read-only takes, so
+      # nothing above the start SHA is packaged either. The guard is itself
+      # gated on the codex step and the reclaim having succeeded, and both
+      # of those on the user setup, so "guard did not succeed" covers every
+      # codex-path failure: a failed prep or user-setup step (no codex
+      # process ran; the base merge, if any, stays unpushed and the round
+      # is refunded, as before the split), a failed codex step (its partial
+      # local commits are never pushed — as before the split, when the
+      # landing step was gated on the run step), a reclaim that did not
+      # succeed (nothing lands from a workspace codex still owns), and a
+      # guard that FAILED — codex may commit locally, and `git commit` over
+      # staged-but-still-marked paths completes the base merge, so HEAD moves
+      # past the start SHA with conflict markers in the tree; keying on
+      # ancestry alone would bundle and push that as marvin, request the
+      # re-review and only then post an error saying nothing landed. The
+      # guard is the enforcement point (design/architecture.md → The landing
+      # step is the enforcement point), so its failure withholds the push
+      # here as it withheld the old Land codex fix step. Post-codex git, so
+      # the git dir is pinned by env like the guard and the commit step
+      # (AGENTS.md; the reclaim's refusal of a redirect is the primary
+      # defence, this is belt and braces).
+      - name: Compose landing manifest
+        id: landing
+        if: always()
+        env:
+          DIR: ${{ runner.temp }}/landing
+          EXTRA: ${{ runner.temp }}/landing-extra.json
+          PR: ${{ needs.gate.outputs.pr }}
+          ATTEMPT: ${{ needs.gate.outputs.attempt }}
+          ENGINE: ${{ needs.gate.outputs.engine }}
+          START_SHA: ${{ steps.base.outputs.sha }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
+          CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
+          PROV_NOTE: ${{ steps.provenance.outputs.note }}
+          ERROR_FILE: ${{ runner.temp }}/agent-error.md
+          GIT_DIR: ${{ github.workspace }}/.git
+          GIT_COMMON_DIR: ${{ github.workspace }}/.git
+          GIT_WORK_TREE: ${{ github.workspace }}
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_1: core.fsmonitor
+          GIT_CONFIG_VALUE_1: "false"
+        run: |
+          set -uo pipefail
+          mkdir -p "$DIR"
+          extra='{}'
+          moved=false
+          head=""
+          if [ "$ENGINE" = "codex" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
+            echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed prep, user-setup, codex or reclaim step skips it); running no git — nothing lands and no hand-back is owed."
+          elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
+            if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
+              moved=true
+            fi
+          fi
+          if [ "$moved" = "true" ]; then
+            extra=$(jq -c '.handback = true | .stage = "Review"' <<<"$extra")
+          fi
+          # Merge-only: HEAD moved, but only to the runner's clean base merge
+          # — any agent commit would have moved it further — so the agent
+          # committed nothing and its final message is owed to the PR just
+          # as on a round where nothing moved at all.
+          merge_only=""
+          [ "$moved" = "true" ] && [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ] && merge_only=1
+          if [ "$ENGINE" = "codex" ]; then
+            if [ "${CODEXCOMMIT_OUTCOME:-}" = "success" ] && [ -s "$DIR/codex-comment.md" ] && [[ "$PR" =~ ^[0-9]+$ ]]; then
+              extra=$(jq -c --argjson n "$PR" '.comments = [{number: $n, body_file: "codex-comment.md"}]' <<<"$extra")
+            fi
+          elif [ "${CLAUDE_OUTCOME:-}" = "success" ] && { [ "$moved" != "true" ] || [ -n "$merge_only" ]; } && [ ! -s "$ERROR_FILE" ] && [[ "$PR" =~ ^[0-9]+$ ]]; then
+            file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+            # Same de-fang as the codex summary step: this relay posts as
+            # marvin, so a final message quoting a trigger, a loop marker or
+            # the codex reviewer's footer would fire a workflow, forge a
+            # verdict or pose as the newest review. `land` repeats the trigger
+            # and marker rules but deliberately not the footer (it posts the
+            # codex reviewer's real one), so this is the footer's only layer.
+            summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 \
+              | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                       -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                       -e 's/engine: codex/engine  codex/g' \
+                       -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' || true)
+            {
+              if [ -n "$merge_only" ]; then
+                printf '🤖 auto (CI-fix attempt %s): base merge only, no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
+              else
+                printf '🤖 auto (CI-fix attempt %s): no fix this attempt — the agent'"'"'s summary:\n\n' "$ATTEMPT"
+              fi
+              printf '%s\n' "${summary:-(the agent produced no final message)}"
+            } >"$DIR/agent-summary.md"
+            extra=$(jq -c --argjson n "$PR" '.comments = [{number: $n, body_file: "agent-summary.md"}]' <<<"$extra")
+          fi
+          if [ -n "${PROV_NOTE:-}" ]; then
+            printf '%s\n' "$PROV_NOTE" >"$DIR/prov.md"
+            extra=$(jq -c '.provenance_comment_file = "prov.md"' <<<"$extra")
+          fi
+          if [ -s "$ERROR_FILE" ]; then
+            extra=$(jq -c --rawfile msg "$ERROR_FILE" '.error = {message: $msg, fail_run: true}' <<<"$extra")
+          fi
+          printf '%s\n' "$extra" >"$EXTRA"
+          echo "landing: moved=$moved $(jq -c 'if .error then .error.message = "<\(.error.message | length) chars>" else . end' <<<"$extra")"
+
+      # Last, always: package the commits above the start SHA and the
+      # manifest for the land job. The PR number is the gate job's trusted
+      # lookup, the SAME value the land job gets (README → Using the pair):
+      # the validator pins the manifest's pr_number to it and its branch to
+      # that PR's live head ref. read-only on the codex path (the gate's
+      # engine, so a failed prep or user-setup step is covered too) unless
+      # the unresolved-merge guard succeeded (the composer's condition, see
+      # its comment): a reclaim that did not succeed skips the guard, and no
+      # git may run against a workspace codex still owns; a FAILED guard means
+      # conflict markers survive in the tree, and a local commit codex made
+      # over them must not be bundled — read-only packages nothing above the
+      # start SHA. Either way the manifest still carries the Surface step's
+      # error for the land job to post (the README's snippet skips the step
+      # outright there; here the report matters more than the empty bundle).
+      - name: Emit landing manifest
+        if: always()
+        uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
+        with:
+          # When the checkout (or the SHA step) failed, `steps.base` is empty
+          # and an empty start_sha would be refused at `validate` — and the
+          # land composite posts the manifest's error only from a VALIDATED
+          # manifest, so the Surface step's checkout-failure message would be
+          # lost to the log. With no repo there is nothing to bundle either
+          # way; github.sha (always 40 hex; the default-branch head on
+          # workflow_run) is a trusted, well-formed placeholder.
+          start-sha: ${{ steps.base.outputs.sha || github.sha }}
+          branch: ${{ inputs.head_branch }}
+          pr-number: ${{ needs.gate.outputs.pr }}
+          manifest-extra: ${{ runner.temp }}/landing-extra.json
+          read-only: ${{ needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success' && 'true' || 'false' }}
+
+  # TRUSTED, last: a fresh runner that checks out nothing and installs
+  # nothing. The `land` composite is the whole landing — download, validate,
+  # push the bundled commits as marvin (re-running CI), post the codex or
+  # no-change summary, post exactly `@review` when a commit landed, move the
+  # stage to Review, post the provenance note, report the agent error and
+  # fail the run when it says so — then the attempt refund. always(): a fix
+  # job that failed still gets its error posted and its attempt refunded;
+  # with no artifact at all (runner killed mid-agent) the composite fails
+  # its download, lands nothing, and says so on the PR. A CANCELLED fix job
+  # skips the Land step but still gets its refund (see the step gates).
+  #
+  # Gated on the gate job having SUCCEEDED, not only on its `act` output: a
+  # gate that failed after writing act=fix — `Record attempt` is the
+  # realistic case, one un-retried `gh api` write under set -e — skips the
+  # fix job (`needs.fix.result` is `skipped`), so there is no artifact to
+  # land, and whether the attempt was recorded is unknown; landing would
+  # post "Landing failed at step(s): download" on the PR for a round that
+  # never started, and refunding might write one BELOW the true count
+  # (weakening the kill-switch). Neither runs: a red gate job with nothing
+  # on the PR, as a Record-attempt failure was before the split.
+  land:
+    needs: [gate, fix]
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.act == 'fix'
+    runs-on: ubuntu-latest
+    # Every write here is marvin's (the land composite's `token`, the refund's
+    # GH_TOKEN); the job token only reads — the artifact, the PR head ref
+    # and default branch, the start SHA fetch.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      actions: read           # artifact download
+    steps:
+      # Skipped when the fix job was cancelled (claude-review.yml's land job
+      # skips the same way). The usual cause is the concurrency group: its
+      # ordering is arbitrary, so run N's pending `fix` can lose the group to
+      # run N+1's `gate` and then be cancelled as the OLDER pending job when
+      # N+1's `fix` queues — a round whose agent never started. Landing it
+      # would fail the artifact download and post "Landing failed" on the PR
+      # for nothing. A run cancelled by hand mid-agent is skipped too: its
+      # partial commits are not pushed and re-reviewed on the strength of an
+      # always(). The step is gated, not the job, so the refund below still
+      # runs and gives back the attempt the gate recorded. `skipped` is
+      # excluded too — the job-level gate on the gate job's success already
+      # rules it out (a fix job is skipped only when its gate did not
+      # succeed), so the test is belt and braces for the same "no artifact,
+      # no agent" shape should the job gate ever loosen.
+      - name: Land
+        id: land
+        if: needs.fix.result != 'cancelled' && needs.fix.result != 'skipped'
+        uses: meridianlabs-ai/agents/.github/actions/land@main
+        with:
+          # The machine account, no fallback: the gate already exited on a
+          # missing MARVIN_TOKEN (a job-token push would not re-run CI and a
+          # job-token `@review` would not trigger the reviewer).
+          token: ${{ secrets.MARVIN_TOKEN }}
+          # The gate job's PR lookup — trusted, computed before any PR code
+          # ran, and the SAME value emit-landing got: the validator pins the
+          # manifest's pr_number to it, and it is where the final report
+          # goes when the manifest never validated (missing artifact,
+          # tampered manifest).
+          pr-number: ${{ needs.gate.outputs.pr }}
+          # The PR's head ref, from the event payload: the gate resolved the
+          # PR BY this branch name (`gh pr list --head`), so it is the PR's
+          # live headRefName and the validator's pin for the manifest's
+          # branch — no lookup of its own needed.
+          pr-head-ref: ${{ inputs.head_branch }}
+          # The CI-fix manifest never files follow-up issues; an empty
+          # allow-list makes the validator refuse any that appear.
+          allowed-issue-repos: ""
+
+      # Infra crashes must not burn fix attempts: the counter increments in
+      # the gate job, BEFORE the agent runs (so real crashes still consume
+      # attempts), but a round whose agent never launched — a bootstrap
+      # failure with NO execution output (observed: "socket hang up" before
+      # the agent started; two such blips nearly escalated a PR spuriously),
+      # a failed codex prep / user-setup / run step (no fix reached the
+      # branch; a persistently missing OPENAI_API_KEY must not burn attempts
+      # toward spurious escalation), or a sync / provisioning failure that
+      # skipped the agent outright (before the split the attempt was
+      # recorded after those steps; it cannot be any more, so the refund
+      # covers it) — attempted no fix. Roll the sticky counter back one.
+      # Three conditions: the agent step did not succeed (a successful codex
+      # run has no execution file), it never produced execution output (a
+      # Claude run that reached a result counts, failed or not), and the
+      # landing pushed nothing (a round whose commits landed keeps its
+      # attempt whatever the agent step's outcome). Never on a FAILED gate
+      # (the job gate above): whether `Record attempt` ever incremented is
+      # then unknown, and an unrecorded attempt refunded would put the count
+      # one below the truth — not refunding is the conservative side.
+      #
+      # NOT serialized: this job is outside the per-PR concurrency group (the
+      # gate's comment says why), so this write can interleave with the next
+      # run's gate re-recording the same sticky comment — two workflow_run
+      # completions for one PR close together (several named CI workflows)
+      # plus an infra-crashed agent. Narrowed, not closed: the step
+      # decrements the comment's CURRENT count instead of writing the gate's
+      # stale `attempt - 1`, so a record the next gate made in between
+      # survives in either order (refund after gate: k+1 → k, the live
+      # attempt still counted; gate after refund: it reads k-1 and records
+      # k). Only the two read-modify-writes crossing inside one window still
+      # leaves the count one off. Accepted: the trigger is rare, the cost is
+      # one attempt of slack in either direction, and an escalation still
+      # drops the label and posts — never a silent stall.
       - name: Refund infra-crashed attempt
         if: >-
-          always() && steps.gate.outputs.act == 'fix' &&
-          (steps.claude.outcome == 'failure' || steps.codexfix.outcome == 'failure' ||
-           steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure')
+          always() && needs.gate.outputs.act == 'fix' &&
+          needs.fix.outputs.agent_outcome != 'success' &&
+          needs.fix.outputs.agent_started != 'true' &&
+          steps.land.outputs.pushed != '1'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.gate.outputs.pr }}
-          EXEC: ${{ steps.claude.outputs.execution_file }}
-          ATTEMPT: ${{ steps.gate.outputs.attempt }}
+          PR: ${{ needs.gate.outputs.pr }}
+          ATTEMPT: ${{ needs.gate.outputs.attempt }}
           CAP: ${{ inputs.fix_attempt_cap }}
           MARKER: "<!-- auto-fix-attempts -->"
         run: |
           set -uo pipefail
-          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
-          if [ -s "$file" ]; then
-            echo "Execution output exists — a real attempt ran; not refunding."
-            exit 0
-          fi
-          prev=$((ATTEMPT - 1))
           cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
                   --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' 2>/dev/null || true)
           [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
+          # Re-read the count (same parse as the gate's) rather than trusting
+          # the gate's value: the next run's gate may have re-recorded since.
+          # Falls back to the gate's value when the body does not parse;
+          # never below zero (an escalation's reset may have zeroed it).
+          cur=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null \
+                  | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p' || true)
+          [[ "$cur" =~ ^[0-9]+$ ]] || cur=$ATTEMPT
+          prev=$(( cur > 0 ? cur - 1 : 0 ))
           body="$MARKER
-          🤖 auto CI-fix attempts: $prev (cap $CAP). (one attempt refunded — the fix agent crashed before starting: infrastructure, not the fix)"
+          🤖 auto CI-fix attempts: $prev (cap $CAP). (one attempt refunded — the fix agent never ran to a result and nothing landed: infrastructure, not the fix)"
           gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
-          echo "Refunded attempt $ATTEMPT -> $prev."
+          echo "Refunded attempt: counter $cur -> $prev (this run was attempt $ATTEMPT)."

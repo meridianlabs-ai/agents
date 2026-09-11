@@ -74,9 +74,29 @@ path throughout: a failed codex step *or* any of its prep steps
 surfaces a visible error comment and, in the loops, refunds the review
 round / CI-fix attempt (infra failures — e.g. a missing
 `OPENAI_API_KEY` — must not march a PR toward spurious escalation);
-the loops' hand-back backstop keys on the codex *run* step, so a push
-that landed before the comment post died still gets its owed
-`@review`. Since 2026-09-09 the landing is three steps, not one: the
+the review loop's hand-back backstop keys on the codex *run* step, so a
+push that landed before the comment post died still gets its owed
+`@review`. In `claude-auto.yml` (since #82) the codex step only *commits*:
+the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)
+commits the tree and writes the de-fanged summary into the landing
+directory, `emit-landing` bundles the commits, and the `land` job — a
+fresh runner holding `MARVIN_TOKEN` — pushes, posts the summary and the
+`@review` the manifest carries; the push and the hand-back cannot come
+apart there: `land` posts the hand-back only after the push landed, and
+`emit-landing` drops `handback` and `stage` whenever it had to drop the
+bundle (HEAD moved, but a non-descendant or a `git bundle` failure left
+nothing to push), so the manifest never carries a hand-back over lost
+work. The HEAD-moved test is gated on the `unresolved-merge-guard` step
+having *succeeded* (on the codex path as the gate's engine resolves it —
+the manifest composer runs no git and `emit-landing` is `read-only`
+otherwise; the guard is gated on the codex step and the reclaim, and
+those on the user setup, so one condition covers a failed prep or
+user-setup step, a failed run step, a failed reclaim and a failed
+guard): codex's local commits are exactly what makes ancestry
+alone unsafe here, since a `git commit` over staged-but-still-marked
+paths completes the base merge and moves HEAD, and the old `Land codex
+fix` step's guard gate is what kept that off the branch. Since
+2026-09-09 the landing is three steps, not one: the
 `codexland` step is git-only (commit, push, `pushed`/`merge_only`
 outputs — the only step carrying the pinned git env and the push
 credential), the `resolve-reported-threads` composite consumes the final

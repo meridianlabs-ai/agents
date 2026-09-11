@@ -146,6 +146,11 @@ runs:
         rm -f "$DIR/manifest.json" "$DIR/commits.bundle"
         note=""
         has_bundle=false
+        # Set when HEAD moved but no bundle came out of it: the workflow
+        # composed its hand-back and stage from the same "HEAD moved" test,
+        # and they must not outlive the bundle (below, where the extra is
+        # merged).
+        lost_bundle=false
         if [ "$READ_ONLY" = "true" ]; then
           # The agent never commits: no git at all (see the input's note),
           # head_sha is the start SHA and there is never a bundle. A bad
@@ -190,6 +195,7 @@ runs:
               # The land job pushes nothing without a bundle; make the
               # manifest consistent (head_sha == start_sha ⇔ has_bundle false).
               head_sha="$START_SHA"
+              lost_bundle=true
             fi
           else
             echo "emit-landing: HEAD is still the start SHA; no commits to bundle."
@@ -220,6 +226,24 @@ runs:
             note="${note:+$note }emit-landing: the workflow's manifest-extra file was missing or not valid JSON; its comments, replies, hand-back and stage were dropped."
             extra='{}'
           fi
+        fi
+        # A hand-back and a stage move are owed by a LANDED commit (the
+        # loops' rule: a run that landed a commit owes exactly one
+        # `@review`). The workflow composes them from its own "HEAD moved"
+        # test, made before this step ran, so when the bundle for that HEAD
+        # could not be written they would survive into a manifest that
+        # pushes nothing — the land job would post the bare `@review` and
+        # move the stage for a round whose work was lost, then report the
+        # error. Drop both here, where the loss is known; the validator
+        # accepts `handback` on a bundle-less manifest, so this is the
+        # enforcing side. Only this branch: a read-only run (the reviewer,
+        # whose `stage` is owed by the review it posts, not by a commit)
+        # never gets here, and a HEAD that never moved owes nothing the
+        # workflow would have composed.
+        if [ "$lost_bundle" = "true" ] && [ "$(jq -r 'has("handback") or has("stage")' <<<"$extra")" = "true" ]; then
+          extra=$(jq -c 'del(.handback, .stage)' <<<"$extra")
+          note="${note:+$note }emit-landing: the manifest's hand-back and stage move were dropped with the bundle — nothing landed, so no re-review is owed and the stage stays where the gate put it."
+          echo "::warning::emit-landing: dropped handback/stage from manifest-extra: no bundle."
         fi
         # Core fields win: `extra + core` lets the extra supply only what the
         # core does not define. A packaging failure is surfaced through the

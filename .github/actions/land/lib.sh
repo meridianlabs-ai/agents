@@ -10,8 +10,15 @@
 # markers with plain substring contains(). Case-insensitive (GNU sed `I`)
 # because the stubs gate on GitHub's contains(), which ignores case. Same
 # sed the codex landing steps and model-provenance use; keep the marker list
-# in step with the `<!-- … -->` comments the workflows read. Truncation only
-# drops trailing bytes, so it cannot resurrect a trigger the sed removed.
+# in step with the `<!-- … -->` comments the workflows read. The codex
+# reviewer's `engine: codex` footer is deliberately NOT in this list:
+# claude-review.yml lands the codex review itself through this composite,
+# and that footer is the anchor pr-feedback-context keys the next codex fix
+# round on — splitting it here would blind every codex review-fix round.
+# Callers whose bodies must not pose as a review (the CI-fix summaries in
+# claude-auto.yml) sed the footer themselves before handing the file over.
+# Truncation only drops trailing bytes, so it cannot resurrect a trigger the
+# sed removed.
 defang() {
   local src="$1" dst="$2"
   sed -E -e 's/@(review|claude|auto)/`\1`/gI' \

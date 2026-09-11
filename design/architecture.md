@@ -205,11 +205,12 @@ changes who pushes. Per step:
 | step | token |
 | --- | --- |
 | `sync-branch` (all three workflows) | job token — fetches only |
-| `push-base-merge` (all three) | `push-token`, now required and validated: `MARVIN_TOKEN` (the push must trigger CI) |
-| codex landing steps | `MARVIN_TOKEN` — in `claude.yml` `\|\| github.token` where the caller lacks it (degrading as every marvin-less push does); the loops have no fallback, their gate already exited on a missing secret |
+| `push-base-merge` (`claude.yml`, `claude-auto-review.yml`) | `push-token`, now required and validated: `MARVIN_TOKEN` (the push must trigger CI). Gone from `claude-auto.yml` since #82: its base merge lands through the bundle |
+| codex landing steps | `MARVIN_TOKEN` — in `claude.yml` `\|\| github.token` where the caller lacks it (degrading as every marvin-less push does); the review loop has no fallback, its gate already exited on a missing secret. In `claude-auto.yml` the codex step only commits (no token); the `land` job pushes |
 | hand-back, unlanded-work, open-PR and verify fetches | job token — best-effort reads that would otherwise fail silently on a private caller. Reachable only because of the origin-URL reset after the action step (below) |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
-| the claude-code-action step | `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml`) — see below |
+| the claude-code-action step | `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml`) — see below. In `claude-review.yml` and `claude-auto.yml` (since #81 / #82) the step gets no `github_token` at all: the action's own App token, and a job-token credential helper for its fetches |
+| the `land` composite (`claude-review.yml`, `claude-auto.yml`) | `MARVIN_TOKEN` for every write, the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
 | `reset-origin-url` (right after the action step, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
@@ -355,6 +356,10 @@ Three rules define the shape:
   the de-fang sed (triggers lose their `@`, loop markers are split,
   case-insensitively, capped under the comment limit) before posting; the
   one exception is the hand-back, posted verbatim as exactly `@review`.
+  The codex reviewer's `engine: codex` anchor footer is deliberately NOT
+  on `land`'s list: the reviewer posts its real footer through this same
+  composite, so workflows whose bodies must not pose as a review (the
+  CI-fix loop's summaries) split it themselves before handing the file over.
 
 Phase 1 (#79) adds the plumbing only — the two composites, the validator and
 its tests — and changes no workflow. Six follow-on issues convert one
@@ -366,6 +371,143 @@ untrusted code is checked out. What moves to `land`: everything after.
 `model-provenance` splits along the same line — the agent job runs it with
 an empty token (job summary only) and the workflow turns its `note` output
 into `provenance_comment_file`.
+
+Conversions so far: `claude-review.yml` (#81, 2026-09-10 — read-only, the
+`refuse-bundle` pair) and `claude-auto.yml` (#82, 2026-09-10 — the first
+loop, and the first agent job whose commits actually land through the
+bundle). What the CI-fix conversion settled, as the model for the review-fix
+loop and the dev agent:
+
+- **The agent commits and stops.** The `fix` job's action step gets no
+  `github_token` (the action mints its own App token, as the reviewer's
+  does) and `additional_permissions: actions: read` so `gh run view
+  --log-failed` still works without the PAT; the job token is read-only
+  (`contents: read`). The action's App token is *not* scoped to the job's
+  permissions (it carries the App's contents/PR/issues write), so the
+  agent's push and posting channels are closed by the settings `deny` list
+  — `Bash(git push:*)` stripped from the caller's allow-list and denied
+  together with the gh comment/review/create verbs, composed at runtime
+  (from a JSON object or the action's path form) so a caller's `settings`
+  cannot re-enable them — plus the prompt, whose ending contract is now "a
+  run that changed anything ends with those changes committed on the
+  branch, nothing more". Those are guard rails, not the security boundary:
+  `Bash(gh:*)` stays allowed (the log and PR reads need it), so `gh api -X
+  POST …/comments`, `gh api -X PATCH …/git/refs/…`, `gh pr edit|close|ready`
+  and `git -C . push` all pass the listed prefixes with a write-capable
+  token in reach. The load-bearing property is the split's invariant:
+  nothing the agent can reach is marvin's identity, so a write that slipped
+  past would be claude[bot]'s — attributable, and no more than the dev agent
+  already holds on a marvin-less `claude.yml` caller — never the loop's.
+  Agent mode installs no MCP server without explicit tool grants, so there
+  is no API-side commit or comment tool to deny.
+- **The hand-back is a manifest field, not a backstop.** `handback: true`
+  and `stage: Review` whenever HEAD moved past the start SHA and descends
+  from it (the same test `emit-landing` applies before bundling), which
+  makes a merge-only round land and owe its `@review` like any other — so
+  `Push base merge if unpushed` and `Ensure hand-back after push` are gone
+  from this workflow: the "pushed but no hand-back" state they existed for
+  cannot occur when the push and the hand-back travel in one validated
+  manifest and the land composite posts the hand-back only after the push
+  landed. The converse — a hand-back with no push — is closed in
+  `emit-landing`: when HEAD moved but the bundle could not be written (a
+  non-descendant HEAD, or a `git bundle` failure) it drops `handback` and
+  `stage` along with the bundle and records the drop in the manifest's
+  `error`, so the validator's tolerance of `handback` on a bundle-less
+  manifest never turns into a bare `@review` over lost work. Two deliberate
+  consequences of keying on ancestry alone: a rebased HEAD lands nothing
+  and owes nothing, and a Claude step that ended `failure` *after*
+  committing (max-turns, an `is_error` result mid-fix) lands those commits
+  and requests the re-review, with the Surface step's error posted alongside
+  and failing the run — before the split only the agent's own push landed,
+  so a failed step landed nothing. Dropping committed work is the worse
+  outcome, the push is what re-runs CI, and the ⚠️ tells the reviewer the
+  round did not finish cleanly.
+- **The codex path splits at the push.** The old `Land codex fix` step
+  keeps its commit half (reclaim-gated, hooks-pinned) and writes the
+  de-fanged summary into the landing directory; the push and the post are
+  the land job's. On the codex path — keyed on the gate's *engine*, not on
+  the codex-user step's outcome, which is `skipped`/`failure` when the prep
+  or user-setup step failed and would let those two fall through to the
+  ancestry test — the manifest composer runs no git and `emit-landing` runs
+  `read-only` unless the `unresolved-merge-guard` step *succeeded*; the
+  guard is itself gated on the codex step and the reclaim, and those on the
+  user setup, so that one condition withholds the push on every codex-path
+  failure, a failed prep or user-setup step included (no codex process ran,
+  the base merge stays unpushed, and the round is refunded — as the Surface
+  strings say and as before the split). It has to be the
+  guard, not ancestry: codex may commit locally, and a `git commit` over
+  staged-but-still-marked paths completes the base merge and moves HEAD
+  past the start SHA, so keying on ancestry alone (as the Claude path does)
+  would bundle the half-resolved merge, push it as marvin, request the
+  re-review and then post an error saying nothing landed. Keying on the
+  guard keeps the old `Land codex fix` gate: a failed guard, a failed codex
+  step (its partial local commits — and the runner's base merge — never
+  pushed, as before the split, when the base-merge backstop was Claude-only)
+  or a reclaim that did not succeed (no git against a workspace codex still
+  owns) each land nothing, and the Surface step's error still reaches the
+  PR through the manifest.
+- **A no-change Claude round is not silent.** The agent can no longer post
+  the blocker comment the old prompt asked for, so when it succeeded and
+  committed nothing (HEAD still at the start SHA, or exactly the runner's
+  clean base merge — a merge-only round, which lands and owes its hand-back
+  but carries no agent commit; the relay's first line says so) the
+  workflow relays its final message as a `comments[]` entry (de-fanged in
+  the fix job with the codex summary's sed, footer rule included, so the
+  relay cannot become a false review anchor; `land` de-fangs triggers and
+  markers again but leaves the footer alone, since the codex reviewer's
+  real footer lands through it) — the Claude analogue
+  of the codex summary that has always posted. Its first line, like the
+  codex summary's, says "committed" / "base merge only", never "pushed":
+  the fix job composes it before `emit-landing` runs, and a `git bundle`
+  failure there drops the hand-back but not `comments[]`, so a header
+  asserting the push would post over lost work and only the error comment
+  that follows would correct it. (Issue #82's fourth verification item said
+  "posts nothing otherwise"; the relay is a deliberate deviation so a round
+  that gave up leaves a trace beyond the counter bump.)
+- **`Record attempt` moved before the sync and provisioning steps** (it is a
+  marvin write, so it lives in `gate`), which would have burned an attempt
+  on every sync or provisioning failure; the land job's refund therefore
+  broadened from "the agent step failed with no execution output" to "the
+  agent step did not succeed, produced no execution output, and the landing
+  pushed nothing" — a skipped agent is refunded whatever skipped it *unless
+  a base merge landed*, and a round whose commits landed is not, whatever
+  the agent step's outcome. The exception is a small regression, accepted:
+  a provisioning failure on a stale branch skips the agent but the runner's
+  clean base merge still lands (HEAD moved, so the bundle carries it and the
+  round owes its `@review`), `pushed` is true and the attempt is kept, where
+  before the split — `Record attempt` after provisioning, the backstop
+  pushing the merge — that round burned none. Bounded to one attempt: the
+  next round has nothing to merge, pushes nothing, and is refunded. The
+  refund is the one marvin write outside the per-PR group (next bullet), so
+  it is not serialized against the next run's gate: it decrements the
+  sticky comment's *current* count rather than the gate's stale value,
+  which keeps a record the next gate made in between; only the two
+  read-modify-writes crossing inside one window still leaves the count one
+  off — accepted (rare trigger, one attempt of slack in either direction,
+  and an escalation still drops the label and posts).
+- **Concurrency covers `gate` and `fix`, not `land`.** Ordering inside a
+  concurrency group is arbitrary and at most one job pends, so a land job
+  that had to wait behind the next run's gate could be cancelled as the
+  older pending job and its bundle lost. The land job runs ungrouped; the
+  residual overlap (a landing pushing while the next run's agent has
+  already checked out the old tip) ends in the land composite's
+  non-fast-forward refusal — reported on the PR, never forced — and the
+  landed push re-runs CI, which re-triggers the loop on the new tip. The
+  same arbitrary ordering can cancel a *pending `fix`* instead (it lost the
+  group to the next run's gate, then was the older pending job when that
+  run's `fix` queued), so the land job's `Land` step is skipped when the
+  fix job's result is `cancelled` — as `claude-review.yml`'s land job is —
+  rather than failing its artifact download and reporting "Landing failed"
+  on the PR for a round whose agent never started; the refund step still
+  runs. A run cancelled by hand mid-agent lands nothing either. The land
+  job as a whole is additionally gated on the gate job's *success*, not only
+  on its `act` output: a gate that failed after deciding `fix` (a
+  `Record attempt` API write that did not go through) skips the fix job,
+  leaving the same no-artifact shape — and whether the attempt was ever
+  recorded is then unknown, so the refund must not run either (an
+  unrecorded attempt refunded would put the count one below the truth).
+  That case ends as it did before the split: a red gate job with nothing on
+  the PR.
 
 **The reviewer (#81, 2026-09-10) is the first conversion.** `claude-review.yml`
 is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`
@@ -933,12 +1075,22 @@ in the logic. Four details are load-bearing:
   codex's landing refuses to proceed when `git ls-files --unmerged` is
   non-empty or a `<<<<<<< `/`>>>>>>> ` marker survives in one of the reported
   files (a failed guard skips the landing step; the "Surface agent errors"
-  steps read the guard's outcome and post the cause). `=======` is deliberately not matched:
+  steps read the guard's outcome and post the cause). In `claude-auto.yml`,
+  where the push is the land job's, the same holds through the manifest:
+  the composer runs no git and `emit-landing` is `read-only` unless the
+  guard succeeded, so a commit codex made itself over a half-resolved merge
+  — which moves HEAD past the start SHA and would otherwise be bundled on
+  ancestry alone — is never packaged (see Landing job → the codex path
+  splits at the push). `=======` is deliberately not matched:
   a bare seven-equals line is a legitimate rST/Markdown heading underline, and
   a repo-wide grep for it would fail honest docs changes.
 
 A `Push base merge if unpushed` backstop covers the Claude path's remaining
-hole: if HEAD is still *exactly* the runner's merge commit when the agent
+hole in `claude.yml` and `claude-auto-review.yml` (`claude-auto.yml` lost it
+with the landing-job split, #82: there the merge commit sits above the
+manifest's start SHA and lands through the bundle with the hand-back as a
+manifest field — the paragraphs below describe the two unconverted
+workflows): if HEAD is still *exactly* the runner's merge commit when the agent
 finishes, nothing else will push it, so the workflow does. Gating on that exact
 SHA means an agent that committed on top — pushed or deliberately not — is
 never second-guessed. If the remote tip moved during the run while HEAD stayed

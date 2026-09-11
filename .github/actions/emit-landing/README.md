@@ -80,8 +80,8 @@ to this document together.
 | `replies[]` | workflow | `review_comment_id` positive integer, `body_file`; posted on `pr_number` |
 | `resolve_threads[]` | workflow | `^PRRT_[A-Za-z0-9_-]+$`; `land` resolves only IDs that belong to `pr_number` |
 | `issues[]` | workflow | `repo` in the land job's `allowed-issue-repos`, `title` (≤ 256), `body_file`, optional `labels`, optional `comment_on` (positive integer: comment on that issue instead of creating one). Created issues are added to Atlas by node ID |
-| `stage` | workflow | one of `Contributor`, `Agent`, `Review`, `Sign-off`, `Merge`, or absent |
-| `handback` | workflow | boolean; posts exactly `@review` on the PR (needs `pr_number` or `pr.open`) |
+| `stage` | workflow | one of `Contributor`, `Agent`, `Review`, `Sign-off`, `Merge`, or absent. Dropped by `emit-landing`, together with `handback`, when HEAD moved past `start_sha` but the bundle could not be written (non-descendant HEAD, or a `git bundle` failure): nothing lands, so the stage stays where the gate put it; the drop is recorded in `error` |
+| `handback` | workflow | boolean; posts exactly `@review` on the PR (needs `pr_number` or `pr.open`). A hand-back is owed by a landed commit, so `emit-landing` drops it with the bundle (see `stage`) — the workflow composes it from its own "HEAD moved" test, and this is what keeps the push and the hand-back from coming apart |
 | `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line |
 | `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move, and a failed hand-back does not withhold the hand-off or the stage move either) and every planned hand-back, hand-off or stage move that never ran because the PR step failed after the push (a failed fetch or push owes nothing — the work never landed), and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
@@ -133,6 +133,13 @@ issue number only on a real issue:
 pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
 issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
 ```
+
+A `workflow_run` event (claude-auto.yml) names no PR in a usable shape
+(`workflow_run.pull_requests` is empty for many runs), so there the trusted
+value is the **gate job's** API lookup — `gh pr list --head <branch>` run
+before any PR code was checked out — passed as `needs.gate.outputs.pr` to
+both composites; `pr-head-ref` is the event's head branch, which is what the
+gate resolved the PR by.
 
 Agent job, last step. It runs git in the workspace, so on the codex path it
 is gated on the reclaim step having **succeeded** — `== 'success'`, never
