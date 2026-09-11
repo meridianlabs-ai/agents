@@ -69,16 +69,19 @@ take effect on every repo's next run.
   their issue. Stage moves come from the agent workflows; stage cleanup on
   close is manual (see design/atlas-tracking.md → Deferred — no hourly sync
   reconciliation for this repo's items).
-- **Label PRs `auto` when opening them** (default policy: Ransom,
-  2026-08-27) — the review-fix loop then drives review rounds to
-  convergence without babysitting. Two consequences: request the review
-  (top-level `@review` comment — mandatory anyway for workflow-editing
-  PRs), and once labeled, DON'T race the loop — let it address review
-  findings rather than pushing your own fixes to the branch mid-round
-  (it is serialized per PR; a session push mid-round invalidates its
-  state). Skip the label only when deliberately keeping manual control
-  of a branch you are actively iterating on. Marvin-opened PRs from
-  `auto` issues inherit the label automatically.
+- **Do NOT label PRs `auto`, and do not post `@auto`** (policy: Ransom,
+  2026-09-11 — reverses the 2026-08-27 default of labeling every PR
+  `auto` so the review-fix loop drove rounds to convergence). Agent work
+  and review are driven from Orca workspaces now (orca-pr-sync mirrors
+  PRs into workspaces; a local review skill runs the review), so the
+  GitHub-hosted autonomous loop is not engaged on new PRs. The `@auto`
+  workflows themselves stay in place for now — this is a policy change,
+  not a removal. Still request the CI review with a top-level `@review`
+  comment (mandatory for workflow-editing PRs; see CLAUDE.md), then
+  address its findings yourself on the branch. If a PR does carry the
+  label (a Marvin-opened PR from an `auto` issue inherits it), don't
+  race the loop — it is serialized per PR, and a session push mid-round
+  invalidates its state.
 
 - **The `@main` contract is load-bearing.** Every caller repo's stub calls these
   workflows at `@main`, so a change merged here is live everywhere immediately.

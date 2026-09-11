@@ -29,7 +29,10 @@ The shared, tool-agnostic instructions for this repo are in `AGENTS.md`
   pull_request_target switch would lift that exception but Anthropic's
   token exchange rejects prt-shaped OIDC subjects — attempted
   2026-08-26, reverted; decision: Ransom, 2026-08-27 — manual comments
-  instead.) The `auto` label lets the loop drive fix rounds. For
+  instead.) Don't label the PR `auto` or post `@auto` — as of 2026-09-11
+  (decision: Ransom) fix rounds are driven from Orca workspaces, not the
+  GitHub-hosted loop (see AGENTS.md → Conventions); address the review's
+  findings yourself. For
   low-blast-radius changes (skills/, design/, docs — nothing at
   `@main`), merging right after the PR opens is fine — an in-flight
   review just lands harmlessly on the merged PR; workflow PRs should
