@@ -78,11 +78,11 @@ to this document together.
 | `pr` | workflow | `open` (bool), `title` (≤ 256 chars), `body_file`; optional `base` (branch name; absent or empty means the land job's default branch, as `gh pr create` would default), `labels` (strings, applied whether `land` opened the PR or adopted an agent-opened one — the `auto` and `engine:*` labels must reach both) and `issue` (the originating issue, gets a "✅ Opened a pull request" comment only when `land` opened the PR). Skipped when `pr_number` is already set; an existing open PR for `branch` is adopted, and the adopt check runs inside the create retry so a create whose response was lost is adopted on the next attempt, not duplicated |
 | `comments[]` | workflow | `number` (positive integer — an issue or a PR; the issues endpoint serves both), `body_file` |
 | `replies[]` | workflow | `review_comment_id` positive integer, `body_file`; posted on `pr_number` |
-| `resolve_threads[]` | workflow | `^PRRT_[A-Za-z0-9_-]+$`; `land` resolves only IDs that belong to `pr_number` |
+| `resolve_threads[]` | workflow | `^PRRT_[A-Za-z0-9_-]+$`; `land` resolves only IDs that belong to `pr_number`. Dropped by `emit-landing` with the bundle (see `stage`): a thread is settled by the code that lands |
 | `issues[]` | workflow | `repo` in the land job's `allowed-issue-repos`, `title` (≤ 256), `body_file`, optional `labels`, optional `comment_on` (positive integer: comment on that issue instead of creating one). Created issues are added to Atlas by node ID |
-| `stage` | workflow | one of `Contributor`, `Agent`, `Review`, `Sign-off`, `Merge`, or absent. Dropped by `emit-landing`, together with `handback`, when HEAD moved past `start_sha` but the bundle could not be written (non-descendant HEAD, or a `git bundle` failure): nothing lands, so the stage stays where the gate put it; the drop is recorded in `error` |
+| `stage` | workflow | one of `Contributor`, `Agent`, `Review`, `Sign-off`, `Merge`, or absent. Dropped by `emit-landing`, together with `handback`, `resolve_threads` and `handoff_body_file`, when HEAD moved past `start_sha` but the bundle could not be written (non-descendant HEAD, or a `git bundle` failure): nothing lands, so the stage stays where the gate put it; the drop is recorded in `error` |
 | `handback` | workflow | boolean; posts exactly `@review` on the PR (needs `pr_number` or `pr.open`). A hand-back is owed by a landed commit, so `emit-landing` drops it with the bundle (see `stage`) — the workflow composes it from its own "HEAD moved" test, and this is what keeps the push and the hand-back from coming apart |
-| `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line |
+| `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line. Dropped by `emit-landing` with the bundle (see `stage`) when HEAD moved: the hand-off concludes a round whose work must have landed; a no-change round's hand-off (HEAD never moved) is untouched |
 | `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move, and a failed hand-back does not withhold the hand-off or the stage move either) and every planned hand-back, hand-off or stage move that never ran because the PR step failed after the push (a failed fetch or push owes nothing — the work never landed), and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
 | `review_verdict` | workflow (claude-review.yml's codex path) | `clean` or `suggestions`; needs `pr_number`. `land` posts one of two FIXED bodies — the reviewer's `🔎 Review complete …` marker comment with the `claude-review-summary` / `claude-review-verdict:<value>` markers live — after `comments[]` (which carries the de-fanged review body) and only when the Post step lost nothing, so the @auto loop never sees a verdict over a review that did not land. The second body posted verbatim besides the hand-back; no agent text reaches it |
@@ -139,7 +139,16 @@ A `workflow_run` event (claude-auto.yml) names no PR in a usable shape
 value is the **gate job's** API lookup — `gh pr list --head <branch>` run
 before any PR code was checked out — passed as `needs.gate.outputs.pr` to
 both composites; `pr-head-ref` is the event's head branch, which is what the
-gate resolved the PR by.
+gate resolved the PR by. `claude-auto-review.yml` runs on the reviewer's
+`issue_comment`, so its trusted number is the caller's `pr_number` input
+(`github.event.issue.number`), passed to both composites, and `pr-head-ref`
+is the gate's `gh pr view … headRefName` lookup. That workflow is also the
+first whose *agent* writes into the manifest: its fix prompt has the agent
+compose `replies`, `resolve_threads`, `handback` and `handoff_body_file` in
+a `manifest-extra.json` under the landing directory, and a runner step
+whitelists and normalizes those four fields into the workflow's
+`manifest-extra` before `emit-landing` runs (design/architecture.md →
+Landing job, the #83 notes).
 
 Agent job, last step. It runs git in the workspace, so on the codex path it
 is gated on the reclaim step having **succeeded** — `== 'success'`, never

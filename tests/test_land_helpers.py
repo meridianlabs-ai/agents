@@ -555,3 +555,65 @@ def test_land_tokens_are_step_scoped():
     assert "persist-credentials" not in text and "actions/checkout" not in text
     # Every credential-helper block reads the one variable name (AGENTS.md).
     assert text.count("GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo \"password=$GIT_TOKEN\"; }; f'") == 2
+
+
+def test_emit_landing_lost_bundle_drops_every_landed_work_claim(repos):
+    # HEAD moved but is not a descendant of the start SHA (the agent rewrote
+    # history), so no bundle can be written and nothing lands. The workflow
+    # composed its manifest-extra before this step from its own "HEAD moved"
+    # test, so every field that CLAIMS the work landed must go with the
+    # bundle: the hand-back (a bare `@review` over lost work), the stage
+    # move, the thread resolutions (a thread is settled by code that lands)
+    # and the completion hand-off (review round 1 of #83 reproduced the last
+    # two outliving a failed bundle). `comments` and `error` stay: the
+    # summary and the report are how the loss reaches the PR.
+    import json
+
+    r = repos
+    work = r["work"]
+    git("checkout", "-q", "--orphan", "rewrite", cwd=work)
+    git("commit", "-qam", "rewritten", cwd=work)
+    extra = r["tmp"] / "extra.json"
+    (r["landing"] / "c.md").write_text("summary\n")
+    (r["landing"] / "h.md").write_text("done\n")
+    extra.write_text(json.dumps({
+        "handback": True,
+        "stage": "Review",
+        "resolve_threads": ["PRRT_a"],
+        "handoff_body_file": "h.md",
+        "comments": [{"number": 456, "body_file": "c.md"}],
+        "error": {"message": "the agent said so", "fail_run": True},
+    }))
+    res, landing, output = run_emit_landing(r["tmp"], cwd=work, read_only=False, start_sha=r["start"], extra=extra)
+    assert res.returncode == 0, res.stderr
+    m = json.loads((landing / "manifest.json").read_text())
+    assert m["has_bundle"] is False and m["head_sha"] == r["start"]
+    assert not (landing / "commits.bundle").exists()
+    for gone in ("handback", "stage", "resolve_threads", "handoff_body_file"):
+        assert gone not in m, m
+    assert m["comments"] == [{"number": 456, "body_file": "c.md"}]
+    assert m["error"]["fail_run"] is True
+    assert m["error"]["message"].startswith("the agent said so")
+    assert "dropped with the bundle" in m["error"]["message"]
+    assert "wrote=true" in output
+
+
+def test_emit_landing_keeps_a_no_change_handoff(repos):
+    # HEAD never moved: a no-change round's hand-off (and its replies) are
+    # owed by the round, not by a commit, and must survive untouched.
+    import json
+
+    r = repos
+    work = r["work"]
+    git("reset", "-q", "--hard", r["start"], cwd=work)
+    extra = r["tmp"] / "extra.json"
+    (r["landing"] / "h.md").write_text("declined everything\n")
+    extra.write_text(json.dumps({"handoff_body_file": "h.md", "stage": "Review",
+                                 "replies": [{"review_comment_id": 7, "body_file": "h.md"}]}))
+    res, landing, _ = run_emit_landing(r["tmp"], cwd=work, read_only=False, start_sha=r["start"], extra=extra)
+    assert res.returncode == 0, res.stderr
+    m = json.loads((landing / "manifest.json").read_text())
+    assert m["has_bundle"] is False
+    assert m["handoff_body_file"] == "h.md" and m["stage"] == "Review"
+    assert m["replies"] == [{"review_comment_id": 7, "body_file": "h.md"}]
+    assert "error" not in m

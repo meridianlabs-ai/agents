@@ -164,7 +164,7 @@ set by a human, not the agent:
 | Transition | Trigger | Driven by |
 |---|---|---|
 | Todo → Agent | kickoff run starts | agent post-step (`claude.yml`/`@auto`) |
-| Agent → Review | `@auto` hands back (converged *or* escalated) | agent post-step (`claude-auto-review.yml`) |
+| Agent → Review | `@auto` hands back (converged *or* escalated), or a fix round's re-review request / hand-off lands | `claude-auto-review.yml`: the `gate` job (converged / escalated), the `land` job (the manifest's `stage`) |
 | Review → Agent | you re-engage (`@claude`/`@auto`) | agent post-step, next run |
 | Review → Sign-off | you request a second reviewer on the PR | **PR-event hook** (`review_requested`) |
 | Sign-off → Merge | that reviewer approves | **PR-event hook** (`pull_request_review` approved) |
@@ -542,8 +542,10 @@ event-driven transitions:
   - `@auto` self-handoff → **`<!-- auto-handoff -->`** comment on the **PR** →
     **Review**. The review-fix agent ends the loop itself (no `@review`)
     when a round was documentation-only nits, or when everything remaining was
-    declined with rationale; the workflow detects the marker and sets the
-    stage.
+    declined with rationale; since #83 it names the hand-off body in its
+    landing manifest and the land job posts the marker comment and sets the
+    stage (before that it posted the comment and the workflow detected the
+    marker).
   - `@auto` escalated (review-round / fix-attempt cap, or no-progress) → the
     "**handing this to a human**" comment on the **PR** **and the `auto` label
     removed** → **Review**.
@@ -628,7 +630,8 @@ hand-back — skipped only for a *successful `@auto` run that left a PR in the
 loop* (the review loop owns the stage from there; an errored run always hands
 back); `claude-auto.yml` sets Agent per CI-fix round, Review on
 escalation; `claude-auto-review.yml` sets Agent per review-fix round,
-Review on both the converged and escalated handoffs. Known accepted
+Review on both the converged and escalated handoffs and — from its land
+job — on a fix round's re-review request or hand-off. Known accepted
 noise: the stub's substring gate can start a run the action then declines
 (word-boundary), briefly staging an unengaged issue.
 

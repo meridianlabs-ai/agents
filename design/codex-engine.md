@@ -74,16 +74,18 @@ path throughout: a failed codex step *or* any of its prep steps
 surfaces a visible error comment and, in the loops, refunds the review
 round / CI-fix attempt (infra failures — e.g. a missing
 `OPENAI_API_KEY` — must not march a PR toward spurious escalation);
-the review loop's hand-back backstop keys on the codex *run* step, so a
-push that landed before the comment post died still gets its owed
-`@review`. In `claude-auto.yml` (since #82) the codex step only *commits*:
+in both loops (`claude-auto.yml` since #82, `claude-auto-review.yml`
+since #83) the codex step only *commits*:
 the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)
 commits the tree and writes the de-fanged summary into the landing
 directory, `emit-landing` bundles the commits, and the `land` job — a
 fresh runner holding `MARVIN_TOKEN` — pushes, posts the summary and the
-`@review` the manifest carries; the push and the hand-back cannot come
+`@review` the manifest carries (or, in the review loop, the hand-off
+when nothing changed — the manifest composer picks one from HEAD exactly
+as the old landing step did, and carries the `RESOLVED-THREADS:` ids as
+`resolve_threads`); the push and the hand-back cannot come
 apart there: `land` posts the hand-back only after the push landed, and
-`emit-landing` drops `handback` and `stage` whenever it had to drop the
+`emit-landing` drops `handback`, `stage`, `resolve_threads` and `handoff_body_file` whenever it had to drop the
 bundle (HEAD moved, but a non-descendant or a `git bundle` failure left
 nothing to push), so the manifest never carries a hand-back over lost
 work. The HEAD-moved test is gated on the `unresolved-merge-guard` step
@@ -95,18 +97,21 @@ user-setup step, a failed run step, a failed reclaim and a failed
 guard): codex's local commits are exactly what makes ancestry
 alone unsafe here, since a `git commit` over staged-but-still-marked
 paths completes the base merge and moves HEAD, and the old `Land codex
-fix` step's guard gate is what kept that off the branch. Since
-2026-09-09 the landing is three steps, not one: the
+fix` step's guard gate is what kept that off the branch. In
+`claude.yml` (the dev verb, not yet converted) the landing has been
+three steps, not one, since 2026-09-09: the
 `codexland` step is git-only (commit, push, `pushed`/`merge_only`
 outputs — the only step carrying the pinned git env and the push
 credential), the `resolve-reported-threads` composite consumes the final
 message's `RESOLVED-THREADS:` line (below, under Limitations), and the
 `codexpost` step composes and posts the de-fanged summary with no git
-env at all. The downstream gates that used to read "landing succeeded"
-(the dev verb's `Stage - Review (hand-back)`, the loop's self-handoff
-detector) key on `codexpost`, which implies the two before it; the
-Surface steps name a landed-but-unposted run separately from a failed
-push.
+env at all; the dev verb's `Stage - Review (hand-back)` keys on
+`codexpost`, which implies the two before it, and the Surface step
+names a landed-but-unposted run separately from a failed push. The
+review loop has the same three roles since #83 with the credentialed
+halves moved out of the agent job: the composite runs parse-only
+(`resolve: "false"`, `ids` output), `Commit codex fix` commits and
+writes the body, and the land job pushes, posts and resolves.
 
 ### Marker/author contract
 
@@ -198,8 +203,8 @@ an index carrying the fsmonitor extension is read — `git status`, even
 `credential.helper`, `http.*`, `url.*.insteadOf` and `remote.origin.url`,
 which decide where a push goes and what authenticates it. Every runner-side
 step that runs git after codex — the landing step with the machine-account
-credential, but also the loops' `Ensure hand-back after push` and `Surface
-agent errors` fetches — runs as `runner` (sudo), so any of those was a route
+credential, but also — until #82/#83 — the loops' `Ensure hand-back after
+push` and `Surface agent errors` fetches — runs as `runner` (sudo), so any of those was a route
 from the sandboxed codex to code execution with the machine-account
 credential — and until #61 the credential itself sat in `.git/config`,
 readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
@@ -514,8 +519,11 @@ Verification for a change here, all cases prompted to codex (any verb):
   OPEN threads (ids from the embedded REVIEW THREADS section) it fully
   addressed in code, or `none`; the shared
   `.github/actions/resolve-reported-threads` composite, run between the
-  landing push and the summary post in both `claude.yml` and
-  `claude-auto-review.yml`, resolves exactly those via the
+  landing push and the summary post in `claude.yml` (and, until #83, in
+  `claude-auto-review.yml` — there it now runs parse-only in the fix
+  job, and its `ids` output travels as the landing manifest's
+  `resolve_threads`, which the land job intersects with the PR's own
+  threads and resolves after the push), resolves exactly those via the
   `resolveReviewThread` mutation — only after a push of real changes,
   only ids that are currently-open threads of this PR (shape-checked and
   intersected with a fresh query, so a hallucinated id is skipped),

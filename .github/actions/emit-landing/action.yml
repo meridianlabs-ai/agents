@@ -227,23 +227,29 @@ runs:
             extra='{}'
           fi
         fi
-        # A hand-back and a stage move are owed by a LANDED commit (the
-        # loops' rule: a run that landed a commit owes exactly one
-        # `@review`). The workflow composes them from its own "HEAD moved"
-        # test, made before this step ran, so when the bundle for that HEAD
-        # could not be written they would survive into a manifest that
-        # pushes nothing — the land job would post the bare `@review` and
-        # move the stage for a round whose work was lost, then report the
-        # error. Drop both here, where the loss is known; the validator
-        # accepts `handback` on a bundle-less manifest, so this is the
-        # enforcing side. Only this branch: a read-only run (the reviewer,
-        # whose `stage` is owed by the review it posts, not by a commit)
-        # never gets here, and a HEAD that never moved owes nothing the
-        # workflow would have composed.
-        if [ "$lost_bundle" = "true" ] && [ "$(jq -r 'has("handback") or has("stage")' <<<"$extra")" = "true" ]; then
-          extra=$(jq -c 'del(.handback, .stage)' <<<"$extra")
-          note="${note:+$note }emit-landing: the manifest's hand-back and stage move were dropped with the bundle — nothing landed, so no re-review is owed and the stage stays where the gate put it."
-          echo "::warning::emit-landing: dropped handback/stage from manifest-extra: no bundle."
+        # A hand-back, a stage move, a thread resolution and a completion
+        # hand-off are owed by a LANDED commit (the loops' rule: a run that
+        # landed a commit owes exactly one `@review`; a thread is resolved
+        # because the code that settles it landed; the review loop's
+        # hand-off says the round's work is done). The workflow composes
+        # them from its own "HEAD moved" test, made before this step ran, so
+        # when the bundle for that HEAD could not be written they would
+        # survive into a manifest that pushes nothing — the land job would
+        # post the bare `@review` or the marker-led hand-off, resolve the
+        # threads and move the stage for a round whose work was lost, then
+        # report the error (review round 1 of #83 reproduced the
+        # resolutions and the hand-off outliving a failed bundle). Drop all
+        # four here, where the loss is known; the validator accepts each of
+        # them on a bundle-less manifest, so this is the enforcing side.
+        # Only this branch: a read-only run (the reviewer, whose `stage` is
+        # owed by the review it posts, not by a commit) never gets here, and
+        # a HEAD that never moved owes nothing the workflow would have
+        # composed — a no-change round's hand-off and its replies are not
+        # touched, and `comments` and `error` survive on every path.
+        if [ "$lost_bundle" = "true" ] && [ "$(jq -r 'has("handback") or has("stage") or has("resolve_threads") or has("handoff_body_file")' <<<"$extra")" = "true" ]; then
+          extra=$(jq -c 'del(.handback, .stage, .resolve_threads, .handoff_body_file)' <<<"$extra")
+          note="${note:+$note }emit-landing: the manifest's hand-back, hand-off, thread resolutions and stage move were dropped with the bundle — nothing landed, so no re-review is owed, no thread is settled, the round is not concluded and the stage stays where the gate put it."
+          echo "::warning::emit-landing: dropped handback/handoff_body_file/resolve_threads/stage from manifest-extra: no bundle."
         fi
         # Core fields win: `extra + core` lets the extra supply only what the
         # core does not define. A packaging failure is surfaced through the

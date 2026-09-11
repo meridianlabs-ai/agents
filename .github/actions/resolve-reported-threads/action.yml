@@ -24,7 +24,14 @@ description: >-
   loop ever opened stayed OPEN, and the fix and review prompts grew with
   settled feedback nobody could tell from live (inspect_ai#428). Shared by
   claude.yml (dev verb on a PR) and claude-auto-review.yml (fix rounds) so
-  the parse/validate/resolve logic cannot drift between them. Referenced
+  the parse/validate/resolve logic cannot drift between them. Two modes:
+  `resolve: "true"` parses, strips and resolves (claude.yml, whose landing
+  step holds the machine-account token); anything else parses and strips
+  only, and the caller reads the shape-checked ids from the `ids` output —
+  claude-auto-review.yml (since #83) runs in a job that holds no write
+  token, so it puts the ids into the landing manifest's `resolve_threads`
+  and the trusted land job resolves them after the push (design/architecture.md
+  → Landing job). Referenced
   fully-qualified (meridianlabs-ai/agents/.github/actions/resolve-reported-threads@main);
   NO post step (local composite actions with post steps break teardown on
   the fork).
@@ -33,7 +40,9 @@ inputs:
   token:
     description: >-
       Token the mutations run as (MARVIN_TOKEN — the same account that posts
-      the summary; resolving a thread needs write access on the repo).
+      the summary; resolving a thread needs write access on the repo). Unused
+      when `resolve` is not "true" (parse-only mode makes no API call), so a
+      job that holds no write token passes its job token.
     required: true
   repo:
     description: owner/name the PR lives in.
@@ -59,13 +68,23 @@ inputs:
   resolve:
     description: >-
       "true" to resolve the threads the line names; anything else only strips
-      the line (the round pushed no real changes, or is not on a PR).
+      the line and reports the ids (the round pushed no real changes, is not
+      on a PR, or the caller's land job resolves them from the manifest).
     required: true
 
 outputs:
   resolved:
     description: Number of threads actually resolved (0 when `resolve` was not "true").
     value: ${{ steps.resolve.outputs.resolved }}
+  ids:
+    description: >-
+      The thread ids the line named, shape-checked (`PRRT_…`), de-duplicated,
+      space-separated on one line; empty when the line was absent, `none`, or
+      the final message is missing. Written in both modes, BEFORE the
+      open-thread intersection: a parse-only caller intersects them itself
+      (the land composite checks each id against the PR's own threads before
+      resolving).
+    value: ${{ steps.resolve.outputs.ids }}
 
 runs:
   using: composite
@@ -169,3 +188,6 @@ runs:
           fi
         fi
         echo "resolved=$resolved" >>"$GITHUB_OUTPUT"
+        # One line: the ids are already restricted to [A-Za-z0-9_-], so a
+        # space-joined list is safe for a step output.
+        echo "ids=$(tr '\n' ' ' <<<"$ids" | sed 's/ *$//')" >>"$GITHUB_OUTPUT"
