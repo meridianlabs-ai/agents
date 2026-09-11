@@ -25,6 +25,16 @@ name: Claude (reusable)
 # the commenter. "The head is in a fork" is decided in the trigger gate, before
 # any checkout, independent of who triggered the run; the reviewer (@review)
 # is the sandboxed path for reviewing fork PRs.
+#
+# Three jobs since issue #84 (design/architecture.md → Landing job): `gate`
+# (trusted: the trigger check and every write that must happen before the
+# agent runs — 👀, stage → Agent, the @auto opt-in and counter reset — with
+# MARVIN_TOKEN), `agent` (untrusted: checkout, provisioning, the agent; the
+# job token only; commits locally and never pushes) and `land` (trusted: a
+# fresh runner that pushes the commits, opens the PR on issue runs, posts
+# the comments, the hand-back and the error report, and moves the stage —
+# as marvin, from the manifest the agent job emitted). One push per run,
+# at the end; iterating on CI is the @auto loop's job.
 
 on:
   workflow_call:
@@ -92,15 +102,19 @@ on:
       settings:
         description: >-
           Claude Code settings JSON (inline). Owns the permission allow-list:
-          file edits + the verify loop (both python/python3 forms) + gh for PR
-          creation and CI reads + a scoped git allow-list so the agent can sync
-          its working branch with the base branch (fetch/merge/rebase/push) and
+          file edits + the verify loop (both python/python3 forms) + gh for
+          PR and CI reads + a scoped git allow-list so the agent can sync
+          its working branch with the base branch (fetch/merge/rebase) and
           inspect history. Additive to the action's defaults; headless runs
           auto-deny anything not allowed, which keeps arbitrary execution off
           the table for workflows triggered by public issue content. git is
-          scoped to branch-sync + read-only subcommands, not blanket git:*; the
-          job's contents:write token is the real privilege boundary, and the
-          fork's branch protection still blocks force-push to main/meridian.
+          scoped to branch-sync + read-only subcommands, not blanket git:*.
+          The agent never pushes or posts (issue #84): the "Compose agent
+          settings" step strips `Bash(git push:*)` from whatever this holds
+          and denies it — together with claude-code-action's tag-mode push
+          wrapper and the gh verbs that comment, review, open or merge — so
+          a caller's override cannot re-enable them; the land job pushes and
+          opens the PR from the landing manifest.
         required: false
         type: string
         default: >-
@@ -109,7 +123,7 @@ on:
           "Bash(pip3:*)","Bash(uv:*)","Bash(python:*)","Bash(python3:*)",
           "Bash(gh:*)",
           "Bash(git fetch:*)","Bash(git merge:*)","Bash(git rebase:*)",
-          "Bash(git push:*)","Bash(git checkout:*)","Bash(git switch:*)",
+          "Bash(git checkout:*)","Bash(git switch:*)",
           "Bash(git branch:*)","Bash(git status:*)","Bash(git log:*)",
           "Bash(git diff:*)","Bash(git show:*)","Bash(git rev-parse:*)",
           "Bash(git remote:*)",
@@ -124,19 +138,17 @@ on:
         default: ""
       request_review_after_open:
         description: >-
-          After opening/adopting an issue-triggered PR and applying the `auto`
-          label, post an `@review` comment to start the reviewer. Set "true"
-          only where auto-review-on-open does not fire — i.e. the inspect_ai
-          fork, whose `pull_request` events never reach the workflow. Doing it
-          here (deterministically, AFTER labeling) instead of from the agent's
-          prompt closes a race: the agent used to post `@review` mid-run, before
-          the post-step applied the label, so a fast review could post its
-          summary while the PR was still unlabeled and the review-fix loop would
-          skip it. Leave "false" on repos where PR-open auto-review already fires
+          After the land job opens/adopts an issue-triggered PR and applies
+          the `auto` label, post an `@review` comment to start the reviewer.
+          Set "true" only where auto-review-on-open does not fire — i.e. the
+          inspect_ai fork, whose `pull_request` events never reach the
+          workflow. Since #84 this is the landing manifest's `handback`: the
+          land composite posts exactly `@review` after its PR step, which
+          labels first, so the review-fix loop always sees a labeled PR when
+          the reviewer's summary lands (the race this input was created to
+          close: the agent used to post `@review` mid-run, before the label).
+          Leave "false" on repos where PR-open auto-review already fires
           (posting @review here would double-review).
-        required: false
-        type: string
-        default: "false"
       branch_sync_prompt:
         description: >-
           Guidance appended to the system prompt (via --append-system-prompt,
@@ -160,8 +172,9 @@ on:
           You are continuing work on an existing branch. Before making any code
           changes, bring it up to date with its base branch: fetch the base
           branch and merge it into this branch, resolving any conflicts, so your
-          changes and their tests run against current code — then include that
-          merge when you push. The checkout has full history (fetch-depth 0),
+          changes and their tests run against current code — and leave that merge
+          committed on the branch; the workflow lands it with your other
+          commits. The checkout has full history (fetch-depth 0),
           so a local merge works without extra fetching depth.
       branch_sync_append:
         description: >-
@@ -201,17 +214,20 @@ on:
           stubs pass it explicitly by name in their `secrets:` map (not
           `secrets: inherit`, which would expose every caller secret to this
           @main-pinned workflow — only the secrets declared here are consumed:
-          this one and OPENAI_API_KEY below). When present it's handed to
-          claude-code-action as github_token, so the agent acts as the machine
-          account: its branch pushes and the PR the post-step opens then trigger
-          CI and @review, which a GITHUB_TOKEN-authored PR cannot (GitHub's
-          recursion guard). The action also does NOT revoke a caller-provided
-          token, so the post-step can reuse it to open the PR deterministically.
-          When absent, the dev agent still works via the Claude App token but
-          issue-triggered PR creation degrades (no CI; blocked entirely where
-          Actions-PR-creation is disallowed). This is the identity layer for
-          @auto; model auth stays Workload Identity Federation regardless. See
-          design/auto-agent.md.
+          this one and OPENAI_API_KEY below). Named ONLY in the `gate` and
+          `land` jobs (issue #84; design/architecture.md → Landing job): the
+          gate's pre-agent writes (the 👀 ack, the stage move, the @auto
+          opt-in and counter reset) and the land job's push, PR, comments,
+          hand-back and stage move run as the machine account, so the pushed
+          branch and the PR trigger CI and @review, which a GITHUB_TOKEN push
+          or PR cannot (GitHub's recursion guard). The job that runs the
+          agent never sees it: the agent commits locally, with
+          claude-code-action's own App token as its GITHUB_TOKEN. When
+          absent, the land job falls back to the job token — the push and
+          the PR come from github-actions[bot] (no CI; blocked entirely where
+          Actions-PR-creation is disallowed), the documented degradation.
+          This is the identity layer for @auto; model auth stays Workload
+          Identity Federation regardless. See design/auto-agent.md.
         required: false
       OPENAI_API_KEY:
         description: >-
@@ -222,14 +238,33 @@ on:
         required: false
 
 jobs:
-  claude:
+  # TRUSTED: the trigger check and every write that must happen BEFORE the
+  # agent runs — the 👀 ack, the stage move to Agent, the @auto opt-in and
+  # counter reset. Names MARVIN_TOKEN; checks out nothing.
+  gate:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read          # trig's permission and PR lookups
+      pull-requests: write    # the refusal comment (job token); the ack, opt-in label and counter reset fall back to it
       issues: write
-      id-token: write
-      actions: read
+    outputs:
+      ok: ${{ steps.trig.outputs.ok }}
+      fork_head: ${{ steps.trig.outputs.fork_head }}
+      engine: ${{ steps.engine.outputs.engine }}
+      is_pr: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+      number: ${{ github.event.issue.number || github.event.pull_request.number }}
+      # The PR's live head branch (PR runs): the land job's pin for the
+      # manifest's branch, read here before any untrusted code ran.
+      head_branch: ${{ steps.engine.outputs.head_branch }}
+      # `true` when this run is in the @auto loop's hands: the trigger is
+      # @auto, or the issue/PR carries the `auto` label. A PR run that lands
+      # a commit then owes the `@review` hand-back; an issue run's PR gets
+      # the label.
+      auto: ${{ steps.engine.outputs.auto }}
+      # Labels the land job puts on a PR it opens or adopts for an issue run
+      # (JSON array): `auto` when the run is autonomous, plus the issue's
+      # engine:* labels (design/codex-engine.md).
+      pr_labels: ${{ steps.engine.outputs.pr_labels }}
     steps:
       # The trig check, the 👀 ack, and the Agent stage move all run
       # BEFORE the checkout: none of them touch the workspace (env-only script;
@@ -245,12 +280,13 @@ jobs:
       # Review after every review round. Mirror the action's word-boundary
       # trigger match and bot-actor rejection; only stage when it passes.
       #
-      # `ok` also gates the RUN pipeline (checkout, provisioning, the agent,
-      # the @auto opt-in), not just ack/stage: on PR-context events the gate
+      # `ok` also gates the RUN pipeline (the agent job — checkout,
+      # provisioning, the agent — and the land job; the @auto opt-in below),
+      # not just ack/stage: on PR-context events the gate
       # additionally resolves whether the target PR's head lives in a FORK
       # (`fork_head`), and a fork head forces ok=false so nothing downstream
       # runs — no checkout, no sync-branch, no claude-setup, no agent, no
-      # stage move (issue #59; header comment). Decided here, before any
+      # landing, no stage move (issue #59; header comment). Decided here, before any
       # checkout, from the PR's head-repo identity (not from who commented):
       # issue_comment looks the PR up via the API; pull_request_review /
       # pull_request_review_comment read it from the event payload. An API
@@ -489,10 +525,15 @@ jobs:
       # is the pre-existing no-op, not a silent Claude run. The former
       # residual gap — a bare @claude posted by MARVIN (a User the action
       # accepts) running the Claude path on a codex item — is closed now that
-      # the claude step is gated on steps.trig too (issue #59): marvin never
+      # the agent job is gated on steps.trig too (issue #59): marvin never
       # passes this check, so such a run skips (marvin-authored text is
       # de-fanged everywhere by design, and every stub excludes marvin at
       # the job level, so nothing relied on it running).
+      # The same label read decides the run's @auto standing (`auto`: an
+      # @auto trigger or an `auto` label — the land job's hand-back and PR
+      # labels key on it) and, on PR runs, reads the PR's live head branch
+      # for the land job's branch pin: both are facts the land job must take
+      # from this trusted job, never from the one that ran the agent.
       - name: Detect engine
         id: engine
         if: steps.trig.outputs.ok == 'true'
@@ -500,15 +541,47 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          PHRASE: ${{ inputs.trigger_phrase }}
+          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          # Review events carry the head ref in the payload; a PR comment
+          # needs one read.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           engine=claude
+          auto=false
+          labels=""
           if [ -n "${NUM:-}" ]; then
             labels=$(gh api "repos/$REPO/issues/$NUM/labels" --paginate \
                        --jq '.[].name' 2>/dev/null || true)
             grep -qx 'engine:codex' <<<"$labels" && engine=codex
+            grep -qx 'auto' <<<"$labels" && auto=true
           fi
-          echo "engine: $engine"
-          echo "engine=$engine" >>"$GITHUB_OUTPUT"
+          # An @auto mention is the opt-in even on an unlabeled item: the
+          # opt-in step below labels an existing PR, and the land job labels
+          # the PR it opens for an issue (the mention case was the gap that
+          # left inspect_ai#71/#74's PRs outside the loop).
+          [ "$PHRASE" = "@auto" ] && auto=true
+          # Labels for a PR the land job opens or adopts on an issue run:
+          # `auto` whenever this is an @auto run, plus the whole engine:*
+          # namespace (not just engine:codex, so future engines need no
+          # change here) — every PR-scoped run reads the PR's own labels, so
+          # without the copy an issue-selected engine would silently revert
+          # to Claude the moment the PR opens.
+          pr_labels=$(jq -nc --arg auto "$auto" --arg labels "$labels" \
+            '[($labels | split("\n")[] | select(startswith("engine:"))), (if $auto == "true" then "auto" else empty end)] | unique')
+          head_branch=""
+          if [ "$IS_PR" = "true" ]; then
+            head_branch="$HEAD_REF"
+            [ -n "$head_branch" ] || head_branch=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null || true)
+            [ -n "$head_branch" ] || echo "::warning::could not read PR #$NUM's head branch; the land job looks it up itself."
+          fi
+          echo "engine: $engine auto: $auto pr_labels: $pr_labels head_branch: ${head_branch:-n/a}"
+          {
+            echo "engine=$engine"
+            echo "auto=$auto"
+            echo "pr_labels=$pr_labels"
+            echo "head_branch=$head_branch"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Acknowledge trigger (eyes)
         if: steps.trig.outputs.ok == 'true'
@@ -541,215 +614,15 @@ jobs:
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}
 
-      # Full history + tags: setuptools-scm versioning needs tags, and Claude
-      # uses git log/blame to understand code. Costs ~1 min on large repos.
-      # Gated on the trigger check (issue #59): on pull_request_review /
-      # pull_request_review_comment events the default ref is
-      # refs/pull/N/merge, which CONTAINS a fork author's code when the head is
-      # a fork — and the provisioning step right after would execute it. A
-      # refused run checks nothing out at all.
-      # persist-credentials:false (issue #61): checkout otherwise writes the
-      # job token into .git/config for the rest of the job — and this job's
-      # codex path group-grants the whole workspace to the codex user, which
-      # could then read a contents-write token off disk. Nothing is persisted
-      # now; every later git network call authenticates itself (design/
-      # architecture.md → "No persisted git credentials"): the runner-side
-      # steps and the claude-code-action step through a step-scoped
-      # credential helper, the agent's pushes through the action's own
-      # origin-URL credential as before.
-      - uses: actions/checkout@v4
-        if: steps.trig.outputs.ok == 'true'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Regression guard for the invariant above (shared composite — one copy
-      # for all three workflows): asks git, which follows includes, for the
-      # header checkout would have persisted, keyed on the server URL.
-      - name: Assert no credential persisted in the workspace
-        if: steps.trig.outputs.ok == 'true'
-        uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
-
-      # ---- Deterministic base-branch sync (design/architecture.md) ---------
-      # The base merge happens HERE, on the runner, for BOTH engines — not in
-      # a prompt. Two reasons. The codex sandbox holds no credentials and is
-      # told not to fetch, so it cannot be asked to merge (instruction, not
-      # structure, since its sandbox gained network on 2026-09-09; the
-      # in-progress hand-off means it never needs to); and a prompted merge
-      # is advisory, so branches drifted anyway (inspect_ai#392 sat 11
-      # commits behind main across 20 commits — GitHub cannot compute a merge
-      # ref for a conflicted PR, so CI never ran and every review round read
-      # stale code). PR-context runs only: a fresh issue run branches off the
-      # hourly-synced base, so nothing to merge.
-      #
-      # The step body is the shared sync-branch composite (one copy for all
-      # three workflows; the per-engine conflict split is documented there).
-      # checkout: true because this job's actions/checkout landed on the
-      # event's default ref, not the PR head: the action resolves the head,
-      # skips closed/merged PRs and fork heads, and checks the branch out.
-      - name: Sync branch with base
-        id: sync
-        if: >-
-          steps.trig.outputs.ok == 'true' &&
-          (github.event.issue.pull_request != '' || github.event.pull_request != '')
-        uses: meridianlabs-ai/agents/.github/actions/sync-branch@main
-        with:
-          pr: ${{ github.event.issue.number || github.event.pull_request.number }}
-          engine: ${{ steps.engine.outputs.engine }}
-          token: ${{ github.token }}
-          checkout: "true"
-
-      # Provision the project environment so the agent's allow-listed
-      # pytest/ruff/mypy can actually run (a bare runner has neither the deps
-      # nor the package installed). Convention-based opt-in: a caller repo adds
-      # a `.github/actions/claude-setup` composite action that delegates to its
-      # existing, cache-backed CI setup — no install command is duplicated here,
-      # and the GitHub cache is the caller's (scoped to the run's repo), so it
-      # hits the same entries normal CI populates. `./` resolves against the
-      # checked-out workspace (the caller repo), not this workflow's repo. The
-      # hashFiles guard makes this a no-op for repos that don't define it.
-      # Fatal on failure: a broken setup surfaces loudly rather than silently
-      # degrading to static-only checks. See design/architecture.md.
-      # Gated on the trigger check too (issue #59): this executes whatever the
-      # checked-out tree supplies, so it must never run on a refused (fork-
-      # head) run — hashFiles alone would happily find a fork's action.
-      #
-      # ONE exception, the same one the loops make: the codex conflict path.
-      # sync-branch hands codex the base merge still IN PROGRESS, with
-      # conflict markers in the tree, and provisioning runs over that tree —
-      # so when pyproject.toml or the lockfile is among the conflicted files
-      # the install fails DETERMINISTICALLY, and a fatal failure here would
-      # skip the very run that exists to resolve the markers (every
-      # re-trigger failing the same way). So when the sync left conflicts
-      # (non-empty only on the codex path — the Claude path aborts its
-      # conflicted merge) a provisioning failure is tolerated: codex runs
-      # static-only, its prompt says so, and the next run — on the resolved
-      # branch — provisions normally. `outcome` still reads `failure` on the
-      # tolerated path (only `conclusion` is neutralized), which is what the
-      # prompt composer and the Surface step key on.
-      - name: Provision project environment
-        id: setup
-        if: >-
-          steps.trig.outputs.ok == 'true' &&
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
-        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
-        uses: ./.github/actions/claude-setup
-
-      # Fallback where claude-setup is absent — the shared provision-fallback
-      # composite the reviewer and both loops already use (the recipe, uv
-      # version, retry, extras/`--group dev` and the .git/info/exclude
-      # entries live there). The dev agent was the last path without it: on
-      # the inspect_ai fork every PR branch is cut from pristine main and
-      # carries no claude-setup, so a dev-verb run on a PR there — `@auto fix
-      # review feedback` on inspect_ai#428, 2026-09-09 — ran with no
-      # pytest/ruff/mypy at all. Claude installs its own so the gap only
-      # showed on codex, which (sandbox network still off at the time) tried
-      # an install, failed, pushed unformatted code with two mypy errors, and
-      # CI caught what the agent could not. Same trigger gate as the shim
-      # step: never on a refused run. Same conflicted-round tolerance as
-      # above — this is the step that actually runs on the fork's PR heads,
-      # where a conflicted dependency file would otherwise fail every
-      # re-trigger identically.
-      - name: Provision project environment (fallback)
-        id: setupfb
-        timeout-minutes: 10
-        if: >-
-          steps.trig.outputs.ok == 'true' &&
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
-          hashFiles('pyproject.toml') != ''
-        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
-        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
-
-      # Compose the appended-system-prompt sources into ONE value, so we emit a
-      # single --append-system-prompt flag. Multiple flags would force a bet on
-      # undocumented CLI behavior (accumulate vs. last-one-wins), and the sources
-      # co-occur on PR follow-ups (review_etiquette and the branch-sync sources
-      # fire there, and append_system_prompt fires on every run). PR context =
-      # an issue comment on a PR, or a review/review-comment event; fresh issue
-      # runs branch off the synced base and skip all of them. Within PR context
-      # the branch-sync sources are gated on what "Sync branch with base" did:
-      # branch_sync_prompt only when it handed the merge to the agent,
-      # branch_sync_append whenever a merge happened at all (see BRANCH_SYNC_
-      # APPEND below). Joined on one line so the toJSON splice below stays a
-      # clean single-quoted arg (a newline would survive toJSON as a literal \n
-      # in the shell-parsed args).
-      #
-      # REVIEW_ETIQUETTE mirrors the @auto review-fix loop's thread-resolution
-      # rule (claude-auto-review.yml): the dev agent is regularly invoked to
-      # address PR review comments (directly via @claude, or — as after an @auto
-      # escalation — because a handoff comment re-trips the kickoff gate), and
-      # without this it fixes the code but leaves the review thread open. gh api
-      # graphql is covered by the settings allow-list (Bash(gh:*)).
-      #
-      # REQUEST_REVIEW closes the loop when @auto is invoked on an *existing* PR
-      # (e.g. "@auto fix the review issue"): the kickoff runs this dev agent,
-      # which fixes and pushes — but the reviewer never re-runs on its own (no
-      # auto-review on push; on the fork the pull_request family doesn't fire at
-      # all), so without an explicit @review the loop stalls until a human asks.
-      # Gated to the @auto trigger (autonomous intent) so a plain @claude PR tweak
-      # doesn't spawn an unasked review, and to PR context (the issue->PR-open
-      # case posts @review from the Open-or-adopt post-step instead, via
-      # request_review_after_open, so it lands after the label).
-      # LANDING is always-on: the agent's work exists only on the ephemeral
-      # runner until pushed, and a run can never resume after its final turn.
-      # Observed failure (inspect_ai#195): full fix implemented and tested,
-      # then the agent ended its turn "waiting on" a verification subagent
-      # before committing — everything was lost, and the green run + tidy
-      # summary made it look done. Same lesson the reviewer prompt already
-      # carries; the deterministic backstop is the "Verify agent work landed"
-      # step below.
-      - name: Compose appended system prompt
-        id: sysprompt
-        env:
-          LANDING: "Your work exists ONLY on this ephemeral runner until it is committed and pushed — and a run can NEVER resume after your final turn ends. In THIS environment nothing can wake you: background tasks do NOT re-invoke you when they finish, their completion notifications never arrive, and a turn that ends 'waiting to be woken' simply ends the run and loses everything unpushed. So never end your turn waiting on anything — subagents, background commands, test suites: collect results in the foreground and complete the commit, push, and any PR or comment inside THIS run. If a final validation is long-running, commit/push/open the PR FIRST and let the PR's own CI be the gate (the automation reacts to it); an unpushed validated change is worth nothing, a pushed change awaiting CI is the normal pipeline."
-          # Spliced only when the runner-side sync could NOT land the merge
-          # itself — a conflict it had to abort to keep the index clean for
-          # setupBranch, or a fork head it declined (the latter unreachable
-          # here since issue #59: the trigger gate refuses fork heads before
-          # the sync step; the composite's skip is shared with the loops and
-          # kept as defense in depth). On the ordinary clean-merge path the
-          # branch is ALREADY current when the agent starts, and telling it to
-          # merge again is noise that invites a redundant push.
-          BRANCH_SYNC: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_prompt || '' }}
-          # branch_sync_append is NOT gated the same way: it must reach the
-          # agent whenever a merge happened this run, clean or delegated. The
-          # fork's append exists for a NON-conflicting mis-merge (git
-          # auto-merges CHANGELOG.md cleanly and lands the entry under the
-          # wrong heading), so on the clean path it rides behind a lead-in
-          # saying the runner already merged and the agent should review the
-          # result; on the delegated path it simply follows branch_sync_prompt.
-          AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
-          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
-          SYNC_BASE: ${{ steps.sync.outputs.base }}
-          SYNC_APPEND: ${{ inputs.branch_sync_append }}
-          REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address. In any comment you post, never write the review-comment HTML marker or the codex reviewer''s footer ''engine: codex'' verbatim: they are how the codex fix rounds locate the newest review, so a comment of yours carrying either would be mistaken for the review.' || '' }}"
-          REQUEST_REVIEW: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && inputs.trigger_phrase == '@auto' && 'This is an autonomous run on an existing pull request. If your work pushed any new commit to the PR, finish by posting a top-level comment of exactly @review so the automated reviewer re-runs — it does not run automatically on push. Do not post it if you made no code changes. That exact standalone comment is the ONLY place to write the token bare: in any other comment text, backtick it (`@review`) — a bare token anywhere in a comment body starts a review run. This applies even when this PR is CLOSED: a closed fork PR whose branch is shared with an upstream PR is the review surface for the continuation — the automated reviewer pins the live branch tip here — so post the @review on THIS PR regardless of its state, and never treat the upstream PR as the review surface (there is no write access there, and the loop cannot see it).' || '' }}"
-          EXTRA: ${{ inputs.append_system_prompt }}
-        run: |
-          # Flattened: a newline in the append would corrupt the value= output
-          # line below (and survive toJSON as a literal \n).
-          append=""
-          if [ -n "${SYNC_APPEND:-}" ]; then
-            if [ "${AGENT_MERGE:-}" = "1" ]; then
-              append=$(tr '\n' ' ' <<<"$SYNC_APPEND")
-            elif [ -n "${MERGE_SHA:-}" ]; then
-              append="A workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts); review that merge result against the following before making other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
-            fi
-          fi
-          combined=""
-          for part in "$LANDING" "$BRANCH_SYNC" "$append" "$REVIEW_ETIQUETTE" "$REQUEST_REVIEW" "$EXTRA"; do
-            [ -n "$part" ] && combined="${combined:+$combined }$part"
-          done
-          echo "value=$combined" >> "$GITHUB_OUTPUT"
-
       # @auto invoked on an *existing* PR (e.g. "@auto fix the review issue"):
       # opt that PR into the loop by applying the `auto` label. The review-fix
       # loop (claude-auto-review.yml) gates on this label. Applied BEFORE the
-      # agent runs (not in a post-step) so the label is in place before the
-      # agent posts its @review — otherwise a fast reviewer could post its
-      # summary while the PR is still unlabeled and the loop would skip it (the
-      # same race the issue->PR path avoids via request_review_after_open). The
-      # PR already exists here, so we can label it up front. Gated to the @auto
+      # agent runs (here, in the trusted gate) so the label is in place before
+      # the land job posts the `@review` hand-back the run's push owes —
+      # otherwise a fast reviewer could post its summary while the PR is still
+      # unlabeled and the loop would skip it (the same race the issue->PR path
+      # avoids by having `land` label before it posts the hand-back). The PR
+      # already exists here, so we can label it up front. Gated to the @auto
       # trigger: a write-access human typing @auto is exactly the opt-in the
       # label represents (a plain @claude PR run stays one-shot).
       # github.event.issue.number is the PR number on a PR comment. Idempotent;
@@ -804,43 +677,337 @@ jobs:
           pr: ${{ github.event.issue.number }}
           reason: "on re-engagement — fresh cap"
 
-      # Gated on the trigger check (issue #59): with the checkout skipped on a
-      # refused run there is no workspace for the action to fetch the fork
-      # head into, and "no agent" is the point of the refusal. Phantom
-      # substring runs (a backticked `@claude`) now skip this step instead of
-      # running it to a "No trigger found" no-op — same outcome, no action
-      # startup. The machine-account divergence noted at "Detect engine"
-      # (steps.trig excludes i-am-marvin; the action accepts it) is settled
-      # the same way: such a run skips rather than runs, which is the
-      # de-fanged-everywhere design intent, and every caller stub already
-      # excludes marvin at the job level.
+
+  # UNTRUSTED: the checkout, the provisioning and the agent. Names no secret
+  # but OPENAI_API_KEY (the codex engine's, unavoidably — design/
+  # codex-engine.md); the job token is read-only, so nothing here can push
+  # or post as this workflow's identity. The agent commits locally;
+  # `emit-landing` (last, always) packages the commits above the run's start
+  # SHA and the landing manifest for the land job.
+  agent:
+    needs: gate
+    if: needs.gate.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read          # checkout, sync fetches; cannot push
+      pull-requests: read     # the PR reads; cannot comment
+      issues: read
+      id-token: write         # WIF auth (and the action's own App token)
+      actions: read
+    steps:
+      # Full history + tags: setuptools-scm versioning needs tags, and Claude
+      # uses git log/blame to understand code. Costs ~1 min on large repos.
+      # This job is gated on the gate's trigger check (issue #59): on
+      # pull_request_review / pull_request_review_comment events the default
+      # ref is refs/pull/N/merge, which CONTAINS a fork author's code when the
+      # head is a fork — and the provisioning step right after would execute
+      # it. A refused run never starts this job, so nothing is checked out.
+      # persist-credentials:false (issue #61): checkout otherwise writes the
+      # job token into .git/config for the rest of the job — and this job's
+      # codex path group-grants the whole workspace to the codex user, which
+      # could then read the token off disk. Nothing is persisted; every later
+      # git network call authenticates itself (design/architecture.md → "No
+      # persisted git credentials"): the runner-side steps and the
+      # claude-code-action step through a step-scoped credential helper on
+      # the job token. The agent itself never pushes (issue #84).
+      - uses: actions/checkout@v4
+        id: checkout
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Regression guard for the invariant above (shared composite — one copy
+      # for all three workflows): asks git, which follows includes, for the
+      # header checkout would have persisted, keyed on the server URL.
+      - name: Assert no credential persisted in the workspace
+        id: assert
+        uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
+
+      # The start SHA of an ISSUE run: the tip of the base branch the agent
+      # branches from (claude-code-action's setupBranch and the codex prep
+      # step both cut the new branch off it), stamped before either runs.
+      # emit-landing bundles the commits above it and the land job refuses a
+      # HEAD that does not descend from it. PR runs take theirs from
+      # sync-branch instead (its PRE-merge tip, so a run whose only product
+      # is the runner's base merge still lands it; on a closed PR, which the
+      # sync skips, the live tip it read — the agent has to check that branch
+      # out itself there, as it always had to). The base branch name is the
+      # caller's input or the event's default branch — the same resolution
+      # claude-code-action makes — and the fetch-depth-0 checkout already
+      # holds every remote branch, so this is a local read. rev-parse on its
+      # own line under -e, so a failure is this step's; the Surface step
+      # names it, and the emit step falls back to github.sha so the manifest
+      # carrying that error still validates.
+      - name: Record base SHA
+        id: base
+        if: github.event.issue.pull_request == '' && github.event.pull_request == ''
+        env:
+          BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse "origin/$BASE")
+          echo "base branch $BASE is at $sha"
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+
+      # ---- Deterministic base-branch sync (design/architecture.md) ---------
+      # The base merge happens HERE, on the runner, for BOTH engines — not in
+      # a prompt. Two reasons. The codex sandbox holds no credentials and is
+      # told not to fetch, so it cannot be asked to merge (instruction, not
+      # structure, since its sandbox gained network on 2026-09-09; the
+      # in-progress hand-off means it never needs to); and a prompted merge
+      # is advisory, so branches drifted anyway (inspect_ai#392 sat 11
+      # commits behind main across 20 commits — GitHub cannot compute a merge
+      # ref for a conflicted PR, so CI never ran and every review round read
+      # stale code). PR-context runs only: a fresh issue run branches off the
+      # hourly-synced base, so nothing to merge.
       #
+      # The step body is the shared sync-branch composite (one copy for all
+      # three workflows; the per-engine conflict split is documented there).
+      # checkout: true because this job's actions/checkout landed on the
+      # event's default ref, not the PR head: the action resolves the head,
+      # skips closed/merged PRs and fork heads, and checks the branch out.
+      - name: Sync branch with base
+        id: sync
+        if: github.event.issue.pull_request != '' || github.event.pull_request != ''
+        uses: meridianlabs-ai/agents/.github/actions/sync-branch@main
+        with:
+          pr: ${{ github.event.issue.number || github.event.pull_request.number }}
+          engine: ${{ needs.gate.outputs.engine }}
+          token: ${{ github.token }}
+          checkout: "true"
+
+      # Provision the project environment so the agent's allow-listed
+      # pytest/ruff/mypy can actually run (a bare runner has neither the deps
+      # nor the package installed). Convention-based opt-in: a caller repo adds
+      # a `.github/actions/claude-setup` composite action that delegates to its
+      # existing, cache-backed CI setup — no install command is duplicated here,
+      # and the GitHub cache is the caller's (scoped to the run's repo), so it
+      # hits the same entries normal CI populates. `./` resolves against the
+      # checked-out workspace (the caller repo), not this workflow's repo. The
+      # hashFiles guard makes this a no-op for repos that don't define it.
+      # Fatal on failure: a broken setup surfaces loudly rather than silently
+      # degrading to static-only checks. See design/architecture.md.
+      # Runs only in this job, which the gate's trigger check admits (issue
+      # #59): this executes whatever the checked-out tree supplies, so it must
+      # never run on a refused (fork-head) run — hashFiles alone would happily
+      # find a fork's action.
+      #
+      # ONE exception, the same one the loops make: the codex conflict path.
+      # sync-branch hands codex the base merge still IN PROGRESS, with
+      # conflict markers in the tree, and provisioning runs over that tree —
+      # so when pyproject.toml or the lockfile is among the conflicted files
+      # the install fails DETERMINISTICALLY, and a fatal failure here would
+      # skip the very run that exists to resolve the markers (every
+      # re-trigger failing the same way). So when the sync left conflicts
+      # (non-empty only on the codex path — the Claude path aborts its
+      # conflicted merge) a provisioning failure is tolerated: codex runs
+      # static-only, its prompt says so, and the next run — on the resolved
+      # branch — provisions normally. `outcome` still reads `failure` on the
+      # tolerated path (only `conclusion` is neutralized), which is what the
+      # prompt composer and the Surface step key on.
+      - name: Provision project environment
+        id: setup
+        if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
+        uses: ./.github/actions/claude-setup
+
+      # Fallback where claude-setup is absent — the shared provision-fallback
+      # composite the reviewer and both loops already use (the recipe, uv
+      # version, retry, extras/`--group dev` and the .git/info/exclude
+      # entries live there). The dev agent was the last path without it: on
+      # the inspect_ai fork every PR branch is cut from pristine main and
+      # carries no claude-setup, so a dev-verb run on a PR there — `@auto fix
+      # review feedback` on inspect_ai#428, 2026-09-09 — ran with no
+      # pytest/ruff/mypy at all. Claude installs its own so the gap only
+      # showed on codex, which (sandbox network still off at the time) tried
+      # an install, failed, pushed unformatted code with two mypy errors, and
+      # CI caught what the agent could not. Same trigger gate as the shim
+      # step: never on a refused run. Same conflicted-round tolerance as
+      # above — this is the step that actually runs on the fork's PR heads,
+      # where a conflicted dependency file would otherwise fail every
+      # re-trigger identically.
+      - name: Provision project environment (fallback)
+        id: setupfb
+        timeout-minutes: 10
+        if: >-
+          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
+          hashFiles('pyproject.toml') != ''
+        continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
+        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+
+      # Compose the appended-system-prompt sources into ONE value, so we emit a
+      # single --append-system-prompt flag. Multiple flags would force a bet on
+      # undocumented CLI behavior (accumulate vs. last-one-wins), and the sources
+      # co-occur on PR follow-ups (review_etiquette and the branch-sync sources
+      # fire there, and append_system_prompt fires on every run). PR context =
+      # an issue comment on a PR, or a review/review-comment event; fresh issue
+      # runs branch off the synced base and skip all of them. Within PR context
+      # the branch-sync sources are gated on what "Sync branch with base" did:
+      # branch_sync_prompt only when it handed the merge to the agent,
+      # branch_sync_append whenever a merge happened at all (see BRANCH_SYNC_
+      # APPEND below). Joined on one line so the toJSON splice below stays a
+      # clean single-quoted arg (a newline would survive toJSON as a literal \n
+      # in the shell-parsed args).
+      #
+      # REVIEW_ETIQUETTE mirrors the @auto review-fix loop's thread-resolution
+      # rule (claude-auto-review.yml): the dev agent is regularly invoked to
+      # address PR review comments (directly via @claude, or — as after an @auto
+      # escalation — because a handoff comment re-trips the kickoff gate), and
+      # without this it fixes the code but leaves the review thread open. gh api
+      # graphql is covered by the settings allow-list (Bash(gh:*)) and runs as
+      # the action's App token (claude[bot]), as it always did on a marvin-less
+      # caller.
+      #
+      # LANDING is always-on and is where the agent learns the shape of this
+      # workflow (issue #84): it commits and stops. It holds no credential that
+      # may push or post as this workflow's identity — the land job pushes the
+      # branch's new commits as the machine account, opens the PR on an issue
+      # run (closing reference, run link, labels) and posts the comments the
+      # agent leaves in the landing manifest (`comments`, the one key it may
+      # write there), after the run ends. The old REQUEST_REVIEW paragraph (an
+      # @auto run on an existing PR posting `@review` itself) is gone: the
+      # hand-back is a field of the manifest, composed from the workflow's own
+      # "HEAD moved" test, so a push and its re-review request cannot come
+      # apart. The ENVIRONMENT part keeps the lesson from inspect_ai#195: full
+      # fix implemented and tested, then the agent ended its turn "waiting on"
+      # a verification subagent before committing — everything was lost, and
+      # the green run + tidy summary made it look done. Same lesson the
+      # reviewer prompt already carries; the deterministic backstop is now the
+      # Surface step's uncommitted-edits check, and the push itself is the
+      # workflow's.
+      - name: Compose appended system prompt
+        id: sysprompt
+        env:
+          LANDING_DIR: ${{ runner.temp }}/landing
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          # Spliced only when the runner-side sync could NOT land the merge
+          # itself — a conflict it had to abort to keep the index clean for
+          # setupBranch, or a fork head it declined (the latter unreachable
+          # here since issue #59: the trigger gate refuses fork heads before
+          # the sync step; the composite's skip is shared with the loops and
+          # kept as defense in depth). On the ordinary clean-merge path the
+          # branch is ALREADY current when the agent starts, and telling it to
+          # merge again is noise.
+          BRANCH_SYNC: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_prompt || '' }}
+          # branch_sync_append is NOT gated the same way: it must reach the
+          # agent whenever a merge happened this run, clean or delegated. The
+          # fork's append exists for a NON-conflicting mis-merge (git
+          # auto-merges CHANGELOG.md cleanly and lands the entry under the
+          # wrong heading), so on the clean path it rides behind a lead-in
+          # saying the runner already merged and the agent should review the
+          # result; on the delegated path it simply follows branch_sync_prompt.
+          AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          SYNC_BASE: ${{ steps.sync.outputs.base }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
+          REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address. In any comment you post, never write the review-comment HTML marker or the codex reviewer''s footer ''engine: codex'' verbatim: they are how the codex fix rounds locate the newest review, so a comment of yours carrying either would be mistaken for the review.' || '' }}"
+          EXTRA: ${{ inputs.append_system_prompt }}
+        run: |
+          # The landing directory exists before the agent starts, runner-owned,
+          # so the agent writes its manifest-extra.json and body files straight
+          # into it (the codex path never writes there; its summary is composed
+          # by a runner step).
+          mkdir -p "$LANDING_DIR"
+          what="issue"; [ "$IS_PR" = "true" ] && what="pull request"
+          # Single line: the value is spliced as one arg downstream (a newline
+          # would corrupt the value= output line below and survive toJSON as a
+          # literal \n).
+          landing="LANDING (mandatory): you hold no credential that may push or post as this workflow's identity, so do NOT push, do NOT open a pull request, and do NOT post comments, reviews or reactions yourself — COMMIT your work to the current branch with git and stop. The workflow lands it after your run ends: it pushes the branch's new commits as the machine account (which runs CI) and, on an issue-triggered run, opens the pull request for you with the closing reference to the issue and a link to this run (on a pull request it pushes to the PR branch); your latest commit's subject and body become the PR title and description, so write them as such. The push-then-'Create a PR' flow the action's own instructions describe does not apply here — the push and the PR are the workflow's. To leave a comment on $what #$NUM (an answer, a question for the requester, something a reviewer must know), write the body to a file under $LANDING_DIR/ (file names must match [A-Za-z0-9._-] and must not start with a dot) and append {\"number\": $NUM, \"body_file\": \"<file name relative to $LANDING_DIR>\"} to the \`comments\` array in $LANDING_DIR/manifest-extra.json — one JSON object with at most that one key and nothing else; create the file if it does not exist and rewrite it whole when you update it, so it is valid JSON when your turn ends (an unparsable file drops everything in it). The workflow posts those bodies as the machine account after the push. In commit messages and in every body you write, never write the trigger tokens bare — backtick them (\`@review\`): they render from a write-access account, where a bare token starts a workflow. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until it is committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn ends. In THIS environment nothing can wake you: background tasks do NOT re-invoke you when they finish, their completion notifications never arrive, and a turn that ends 'waiting to be woken' simply ends the run and loses everything uncommitted. So never end your turn waiting on anything — subagents, background commands, test suites: collect results in the foreground and complete the commit inside THIS run. If a final validation is long-running, commit FIRST and let the PR's own CI be the gate; an uncommitted validated change is worth nothing. Uncommitted edits to tracked files are lost with the runner and reported to the $what as an error, so commit everything you mean to keep and revert scratch edits to tracked files you do not."
+          append=""
+          if [ -n "${SYNC_APPEND:-}" ]; then
+            if [ "${AGENT_MERGE:-}" = "1" ]; then
+              append=$(tr '\n' ' ' <<<"$SYNC_APPEND")
+            elif [ -n "${MERGE_SHA:-}" ]; then
+              append="A workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts); review that merge result against the following before making other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
+            fi
+          fi
+          combined=""
+          for part in "$landing" "$BRANCH_SYNC" "$append" "$REVIEW_ETIQUETTE" "$EXTRA"; do
+            [ -n "$part" ] && combined="${combined:+$combined }$part"
+          done
+          echo "value=$combined" >> "$GITHUB_OUTPUT"
+
+      # The agent's push and posting channels are closed in settings, not only
+      # in the prompt: `Bash(git push:*)` is stripped from the caller's allow
+      # list and put on a `deny` list together with claude-code-action's
+      # tag-mode push wrapper — the action's own prompt tells the agent to
+      # push through `<action path>/scripts/git-push.sh origin <branch>` and
+      # allows it by that path, which a `git push` prefix rule never sees (a
+      # `*` matches anywhere in a Bash rule) — and the gh verbs that post or
+      # open things (deny beats allow in Claude Code, so this holds against a
+      # caller's `settings`, any claude_args override and the action's own
+      # --allowedTools). Guard rails, not a security boundary: `Bash(gh:*)`
+      # stays allowed because the PR and CI reads go through it, so `gh api
+      # -X POST/PATCH`, `gh pr edit|close|ready` or a `git -C . push` pass the
+      # listed prefixes while the action's own App token — NOT scoped to this
+      # job's read-only permissions; it carries the App's contents/PR/issues
+      # write — is in reach. What holds structurally is the split: nothing the
+      # agent can reach is marvin's identity, so a write that slipped past
+      # would be claude[bot]'s — attributable, and exactly what the dev agent
+      # held on a marvin-less caller before — never the machine account's. Tag
+      # mode installs the action's comment server (the tracking comment the
+      # agent updates with its answer; that stays) and, only with
+      # use_commit_signing, a file-ops server that commits server-side — not
+      # enabled here, so there is no API-side push to deny. Claude path only:
+      # codex composes its own prompt and holds no settings, so a failure here
+      # must not skip it. Same shape as the loops' step; keep them in step.
+      - name: Compose agent settings (deny pushes and posts)
+        id: agentsettings
+        if: needs.gate.outputs.engine != 'codex'
+        env:
+          SETTINGS: ${{ inputs.settings }}
+        run: |
+          set -euo pipefail
+          # The action documents `settings` as a JSON string OR a path to a
+          # settings file (its setupClaudeCodeSettings tries JSON.parse
+          # first, then reads the path relative to the workspace — i.e. a
+          # file from this checkout, which the deny overlay below then
+          # covers like any other). Mirror that, since the value is
+          # transformed here before the action sees it; anything else fails
+          # loudly and the Surface step reports it (AGENTSETTINGS_OUTCOME) —
+          # the action step is skipped, not failed, so nothing else would.
+          [ -n "$SETTINGS" ] || SETTINGS='{}'
+          is_object() { printf '%s' "$1" | jq -e 'type == "object"' >/dev/null 2>&1; }
+          if ! is_object "$SETTINGS" && [ -f "$SETTINGS" ]; then
+            echo "settings input is a path; reading $SETTINGS"
+            SETTINGS=$(cat "$SETTINGS")
+          fi
+          is_object "$SETTINGS" || { echo "::error::the settings input is neither a JSON object nor a path to a file holding one"; exit 1; }
+          deny='["Bash(git push:*)","Bash(*/scripts/git-push.sh *)","Bash(gh pr comment:*)","Bash(gh issue comment:*)","Bash(gh pr review:*)","Bash(gh pr create:*)","Bash(gh pr merge:*)","Bash(gh issue create:*)"]'
+          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson d "$deny" '
+            .permissions.allow = ((.permissions.allow // []) - $d)
+            | .permissions.deny = (((.permissions.deny // []) + $d) | unique)')
+          {
+            echo "value<<SETTINGS_EOF"
+            printf '%s\n' "$merged"
+            echo "SETTINGS_EOF"
+          } >>"$GITHUB_OUTPUT"
+
       # GIT_CONFIG_* env (issue #61): with nothing persisted by checkout, the
       # action's own git needs a credential BEFORE it configures one — tag
       # mode's setupBranch runs `git fetch origin <branch>` (and `git
       # ls-remote` on issue runs) ahead of configureGitAuth (its
       # src/modes/tag/index.ts), which used to ride on checkout's persisted
-      # header and would now fail on a private caller. This defines a
-      # credential helper, in this step's environment only, that answers a
-      # 401 from GIT_TOKEN. It does NOT change who the agent pushes as: the
-      # action then rewrites the origin URL to carry github_token, and a
-      # URL-embedded credential takes precedence over helpers — so on repos
-      # without MARVIN_TOKEN the push still goes out as the Claude App (which
-      # triggers CI), not as github-actions[bot]. What the agent can read:
-      # on MARVIN repos nothing new — the same token is already in its
-      # environment as GITHUB_TOKEN (that is what its `gh` calls use). On a
-      # marvin-less repo GIT_TOKEN is the JOB token, which the agent could
-      # not read before (its GITHUB_TOKEN is the Claude App token there, and
-      # the action strips checkout's copy) — bounded by the caller's
-      # `permissions:` block, on a repo the agent already writes to. The
-      # helper is scoped to this server's URL, so a `git fetch` the agent
-      # aims at any other host (its allow-list permits the verb) gets no
-      # credential.
+      # header and would fail on a private caller. This defines a credential
+      # helper, in this step's environment only, that answers a 401 from
+      # GIT_TOKEN — the JOB token (issue #84): no github_token is passed, so
+      # the action mints its own App token through the OIDC exchange (as the
+      # reviewer's and the loops' steps do) and the machine-account PAT is nowhere in
+      # this job. The agent never pushes: its branch for an issue run is
+      # created LOCALLY (setupBranch's `git checkout -b`, verified in the
+      # action's src/github/operations/branch.ts — no push), and the action's
+      # post-run step (src/github/operations/branch-cleanup.ts) only
+      # auto-commits, links or deletes a branch that already exists on
+      # origin, which this one never does; the land job pushes the commits
+      # and opens the PR. The helper is scoped to this server's URL, so a
+      # `git fetch` the agent aims at any other host (its allow-list permits
+      # the verb) gets no credential.
       - uses: anthropics/claude-code-action@v1
-        if: steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine != 'codex'
+        if: needs.gate.outputs.engine != 'codex'
         id: claude
         env:
-          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GIT_TOKEN: ${{ github.token }}
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
           GIT_CONFIG_VALUE_0: ""
@@ -854,284 +1021,35 @@ jobs:
           trigger_phrase: ${{ inputs.trigger_phrase }}
           label_trigger: ${{ inputs.label_trigger }}
           base_branch: ${{ inputs.base_branch }}
-          # Machine-account identity (empty falls back to the Claude App token).
-          # Passing it also stops the action revoking it, so the post-step below
-          # can reuse the same live token to open the PR. See secrets.MARVIN_TOKEN.
-          github_token: ${{ secrets.MARVIN_TOKEN }}
-          settings: ${{ inputs.settings }}
+          settings: ${{ steps.agentsettings.outputs.value }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
             ${{ inputs.claude_args }}
 
-      # The action leaves its github_token in remote.origin.url, and git never
+      # The action leaves its App token in remote.origin.url, and git never
       # falls back to a helper when the URL carries a credential (a 401 there
-      # rejects outright). Reset the URL so every later `git fetch`/`git push
-      # origin` in this job — the backstop, Open or adopt PR, Verify agent
-      # work landed — reaches its own step-scoped helper as designed. This is
-      # what makes the marvin-less path work at all: there the URL token is
-      # the Claude App token, which the action revokes in its own final step,
-      # so those fetches failed ("not on origin", no PR opened) before this
-      # existed. Also stops the token sitting in .git/config for the rest of
-      # the job. always(): a failed or cancelled agent leaves the URL
-      # rewritten too, and the backstop below runs on those paths.
+      # rejects outright). Reset the URL so the token does not sit in
+      # .git/config for the rest of the job and so any later runner-side
+      # fetch reaches its own step-scoped helper. One mechanism across the
+      # workflows. always(): a failed or cancelled agent leaves the URL
+      # rewritten too.
       - name: Reset origin URL after the agent
         if: always() && steps.claude.outcome != 'skipped'
         uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
 
-      # If the runner's base merge is STILL the branch tip, the agent finished
-      # without committing anything of its own — and on a PR run nothing else
-      # pushes it. Land it anyway: restoring the PR to mergeable is what lets
-      # GitHub compute a merge ref again, which is what lets CI run at all.
-      # Gated on HEAD being EXACTLY that merge commit, so an agent that
-      # committed on top — pushed, or deliberately not — is never second-
-      # guessed. always(), so a failed or cancelled agent still leaves the
-      # branch current rather than resuming tomorrow's drift — but fenced on
-      # the agent having actually STARTED. When the fence was added,
-      # claude-code-action alone authorized the commenter (it fails its step
-      # for an actor without write access), so an unfenced always() would
-      # have let an outsider's @claude on a public repo's behind PR produce a
-      # machine-account push and a CI re-run: a write reachable without write
-      # access. steps.trig now verifies write access itself (issue #92), so
-      # an outsider never reaches the sync step; the fence stays as defense
-      # in depth — the two checks are independent lookups.
-      # The execution file is the evidence: the action writes it only after
-      # the Claude session (or on an SDK error mid-run), never when it
-      # declines the actor or dies before starting Claude — verified in its
-      # src/entrypoints/run.ts and base-action/src/execution-file.ts. A run
-      # whose agent never started leaves the merge on the runner; the next
-      # authorized run re-merges.
-      #
-      # A push here on an @auto run also owes the re-review request. The
-      # Claude path otherwise relies on the REQUEST_REVIEW prompt, which tells
-      # the agent NOT to post when it made no code changes — so a Q&A @auto
-      # run on a behind branch would move the head with nobody requesting
-      # re-review, and "Stage - Review (hand-back)" skips because this counts
-      # as a successful @auto PR run: board stranded at Agent. Mirrors the
-      # codex landing step's deterministic post; gated on the agent having
-      # succeeded (like the loops' "Ensure hand-back after push"), since a
-      # failed agent is already handed to a human by the Surface step. The
-      # post retries with backoff like the loops' step does — this comment IS
-      # the hand-back — and both steps have ids so a failure in either (push
-      # or post) reaches the Surface step, which comments on the PR and fails
-      # the job; that in turn switches off the successful-@auto-PR-run
-      # exception in "Stage - Review (hand-back)", so the board moves instead
-      # of sitting at Agent with a red job and nothing on the PR.
-      #
-      # Shared push-base-merge composite (exact-SHA gate, non-fast-forward
-      # guard, push). One input differs from the loops' calls: require-file
-      # carries the execution-file fence (the loops' own gate already
-      # authorized the actor, so they leave it empty), with the same fallback
-      # path the Surface step uses because the action's output is unset when
-      # its step fails even though the file is there if Claude ran.
-      # push-token is the machine account where the caller has it (the push
-      # must trigger CI; the `|| github.token` fallback degrades exactly as
-      # every other marvin-less push does: github-actions[bot], no CI) — the
-      # composite authenticates its own push, step-scoped; nothing is
-      # persisted by this job's checkout, and the origin-URL reset above is
-      # what lets its helper be consulted at all (a URL credential would win
-      # — on a marvin-less caller a revoked one, failing the fetch).
-      - name: Push base merge if unpushed
-        id: backstop
-        if: >-
-          always() && steps.engine.outputs.engine != 'codex' &&
-          steps.sync.outputs.merge_sha != ''
-        uses: meridianlabs-ai/agents/.github/actions/push-base-merge@main
-        with:
-          branch: ${{ steps.sync.outputs.branch }}
-          merge_sha: ${{ steps.sync.outputs.merge_sha }}
-          require-file: ${{ steps.claude.outputs.execution_file || '/home/runner/work/_temp/claude-execution-output.json' }}
-          push-token: ${{ secrets.MARVIN_TOKEN || github.token }}
-
-      # merge_sha is only set on PR-context runs, so this IS a PR: an @auto
-      # push to an existing PR owes a re-review (the reviewer does not run on
-      # push). Gated on the backstop having actually pushed — a skipped push
-      # (agent never ran, agent commits on top, already on origin, remote
-      # moved) owes nothing. Like the loops' step it first checks for a
-      # hand-back already posted since the run started (the agent posting
-      # @review anyway — the prompt's "not on no-change runs" is advisory —
-      # or a human requesting a review mid-run), so it never double-posts
-      # and spawns two review runs. Retries with backoff (same shape as the
-      # loops' "Ensure hand-back after push"): a swallowed 5xx here (observed there:
-      # GitHub 503 during an outage) would leave the merge pushed and the
-      # board stranded at Agent. Fails loudly if the post never lands; the
-      # Surface step reads this step's outcome and turns that into a PR
-      # comment.
-      - name: Request re-review after backstop push
-        id: handback
-        if: >-
-          always() && steps.backstop.outputs.pushed == '1' &&
-          inputs.trigger_phrase == '@auto' && steps.claude.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-          SINCE: ${{ steps.sync.outputs.started }}
-        run: |
-          set -euo pipefail
-          # Same "already posted this run" check as the loops' step: an exact
-          # @review comment or a LEADING hand-off marker since the run started
-          # means the hand-back exists — posting again would start a second
-          # review run (the older one cancelled by newest-wins), or re-review a
-          # PR the agent just handed to a human. The marker is matched as the
-          # first line (same shape as the loops' selfhandoff detector), not as
-          # a substring: claude-code-action's tracking comment is created after
-          # `started` and rewritten with the agent's final summary, and an
-          # agent editing these workflows routinely writes about the marker in
-          # prose — a substring match would read that as a posted hand-back and
-          # skip the one owed here. An API failure reads as 0 and
-          # falls through to posting — the safe completion. An empty SINCE
-          # gets the same treatment: GitHub ignores an empty `since=` rather
-          # than rejecting it, so the unguarded call would match every old
-          # hand-back on the PR and silently skip the one owed now. The
-          # composite stamps `started` first, so this only bites when the
-          # workflow and sync-branch@main skew (a branch-tested claude.yml
-          # against an older composite).
-          posted=0
-          if [ -n "${SINCE:-}" ]; then
-            posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
-              --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
-          fi
-          if [ "${posted:-0}" -gt 0 ]; then
-            echo "Hand-back already posted this run; not posting another."
-            exit 0
-          fi
-          ok=""
-          for i in 1 2 3 4 5; do
-            if gh pr comment "$NUM" --repo "$REPO" --body '@review'; then ok=1; break; fi
-            echo "hand-back post failed (attempt $i); retrying"
-            sleep $((i * 15))
-          done
-          if [ -z "$ok" ]; then
-            echo "::error::hand-back @review comment failed after 5 attempts — post it manually"
-            exit 1
-          fi
-
-      # The agent's OWN push owes the same hand-back, and the step above only
-      # covers the runner's base-merge push. Observed on fork PR #416
-      # (2026-09-03): an @auto run on a closed-PR continuation pushed its fix
-      # to the shared branch, then reasoned "this PR is closed and superseded,
-      # the upstream PR is the review surface" and skipped the @review — so
-      # nothing requested a review, the loop never engaged, and "Stage -
-      # Review (hand-back)" kept the board at Agent expecting the loop to own
-      # it. Mirror the loops' "Ensure hand-back after push": on an @auto PR
-      # run with a successful agent, if the PR's head branch tip moved during
-      # the run and no @review / leading hand-off marker was posted since,
-      # post the @review. "Moved" is the live tip against the live tip
-      # sync-branch recorded before the agent ran (its `head_sha`, emitted
-      # before its closed-PR skip — that skip is why `branch`/`start_sha` are
-      # empty in exactly the continuation case), so like the loops' SHA
-      # comparison it also catches a fast-forward of pre-existing commits
-      # (the agent pulling the upstream PR's branch), which a commit-date
-      # filter would miss. The branch is read live from the PR because the
-      # sync outputs are empty on closed PRs. Every read is fail-safe: `gh
-      # api` prints the error body to STDOUT on a non-2xx, so a swallowed
-      # status would post a review on a merged PR whose branch is gone, or on
-      # a 5xx — the values are validated and the check skips instead.
-      # Same since-check as the step above (the two never double-post), same
-      # retry/backoff, same loud failure into the Surface step. Gated on the
-      # trigger like the other post-agent steps: a comment that merely quotes
-      # the phrase passes the stub's contains() filter but fails the
-      # word-boundary check, and no agent runs (the claude step is now gated
-      # on the same check; before that it ran to a "No trigger found" no-op)
-      # — the unguarded step would warn about a missing run-start stamp on a
-      # run where no agent ran.
-      - name: Ensure hand-back after agent push
-        id: agentpush
-        if: >-
-          always() && steps.trig.outputs.ok == 'true' &&
-          steps.claude.outcome == 'success' &&
-          inputs.trigger_phrase == '@auto' &&
-          (github.event.issue.pull_request != '' || github.event.pull_request != '')
-        env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-          SINCE: ${{ steps.sync.outputs.started }}
-          START_TIP: ${{ steps.sync.outputs.head_sha }}
-        run: |
-          set -uo pipefail
-          if [ -z "${SINCE:-}" ]; then
-            echo "::warning::no run-start stamp from sync-branch; cannot judge whether the agent pushed — skipping the hand-back check"
-            exit 0
-          fi
-          # Fork heads owe nothing (no engine can push there — the same skip
-          # sync-branch applies), and must not be looked up: headRefName is
-          # the FORK's branch name, and a base-repo branch of the same name
-          # (a fork's `main`, on a repo whose main is re-synced hourly) would
-          # have its own commits counted as the agent's push. Unreachable
-          # since issue #59 (the trigger gate refuses fork heads, so no agent
-          # runs and this step is skipped); kept as defense in depth, a
-          # re-resolution of the same property from the same API field.
-          prj=$(gh pr view "$NUM" --repo "$REPO" --json headRefName,isCrossRepository 2>/dev/null) || prj=""
-          branch=$(jq -r '.headRefName // empty' <<<"${prj:-null}")
-          if [ -z "$branch" ]; then
-            echo "::warning::could not read the head branch of PR #$NUM; skipping the hand-back check"
-            exit 0
-          fi
-          if [ "$(jq -r '.isCrossRepository' <<<"$prj")" = "true" ]; then
-            echo "PR #$NUM has a fork head; nothing pushes there — no hand-back owed."
-            exit 0
-          fi
-          tip=$(gh api "repos/$REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null) || tip=""
-          [[ "$tip" =~ ^[0-9a-f]{40}$ ]] || tip=""
-          if [ -z "$tip" ]; then
-            echo "::warning::could not read the tip of $branch (branch deleted, or API error); skipping the hand-back check"
-            exit 0
-          fi
-          if [ -n "${START_TIP:-}" ]; then
-            if [ "$tip" = "$START_TIP" ]; then
-              echo "Tip of $branch unchanged ($tip); no hand-back owed."
-              exit 0
-            fi
-            moved="$START_TIP -> $tip"
-          else
-            # No pre-run tip (sync-branch's read failed, or a branch-tested
-            # claude.yml against an older composite): fall back to commits
-            # dated after the run started. Weaker (a fast-forward of older
-            # commits reads as 0) but still fail-safe: a non-number means an
-            # API error, and that skips rather than posts.
-            if ! pushed=$(gh api "repos/$REPO/commits?sha=$branch&since=$SINCE&per_page=5" --jq 'length' 2>/dev/null) \
-               || ! [[ "$pushed" =~ ^[0-9]+$ ]]; then
-              echo "::warning::could not list commits on $branch since $SINCE; skipping the hand-back check"
-              exit 0
-            fi
-            if [ "$pushed" -eq 0 ]; then
-              echo "No commits on $branch since $SINCE; no hand-back owed."
-              exit 0
-            fi
-            moved="$pushed commit(s) since $SINCE"
-          fi
-          posted=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
-            --jq '[.[] | select((.body | test("^\\s*@review\\s*$")) or (.body | startswith("<!-- auto-handoff -->")))] | length' 2>/dev/null || echo 0)
-          if [ "${posted:-0}" -gt 0 ]; then
-            echo "Hand-back already posted this run; not posting another."
-            exit 0
-          fi
-          echo "Agent pushed to $branch this run ($moved) without a hand-back; posting the re-review request."
-          ok=""
-          for i in 1 2 3 4 5; do
-            if gh pr comment "$NUM" --repo "$REPO" --body '@review'; then ok=1; break; fi
-            echo "hand-back post failed (attempt $i); retrying"
-            sleep $((i * 15))
-          done
-          if [ -z "$ok" ]; then
-            echo "::error::hand-back @review comment failed after 5 attempts — post it manually"
-            exit 1
-          fi
-
       # ---- Codex engine (design/codex-engine.md) ----------------------------
-      # The codex sandbox has no GitHub credentials, so unlike
-      # the Claude path the agent only edits the working tree: these steps
-      # prepare the branch, feed the task in a prompt file, then commit/push
-      # and post deterministically. claude-code-action's internal branch
+      # The codex sandbox has no GitHub credentials, so the agent only edits
+      # the working tree: these steps prepare the branch, feed the task in a
+      # prompt file, then a runner step commits deterministically and the
+      # land job pushes and posts. claude-code-action's internal branch
       # handling is unavailable here, so the prep step reproduces it: PR runs
       # check out the PR head; issue runs cut a claude/issue-N-* branch (the
       # board's join convention) off the base.
       - name: Prepare workspace (codex)
         id: codexprep
-        if: steps.engine.outputs.engine == 'codex'
+        if: needs.gate.outputs.engine == 'codex'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1204,7 +1122,7 @@ jobs:
       # which skips the compose and the agent; the Surface step names it.
       - name: Fetch PR thread for codex prompt
         id: codexfeedback
-        if: steps.engine.outputs.engine == 'codex' && (github.event.issue.pull_request != '' || github.event.pull_request != '')
+        if: needs.gate.outputs.engine == 'codex' && (github.event.issue.pull_request != '' || github.event.pull_request != '')
         uses: meridianlabs-ai/agents/.github/actions/pr-feedback-context@main
         with:
           token: ${{ github.token }}
@@ -1214,7 +1132,7 @@ jobs:
 
       - name: Compose codex prompt
         id: codexcompose
-        if: steps.engine.outputs.engine == 'codex'
+        if: needs.gate.outputs.engine == 'codex'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1388,12 +1306,12 @@ jobs:
       # on `steps.codexuser.outcome`.
       - name: Create codex user
         id: codexuser
-        if: steps.engine.outputs.engine == 'codex'
+        if: needs.gate.outputs.engine == 'codex'
         uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
 
       - name: Run Codex
         id: codexrun
-        if: steps.engine.outputs.engine == 'codex'
+        if: needs.gate.outputs.engine == 'codex'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -1402,13 +1320,13 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          # Authorization: steps.trig verified the actor's write access
+          # Authorization: the gate's trig step verified the actor's write access
           # before anything ran (issue #92), so an outsider's trigger on an
           # engine:codex item never reaches this step; codex-action's own
           # built-in write-access check on the triggering actor is the second,
           # independent gate (mirroring the Claude path, where
           # claude-code-action's internal check is the second one). No
-          # allow-bot-users: bot actors never pass steps.trig, so none reach
+          # allow-bot-users: bot actors never pass the gate's trig step, so none reach
           # this step — matching the Claude path, which sets no allowed_bots
           # on this verb either.
           prompt-file: .codex-prompt.md
@@ -1420,12 +1338,11 @@ jobs:
       # .git), and restore the pre-codex .git/config that `Create codex user`
       # snapshotted (design/codex-engine.md → Hook-safe landing). Runs BEFORE
       # the guard and the landing so that every later step reads a clean
-      # config regardless of how codex, the guard or the landing ended. This
-      # workflow's post-codex git users are all gated on the landing having
-      # succeeded, so the exposure the loops had (a hand-back fetch through
-      # codex's config) never existed here — the step is the same one for
-      # consistency and so the invariant is structural, not per-gate. Runs
-      # no git itself.
+      # config regardless of how codex, the guard or the commit step ended.
+      # Every later step that runs git here — the guard, the commit step, the
+      # manifest composer and emit-landing — is gated on the guard, which is
+      # gated on this step's success (AGENTS.md → the codex path). Runs no
+      # git itself.
       - name: Reclaim workspace from codex
         id: codexreclaim
         if: always() && steps.codexuser.outcome == 'success'
@@ -1441,7 +1358,7 @@ jobs:
       # continue-on-error makes that structural — a failure here must never
       # trip the landing step's implicit success() gate and strand the work.
       - name: Codex usage
-        if: always() && steps.engine.outputs.engine == 'codex'
+        if: always() && needs.gate.outputs.engine == 'codex'
         continue-on-error: true
         uses: meridianlabs-ai/agents/.github/actions/codex-usage@main
         with:
@@ -1462,42 +1379,38 @@ jobs:
         with:
           conflicts: ${{ steps.sync.outputs.conflicts }}
 
-      # Land the codex work: commit + push (as the machine account, so the
-      # push triggers CI), expose branch_name so the Open-or-adopt step below
-      # opens/labels the PR on issue runs, post the final message, and on
-      # @auto PR runs post the re-review hand-back the push now owes. This
-      # step failing fails the run loudly — codex work cannot strand silently.
+      # Commit the codex work: the commit half of the old "Land codex work"
+      # step (issue #84). The push, the summary comment, the thread
+      # resolutions and the re-review hand-back are the land job's, from the
+      # manifest — emit-landing bundles START_SHA..HEAD at the end of this
+      # job. No credential here. This step failing fails the run loudly —
+      # codex work cannot strand silently.
       #
-      # First credentialed step after codex had write access to the
-      # workspace. The reclaim step above already took .git back and restored
-      # the pre-codex .git/config (remote URLs, credential/http keys, filter
-      # drivers, fsmonitor, hooksPath — anything codex wrote there is gone),
-      # and this step trusts nothing else under .git (design/codex-engine.md
-      # → hook-safe landing): the git dir is pinned by env
-      # (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a .git/commondir file
-      # could not redirect git to a config codex owns even if the reclaim's
-      # refusal had missed it (gitrepository-layout(5): that file sets
-      # GIT_COMMON_DIR unless the env already does), and the GIT_CONFIG_* env
-      # below re-pins the two things a config restore cannot: hooks live as
-      # FILES in .git/hooks, so hooksPath points at an empty, runner-only
+      # First git-running step after codex had write access to the workspace
+      # (the guard above reads only). The reclaim step already took .git back
+      # and restored the pre-codex .git/config (remote URLs, credential/http
+      # keys, filter drivers, fsmonitor, hooksPath — anything codex wrote
+      # there is gone), and this step trusts nothing else under .git
+      # (design/codex-engine.md → hook-safe landing): the git dir is pinned
+      # by env (GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE), so a .git/commondir
+      # file could not redirect git to a config codex owns even if the
+      # reclaim's refusal had missed it (gitrepository-layout(5): that file
+      # sets GIT_COMMON_DIR unless the env already does), and the GIT_CONFIG_*
+      # env below re-pins the two things a config restore cannot: hooks live
+      # as FILES in .git/hooks, so hooksPath points at an empty, runner-only
       # path; and the index may carry the fsmonitor extension, so fsmonitor
       # is off. The reclaim already moved .git/hooks aside and appended the
       # same two keys to the restored config for every later step; the env
-      # pin here is belt and braces on the step that pushes. GIT_CONFIG_GLOBAL
+      # pin here is belt and braces on the step that commits. GIT_CONFIG_GLOBAL
       # skips the runner's ~/.gitconfig as well: codex is in the runner
       # group, and a group-writable home file would sit outside the restore
       # (the hosted image ships it runner-only; this makes that structural —
       # identity for the commit is in the repo config the reclaim restored).
-      # The credential helper is the machine account where the caller
-      # has it — the push must trigger CI — it is scoped to this server's
-      # URL, and it lives only in this step's environment.
-      - name: Land codex work
-        id: codexland
+      - name: Commit codex work
+        id: codexcommit
         if: steps.codexguard.outcome == 'success'
         env:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
-          BRANCH: ${{ steps.codexprep.outputs.branch }}
           START_SHA: ${{ steps.codexprep.outputs.sha }}
           OUT: ${{ runner.temp }}/codex/codex-final.md
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
@@ -1505,16 +1418,11 @@ jobs:
           GIT_COMMON_DIR: ${{ github.workspace }}/.git
           GIT_WORK_TREE: ${{ github.workspace }}
           GIT_CONFIG_GLOBAL: /dev/null
-          GIT_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          GIT_CONFIG_COUNT: "4"
-          GIT_CONFIG_KEY_0: credential.helper
-          GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
-          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
-          GIT_CONFIG_KEY_2: core.hooksPath
-          GIT_CONFIG_VALUE_2: ${{ runner.temp }}/no-hooks
-          GIT_CONFIG_KEY_3: core.fsmonitor
-          GIT_CONFIG_VALUE_3: "false"
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_1: core.fsmonitor
+          GIT_CONFIG_VALUE_1: "false"
         run: |
           set -euo pipefail
           # Untracked files count: new source files are legitimate codex
@@ -1523,7 +1431,7 @@ jobs:
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge
           # is still in progress — commit anyway so the merge completes,
-          # HEAD moves past START_SHA, and the push gate lands it.
+          # HEAD moves past START_SHA, and the landing lands it.
           # --ignore-submodules=dirty: never spawn `git status` inside an
           # embedded repo (is_submodule_modified) — its nested .git/config
           # is codex-writable and outside the restore and the pins. The
@@ -1544,84 +1452,82 @@ jobs:
           # Landable work = HEAD moved since prep, not just a dirty tree:
           # the prompt calls local commits unnecessary but they are possible,
           # and a status-only check would silently discard them with the
-          # runner. The refspec already pins the target branch, so a HEAD
-          # codex left elsewhere still lands on $BRANCH; a diverted HEAD
-          # that isn't genuinely new work fails the push non-fast-forward —
-          # loud, not lossy.
-          pushed=""
+          # runner. emit-landing bundles START_SHA..HEAD at the end of the job
+          # and the land job pushes it (refusing a HEAD that does not descend
+          # from START_SHA — loud, not lossy); here the outcome shapes the
+          # summary's footer, and the manifest composer reads the two outputs.
+          committed=""
           merge_only=""
           if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
-            # Authenticates through this step's credential helper (see the
-            # step comment): the restored config's origin URL carries no
-            # credential, so the 401 goes to the helper and the push runs as
-            # the machine account.
-            git push --quiet origin "HEAD:refs/heads/$BRANCH"
-            pushed=1
+            committed=1
             # HEAD still exactly the runner's clean base merge: codex changed
             # nothing (any commit above would have moved it). Report that
             # instead of silently dropping the "no code changes" line.
             [ -n "${MERGE_SHA:-}" ] && [ "$(git rev-parse HEAD)" = "$MERGE_SHA" ] && merge_only=1
-            echo "pushed $(git rev-parse --short HEAD) to $BRANCH${merge_only:+ (base merge only)}"
-            [ "$IS_PR" != "true" ] && echo "branch_name=$BRANCH" >>"$GITHUB_OUTPUT"
+            echo "committed $(git rev-parse --short HEAD)${merge_only:+ (base merge only)} — the land job pushes it"
           else
-            echo "codex made no changes; nothing to push."
+            echo "codex made no changes; nothing to land."
           fi
-          # The two steps below (thread resolution, summary comment) run no
-          # git: they key on these outputs instead of re-deriving them.
-          echo "pushed=$pushed" >>"$GITHUB_OUTPUT"
+          echo "committed=$committed" >>"$GITHUB_OUTPUT"
           echo "merge_only=$merge_only" >>"$GITHUB_OUTPUT"
 
       # Codex cannot run gh, so the review threads it reports as fully
       # addressed (the RESOLVED-THREADS: line of its final message) are
-      # resolved here on its word — rationale, guards and format tolerance
-      # in the composite. Only on a PR, and only after a push of real
-      # changes: a no-change or merge-only run addressed nothing, whatever
-      # the line says. Also writes the final message with the line stripped,
-      # on every path: it is machine input, not summary. Best-effort — never
-      # fails the job.
-      - name: Resolve review threads codex reported as addressed
+      # parsed here — resolve: "false", the job token: this job holds no
+      # write token, so the resolution is the land job's, from the manifest's
+      # resolve_threads (only on a PR run that committed real changes: a
+      # no-change or merge-only run addressed nothing, whatever the line
+      # says; `land` intersects the ids with the PR's own threads). Also
+      # writes the final message with the line stripped, on every path: it
+      # is machine input, not summary. Best-effort — never fails the job.
+      - name: Parse review threads codex reported as addressed
         id: codexthreads
-        if: steps.codexland.outcome == 'success'
+        if: steps.codexcommit.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/resolve-reported-threads@main
         with:
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          token: ${{ github.token }}
           repo: ${{ github.repository }}
           pr: ${{ github.event.issue.number || github.event.pull_request.number }}
           final-message: ${{ runner.temp }}/codex/codex-final.md
           stripped: ${{ runner.temp }}/codex-final.stripped.md
-          resolve: >-
-            ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') &&
-                steps.codexland.outputs.pushed == '1' && steps.codexland.outputs.merge_only != '1' }}
+          resolve: "false"
 
-      # Post the final message (de-fanged: it posts from a write-access
-      # account, so bare trigger tokens would fire workflows, and the
-      # @auto loops match their verdict/handoff markers with plain
-      # substring contains() — codex QUOTING a marker would forge a
-      # verdict or suppress an owed hand-back, so break those substrings
-      # too). Gated on the resolve step (which is gated on the landing):
-      # the summary states the resolved count, and OUT is the stripped copy
-      # it wrote — falling back to FINAL, codex's message unstripped, when
-      # that copy is missing (the composite warned; a read needs no write
-      # permission, and a stray RESOLVED-THREADS line in a comment beats
-      # the summary going unread — inspect_ai#428's ten blind rounds). Runs
-      # no git, so it carries no git env or credential.
-      - name: Post codex summary
-        id: codexpost
+      # The codex summary body for the land job to post on the issue/PR,
+      # de-fanged: it posts from a write-access account, so bare trigger
+      # tokens would fire workflows, and the @auto loops match their
+      # verdict/handoff markers with plain substring contains() — codex
+      # QUOTING a marker would forge a verdict or suppress an owed hand-back,
+      # so break those substrings too. The review-comment anchor marker and
+      # the codex reviewer's engine footer are in the list as well: this body
+      # posts as marvin, an author pr-feedback-context trusts as a review
+      # anchor, so a summary echoing either would be taken for the newest
+      # review by the next codex fix round on the same PR (`land` de-fangs
+      # triggers and markers again but deliberately not the footer — it
+      # posts the codex reviewer's real one — so this is the footer's only
+      # layer). Gated on the parse step (which is gated on the commit step):
+      # the summary states the thread count, and OUT is the stripped copy it
+      # wrote — falling back to FINAL, codex's message unstripped, when that
+      # copy is missing (the composite warned; a stray RESOLVED-THREADS line
+      # in a comment beats the summary going unread — inspect_ai#428's ten
+      # blind rounds). The footer lines say "committed", never "pushed": this
+      # step cannot know the push happened (emit-landing may still lose the
+      # bundle), and the land job posts the body either way. Runs no git.
+      - name: Write codex summary
+        id: codexsummary
         if: steps.codexthreads.outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          DIR: ${{ runner.temp }}/landing
           OUT: ${{ runner.temp }}/codex-final.stripped.md
           FINAL: ${{ runner.temp }}/codex/codex-final.md
-          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
-          PUSHED: ${{ steps.codexland.outputs.pushed }}
-          MERGE_ONLY: ${{ steps.codexland.outputs.merge_only }}
-          RESOLVED: ${{ steps.codexthreads.outputs.resolved }}
+          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          COMMITTED: ${{ steps.codexcommit.outputs.committed }}
+          MERGE_ONLY: ${{ steps.codexcommit.outputs.merge_only }}
+          IDS: ${{ steps.codexthreads.outputs.ids }}
         run: |
           set -euo pipefail
+          mkdir -p "$DIR"
           src="$OUT"; [ -f "$src" ] || src="$FINAL"
+          n_ids=$(wc -w <<<"${IDS:-}" | tr -d ' ')
           {
             printf '🤖 codex (dev agent):\n\n'
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
@@ -1629,293 +1535,82 @@ jobs:
                    -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$src" 2>/dev/null || echo "(codex produced no final message)"
-            [ -z "$PUSHED" ] && printf '\n\n_No code changes were made._'
-            [ -n "$MERGE_ONLY" ] && printf '\n\n_No code changes were made; the base-branch merge from the workflow was pushed._'
-            [ "${RESOLVED:-0}" -gt 0 ] && printf '\n\n_Resolved %s review thread(s) codex reported as fully addressed._' "$RESOLVED"
-          } >"$RUNNER_TEMP/codex-comment.md"
+            [ -z "$COMMITTED" ] && printf '\n\n_No code changes were made._'
+            [ -n "$MERGE_ONLY" ] && printf '\n\n_No code changes were made; the base-branch merge from the workflow was committed and lands with this run._'
+            if [ "$IS_PR" = "true" ] && [ -n "$COMMITTED" ] && [ -z "$MERGE_ONLY" ] && [ "${n_ids:-0}" -gt 0 ]; then
+              printf '\n\n_%s review thread(s) codex reported as fully addressed are resolved when this run lands._' "$n_ids"
+            fi
+          } >"$DIR/codex-comment.md"
           # GitHub caps comment bodies at 65,536 characters and codex's final
-          # message is unbounded; here the post failing lands AFTER the push,
-          # losing the summary for work that already landed. Truncate with a
-          # note instead — cutting the de-fanged body can't resurrect a
-          # trigger or marker (the sed removed the @ / split the substrings,
-          # and truncation only drops trailing bytes).
-          if [ "$(wc -c <"$RUNNER_TEMP/codex-comment.md")" -gt 60000 ]; then
-            head -c 60000 "$RUNNER_TEMP/codex-comment.md" >"$RUNNER_TEMP/codex-comment.trunc"
-            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$RUNNER_TEMP/codex-comment.trunc"
-            mv "$RUNNER_TEMP/codex-comment.trunc" "$RUNNER_TEMP/codex-comment.md"
+          # message is unbounded; a post failing there would lose the summary
+          # for work that already landed. Truncate with a note instead —
+          # cutting the de-fanged body can't resurrect a trigger or marker
+          # (the sed removed the @ / split the substrings, and truncation
+          # only drops trailing bytes). 59,000, not 60,000: the land job's
+          # own de-fang re-caps at 60,000, and the note below must fit under
+          # THAT cap or the second truncation would drop it (and the
+          # validator refuses a body file of 64 KiB or more outright).
+          if [ "$(wc -c <"$DIR/codex-comment.md")" -gt 59000 ]; then
+            head -c 59000 "$DIR/codex-comment.md" >"$DIR/codex-comment.trunc"
+            printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$DIR/codex-comment.trunc"
+            mv "$DIR/codex-comment.trunc" "$DIR/codex-comment.md"
           fi
-          gh api "repos/$REPO/issues/$NUM/comments" -F body=@"$RUNNER_TEMP/codex-comment.md" --silent
-          # Mirrors the Claude path's REQUEST_REVIEW prompt rule,
-          # deterministically: an @auto push to an existing PR owes a
-          # re-review (the reviewer does not run on push).
-          if [ "$IS_PR" = "true" ] && [ -n "$PUSHED" ] && [ "$TRIGGER_PHRASE" = "@auto" ]; then
-            gh pr comment "$NUM" --repo "$REPO" --body '@review'
-          fi
+          echo "codex summary: $(wc -c <"$DIR/codex-comment.md") bytes — posted by the land job."
       # ---- end Codex engine --------------------------------------------------
-
-      # On issue triggers claude-code-action pushes a branch but usually only
-      # posts a prefilled "Create PR" link rather than opening the PR — its
-      # built-in flow tends to win over any --append-system-prompt nudge to run
-      # `gh pr create`. So open the PR here deterministically. The exception: a
-      # multi-step task ("open a PR and follow it through") can have the agent
-      # run `gh pr create` itself — and this is the norm on the fork, whose
-      # appended prompt mandates it — so by the time this step runs the PR may
-      # already exist. Either way this step must reach the labeling below: adopt
-      # the existing PR or open one, then propagate the `auto` label. (Original
-      # bug: opening and labeling lived on one path, so agent-opened PRs never
-      # got the `auto` label and the @auto review loop never engaged on them.)
-      # Gated to fresh issue runs (the inverse of the branch-sync gate): PR
-      # follow-ups already have a PR. branch_name is the action's output for the
-      # branch it pushed — empty when the run made no commits, so this no-ops.
-      #
-      # Token: prefer the machine-account PAT (MARVIN_TOKEN). It's a real GitHub
-      # identity, so the PR it opens triggers CI and @review (the whole point);
-      # and because it was passed to the action as github_token, the action did
-      # NOT revoke it, so it's still live here. Two dead ends ruled this in:
-      # steps.claude.outputs.github_token is the Claude App token, which the
-      # action revokes inside its own composite step (gh → 401 here); and the
-      # default GITHUB_TOKEN is barred from creating PRs where the org disables
-      # Actions PR-creation, and even when allowed its PRs trigger no CI
-      # (recursion guard). The `|| github.token` fallback only applies on repos
-      # without the secret, where it degrades exactly as documented above.
-      # The git fetch below is a separate matter from gh: it authenticates
-      # through this step's helper (job token), which the origin-URL reset
-      # after the action step is what makes reachable — with the action's URL
-      # credential still in place git would use that instead, and on a
-      # marvin-less caller it is the revoked App token.
-      - name: Open or adopt PR for issue-triggered run
-        id: openpr
-        if: >-
-          github.event.issue.pull_request == '' &&
-          github.event.pull_request == '' &&
-          (steps.claude.outputs.branch_name != '' || steps.codexland.outputs.branch_name != '')
-        env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
-          REPO: ${{ github.repository }}
-          BRANCH: ${{ steps.claude.outputs.branch_name || steps.codexland.outputs.branch_name }}
-          # Empty on most repos (gh defaults --base to the repo default branch);
-          # set on the fork, where base is pristine main, not the meridian default.
-          BASE: ${{ inputs.base_branch }}
-          ISSUE: ${{ github.event.issue.number }}
-          # Label that opts a PR into the @auto loop; propagated from the issue.
-          AUTO_LABEL: "auto"
-          # The kickoff's trigger phrase — "@auto" for the autonomous kickoff job,
-          # whether it fired from the `auto` label OR an `@auto` mention. Used to
-          # label the PR even when the issue itself carries no `auto` label.
-          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
-          REQ_REVIEW: ${{ inputs.request_review_after_open }}
-          # Step-scoped credential for the fetch below (nothing is persisted
-          # by checkout, and the origin URL carries none after the reset):
-          # unauthenticated it would fail on a private caller and this step
-          # would conclude "not on origin" and open no PR.
-          GIT_TOKEN: ${{ github.token }}
-          GIT_CONFIG_COUNT: "2"
-          GIT_CONFIG_KEY_0: credential.helper
-          GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
-          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
-        run: |
-          set -euo pipefail
-          # The branch lives on origin; the initial checkout predates the push.
-          if ! git fetch --quiet origin "$BRANCH"; then
-            echo "Branch $BRANCH not on origin; nothing to open."
-            exit 0
-          fi
-          # Adopt the PR if the agent already opened one for this branch (fork /
-          # multi-step tasks); otherwise open it ourselves. Both paths fall
-          # through to the labeling below.
-          pr_url="$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
-          if [ -n "$pr_url" ]; then
-            echo "PR already exists for $BRANCH ($pr_url); adopting it."
-            opened=false
-          else
-            # Title/body from the latest commit (the agent writes descriptive,
-            # conventional-commit messages); prefix the body with the issue link.
-            title="$(git log -1 --format=%s FETCH_HEAD)"
-            detail="$(git log -1 --format=%b FETCH_HEAD)"
-            body="$(printf 'Fixes #%s\n\n%s' "$ISSUE" "$detail")"
-            pr_url="$(gh pr create --repo "$REPO" --head "$BRANCH" ${BASE:+--base "$BASE"} \
-              --title "$title" --body "$body")"
-            opened=true
-          fi
-          # Label the PR `auto` so the @auto loop engages — whenever this is an
-          # @auto run. That's true if the kickoff's trigger phrase is `@auto`
-          # (fired by an `@auto` *mention*, even on an unlabeled issue) OR the
-          # originating issue carries the `auto` label. The mention case was the
-          # gap: "@auto please implement this" on an unlabeled issue opened an
-          # unlabeled PR, so the review-fix loop never engaged (inspect_ai#71/#74).
-          # Idempotent, and independent of who opened the PR — must run on the
-          # adopt path too, or fork/agent-opened PRs never get labeled.
-          issue_labels=$(gh issue view "$ISSUE" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || true)
-          if [ "$TRIGGER_PHRASE" = "@auto" ] \
-             || grep -qx "$AUTO_LABEL" <<<"$issue_labels"; then
-            echo "@auto run; labeling $pr_url with '$AUTO_LABEL'."
-            gh pr edit "$pr_url" --add-label "$AUTO_LABEL" || true
-          fi
-          # Propagate any engine:* label too (design/codex-engine.md): every
-          # PR-scoped run — reviewer, both loop rounds — reads the PR's own
-          # labels, so without this an issue-selected engine would silently
-          # revert to Claude the moment the PR opens. Copies the whole
-          # engine: namespace (not just engine:codex) so future engines need
-          # no change here. Runs before the @review below, so the first
-          # review already sees the label.
-          while IFS= read -r lbl; do
-            [ -n "$lbl" ] || continue
-            echo "propagating $lbl to $pr_url."
-            gh pr edit "$pr_url" --add-label "$lbl" || true
-          done <<<"$(grep '^engine:' <<<"$issue_labels" || true)"
-          # Start the reviewer — but only AFTER the label above, so the review-fix
-          # loop sees an authorized (labeled) PR when the reviewer's summary lands.
-          # Only where the caller opts in (the fork, where PR-open auto-review
-          # doesn't fire); elsewhere that native trigger already covers it. Posted
-          # as the machine account so it actually triggers the reviewer. This
-          # replaces the agent posting @review from its prompt, which raced the
-          # labeling above (see request_review_after_open).
-          if [ "${REQ_REVIEW:-false}" = "true" ]; then
-            echo "Requesting review on $pr_url (post-label)."
-            gh pr comment "$pr_url" --repo "$REPO" --body '@review' || true
-          fi
-          # Surface the real PR link on the issue — only when WE opened it.
-          # claude-code-action's own run summary only shows a prefilled "Create
-          # PR" compare link (now stale) and never names the opened PR, so post
-          # it explicitly. When the agent opened its own PR it already linked it,
-          # so a second comment here would just be noise.
-          if [ "$opened" = "true" ]; then
-            gh issue comment "$ISSUE" --repo "$REPO" --body "$(printf \
-              '✅ Opened a pull request for this issue: %s\n\n(The "Create PR ➔" link in the run summary above is superseded — the PR is already open.)' \
-              "$pr_url")" || true
-          fi
-          # Expose the PR for the stage post-step: an @auto run that left a PR
-          # in the loop stays Agent; one that didn't hands back.
-          echo "url=$pr_url" >>"$GITHUB_OUTPUT"
-
-      # A run can end with its work stranded on the runner: the agent edits (and
-      # maybe commits) locally, spawns a verification subagent, and ends its
-      # turn "waiting" — a run can never resume, so everything evaporates with
-      # the runner while the green run + tidy summary hide it (observed:
-      # inspect_ai#195 — fix implemented and tested, zero bytes landed, stage
-      # handed back to Review with nothing to review). Deterministic backstop
-      # for the LANDING prompt rule: on issue-triggered runs, tracked-file
-      # edits left uncommitted (untracked files are ignored — test caches and
-      # scratch leftovers are normal), a reported branch carrying local commits
-      # that never reached origin, or local commits contained in no remote ref
-      # all mean the work did NOT land — say so visibly and fail the run.
-      # The branch check only applies when the branch exists locally with
-      # commits beyond the start SHA: the action mints a per-run branch name
-      # even when the task is to update an EXISTING PR branch, and in that flow
-      # the minted branch is legitimately never pushed (observed: inspect_ai#67
-      # — review fixes pushed to the existing PR branch, false ⚠️ posted for
-      # the unused per-run branch).
-      - name: Verify agent work landed
-        if: >-
-          always() && steps.claude.outcome == 'success' &&
-          github.event.issue.pull_request == '' &&
-          github.event.pull_request == ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          ISSUE: ${{ github.event.issue.number }}
-          BRANCH: ${{ steps.claude.outputs.branch_name }}
-          START_SHA: ${{ github.sha }}
-          # Step-scoped credential for the best-effort fetch below (nothing
-          # is persisted by checkout and the origin URL carries none after
-          # the reset; a silent fetch failure on a private caller would read
-          # landed work as unlanded).
-          GIT_TOKEN: ${{ github.token }}
-          GIT_CONFIG_COUNT: "2"
-          GIT_CONFIG_KEY_0: credential.helper
-          GIT_CONFIG_VALUE_0: ""
-          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
-          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
-        run: |
-          set -uo pipefail
-          unlanded=""
-          dirty=$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)
-          [ -n "$dirty" ] && unlanded="uncommitted edits to tracked files"
-          local_tip=$(git rev-parse --quiet --verify "refs/heads/${BRANCH:-}" || true)
-          if [ -n "$local_tip" ] && [ "$local_tip" != "$START_SHA" ]; then
-            git fetch --quiet origin "$BRANCH" 2>/dev/null || true
-            if ! git branch -r --contains "$local_tip" 2>/dev/null | grep -q .; then
-              unlanded="${unlanded:+$unlanded; }branch $BRANCH has local commits that never reached origin"
-            fi
-          fi
-          head=$(git rev-parse HEAD 2>/dev/null || echo "")
-          if [ -n "$head" ] && [ "$head" != "$START_SHA" ] \
-             && ! git branch -r --contains "$head" 2>/dev/null | grep -q .; then
-            unlanded="${unlanded:+$unlanded; }local commits contained in no remote branch"
-          fi
-          [ -z "$unlanded" ] && { echo "Work landed (or the run made no changes)."; exit 0; }
-          # Local scratch is not proof of loss: a task's deliverable can land
-          # OUTSIDE this repo (a companion-repo PR, agent comments) while
-          # regeneration byproducts stay local by design (observed: an
-          # External schema-regen task delivered a green ts-mono PR and drew
-          # this ⚠️ for its local leftovers). Before flagging, look for
-          # evidence the run shipped something anywhere: PRs the machine
-          # account or agent app opened in the org since the run started, or
-          # agent comments on this issue. Evidence -> pass with a notice
-          # naming it; none -> the work is genuinely gone, External or not.
-          started=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at 2>/dev/null || true)
-          evidence=""
-          if [ -n "$started" ]; then
-            org="${REPO%%/*}"
-            prs=$(gh search prs --owner "$org" --author i-am-marvin --created ">=$started" \
-                    --json repository,number --jq '[.[] | "\(.repository.nameWithOwner)#\(.number)"] | join(", ")' 2>/dev/null || true)
-            [ -z "$prs" ] && prs=$(gh search prs --owner "$org" --author "app/claude" --created ">=$started" \
-                    --json repository,number --jq '[.[] | "\(.repository.nameWithOwner)#\(.number)"] | join(", ")' 2>/dev/null || true)
-            [ -n "$prs" ] && evidence="PR(s) opened during this run: $prs"
-            if [ -z "$evidence" ]; then
-              n=$(gh api "repos/$REPO/issues/$ISSUE/comments?since=$started" \
-                    --jq '[.[] | select(.user.login == "claude[bot]")] | length' 2>/dev/null || echo 0)
-              [ "${n:-0}" -gt 0 ] && evidence="$n agent comment(s) posted on this issue"
-            fi
-          fi
-          if [ -n "$evidence" ]; then
-            echo "::notice::local changes not landed ($unlanded), but the run shipped work elsewhere — $evidence. Local state treated as deliberate scratch."
-            exit 0
-          fi
-          echo "::error::agent work did not land: $unlanded"
-          gh issue comment "$ISSUE" --repo "$REPO" --body "$(printf '⚠️ The agent run finished WITHOUT landing its work (%s). The runner is ephemeral, so those changes are gone — the summary above may describe work that exists on no branch. Re-trigger to redo the task.' "$unlanded")" || true
-          exit 1
 
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
-      # --fallback-model fires, so this parses modelUsage and posts a note on
-      # the issue/PR when a non-requested model served tokens or the result
-      # reads like a classifier refusal. Best-effort, always exits 0. Codex
-      # runs have no execution file — the Codex usage step above covers them.
+      # --fallback-model fires, so this parses modelUsage, writes the served-
+      # model table to THIS job's summary, and — when a non-requested model
+      # served tokens or the result reads like a classifier refusal — hands
+      # the note it would have posted back as its `note` output. No token:
+      # this job names no GitHub-write secret, so the note travels to the land
+      # job as the manifest's provenance_comment_file (composed below) and
+      # posts from there as the machine account. Best-effort, always exits 0.
+      # Codex runs have no execution file — the Codex usage step above covers
+      # them.
       - name: Model provenance
-        if: always() && steps.trig.outputs.ok == 'true' && steps.engine.outputs.engine != 'codex'
+        id: provenance
+        if: always() && needs.gate.outputs.engine != 'codex'
         uses: meridianlabs-ai/agents/.github/actions/model-provenance@main
         with:
           exec-file: ${{ steps.claude.outputs.execution_file }}
           requested: ${{ inputs.model }}
-          token: ${{ secrets.MARVIN_TOKEN }}
-          repo: ${{ github.repository }}
-          number: ${{ github.event.issue.number || github.event.pull_request.number }}
 
       # Surface agent errors the action swallows. A model API error (overload /
       # 529, a model 404, etc.) leaves the run green at the workflow level but
       # with no result — and a stale "I'll get back to you" comment. Detect
-      # is_error in the execution log (or a failed action step), post a visible
-      # comment, and fail the job so the run isn't a misleading success.
+      # is_error in the execution log (or a failed step anywhere on the path),
+      # and the "completed-but-blocked" case: the agent finished with no error
+      # but left its edits uncommitted (below). This job cannot post the ⚠️
+      # itself any more (issue #84: the comment must come from an account
+      # whose posts are read, and this job holds no such token): the message
+      # is written to a file the landing manifest carries as `error` with
+      # fail_run true, and the LAND job posts it — de-fanged, as the machine
+      # account — and fails the run AFTER everything else landed. So this step
+      # exits 0 on every path: the red X is the land job's.
       - name: Surface agent errors
         id: surface
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          ASSERT_OUTCOME: ${{ steps.assert.outcome }}
+          BASE_OUTCOME: ${{ steps.base.outcome }}
+          START_SHA: ${{ steps.base.outputs.sha || steps.sync.outputs.start_sha || steps.sync.outputs.head_sha }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
-          BACKSTOP_OUTCOME: ${{ steps.backstop.outcome }}
-          HANDBACK_OUTCOME: ${{ steps.handback.outcome }}
-          AGENTPUSH_OUTCOME: ${{ steps.agentpush.outcome }}
+          AGENTSETTINGS_OUTCOME: ${{ steps.agentsettings.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
+          ENGINE: ${{ needs.gate.outputs.engine }}
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXFEEDBACK_OUTCOME: ${{ steps.codexfeedback.outcome }}
           CODEXCOMPOSE_OUTCOME: ${{ steps.codexcompose.outcome }}
@@ -1923,18 +1618,43 @@ jobs:
           CODEX_OUTCOME: ${{ steps.codexrun.outcome }}
           CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
-          CODEXLAND_OUTCOME: ${{ steps.codexland.outcome }}
-          CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
+          CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
+          CODEXSUMMARY_OUTCOME: ${{ steps.codexsummary.outcome }}
+          ERROR_FILE: ${{ runner.temp }}/agent-error.md
+          # The tree check below runs git on the Claude path only (the codex
+          # path's commit step already committed the tree, and a reclaim that
+          # did not succeed sets err before any git call); pinned like the
+          # landing steps anyway (design/codex-engine.md → Hook-safe landing)
+          # so the ordering never becomes load-bearing.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_1: core.fsmonitor
+          GIT_CONFIG_VALUE_1: "false"
         run: |
           set -uo pipefail
+          rm -f "$ERROR_FILE"
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           err=""
+          # The checkout or the persisted-credential assertion failed: nothing
+          # else ran (every later step is SKIPPED, not failed). Test for
+          # anything but success and name both causes, so a tripped security
+          # invariant is not read as a checkout hiccup and blindly re-triggered.
+          if [ "${CHECKOUT_OUTCOME:-}" != "success" ] || [ "${ASSERT_OUTCOME:-}" != "success" ]; then
+            err="checking out the repository or verifying that no credential was persisted in the workspace failed before the agent started — see the job logs for which; nothing was attempted. Re-trigger to retry only if it was the checkout; a persisted credential is a workflow bug, not a transient."
+          fi
+          # Issue runs: the base branch's tip could not be read (the caller's
+          # base_branch input names a branch that is not on origin?).
+          if [ -z "$err" ] && [ "${BASE_OUTCOME:-}" = "failure" ]; then
+            err="reading the tip of the base branch failed before the agent started (the base_branch the caller configured is not on origin? — see the job logs); nothing was attempted."
+          fi
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every
           # downstream step is SKIPPED, not failed, so no other branch below
           # fires — without this the person who typed the trigger gets the
           # eyes reaction and then silence.
-          if [ "${SYNC_OUTCOME:-}" = "failure" ]; then
+          if [ -z "$err" ] && [ "${SYNC_OUTCOME:-}" = "failure" ]; then
             err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); re-trigger to retry."
           fi
           # Provisioning died before the agent started (observed: a transient
@@ -1957,28 +1677,24 @@ jobs:
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (that one fails identically on every trigger: check the job logs and fix it by hand); re-trigger if it looks transient."
           fi
-          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null || true)
+          # The settings composer failed (a caller's `settings` that is
+          # neither a JSON object nor a path to a file holding one): the
+          # action step is SKIPPED, not failed, so without this clause the
+          # run ends "No agent error detected" with nothing on the issue.
+          # Deterministic — the caller's stub is what needs fixing, so no
+          # "re-trigger" advice.
+          if [ -z "$err" ] && [ "${AGENTSETTINGS_OUTCOME:-}" = "failure" ]; then
+            err="composing the agent's settings failed before the agent started — the caller's \`settings\` input is neither a JSON object nor a path to a file holding one (see the job logs). This fails identically on every trigger: fix the caller stub's settings input."
+          fi
+          # The agent's own error text is free-form (and unbounded — it is
+          # the final message when is_error is set); cap it so the manifest's
+          # error.message stays well under the validator's 64 KiB limit.
+          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the Claude Code step failed before producing a result (see the job logs)."
           fi
-          # The base-merge backstop (push-base-merge) or its re-review post
-          # failed AFTER a healthy agent run — the post already retried five
-          # times. Without these clauses the job is red with nothing on the
-          # PR, and because this step would still succeed, "Stage - Review
-          # (hand-back)" would treat the run as a successful @auto PR run and
-          # leave the board at Agent. Trigger tokens deliberately absent from
-          # the text: it is posted.
-          if [ -z "$err" ] && [ "${BACKSTOP_OUTCOME:-}" = "failure" ]; then
-            err="the agent finished, but the step that pushes the runner's base-branch merge failed — see the job logs. The PR branch may still be behind its base."
-          fi
-          if [ -z "$err" ] && [ "${HANDBACK_OUTCOME:-}" = "failure" ]; then
-            err="the agent finished and the runner's base-branch merge was pushed, but the re-review request that push owes could not be posted after 5 attempts — see the job logs. Request the re-review by hand."
-          fi
-          if [ -z "$err" ] && [ "${AGENTPUSH_OUTCOME:-}" = "failure" ]; then
-            err="the agent pushed commits to the PR branch but the re-review request that push owes could not be posted after 5 attempts — see the job logs. Request the re-review by hand."
-          fi
           # Codex engine: no execution file exists; step outcomes are the
-          # signal (landing is deterministic, so green steps cannot strand).
+          # signal (the commit is deterministic, so green steps cannot strand).
           if [ -z "$err" ] && [ "${CODEXPREP_OUTCOME:-}" = "failure" ]; then
             err="the codex workspace prep failed before the agent started — a fork-head PR (the codex engine cannot push to fork branches; remove the engine:codex label), or a branch fetch error (see the job logs)."
           fi
@@ -1996,91 +1712,492 @@ jobs:
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
           fi
-          # A reclaim that did not succeed SKIPS the guard and the landing, so
-          # it needs its own check or the failure is a silent red job. `!=
-          # success` (not `= failure`) so a job cancel that landed mid-reclaim
-          # is named too, as in the loops' Surface steps — this step runs no
-          # git, so here it is only the message; the codexuser test keeps the
-          # Claude path's `skipped` reclaim from tripping it.
+          # A reclaim that did not succeed SKIPS the guard, the commit step
+          # and every later git call (the manifest composer skips git and
+          # emit-landing runs read-only whenever the guard did not succeed,
+          # which a skipped guard is), so it needs its own check or the
+          # failure is a silent red job. `!= success` (not `= failure`) so a
+          # job cancel that landed mid-reclaim is named too; the codexuser
+          # test keeps the Claude path's `skipped` reclaim from tripping it.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXRECLAIM_OUTCOME:-}" != "success" ]; then
-            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was pushed. Inspect the codex run's transcript before re-triggering."
+            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed. Inspect the codex run's transcript before re-triggering."
           fi
-          # A failed guard SKIPS the landing step, so it needs its own check.
+          # A failed guard SKIPS the commit step, so it needs its own check.
+          # "nothing was landed" holds because the manifest composer and
+          # emit-landing go read-only on a guard that did not succeed: a
+          # local commit codex made over the markers is never bundled.
           if [ -z "$err" ] && [ "${CODEXGUARD_OUTCOME:-}" = "failure" ]; then
-            err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was pushed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
+            err="codex finished but left the base merge unresolved (an unmerged index or surviving conflict markers — see the job logs); nothing was landed. Resolve and stage the conflicts manually, or drop the engine:codex label to use the Claude path."
           fi
-          if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "failure" ]; then
-            err="codex finished but its landing step failed — the work may not have reached the branch (see the job logs)."
+          if [ -z "$err" ] && [ "${CODEXCOMMIT_OUTCOME:-}" = "failure" ]; then
+            # The guard succeeded on this path, so codex's own local commits
+            # (if any) still land through ancestry; only the runner's commit
+            # of its leftover edits is lost — say so, rather than "nothing".
+            err="codex finished but committing its leftover edits failed — codex's own local commits, if any, still land; its uncommitted edits did not, and its summary could not be composed (see the job logs)."
           fi
-          # The landing succeeded but the summary never posted (the thread
-          # resolution composite is best-effort and cannot fail, so a skipped
-          # post means a failed post): the branch has the work, the thread
-          # has no comment about it — and on an @auto PR run no @review.
-          if [ -z "$err" ] && [ "${CODEXLAND_OUTCOME:-}" = "success" ] && [ "${CODEXPOST_OUTCOME:-}" != "success" ]; then
-            err="codex finished and its work was landed, but its summary comment could not be posted (post step outcome: ${CODEXPOST_OUTCOME:-unknown}; see the job logs for the final message). If this was an auto run on a PR, request the re-review by hand."
+          # The commit succeeded but the summary was never written (the parse
+          # composite is best-effort and cannot fail, so a skipped summary
+          # step means a failed one): the commits land, the thread has no
+          # comment about them.
+          if [ -z "$err" ] && [ "${CODEXCOMMIT_OUTCOME:-}" = "success" ] && [ "${CODEXSUMMARY_OUTCOME:-}" != "success" ]; then
+            err="codex finished and its commits land, but its summary could not be composed (summary step outcome: ${CODEXSUMMARY_OUTCOME:-unknown}; see the job logs for the final message)."
+          fi
+          # Completed-but-blocked (Claude path): the action reports success,
+          # but the agent left edits to tracked files uncommitted — they die
+          # with the runner, whatever its summary says (inspect_ai#195: fix
+          # implemented and tested, zero bytes landed). The deterministic
+          # replacement for the old "Verify agent work landed" step, which
+          # checked for unpushed commits: the push is the land job's now, so
+          # only an uncommitted tree can strand work. Untracked files are
+          # normal scratch (test caches, venvs) — only tracked-file edits
+          # count. Flagged only when nothing of the AGENT's is landable: HEAD
+          # still at the start SHA, or exactly the runner's clean base merge
+          # (the merge still lands, so the wording says so). With an agent
+          # commit above it the commits land and the leftovers are a warning.
+          if [ -z "$err" ] && [ "$ENGINE" != "codex" ] && [ "$CLAUDE_OUTCOME" = "success" ] && [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            dirty=$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)
+            if [ -n "$dirty" ]; then
+              head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
+              if [ "$head" = "$START_SHA" ] || { [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ]; }; then
+                # Strip the @ from trigger tokens in agent-authored text and
+                # split the codex reviewer's footer — this is embedded in a
+                # marvin-authored comment, which pr-feedback-context would
+                # take for the newest review if it carried the footer (the
+                # land job de-fangs triggers and markers again, but not the
+                # footer: see the codex summary step's comment).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' -e 's/engine: codex/engine  codex/g' || true)
+                err="the agent finished but left edits to tracked files uncommitted, so none of its work landed (only the runner's base merge, if there was one) — whatever its summary reports, no code change reached the branch. The runner is ephemeral, so those edits are gone; re-trigger to redo the task."
+                [ -n "$summary" ] && err="$err Agent summary: $summary"
+              else
+                echo "::warning::the agent committed but also left uncommitted edits to tracked files behind; the commits land, the leftovers die with the runner: $(printf '%s' "$dirty" | head -5 | tr '\n' ' ')"
+              fi
+            fi
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }
-          echo "::error::Claude run did not complete: $err"
-          if [ -n "${NUM:-}" ]; then
-            # cc the responsible human on PR threads (same rationale as the
-            # auto loops): PR-triggered failures otherwise email nobody. Issue
-            # threads skip this — the issue author/assignee already gets email
-            # as a participant. Derivation mirrors claude-auto.yml: closing
-            # ref, else claude/issue-N-* branch; first assignee unless
-            # bot/machine account, else author unless bot/machine account.
-            cc=""
-            if [ "${IS_PR:-false}" = "true" ]; then
-              mention=""
-              prj=$(gh pr view "$NUM" --repo "$REPO" --json body,headRefName 2>/dev/null || echo '{}')
-              ref=$(jq -r '.body // ""' <<<"$prj" \
-                      | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
-                      | head -1 || true)
-              inum=""
-              issue_repo="$REPO"
-              lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-              if [ -n "$ref" ]; then
-                refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-                if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
-                  inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-                elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
-                  inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-                  issue_repo="$ANCHOR_REPO"
-                fi
+          echo "::error::Claude run did not complete: $err — the land job posts the note and fails the run."
+          # cc the responsible human on PR threads (same rationale as the
+          # auto loops): PR-triggered failures otherwise email nobody. Issue
+          # threads skip this — the issue author/assignee already gets email
+          # as a participant. Derivation mirrors claude-auto.yml: closing
+          # ref, else claude/issue-N-* branch; first assignee unless
+          # bot/machine account, else author unless bot/machine account.
+          # Reads only, with the job token.
+          cc=""
+          if [ "${IS_PR:-false}" = "true" ] && [ -n "${NUM:-}" ]; then
+            mention=""
+            prj=$(gh pr view "$NUM" --repo "$REPO" --json body,headRefName 2>/dev/null || echo '{}')
+            ref=$(jq -r '.body // ""' <<<"$prj" \
+                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
+                    | head -1 || true)
+            inum=""
+            issue_repo="$REPO"
+            lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+            if [ -n "$ref" ]; then
+              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
+              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                issue_repo="$ANCHOR_REPO"
               fi
-              if [ -z "$inum" ]; then
-                hb=$(jq -r '.headRefName // ""' <<<"$prj")
-                inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
-                if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
-                   gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
-                  issue_repo="$ANCHOR_REPO"
-                fi
-              fi
-              [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-                --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
-              [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
             fi
-            gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ This Claude run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload or a model-availability blip). Re-trigger to retry; if it persists see https://status.claude.com.%s' "$err" "$cc")" || true
+            if [ -z "$inum" ]; then
+              hb=$(jq -r '.headRefName // ""' <<<"$prj")
+              inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
+                 gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
+                issue_repo="$ANCHOR_REPO"
+              fi
+            fi
+            [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
+              --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+            [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
           fi
-          exit 1
+          # Trigger tokens deliberately absent from our own text (the land
+          # job's de-fang would backtick them anyway): it is posted.
+          printf '⚠️ This Claude run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload or a model-availability blip). Re-trigger to retry; if it persists see https://status.claude.com.%s\n' "$err" "$cc" >"$ERROR_FILE"
 
-      # Atlas tracking: the one-shot dev agent hands back to a human when it's
-      # done — and an errored run also needs a human (the error comment asks
-      # for a re-trigger) — so move to Review. The exception is a
-      # SUCCESSFUL @auto run that left a PR in the loop (opened/adopted one, or
-      # ran on a PR): the automated review loop owns the stage from there
-      # (claude-auto-review.yml sets Review at its converged/escalated
-      # handoff). always(): this must run after a failed claude step or a
-      # failing Surface step — those are exactly the hand-back-to-human cases.
-      - name: Stage - Review (hand-back)
-        if: >-
-          always() && steps.trig.outputs.ok == 'true' && !(
-            inputs.trigger_phrase == '@auto' &&
-            (steps.claude.outcome == 'success' || steps.codexpost.outcome == 'success') &&
-            steps.surface.outcome == 'success' &&
-            (github.event.issue.pull_request != '' ||
-             github.event.pull_request != '' ||
-             steps.openpr.outputs.url != '')
-          )
+      # Everything the land job pushes, posts and moves, as ONE JSON object for
+      # emit-landing's manifest-extra (schema: .github/actions/emit-landing/
+      # README.md). Body text goes in as files under the landing directory,
+      # referenced by name; the manifest itself is DATA the land job
+      # validates before acting. The rules, each the old post-agent step it
+      # replaces (issue #84):
+      #   branch — PR runs: the PR's head branch (the gate's lookup; the
+      #     validator pins the manifest to the PR's live headRefName anyway).
+      #     Issue runs: the branch claude-code-action or the codex prep step
+      #     cut (`branch_name` / codexprep's output; a failed action step
+      #     loses its outputs, so the local branch is read when it carries
+      #     the issue's prefix), else a prefix-conforming placeholder nothing
+      #     lands on unless HEAD moved.
+      #   pr.open (was "Open or adopt PR for issue-triggered run") — an issue
+      #     run whose HEAD moved: title from the tip commit's subject (the
+      #     agent writes descriptive, conventional-commit messages — codex's
+      #     is its final message's first line — or a default), body `Fixes
+      #     #N` + the commit body + the run link, base from base_branch,
+      #     labels from the gate (`auto`, engine:*), the originating issue
+      #     for the "✅ Opened a pull request" link. `land` adopts an open PR
+      #     for the branch instead of duplicating it. With
+      #     request_review_after_open (the fork), `handback` rides along:
+      #     `land` posts the `@review` after the PR step, which labels first
+      #     — the ordering the input exists for.
+      #   handback (was "Ensure hand-back after agent push" and the codex
+      #     summary's `@review`) — a PR run whose HEAD moved, on an @auto
+      #     run or an `auto`-labelled PR (the gate's `auto`): the landed
+      #     commit owes exactly one `@review`, whatever the agent step's
+      #     outcome (the loops' rule — dropping committed work is worse, the
+      #     push is what re-runs CI, and the ⚠️ says the run failed). A
+      #     merge-only run owes it too, as the old backstop's post did: the
+      #     merge moves the head, and a Q&A @auto run on a behind branch
+      #     would otherwise move it with nobody requesting re-review.
+      #   comments — codex: the summary the step above wrote. Claude: the
+      #     agent's own `comments` from its manifest-extra.json — the ONE key
+      #     it may write; each entry pinned to THIS issue/PR (a number of the
+      #     agent's choosing would be a posting channel onto other threads),
+      #     the body file shape-checked, present, not a symlink and capped
+      #     (the validator refuses the WHOLE manifest — commits included —
+      #     over one bad reference, so a bad entry is dropped with a warning
+      #     instead), at most five. A no-change Claude run that left no
+      #     comment relays its final message instead (de-fanged with the
+      #     codex summary's sed, footer rule included), so a run that
+      #     answered a question or gave up leaves its answer on the thread
+      #     as the machine account — the codex summary's Claude analogue.
+      #   resolve_threads — codex, PR run, real commits: the RESOLVED-THREADS
+      #     ids (`land` intersects them with the PR's own threads).
+      #   stage (was "Stage - Review (hand-back)") — Review: the one-shot dev
+      #     agent hands back to a human when it is done, and an errored run
+      #     also needs one; EXCEPT a SUCCESSFUL @auto run that left a PR in
+      #     the loop (opened one, or ran on a PR): the review loop owns the
+      #     stage from there (design/atlas-tracking.md).
+      #   provenance_comment_file, error — as in the loops.
+      # `moved` requires ancestry (the same test emit-landing applies before
+      # it bundles — a rebased HEAD lands nothing and must owe nothing).
+      # emit-landing drops handback, stage and resolve_threads again when it
+      # drops the bundle, so no bare `@review` posts for a run whose work
+      # was lost; `pr.open` survives, and `land` then refuses to open a PR
+      # for a branch that is not on origin — reported, not silent.
+      # Not set -e: a manifest must come out of every path. On the codex path
+      # (the gate's ENGINE — not `codexuser.outcome`, which is
+      # `skipped`/`failure` when the prep or user-setup step failed and would
+      # let those two fall through to the ancestry branch) the git reads are
+      # skipped (nothing lands, no PR, no hand-back) unless the
+      # unresolved-merge guard SUCCEEDED — the same condition emit-landing's
+      # read-only takes; the loops' composers have the full rationale (the
+      # guard is the enforcement point: a failed guard means conflict markers
+      # survive in a tree codex may have committed over). Post-codex git, so
+      # the git dir is pinned by env like the guard and the commit step.
+      - name: Compose landing manifest
+        id: landing
+        if: always()
+        env:
+          DIR: ${{ runner.temp }}/landing
+          EXTRA: ${{ runner.temp }}/landing-extra.json
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          ISSUE: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
+          ENGINE: ${{ needs.gate.outputs.engine }}
+          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+          AUTO: ${{ needs.gate.outputs.auto }}
+          PR_LABELS: ${{ needs.gate.outputs.pr_labels }}
+          HEAD_BRANCH: ${{ needs.gate.outputs.head_branch || steps.sync.outputs.branch }}
+          REQ_REVIEW: ${{ inputs.request_review_after_open }}
+          BASE: ${{ inputs.base_branch }}
+          START_SHA: ${{ steps.base.outputs.sha || steps.sync.outputs.start_sha || steps.sync.outputs.head_sha || github.sha }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          CLAUDE_BRANCH: ${{ steps.claude.outputs.branch_name }}
+          CODEX_BRANCH: ${{ steps.codexprep.outputs.branch }}
+          EXEC: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
+          CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
+          CODEX_IDS: ${{ steps.codexthreads.outputs.ids }}
+          PROV_NOTE: ${{ steps.provenance.outputs.note }}
+          ERROR_FILE: ${{ runner.temp }}/agent-error.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GIT_DIR: ${{ github.workspace }}/.git
+          GIT_COMMON_DIR: ${{ github.workspace }}/.git
+          GIT_WORK_TREE: ${{ github.workspace }}
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+          GIT_CONFIG_KEY_1: core.fsmonitor
+          GIT_CONFIG_VALUE_1: "false"
+        run: |
+          set -uo pipefail
+          mkdir -p "$DIR"
+          extra='{}'
+          moved=false
+          head=""
+          if [ "$ENGINE" = "codex" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
+            echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed prep, user-setup, codex or reclaim step skips it); running no git — nothing lands, no PR is opened and no hand-back is owed."
+          elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
+            if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
+              moved=true
+            fi
+          fi
+          # Merge-only: HEAD moved, but only to the runner's clean base merge
+          # — any agent commit would have moved it further — so the agent
+          # committed nothing.
+          merge_only=""
+          [ "$moved" = "true" ] && [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ] && merge_only=1
+          committed=""
+          [ "$moved" = "true" ] && [ -z "$merge_only" ] && committed=1
+          # -- the branch the land job pushes to (emit-landing's `branch`)
+          if [ "$IS_PR" = "true" ]; then
+            branch="$HEAD_BRANCH"
+          else
+            branch="${CODEX_BRANCH:-$CLAUDE_BRANCH}"
+            if [ -z "$branch" ] && [ -n "$head" ]; then
+              local_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+              case "$local_branch" in "claude/issue-${ISSUE:-0}-"*) branch="$local_branch" ;; esac
+            fi
+            [ -n "$branch" ] || branch="claude/issue-${ISSUE:-0}-run-$GITHUB_RUN_ID"
+          fi
+          echo "branch=$branch" >>"$GITHUB_OUTPUT"
+          # -- pr.open: an issue run that produced commits gets its PR
+          if [ "$IS_PR" != "true" ] && [ "$moved" = "true" ] && [[ "${ISSUE:-}" =~ ^[0-9]+$ ]]; then
+            # Title from the tip commit's subject; jq slices by code point,
+            # so the validator's 256-character cap cannot split a multibyte
+            # character the way `cut -c` (bytes) would.
+            title=$(git log -1 --format=%s HEAD 2>/dev/null | tr -d '\n' || true)
+            [ -n "$title" ] || title="claude: automated change for #$ISSUE"
+            detail=$(git log -1 --format=%b HEAD 2>/dev/null || true)
+            {
+              printf 'Fixes #%s\n\n' "$ISSUE"
+              [ -z "$detail" ] || printf '%s\n\n' "$detail"
+              printf -- '---\n_Opened by the dev agent from [this run](%s)._\n' "$RUN_URL"
+            } >"$DIR/pr-body.md"
+            labels='[]'
+            printf '%s' "${PR_LABELS:-}" | jq -e 'type == "array" and all(strings)' >/dev/null 2>&1 && labels="$PR_LABELS"
+            pr=$(jq -nc --arg t "$title" --arg base "$BASE" --argjson labels "$labels" --argjson issue "$ISSUE" \
+                   '{open: true, title: $t[:256], body_file: "pr-body.md", labels: $labels, issue: $issue}
+                    + (if $base != "" then {base: $base} else {} end)')
+            extra=$(jq -c --argjson pr "$pr" '.pr = $pr' <<<"$extra")
+            if [ "${REQ_REVIEW:-false}" = "true" ]; then
+              extra=$(jq -c '.handback = true' <<<"$extra")
+            fi
+          fi
+          # -- hand-back: a landed commit on a PR in the loop's hands
+          if [ "$IS_PR" = "true" ] && [ "$moved" = "true" ] && [ "${AUTO:-}" = "true" ]; then
+            extra=$(jq -c '.handback = true' <<<"$extra")
+          fi
+          # -- comments (and the codex thread ids)
+          if [ "$ENGINE" = "codex" ]; then
+            if [ "${CODEXCOMMIT_OUTCOME:-}" = "success" ] && [ -s "$DIR/codex-comment.md" ] && [[ "$NUM" =~ ^[0-9]+$ ]]; then
+              extra=$(jq -c --argjson n "$NUM" '.comments = [{number: $n, body_file: "codex-comment.md"}]' <<<"$extra")
+              if [ "$IS_PR" = "true" ] && [ -n "$committed" ]; then
+                # One jq builds the array, so an empty or all-filtered list
+                # is exactly `[]` (review round 1 of #83: a grep-based
+                # version appended a second array under pipefail).
+                ids=$(jq -nc --arg s "${CODEX_IDS:-}" '[$s | split(" ")[] | select(test("^PRRT_[A-Za-z0-9_-]+$"))] | unique')
+                [ "$ids" = "[]" ] || extra=$(jq -c --argjson t "$ids" '.resolve_threads = $t' <<<"$extra")
+              fi
+            fi
+          else
+            agent='{}'
+            if [ -f "$DIR/manifest-extra.json" ]; then
+              if ! agent=$(jq -c 'if type=="object" then . else error("not an object") end' "$DIR/manifest-extra.json" 2>&1); then
+                echo "::error::landing: the agent's manifest-extra.json is not a JSON object ($agent); its comments were dropped."
+                agent='{}'
+              fi
+            fi
+            unknown=$(jq -r '[keys[] | select(. != "comments")] | join(", ")' <<<"$agent" 2>/dev/null || true)
+            [ -z "$unknown" ] || echo "::warning::landing: ignored keys the agent may not set in its manifest: $unknown."
+            comments='[]'
+            n=0
+            # `-` stands in for a missing number: read strips leading IFS
+            # whitespace, so an empty first field would collapse into the
+            # second.
+            while IFS=$'\t' read -r number file; do
+              [ -n "$file" ] || { echo "::warning::landing: dropped a comments entry with no body_file."; continue; }
+              if [ "$number" != "-" ] && [ "$number" != "$NUM" ]; then
+                echo "::warning::landing: dropped comments entry '$file': number $number is not this run's #$NUM."
+                continue
+              fi
+              if ! [[ "$file" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+                echo "::warning::landing: dropped comments entry '$file': body_file must be a plain file name ([A-Za-z0-9._-], not starting with a dot)."
+                continue
+              fi
+              if [ -L "$DIR/$file" ] || [ ! -f "$DIR/$file" ]; then
+                echo "::warning::landing: dropped comments entry '$file': no such regular file under the landing directory."
+                continue
+              fi
+              if [ "$n" -ge 5 ]; then
+                echo "::warning::landing: dropped comments entry '$file': at most five comments per run."
+                continue
+              fi
+              # Cap like the codex summary (the validator refuses a body
+              # file of 64 KiB or more, and `land` re-caps at 60,000 with
+              # its own note).
+              if [ "$(wc -c <"$DIR/$file")" -gt 59000 ]; then
+                head -c 59000 "$DIR/$file" >"$DIR/$file.trunc"
+                printf '\n\n_[truncated: the body exceeded the comment size cap]_\n' >>"$DIR/$file.trunc"
+                mv "$DIR/$file.trunc" "$DIR/$file"
+              fi
+              comments=$(jq -c --argjson num "$NUM" --arg f "$file" '. + [{number: $num, body_file: $f}]' <<<"$comments")
+              n=$((n + 1))
+            done < <(jq -r '(.comments // [])[]? | select(type == "object") | [((.number // "-") | tostring), ((.body_file // "") | if type == "string" then . else "" end)] | @tsv' <<<"$agent" 2>/dev/null || true)
+            if [ "$n" -gt 0 ]; then
+              extra=$(jq -c --argjson c "$comments" '.comments = $c' <<<"$extra")
+            elif [ -z "$committed" ] && [ "${CLAUDE_OUTCOME:-}" = "success" ] && [ ! -s "$ERROR_FILE" ] && [[ "$NUM" =~ ^[0-9]+$ ]]; then
+              # No agent commit, no comment of its own and no error: relay
+              # the final message so the answer (or the reason it changed
+              # nothing) reaches the thread. Same de-fang as the codex
+              # summary step: this posts as marvin, so a final message
+              # quoting a trigger, a loop marker or the codex reviewer's
+              # footer would fire a workflow, forge a verdict or pose as the
+              # newest review; `land` repeats the trigger and marker rules
+              # but deliberately not the footer.
+              file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
+              summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 \
+                | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                         -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                         -e 's/engine: codex/engine  codex/g' \
+                         -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' || true)
+              {
+                printf '🤖 claude (dev agent): no code changes were made%s — the agent'"'"'s summary:\n\n' "${merge_only:+ (the base-branch merge from the workflow was committed and lands with this run)}"
+                printf '%s\n' "${summary:-(the agent produced no final message)}"
+              } >"$DIR/agent-summary.md"
+              extra=$(jq -c --argjson num "$NUM" '.comments = [{number: $num, body_file: "agent-summary.md"}]' <<<"$extra")
+            fi
+          fi
+          # -- stage
+          agent_ok=""
+          if [ "$ENGINE" = "codex" ]; then
+            [ "${CODEXCOMMIT_OUTCOME:-}" = "success" ] && agent_ok=1
+          else
+            [ "${CLAUDE_OUTCOME:-}" = "success" ] && agent_ok=1
+          fi
+          in_loop=""
+          if [ "$IS_PR" = "true" ] || [ "$(jq -r '.pr.open // false' <<<"$extra")" = "true" ]; then in_loop=1; fi
+          if [ "$TRIGGER_PHRASE" = "@auto" ] && [ -n "$agent_ok" ] && [ ! -s "$ERROR_FILE" ] && [ -n "$in_loop" ]; then
+            echo "landing: successful @auto run with a PR in the loop; the stage stays at Agent (the review loop owns it)."
+          else
+            extra=$(jq -c '.stage = "Review"' <<<"$extra")
+          fi
+          if [ -n "${PROV_NOTE:-}" ]; then
+            printf '%s\n' "$PROV_NOTE" >"$DIR/prov.md"
+            extra=$(jq -c '.provenance_comment_file = "prov.md"' <<<"$extra")
+          fi
+          if [ -s "$ERROR_FILE" ]; then
+            extra=$(jq -c --rawfile msg "$ERROR_FILE" '.error = {message: $msg, fail_run: true}' <<<"$extra")
+          fi
+          printf '%s\n' "$extra" >"$EXTRA"
+          echo "landing: branch=$branch moved=$moved committed=${committed:-0} merge_only=${merge_only:-0} $(jq -c 'if .error then .error.message = "<\(.error.message | length) chars>" else . end' <<<"$extra")"
+
+      # Last, always: package the commits above the start SHA and the
+      # manifest for the land job. The PR/issue numbers are the event
+      # payload's (README → Using the pair), the SAME expressions the land
+      # job gets: the validator pins the manifest's pr_number / issue_number
+      # to them, its branch to the PR's live head ref on PR runs and to the
+      # `claude/issue-N-` prefix on issue runs. read-only on the codex path
+      # (the gate's engine, so a failed prep or user-setup step is covered
+      # too) unless the unresolved-merge guard succeeded (the composer's
+      # condition, see its comment): a reclaim that did not succeed skips the
+      # guard, and no git may run against a workspace codex still owns; a
+      # FAILED guard means conflict markers survive in the tree, and a local
+      # commit codex made over them must not be bundled — read-only packages
+      # nothing above the start SHA. Either way the manifest still carries
+      # the Surface step's error for the land job to post. start-sha falls
+      # back to github.sha when the checkout or the base step failed
+      # (`steps.base` / `steps.sync` empty): an empty start_sha would be
+      # refused at `validate`, and the land composite posts the manifest's
+      # error only from a VALIDATED manifest — with no repo there is nothing
+      # to bundle either way, and github.sha is a trusted, well-formed
+      # placeholder.
+      - name: Emit landing manifest
+        if: always()
+        uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
+        with:
+          start-sha: ${{ steps.base.outputs.sha || steps.sync.outputs.start_sha || steps.sync.outputs.head_sha || github.sha }}
+          branch: ${{ steps.landing.outputs.branch || needs.gate.outputs.head_branch }}
+          pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
+          issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
+          manifest-extra: ${{ runner.temp }}/landing-extra.json
+          read-only: ${{ needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success' && 'true' || 'false' }}
+
+  # TRUSTED, last: a fresh runner that checks out nothing and installs
+  # nothing. The `land` composite is the whole landing — download, validate,
+  # push the bundled commits as marvin (which runs CI), open or adopt the PR
+  # on an issue run (labels, the "✅ Opened a pull request" link on the
+  # issue), post the agent's comments or the codex summary, post exactly
+  # `@review` where a hand-back is owed, move the stage, post the provenance
+  # note, report the agent error and fail the run when it says so. always():
+  # an agent job that failed still gets its error posted; with no artifact at
+  # all (runner killed mid-agent) the composite fails its download, lands
+  # nothing, and says so on the issue/PR. Gated on the gate job's success as
+  # well as its `ok`: a gate that failed after admitting the run has no
+  # agent job to land.
+  #
+  # This workflow keeps the marvin-less fallback the loops dropped: callers
+  # without MARVIN_TOKEN still get a github-actions[bot] push and PR — no CI,
+  # and blocked entirely where Actions-PR-creation is disallowed — today's
+  # documented degradation (secrets.MARVIN_TOKEN above). So the job token
+  # holds contents: write HERE, in the job that never ran the agent; the
+  # agent job's is read-only.
+  land:
+    needs: [gate, agent]
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write         # the job-token fallback push
+      pull-requests: write    # the fallback PR, labels and comments
+      issues: write
+      actions: read           # artifact download
+    steps:
+      # Skipped when the agent job was cancelled (as the loops' land jobs
+      # skip): its partial commits are not pushed and no PR is opened on the
+      # strength of an always(); the two steps below say so instead.
+      # `skipped` is excluded too — the job-level gate already rules it out
+      # — belt and braces for the same "no artifact, no agent" shape.
+      - name: Land
+        id: land
+        if: needs.agent.result != 'cancelled' && needs.agent.result != 'skipped'
+        uses: meridianlabs-ai/agents/.github/actions/land@main
+        with:
+          # The machine account where the caller has it; the job token
+          # elsewhere (the degradation above).
+          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          # The event payload's numbers — the SAME expressions emit-landing
+          # got: the validator pins the manifest's pr_number / issue_number
+          # to them, and they are where the final report goes when the
+          # manifest never validated (missing artifact, tampered manifest).
+          pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
+          issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
+          # The PR's live head branch, read by the gate before any untrusted
+          # code ran: the validator's pin for the manifest's branch on PR
+          # runs. Empty on issue runs (and when the gate's read failed —
+          # the composite then looks it up itself).
+          pr-head-ref: ${{ needs.gate.outputs.head_branch }}
+          # Issue runs have no PR head ref to pin the branch to; the prefix
+          # claude-code-action (and the codex prep step) give issue branches,
+          # composed from the trusted issue number, keeps the push off the
+          # branches of PRs opened for other issues. Ignored on PR runs.
+          branch-prefix: ${{ !github.event.issue.pull_request && github.event.issue.number && format('claude/issue-{0}-', github.event.issue.number) || '' }}
+          # The dev-agent manifest never files follow-up issues; an empty
+          # allow-list makes the validator refuse any that appear.
+          allowed-issue-repos: ""
+
+      # A cancelled agent job lands nothing and posts nothing except this
+      # note — and moves the stage, as every run that needs a human does.
+      # Same identity fallback as the landing. Best-effort.
+      - name: Report a cancelled agent job
+        if: needs.agent.result == 'cancelled'
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "${NUM:-}" ] || { echo "no issue or PR to post on"; exit 0; }
+          gh api "repos/$REPO/issues/$NUM/comments" \
+            -f body="⚠️ The agent job of [this run]($RUN_URL) was cancelled before it finished, so nothing was landed: no push, no pull request, no comments. Re-trigger to redo the task." \
+            --silent || echo "::warning::could not post the cancellation note on #$NUM"
+
+      - name: Stage - Review (cancelled agent)
+        if: needs.agent.result == 'cancelled'
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Review

@@ -19,6 +19,14 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   normalization, and the codex path's hand-back / hand-off decision — with
   the codex no-thread-ids case run on through `emit-landing` and the
   validator.
+- `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
+  step, lifted the same way: the PR open for an issue run (title, body,
+  labels, base, the fork's review request), the `@review` hand-back on an
+  autonomous PR run, the stage rule, the agent's `comments` (pinned,
+  shape-checked, capped), the no-change relay, the codex summary and
+  thread ids, and the guard-failed codex path — with the issue-run case
+  run on through `emit-landing` and the validator under the land job's
+  `branch-prefix`.
 
 Run from the repo root:
 

@@ -14,13 +14,15 @@ the auto-review and permission tradeoffs — see [design/architecture.md](design
 |---|---|---|
 | Workflow | `.github/workflows/claude.yml` | `.github/workflows/claude-review.yml` |
 | Trigger | `@claude` mention, or the `claude` label | auto on PR open, or `@review` |
-| GitHub token | `contents: write` (edits, pushes, opens PRs) | `contents: read` (cannot push) |
+| GitHub token | agent job: read-only; a separate land job pushes the commits and opens the PR as the machine account | `contents: read` (cannot push) |
 | Tools | file edits + verify loop (tests/lint) + `gh` | verify loop + `gh` + inline comments; **denies** edits/git writes |
 
 Both authenticate the same way (Workload Identity Federation) and default to
 the same model (Fable, falling back to the account default). The hard
-privilege boundary between them is the GitHub token scope, not the prompt — the
-reviewer physically cannot push regardless of what it's asked to do.
+privilege boundary between them is the GitHub token scope, not the prompt —
+neither job that runs an agent holds a write token: the reviewer physically
+cannot push regardless of what it's asked to do, and the dev agent's commits
+are pushed by a separate job after its run ends.
 
 ## Layout
 
@@ -81,16 +83,23 @@ Trigger it by:
 Notes:
 
 - On an **issue**, the agent starts from the default branch and creates a new
-  branch. On a **PR**, it pushes to the existing PR branch. Drive iterative
+  branch; the workflow pushes that branch and opens the PR when the run ends.
+  On a **PR**, its commits land on the existing PR branch. Drive iterative
   work (review fixes, follow-ups) from the PR, not the issue, or you'll spawn a
   parallel branch.
+- **One push per run, at the end.** The agent itself never pushes, opens PRs
+  or comments: it commits, and the workflow's land job pushes the commits as
+  the machine account (so CI runs), opens the PR on an issue run, and posts
+  any comment the agent left for the thread. Commits do not appear mid-run;
+  to iterate on CI failures use `@auto`, whose loop re-runs the agent on each
+  red CI run.
 - PR follow-ups first merge the base branch into the PR branch on the runner,
-  and push that merge even if nothing else lands — so a behind branch may gain
-  a merge commit from the machine account after any `@claude` request (pull
-  before pushing local work). That merge is what lets GitHub compute a merge
-  ref again, so CI can run.
-- The agent runs the project's tests/lint to verify its work before opening a
-  PR (per each repo's CLAUDE.md conventions).
+  and that merge lands with the run's push even if nothing else changes — so
+  a behind branch may gain a merge commit from the machine account after any
+  `@claude` request (pull before pushing local work). That merge is what lets
+  GitHub compute a merge ref again, so CI can run.
+- The agent runs the project's tests/lint to verify its work before it
+  commits (per each repo's CLAUDE.md conventions).
 - **It does not run on PRs whose head lives in a fork.** That code would
   execute unsandboxed in a job holding write credentials, so the run stops
   before checking anything out; collaborators get a short comment saying so
@@ -128,8 +137,8 @@ handoff from reviewer to dev agent (the reviewer's comments don't contain
 
 1. Reviewer posts findings.
 2. You decide which to act on.
-3. Comment `@claude address the review feedback` **on the PR**. The dev agent
-   pushes fixes to the same branch.
+3. Comment `@claude address the review feedback` **on the PR**. The dev
+   agent's fixes land on the same branch.
 
 This keeps your judgment in the loop on which findings matter. See the design
 doc for why we avoid a fully automatic reviewer→fixer loop.

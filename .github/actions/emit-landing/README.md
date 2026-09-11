@@ -148,13 +148,23 @@ compose `replies`, `resolve_threads`, `handback` and `handoff_body_file` in
 a `manifest-extra.json` under the landing directory, and a runner step
 whitelists and normalizes those four fields into the workflow's
 `manifest-extra` before `emit-landing` runs (design/architecture.md →
-Landing job, the #83 notes).
+Landing job, the #83 notes). `claude.yml` (#84) passes the event-payload
+expressions above to both composites and the gate job's head-branch read as
+`pr-head-ref`; its agent may write only `comments` into
+`manifest-extra.json`, and the workflow's composer pins each entry's
+`number` to the run's own issue/PR before merging it. Its issue runs are the
+first `pr.open` manifests: title, body file, base, labels and issue composed
+by the workflow from the tip commit and the gate's label read.
 
 Agent job, last step. It runs git in the workspace, so on the codex path it
 is gated on the reclaim step having **succeeded** — `== 'success'`, never
 `!= 'failure'`: a reclaim cancelled mid-run must skip every later git call
 (AGENTS.md → the codex path). The Claude path has no reclaim step, hence the
-path-aware condition (`codexuser` / `codexreclaim` are claude.yml's step ids):
+path-aware condition (`codexuser` / `codexreclaim` are claude.yml's step ids).
+The converted workflows run the step `if: always()` instead and key
+`read-only` on the unresolved-merge guard having succeeded (which implies the
+reclaim did), so the Surface step's error still ships when the codex path
+failed early:
 
 ```yaml
       - name: Emit landing manifest
