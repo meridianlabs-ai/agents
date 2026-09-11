@@ -9,10 +9,10 @@ Runs the two reconciliation mechanisms on demand instead of waiting for their
 natural cadence (the sync runs hourly at :17; chips only land when the local
 sweep runs). Both are idempotent — running this at any time is safe.
 
-Locate the agents checkout first (this skill is a symlink into it):
+Set `SKILL_DIR` to the absolute directory containing this loaded `SKILL.md`. Resolve symlinks to find the agents checkout:
 
 ```sh
-AGENTS=$(dirname "$(dirname "$(realpath ~/.claude/skills/resolve-board)")")
+AGENTS=$(dirname "$(dirname "$(realpath "$SKILL_DIR")")")
 ```
 
 ## Step 1 — dispatch the Atlas sync and wait
