@@ -11,7 +11,14 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `gh`, the landing-failure hint) and
   the git sequence its fetch/push steps rely on (bundle above the start SHA;
   unbundle into an empty bare repo; refuse a moved branch; push without
-  `--force`), run against local repos.
+  `--force`), run against local repos — including `emit-landing`'s `write`
+  step, lifted from the action and run against those repos.
+- `test_review_fix_composer.py` — `claude-auto-review.yml`'s `Compose
+  landing manifest` step, lifted from the workflow the same way: the
+  review loop's ending contract (exactly one hand-back), the agent-field
+  normalization, and the codex path's hand-back / hand-off decision — with
+  the codex no-thread-ids case run on through `emit-landing` and the
+  validator.
 
 Run from the repo root:
 

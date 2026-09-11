@@ -85,7 +85,7 @@ when nothing changed — the manifest composer picks one from HEAD exactly
 as the old landing step did, and carries the `RESOLVED-THREADS:` ids as
 `resolve_threads`); the push and the hand-back cannot come
 apart there: `land` posts the hand-back only after the push landed, and
-`emit-landing` drops `handback` and `stage` whenever it had to drop the
+`emit-landing` drops `handback`, `stage`, `resolve_threads` and `handoff_body_file` whenever it had to drop the
 bundle (HEAD moved, but a non-descendant or a `git bundle` failure left
 nothing to push), so the manifest never carries a hand-back over lost
 work. The HEAD-moved test is gated on the `unresolved-merge-guard` step

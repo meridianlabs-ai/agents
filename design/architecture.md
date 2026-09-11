@@ -412,7 +412,8 @@ settled, as the model for the review-fix loop and the dev agent:
   landed. The converse — a hand-back with no push — is closed in
   `emit-landing`: when HEAD moved but the bundle could not be written (a
   non-descendant HEAD, or a `git bundle` failure) it drops `handback` and
-  `stage` along with the bundle and records the drop in the manifest's
+  `stage` — and, since #83, `resolve_threads` and `handoff_body_file`, the
+  review loop's two other "the work landed" claims — along with the bundle and records the drop in the manifest's
   `error`, so the validator's tolerance of `handback` on a bundle-less
   manifest never turns into a bare `@review` over lost work. Two deliberate
   consequences of keying on ancestry alone: a rebased HEAD lands nothing

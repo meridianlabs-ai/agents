@@ -1891,8 +1891,9 @@ jobs:
       # those commits and hands back, with the Surface step's error posted
       # alongside — dropping committed work is worse, the push is what
       # re-runs CI, and the ⚠️ says the round failed. emit-landing drops
-      # handback and stage again when it drops the bundle, so no bare
-      # `@review` posts for a round whose work was lost.
+      # handback, stage, resolve_threads and handoff_body_file again when it
+      # drops the bundle, so no bare `@review`, no thread resolution and no
+      # completion hand-off posts for a round whose work was lost.
       # Not set -e: a manifest must come out of every path. On the codex path
       # (the ENGINE the gate resolved — not `codexuser.outcome`, which is
       # `skipped`/`failure` when the prep or user-setup step failed and would
@@ -1961,8 +1962,13 @@ jobs:
               extra=$(jq -c '.handback = true | .stage = "Review"' <<<"$extra")
               if [ -n "$have_summary" ]; then
                 extra=$(jq -c --argjson n "$PR" '.comments = [{number: $n, body_file: "codex-comment.md"}]' <<<"$extra")
-                ids=$(tr ' ' '\n' <<<"${CODEX_IDS:-}" | grep -E '^PRRT_[A-Za-z0-9_-]+$' | sort -u | jq -R . | jq -sc . 2>/dev/null || echo '[]')
-                [ "$ids" != "[]" ] && extra=$(jq -c --argjson t "$ids" '.resolve_threads = $t' <<<"$extra")
+                # One jq builds the array, so an empty or all-filtered list
+                # is exactly `[]` (a grep with no match exits 1, and under
+                # pipefail its `|| echo '[]'` fallback appended a SECOND
+                # array — --argjson then failed and emptied the manifest:
+                # review round 1 of #83, the RESOLVED-THREADS: none case).
+                ids=$(jq -nc --arg s "${CODEX_IDS:-}" '[$s | split(" ")[] | select(test("^PRRT_[A-Za-z0-9_-]+$"))] | unique')
+                [ "$ids" = "[]" ] || extra=$(jq -c --argjson t "$ids" '.resolve_threads = $t' <<<"$extra")
               fi
             elif [ -n "$have_summary" ]; then
               extra=$(jq -c '.handoff_body_file = "codex-comment.md" | .stage = "Review"' <<<"$extra")
