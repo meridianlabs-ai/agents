@@ -1,29 +1,20 @@
-# The agents repo's OWN reviewer stub (copy of examples/claude-review-stub.yml;
+# The agents repo's OWN reviewer stub (based on examples/claude-review-stub.yml;
 # -stub suffix because claude-review.yml is the reusable definition here).
-# Auto-reviews PRs on open (PRs here target main, which carries this file, so
-# the pull_request trigger fires — unlike the pristine-base fork; release-please
-# PRs are skipped, gated in the reusable workflow) and on demand via @review.
+# PRs here are NOT auto-reviewed on open: the reviewer runs only on an explicit
+# @review comment (on a PR, or on an External-labeled proxy issue). Ransom is
+# moving review into local Orca-driven loops, so the GitHub-hosted review no
+# longer fires on every PR (decision: Ransom, 2026-09-11). This stub therefore
+# deliberately DIVERGES from examples/claude-review-stub.yml, which keeps the
+# pull_request trigger for caller repos; do not "re-sync" it.
 name: Review
 
 on:
-  # pull_request (NOT pull_request_target — attempted 2026-08-26, reverted:
-  # Anthropic's token exchange rejects prt-shaped OIDC subjects, "Invalid
-  # OIDC token"; see design/architecture.md → auto-review tradeoffs).
-  # Consequence: PRs that EDIT the reviewer's own files skip auto-review
-  # (server-side workflow validation) and need a manual top-level @review
-  # comment, which resolves the workflow from the default branch.
-  pull_request:
-    types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
 
 jobs:
   review:
-    # Run on PR events (skipping drafts — they get reviewed via
-    # ready_for_review when marked ready — and fork PRs, which get no OIDC
-    # token so the run would die at startup on id-token: write; the
-    # same-repo check below is an ergonomic skip, not a security
-    # boundary), or on a PR comment containing
+    # Run on a PR comment containing
     # @review — or an @review comment on an External-labeled proxy ISSUE, which
     # reviews the tracked upstream PR and posts findings on the proxy (external
     # mode; see the reusable workflow). An explicit @review still works on a
@@ -50,9 +41,6 @@ jobs:
     # either alongside a genuine bare trigger is wrongly skipped — rare,
     # recoverable by re-commenting the bare token alone.
     if: >
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.draft != true &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event.issue.pull_request != null &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
