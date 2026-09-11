@@ -139,7 +139,16 @@ A `workflow_run` event (claude-auto.yml) names no PR in a usable shape
 value is the **gate job's** API lookup — `gh pr list --head <branch>` run
 before any PR code was checked out — passed as `needs.gate.outputs.pr` to
 both composites; `pr-head-ref` is the event's head branch, which is what the
-gate resolved the PR by.
+gate resolved the PR by. `claude-auto-review.yml` runs on the reviewer's
+`issue_comment`, so its trusted number is the caller's `pr_number` input
+(`github.event.issue.number`), passed to both composites, and `pr-head-ref`
+is the gate's `gh pr view … headRefName` lookup. That workflow is also the
+first whose *agent* writes into the manifest: its fix prompt has the agent
+compose `replies`, `resolve_threads`, `handback` and `handoff_body_file` in
+a `manifest-extra.json` under the landing directory, and a runner step
+whitelists and normalizes those four fields into the workflow's
+`manifest-extra` before `emit-landing` runs (design/architecture.md →
+Landing job, the #83 notes).
 
 Agent job, last step. It runs git in the workspace, so on the codex path it
 is gated on the reclaim step having **succeeded** — `== 'success'`, never

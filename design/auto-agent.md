@@ -218,12 +218,17 @@ keeps CI-only fix iterations from burning the budget.
 non-blocking (nit-level) AND every change it pushed is documentation-only
 (markdown/doc files, code comments, docstrings — zero behavioral code), it
 skips `@review` and hands off to a human directly — another review round would
-just re-read prose. The judgment lives in the agent's prompt; the *detection*
-is deterministic: any agent self-handoff comment starts with the
-`<!-- auto-handoff -->` marker, which the workflow keys on (it moves the Atlas
-stage to Review — see atlas-tracking.md). The same marker covers the
+just re-read prose. The judgment lives in the agent's prompt; the *mechanism*
+is deterministic: since #83 the agent names its hand-off body in the landing
+manifest (`handoff_body_file`) and the land job posts it with the
+`<!-- auto-handoff -->` marker as its first line and moves the Atlas stage to
+Review (see atlas-tracking.md; before #83 the agent posted the marker comment
+itself and the workflow detected it). The same path covers the
 older self-handoff case (all remaining feedback declined with rationale),
-which previously ended the loop without any deterministic trace.
+which previously ended the loop without any deterministic trace, and — since
+#83 — a round in which the agent committed nothing and set no hand-back at
+all, which the workflow concludes with a hand-off carrying the agent's
+summary rather than leaving the board at Agent.
 
 **Both counters are per-PR-lifetime tallies, reset only by an explicit human
 decision to grant a fresh budget** (escalation reset added 2026-09-09). Neither
@@ -272,8 +277,8 @@ outcomes) must not skip the comment on a PR whose label may already be gone;
 empty outputs route to the conservative wording. Each of the three steps is a
 shared composite (`disarm-auto-loop`, `reset-auto-counters`, `post-pr-comment`)
 so the two loops cannot drift — as is the gates' labeler check
-(`verify-auto-labeler`, Trigger surface above); `post-pr-comment` is also what the loops' "Ensure
-hand-back after push" backstop posts the `@review` with, since that comment is
+(`verify-auto-labeler`, Trigger surface above); `post-pr-comment` is also what the `land`
+composite posts the loops' `@review` hand-back with, since that comment is
 the loop's other unlosable one. The
 reset body carries no `rounds:`/`attempts:` number and, for the review loop, no
 head marker: the gates read 0 via their `${prev:-0}` default, and the

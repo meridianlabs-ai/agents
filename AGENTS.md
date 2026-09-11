@@ -124,7 +124,8 @@ take effect on every repo's next run.
   to the restored config (hooks and the index are files a restore cannot
   cover, and `git fetch`/`git status` run hooks too, not just `git
   commit`) — so keep every later git-running step gated on its success
-  (guard, landing, the loops' hand-back fetch; the Surface steps set their
+  (guard, commit/landing, the loops' manifest composer and emit-landing;
+  the Surface steps set their
   error on `!= success`, not `= failure`, so a reclaim cancelled mid-run
   skips their git calls too) and put nothing that runs git between codex
   and it. The landing steps additionally pin
