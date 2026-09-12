@@ -491,15 +491,16 @@ def emit_landing_script() -> str:
     return "\n".join(body) + "\n"
 
 
-def run_emit_landing(tmp_path, *, cwd, read_only, start_sha, extra=None):
+def run_emit_landing(tmp_path, *, cwd, read_only, start_sha, extra=None,
+                     branch="claude/issue-81-review", pr_number="456", issue_number=""):
     landing = tmp_path / "landing"
     out = tmp_path / "out.txt"
     out.write_text("")
     env = {
         "START_SHA": start_sha,
-        "BRANCH": "claude/issue-81-review",
-        "PR_NUMBER": "456",
-        "ISSUE_NUMBER": "",
+        "BRANCH": branch,
+        "PR_NUMBER": pr_number,
+        "ISSUE_NUMBER": issue_number,
         "EXTRA": str(extra) if extra else "",
         "DIR": str(landing),
         "READ_ONLY": "true" if read_only else "false",
