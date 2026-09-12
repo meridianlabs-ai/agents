@@ -200,27 +200,78 @@ def test_early_failure_on_an_alternate_base_bundles_nothing(repo):
     assert out["branch"] == "claude/issue-12-run-123" and out["read_only"] == "true"
     assert "pr" not in m and "handback" not in m and "comments" not in m
     assert m["error"]["fail_run"] is True and m["stage"] == "Review"
-    assert "not on the run's branch" in res.stdout
+    assert "does not exist locally" in res.stdout
 
 
 def test_commits_off_the_run_branch_are_not_bundled(repo):
-    # The action reported its branch, but HEAD ended up elsewhere (the
-    # agent switched branches): whatever it committed there is not the
-    # run's work, and the branch it names must not receive foreign history.
+    # The action reported its branch, but it does not exist locally and HEAD
+    # is elsewhere (the step died before setupBranch, or the agent removed
+    # it): whatever sits on HEAD is not the run's work, and the branch the
+    # action named must not receive foreign history. No error of the
+    # composer's own — the Surface step's report says what failed.
     on(repo, "somewhere-else")
     commit(repo)
     m, res, _, out = compose(repo, is_pr=False)
     assert out["branch"] == ISSUE_BRANCH and out["read_only"] == "true"
-    assert "pr" not in m and m["stage"] == "Review"
-    assert "not on the run's branch" in res.stdout
+    assert "pr" not in m and m["stage"] == "Review" and "error" not in m
+    assert "does not exist locally" in res.stdout
+
+
+def test_detached_head_at_the_run_branch_tip_still_lands(repo):
+    # `git checkout --detach` after the commit leaves the work at the
+    # branch's tip; a name-only test dropped it with a green run (review
+    # round 2 of #84). Through emit-landing and the validator too.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    git("checkout", "-q", "--detach", "HEAD", cwd=repo["work"])
+    m, _, _, out = compose(repo, is_pr=False)
+    assert out["read_only"] == "false" and m["pr"]["open"] is True and "error" not in m
+    extra = repo["tmp"] / "landing-extra.json"
+    res, landing, output = run_emit_landing(repo["tmp"], cwd=repo["work"], read_only=False, start_sha=repo["start"],
+                                            extra=extra, branch=out["branch"], pr_number="", issue_number="12")
+    assert res.returncode == 0 and "wrote=true" in output
+    manifest = json.loads((landing / "manifest.json").read_text())
+    assert manifest["has_bundle"] is True
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
+    assert v.returncode == 0, v.stdout
+
+
+def test_leaving_the_run_branch_is_an_error_not_a_silent_no_change(repo):
+    # The branch was initialized and committed on, then HEAD moved to another
+    # branch: emit-landing bundles START..HEAD, so that work cannot be
+    # packaged. Refused loudly — an error that fails the run, and no relay
+    # claiming "no code changes were made".
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    on(repo, "scratch")
+    (repo["work"] / "g").write_text("scratch\n")
+    git("add", "g", cwd=repo["work"])
+    git("commit", "-qm", "scratch work", cwd=repo["work"])
+    m, res, landing, out = compose(repo, is_pr=False, final_message="All done, pushed it myself.")
+    assert out["read_only"] == "true"
+    assert "pr" not in m and "comments" not in m and m["stage"] == "Review"
+    assert m["error"]["fail_run"] is True
+    assert "left its branch" in m["error"]["message"] and "NOT landed" in m["error"]["message"]
+    assert "::error::landing: HEAD ended the run" in res.stdout
+    assert not (landing / "agent-summary.md").exists()
+
+
+def test_leaving_the_run_branch_appends_to_the_surface_error(repo):
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    git("checkout", "-q", "--detach", repo["start"], cwd=repo["work"])   # HEAD back at the start, off the tip
+    m, _, _, _ = compose(repo, is_pr=False, error="⚠️ it broke\n", claude_outcome="failure")
+    assert m["error"]["message"].startswith("⚠️ it broke\n\n---\n\n⚠️ The agent run finished but its work was NOT landed")
 
 
 def test_pr_run_with_head_off_the_pr_branch_lands_nothing(repo):
     # A closed PR the sync skipped: HEAD is still the default ref, whose
     # history may contain the PR's merged tip — never a push to the branch.
+    # The PR branch does not exist locally, so this is the fence, not a
+    # rejection: no error of the composer's own.
     commit(repo)
     m, _, _, out = compose(repo, is_pr=True, trigger="@auto", auto="true")
-    assert out["read_only"] == "true" and "handback" not in m
+    assert out["read_only"] == "true" and "handback" not in m and "error" not in m
 
 
 def test_issue_run_title_falls_back_and_is_capped(repo):

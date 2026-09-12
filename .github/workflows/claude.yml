@@ -1973,20 +1973,37 @@ jobs:
             [ -n "$branch" ] || branch="claude/issue-${ISSUE:-0}-run-$GITHUB_RUN_ID"
           fi
           echo "branch=$branch" >>"$GITHUB_OUTPUT"
-          # -- what may be bundled: HEAD on the branch (the evidence that the
-          # agent's branch was initialized and worked on), moved past the
-          # start SHA and descending from it.
+          # -- what may be bundled: HEAD at the branch (the evidence that the
+          # agent's branch was initialized and worked on — on it, or detached
+          # at its tip: a `git checkout --detach` after the commit leaves the
+          # work in place, and review round 2 of #84 showed a name-only test
+          # dropping it with a green run), moved past the start SHA and
+          # descending from it. A branch that exists locally with HEAD
+          # elsewhere is the agent having LEFT its branch: emit-landing
+          # bundles START..HEAD, so that work cannot be packaged — refused
+          # loudly (an error, and no "no code changes" relay), not silently.
+          # No local branch at all is the early-failure fence (the agent
+          # never initialized it; the Surface step's error says why).
           read_only=true
-          if [ -n "$git_ok" ] && [ -n "$branch" ] && [ "$local_branch" = "$branch" ]; then
-            read_only=false
-            if [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
-              head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
-              if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
+          rejected=""
+          if [ -n "$git_ok" ] && [ -n "$branch" ]; then
+            head=$(git rev-parse HEAD 2>/dev/null || true)
+            tip=$(git rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null || true)
+            if [ "$local_branch" = "$branch" ] || { [ -n "$tip" ] && [ "$tip" = "$head" ]; }; then
+              read_only=false
+              [ -n "$head" ] || head="$START_SHA"
+              if [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]] \
+                 && [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
                 moved=true
               fi
+            elif [ -n "$tip" ]; then
+              rejected="HEAD ended the run at ${head:-?} (on '${local_branch:-a detached HEAD}'), not at the tip of the run's branch '$branch' ($tip) — the agent left its branch, so its work there could not be packaged and nothing was landed"
+              echo "::error::landing: $rejected"
+            else
+              echo "landing: HEAD is on '${local_branch:-?}' and the run's branch '$branch' does not exist locally — the agent never initialized it; nothing is bundled and no PR is opened."
             fi
-          elif [ -n "$git_ok" ]; then
-            echo "landing: HEAD is on '${local_branch:-?}', not on the run's branch '$branch' — the agent never initialized or left its branch; nothing is bundled and no PR is opened."
+            head=""
+            [ "$read_only" = "false" ] && head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
           fi
           echo "read_only=$read_only" >>"$GITHUB_OUTPUT"
           # Merge-only: HEAD moved, but only to the runner's clean base merge
@@ -2087,7 +2104,7 @@ jobs:
             done < <(jq -r '(.comments // [])[]? | select(type == "object") | [((.number // "-") | tostring), ((.body_file // "") | if type == "string" then . else "" end)] | @tsv' <<<"$agent" 2>/dev/null || true)
             if [ "$n" -gt 0 ]; then
               extra=$(jq -c --argjson c "$comments" '.comments = $c' <<<"$extra")
-            elif [ -z "$committed" ] && [ "${CLAUDE_OUTCOME:-}" = "success" ] && [ ! -s "$ERROR_FILE" ] && [[ "$NUM" =~ ^[0-9]+$ ]]; then
+            elif [ -z "$committed" ] && [ -z "$rejected" ] && [ "${CLAUDE_OUTCOME:-}" = "success" ] && [ ! -s "$ERROR_FILE" ] && [[ "$NUM" =~ ^[0-9]+$ ]]; then
               # No agent commit, no comment of its own and no error: relay
               # the final message so the answer (or the reason it changed
               # nothing) reaches the thread. Same de-fang as the codex
@@ -2126,6 +2143,16 @@ jobs:
           if [ -n "${PROV_NOTE:-}" ]; then
             printf '%s\n' "$PROV_NOTE" >"$DIR/prov.md"
             extra=$(jq -c '.provenance_comment_file = "prov.md"' <<<"$extra")
+          fi
+          # The error: the Surface step's message, the rejected-work note, or
+          # both (one comment). Our own text, so it names no live trigger
+          # token; the land job de-fangs it anyway.
+          if [ -n "$rejected" ]; then
+            {
+              [ ! -s "$ERROR_FILE" ] || { cat "$ERROR_FILE"; printf '\n---\n\n'; }
+              printf '⚠️ The agent run finished but its work was NOT landed: %s. The runner is ephemeral, so those commits are gone — re-trigger to redo the task, and keep the work on the current branch.\n' "$rejected"
+            } >"$ERROR_FILE.rejected"
+            mv "$ERROR_FILE.rejected" "$ERROR_FILE"
           fi
           if [ -s "$ERROR_FILE" ]; then
             extra=$(jq -c --rawfile msg "$ERROR_FILE" '.error = {message: $msg, fail_run: true}' <<<"$extra")
