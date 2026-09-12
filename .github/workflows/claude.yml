@@ -149,6 +149,9 @@ on:
           close: the agent used to post `@review` mid-run, before the label).
           Leave "false" on repos where PR-open auto-review already fires
           (posting @review here would double-review).
+        required: false
+        type: string
+        default: "false"
       branch_sync_prompt:
         description: >-
           Guidance appended to the system prompt (via --append-system-prompt,
@@ -1002,7 +1005,12 @@ jobs:
       # origin, which this one never does; the land job pushes the commits
       # and opens the PR. The helper is scoped to this server's URL, so a
       # `git fetch` the agent aims at any other host (its allow-list permits
-      # the verb) gets no credential.
+      # the verb) gets no credential. additional_permissions asks the App
+      # token for actions: read, as claude-auto.yml's step does: the exchange
+      # grants contents/PR/issues by default, the job's own actions: read
+      # covers the job token and not that token, and "why is CI red on this
+      # PR" is an everyday dev-agent request (`gh run view --log-failed`) —
+      # the PAT used to cover the read.
       - uses: anthropics/claude-code-action@v1
         if: needs.gate.outputs.engine != 'codex'
         id: claude
@@ -1021,6 +1029,7 @@ jobs:
           trigger_phrase: ${{ inputs.trigger_phrase }}
           label_trigger: ${{ inputs.label_trigger }}
           base_branch: ${{ inputs.base_branch }}
+          additional_permissions: "actions: read"
           settings: ${{ steps.agentsettings.outputs.value }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
@@ -1828,8 +1837,18 @@ jobs:
       #     Issue runs: the branch claude-code-action or the codex prep step
       #     cut (`branch_name` / codexprep's output; a failed action step
       #     loses its outputs, so the local branch is read when it carries
-      #     the issue's prefix), else a prefix-conforming placeholder nothing
-      #     lands on unless HEAD moved.
+      #     the issue's prefix), else a prefix-conforming placeholder.
+      #     NOTHING is bundled unless HEAD is on that branch: the checkout
+      #     lands on the event's default ref, which on the fork (default
+      #     `meridian`, base_branch `main`) is a branch AHEAD of the
+      #     recorded base tip — so a run whose agent never initialized its
+      #     branch (provisioning or the action step failed first) would
+      #     otherwise read `main..meridian` as agent work, invent the
+      #     placeholder branch and ask for a PR against main (review round
+      #     1 of #84 reproduced it). Same rule on PR runs: a closed PR the
+      #     sync skipped leaves HEAD on the default ref, whose history may
+      #     well contain the PR's merged tip. No evidence, no bundle:
+      #     emit-landing runs read-only (the `read_only` output).
       #   pr.open (was "Open or adopt PR for issue-triggered run") — an issue
       #     run whose HEAD moved: title from the tip commit's subject (the
       #     agent writes descriptive, conventional-commit messages — codex's
@@ -1857,7 +1876,13 @@ jobs:
       #     the body file shape-checked, present, not a symlink and capped
       #     (the validator refuses the WHOLE manifest — commits included —
       #     over one bad reference, so a bad entry is dropped with a warning
-      #     instead), at most five. A no-change Claude run that left no
+      #     instead), at most five, and de-fanged in place with the codex
+      #     summary's sed, footer rule included — `land` breaks triggers
+      #     and markers again but leaves the codex reviewer's footer alone,
+      #     so an agent body quoting `engine: codex`, posted as marvin
+      #     after a review verdict, would be pr-feedback-context's newest
+      #     review anchor for the next codex fix round (review round 1 of
+      #     #84 reproduced it). A no-change Claude run that left no
       #     comment relays its final message instead (de-fanged with the
       #     codex summary's sed, footer rule included), so a run that
       #     answered a question or gave up leaves its answer on the thread
@@ -1929,14 +1954,41 @@ jobs:
           extra='{}'
           moved=false
           head=""
+          local_branch=""
+          git_ok=""
           if [ "$ENGINE" = "codex" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
             echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed prep, user-setup, codex or reclaim step skips it); running no git — nothing lands, no PR is opened and no hand-back is owed."
-          elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
-            head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
-            if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
-              moved=true
-            fi
+          else
+            git_ok=1
+            local_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
           fi
+          # -- the branch the land job pushes to (emit-landing's `branch`)
+          if [ "$IS_PR" = "true" ]; then
+            branch="$HEAD_BRANCH"
+          else
+            branch="${CODEX_BRANCH:-$CLAUDE_BRANCH}"
+            if [ -z "$branch" ]; then
+              case "$local_branch" in "claude/issue-${ISSUE:-0}-"*) branch="$local_branch" ;; esac
+            fi
+            [ -n "$branch" ] || branch="claude/issue-${ISSUE:-0}-run-$GITHUB_RUN_ID"
+          fi
+          echo "branch=$branch" >>"$GITHUB_OUTPUT"
+          # -- what may be bundled: HEAD on the branch (the evidence that the
+          # agent's branch was initialized and worked on), moved past the
+          # start SHA and descending from it.
+          read_only=true
+          if [ -n "$git_ok" ] && [ -n "$branch" ] && [ "$local_branch" = "$branch" ]; then
+            read_only=false
+            if [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+              head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
+              if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
+                moved=true
+              fi
+            fi
+          elif [ -n "$git_ok" ]; then
+            echo "landing: HEAD is on '${local_branch:-?}', not on the run's branch '$branch' — the agent never initialized or left its branch; nothing is bundled and no PR is opened."
+          fi
+          echo "read_only=$read_only" >>"$GITHUB_OUTPUT"
           # Merge-only: HEAD moved, but only to the runner's clean base merge
           # — any agent commit would have moved it further — so the agent
           # committed nothing.
@@ -1944,18 +1996,6 @@ jobs:
           [ "$moved" = "true" ] && [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ] && merge_only=1
           committed=""
           [ "$moved" = "true" ] && [ -z "$merge_only" ] && committed=1
-          # -- the branch the land job pushes to (emit-landing's `branch`)
-          if [ "$IS_PR" = "true" ]; then
-            branch="$HEAD_BRANCH"
-          else
-            branch="${CODEX_BRANCH:-$CLAUDE_BRANCH}"
-            if [ -z "$branch" ] && [ -n "$head" ]; then
-              local_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-              case "$local_branch" in "claude/issue-${ISSUE:-0}-"*) branch="$local_branch" ;; esac
-            fi
-            [ -n "$branch" ] || branch="claude/issue-${ISSUE:-0}-run-$GITHUB_RUN_ID"
-          fi
-          echo "branch=$branch" >>"$GITHUB_OUTPUT"
           # -- pr.open: an issue run that produced commits gets its PR
           if [ "$IS_PR" != "true" ] && [ "$moved" = "true" ] && [[ "${ISSUE:-}" =~ ^[0-9]+$ ]]; then
             # Title from the tip commit's subject; jq slices by code point,
@@ -2028,9 +2068,15 @@ jobs:
                 echo "::warning::landing: dropped comments entry '$file': at most five comments per run."
                 continue
               fi
-              # Cap like the codex summary (the validator refuses a body
-              # file of 64 KiB or more, and `land` re-caps at 60,000 with
-              # its own note).
+              # De-fang in place (to a sibling scratch file, then move — no
+              # GNU-vs-BSD `sed -i`), then cap like the codex summary (the
+              # validator refuses a body file of 64 KiB or more, and `land`
+              # re-caps at 60,000 with its own note).
+              sed -E -e 's/@(review|claude|auto)/`\1`/g' \
+                     -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
+                     -e 's/engine: codex/engine  codex/g' \
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
+                     "$DIR/$file" >"$DIR/$file.defanged" && mv "$DIR/$file.defanged" "$DIR/$file"
               if [ "$(wc -c <"$DIR/$file")" -gt 59000 ]; then
                 head -c 59000 "$DIR/$file" >"$DIR/$file.trunc"
                 printf '\n\n_[truncated: the body exceeded the comment size cap]_\n' >>"$DIR/$file.trunc"
@@ -2085,22 +2131,26 @@ jobs:
             extra=$(jq -c --rawfile msg "$ERROR_FILE" '.error = {message: $msg, fail_run: true}' <<<"$extra")
           fi
           printf '%s\n' "$extra" >"$EXTRA"
-          echo "landing: branch=$branch moved=$moved committed=${committed:-0} merge_only=${merge_only:-0} $(jq -c 'if .error then .error.message = "<\(.error.message | length) chars>" else . end' <<<"$extra")"
+          echo "landing: branch=$branch read_only=$read_only moved=$moved committed=${committed:-0} merge_only=${merge_only:-0} $(jq -c 'if .error then .error.message = "<\(.error.message | length) chars>" else . end' <<<"$extra")"
 
       # Last, always: package the commits above the start SHA and the
       # manifest for the land job. The PR/issue numbers are the event
       # payload's (README → Using the pair), the SAME expressions the land
       # job gets: the validator pins the manifest's pr_number / issue_number
       # to them, its branch to the PR's live head ref on PR runs and to the
-      # `claude/issue-N-` prefix on issue runs. read-only on the codex path
+      # `claude/issue-N-` prefix on issue runs. read-only whenever the
+      # composer says so (its `read_only` output; anything but an explicit
+      # `false` — a composer that never wrote it — counts): on the codex path
       # (the gate's engine, so a failed prep or user-setup step is covered
-      # too) unless the unresolved-merge guard succeeded (the composer's
-      # condition, see its comment): a reclaim that did not succeed skips the
-      # guard, and no git may run against a workspace codex still owns; a
-      # FAILED guard means conflict markers survive in the tree, and a local
-      # commit codex made over them must not be bundled — read-only packages
-      # nothing above the start SHA. Either way the manifest still carries
-      # the Surface step's error for the land job to post. start-sha falls
+      # too) unless the unresolved-merge guard succeeded — a reclaim that did
+      # not succeed skips the guard, and no git may run against a workspace
+      # codex still owns; a FAILED guard means conflict markers survive in the
+      # tree, and a local commit codex made over them must not be bundled —
+      # and on either path when HEAD is not on the run's branch (the agent
+      # never initialized it: the checkout's default ref is not agent work).
+      # read-only packages nothing above the start SHA. Either way the
+      # manifest still carries the Surface step's error for the land job to
+      # post. start-sha falls
       # back to github.sha when the checkout or the base step failed
       # (`steps.base` / `steps.sync` empty): an empty start_sha would be
       # refused at `validate`, and the land composite posts the manifest's
@@ -2116,7 +2166,7 @@ jobs:
           pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
           issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
-          read-only: ${{ needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success' && 'true' || 'false' }}
+          read-only: ${{ steps.landing.outputs.read_only != 'false' && 'true' || 'false' }}
 
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate,

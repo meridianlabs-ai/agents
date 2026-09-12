@@ -644,7 +644,19 @@ the agent push mid-run:
   sync-branch's pre-merge tip, or on a closed PR (which the sync skips) the
   live tip it read — the closed-PR continuation still depends on the agent
   checking that branch out itself, as it always did, and a HEAD that does
-  not descend from it lands nothing.
+  not descend from it lands nothing. Nothing is bundled at all unless HEAD
+  is *on* the run's branch (the composer's `read_only` output drives
+  `emit-landing`): the checkout lands on the event's default ref, which on
+  the fork (default `meridian`, base `main`) is ahead of the recorded base
+  tip, so a run whose agent never initialized its branch — provisioning or
+  the action step failed first — would otherwise read `main..meridian` as
+  agent work, invent a placeholder branch and ask for a PR (review round 1
+  of #84 reproduced it); the same rule keeps a closed PR the sync skipped,
+  with HEAD on a default ref whose history may contain the PR's merged tip,
+  from receiving a push. The action step also asks its App token for
+  `actions: read` (`additional_permissions`, as the CI-fix loop does): the
+  job's own `actions: read` covers the job token, not that token, and "why
+  is CI red" is an everyday dev-agent request the PAT used to cover.
 - **The hand-back keys on the label, not only the trigger.** A PR run whose
   HEAD moved owes exactly one `@review` when the run is autonomous — an
   `@auto` trigger *or* an `auto`-labelled PR (the gate's `auto` output) —
@@ -662,9 +674,14 @@ the agent push mid-run:
   alone, pins `number` to the run's own issue/PR (an agent-chosen number
   would be a posting channel onto other threads), requires a plain,
   non-dot file name that is a regular file (no symlink) under the landing
-  directory, truncates it under the size caps and keeps at most five —
-  each dropped entry a warning, never a validator refusal that would take
-  the commits with it. A Claude run that succeeded, committed nothing and
+  directory, de-fangs it in place with the codex summary's sed (footer rule
+  included: `land` leaves the codex reviewer's `engine: codex` footer alone,
+  and a marvin-posted body quoting it after a review verdict would be
+  `pr-feedback-context`'s newest review anchor for the next codex fix
+  round — review round 1 of #84 reproduced it), truncates it under the size
+  caps and keeps at most five — each dropped entry a warning, never a
+  validator refusal that would take the commits with it. A Claude run that
+  succeeded, committed nothing and
   left no comment has its final message relayed as a comment (the CI-fix
   loop's relay; `🤖 claude (dev agent): no code changes were made`), so a
   question gets its answer on the thread from the machine account (issue
@@ -703,7 +720,9 @@ the agent push mid-run:
   and the answer appears via `land`; the codex engine does the same on an
   issue and on a PR with its final message posted by `land`; a cancelled
   agent job lands and posts nothing except the error note.
-  `tests/test_dev_agent_composer.py` covers the composer's rules.
+  `tests/test_dev_agent_composer.py` covers the composer's rules and checks
+  that every `workflow_call` input declares a `type` (an input without one
+  fails to load for every caller).
 
 **The reviewer (#81, 2026-09-10) is the first conversion.** `claude-review.yml`
 is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`

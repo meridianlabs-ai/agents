@@ -24,9 +24,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   labels, base, the fork's review request), the `@review` hand-back on an
   autonomous PR run, the stage rule, the agent's `comments` (pinned,
   shape-checked, capped), the no-change relay, the codex summary and
-  thread ids, and the guard-failed codex path — with the issue-run case
-  run on through `emit-landing` and the validator under the land job's
-  `branch-prefix`.
+  thread ids, the branch-evidence rule (nothing bundled while HEAD is off
+  the run's branch) and the guard-failed codex path — with the issue-run
+  case run on through `emit-landing` and the validator under the land job's
+  `branch-prefix`. Also checks every `workflow_call` input declares a
+  `type`.
 
 Run from the repo root:
 
