@@ -1848,7 +1848,9 @@ jobs:
       #     1 of #84 reproduced it). Same rule on PR runs: a closed PR the
       #     sync skipped leaves HEAD on the default ref, whose history may
       #     well contain the PR's merged tip. No evidence, no bundle:
-      #     emit-landing runs read-only (the `read_only` output).
+      #     emit-landing runs read-only (the `read_only` output) — and a
+      #     branch the agent left, renamed or never returned to is an
+      #     ERROR, not a quiet no-change run (below).
       #   pr.open (was "Open or adopt PR for issue-triggered run") — an issue
       #     run whose HEAD moved: title from the tip commit's subject (the
       #     agent writes descriptive, conventional-commit messages — codex's
@@ -1925,6 +1927,12 @@ jobs:
           AUTO: ${{ needs.gate.outputs.auto }}
           PR_LABELS: ${{ needs.gate.outputs.pr_labels }}
           HEAD_BRANCH: ${{ needs.gate.outputs.head_branch || steps.sync.outputs.branch }}
+          # Non-empty when sync-branch checked the PR head out (open PRs):
+          # its later absence is the agent's doing, not a closed PR's skip.
+          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
+          # Where actions/checkout left HEAD (the event's default ref): a
+          # HEAD elsewhere with no branch of the run's is agent work off it.
+          CHECKOUT_SHA: ${{ github.sha }}
           REQ_REVIEW: ${{ inputs.request_review_after_open }}
           BASE: ${{ inputs.base_branch }}
           START_SHA: ${{ steps.base.outputs.sha || steps.sync.outputs.start_sha || steps.sync.outputs.head_sha || github.sha }}
@@ -1978,12 +1986,20 @@ jobs:
           # at its tip: a `git checkout --detach` after the commit leaves the
           # work in place, and review round 2 of #84 showed a name-only test
           # dropping it with a green run), moved past the start SHA and
-          # descending from it. A branch that exists locally with HEAD
-          # elsewhere is the agent having LEFT its branch: emit-landing
-          # bundles START..HEAD, so that work cannot be packaged — refused
-          # loudly (an error, and no "no code changes" relay), not silently.
-          # No local branch at all is the early-failure fence (the agent
-          # never initialized it; the Surface step's error says why).
+          # descending from it. Anything else the agent left behind is
+          # REFUSED loudly (an error that fails the run, and no "no code
+          # changes" relay), never silently: a branch that exists locally
+          # with HEAD elsewhere (the agent left it — emit-landing bundles
+          # START..HEAD, so that work cannot be packaged); a branch the
+          # action or the codex prep step named that no longer exists (the
+          # agent renamed or deleted it — the action keeps the original name
+          # in its branch_name output, so a `git branch -m` would otherwise
+          # end as a green "no code changes" run; review round 3 of #84
+          # reproduced it); and, when no branch was named at all, a HEAD
+          # that is no longer where the checkout left it (github.sha) —
+          # the agent worked somewhere. Only a named-nothing, moved-nothing
+          # run is the early-failure fence (the agent never initialized its
+          # branch; the Surface step's error says why).
           read_only=true
           rejected=""
           if [ -n "$git_ok" ] && [ -n "$branch" ]; then
@@ -1998,10 +2014,14 @@ jobs:
               fi
             elif [ -n "$tip" ]; then
               rejected="HEAD ended the run at ${head:-?} (on '${local_branch:-a detached HEAD}'), not at the tip of the run's branch '$branch' ($tip) — the agent left its branch, so its work there could not be packaged and nothing was landed"
-              echo "::error::landing: $rejected"
+            elif [ -n "${CODEX_BRANCH:-}${CLAUDE_BRANCH:-}" ] || { [ "$IS_PR" = "true" ] && [ -n "${SYNC_BRANCH:-}" ]; }; then
+              rejected="the run's branch '$branch' no longer exists locally (renamed or deleted after it was created for this run); HEAD ended the run at ${head:-?} on '${local_branch:-a detached HEAD}', so the agent's work could not be packaged and nothing was landed"
+            elif [ -n "$head" ] && [ -n "${CHECKOUT_SHA:-}" ] && [ "$head" != "$CHECKOUT_SHA" ]; then
+              rejected="the run's branch '$branch' does not exist locally and HEAD ended the run at $head on '${local_branch:-a detached HEAD}', away from the checkout ($CHECKOUT_SHA) — the agent worked off its branch, so its work could not be packaged and nothing was landed"
             else
-              echo "landing: HEAD is on '${local_branch:-?}' and the run's branch '$branch' does not exist locally — the agent never initialized it; nothing is bundled and no PR is opened."
+              echo "landing: HEAD is still the checkout ($head) and the run's branch '$branch' does not exist locally — the agent never initialized it; nothing is bundled and no PR is opened."
             fi
+            [ -z "$rejected" ] || echo "::error::landing: $rejected"
             head=""
             [ "$read_only" = "false" ] && head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
           fi
@@ -2135,7 +2155,10 @@ jobs:
           fi
           in_loop=""
           if [ "$IS_PR" = "true" ] || [ "$(jq -r '.pr.open // false' <<<"$extra")" = "true" ]; then in_loop=1; fi
-          if [ "$TRIGGER_PHRASE" = "@auto" ] && [ -n "$agent_ok" ] && [ ! -s "$ERROR_FILE" ] && [ -n "$in_loop" ]; then
+          # A run whose work was refused above failed, whatever the agent
+          # step said: nothing landed and no re-review is requested, so a
+          # human has to look — Review, like every errored run.
+          if [ "$TRIGGER_PHRASE" = "@auto" ] && [ -n "$agent_ok" ] && [ ! -s "$ERROR_FILE" ] && [ -z "$rejected" ] && [ -n "$in_loop" ]; then
             echo "landing: successful @auto run with a PR in the loop; the stage stays at Agent (the review loop owns it)."
           else
             extra=$(jq -c '.stage = "Review"' <<<"$extra")

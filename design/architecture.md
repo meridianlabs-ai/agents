@@ -653,7 +653,18 @@ the agent push mid-run:
   agent work, invent a placeholder branch and ask for a PR (review round 1
   of #84 reproduced it); the same rule keeps a closed PR the sync skipped,
   with HEAD on a default ref whose history may contain the PR's merged tip,
-  from receiving a push. The action step also asks its App token for
+  from receiving a push. "On the branch" includes a HEAD detached at its
+  tip (a `git checkout --detach` after the commit; review round 2), and
+  everything else the agent left behind is refused *loudly* — a branch that
+  exists with HEAD elsewhere, a branch the action or codex prep named that
+  no longer exists (renamed or deleted; the action's `branch_name` output
+  keeps the original name, so this ended as a green "no code changes" run
+  in review round 3), or, with no branch named, a HEAD away from the
+  checkout: the composer writes an error with `fail_run: true`, posts no
+  no-change relay and sets `stage: Review` whatever the trigger, so a
+  rejected `@auto` run is not stranded at Agent. Only a named-nothing,
+  moved-nothing run is the quiet early-failure fence. The action step also
+  asks its App token for
   `actions: read` (`additional_permissions`, as the CI-fix loop does): the
   job's own `actions: read` covers the job token, not that token, and "why
   is CI red" is an everyday dev-agent request the PAT used to cover.

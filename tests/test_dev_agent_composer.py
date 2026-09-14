@@ -78,7 +78,7 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
             claude_outcome="success", codex_commit="skipped", codex_guard=None, codex_ids="",
             codex_summary=None, final_message="Here is the answer.", error=None, req_review="false",
             base="", pr_labels='["auto"]', claude_branch=ISSUE_BRANCH, head_branch=PR_BRANCH,
-            merge_sha="", prov_note=""):
+            merge_sha="", prov_note="", checkout_sha=None, sync_branch=None):
     landing = r["tmp"] / "landing"
     landing.mkdir(exist_ok=True)
     if agent_extra is not None:
@@ -101,6 +101,11 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
         "ISSUE": "" if is_pr else "12",
         "ENGINE": engine, "TRIGGER_PHRASE": trigger, "AUTO": auto, "PR_LABELS": pr_labels,
         "HEAD_BRANCH": head_branch if is_pr else "", "REQ_REVIEW": req_review, "BASE": base,
+        # Where checkout left HEAD (github.sha): the scratch repo's first
+        # commit unless a test says otherwise. SYNC_BRANCH: sync-branch
+        # checked the PR head out (open PRs) unless a test says otherwise.
+        "CHECKOUT_SHA": r["start"] if checkout_sha is None else checkout_sha,
+        "SYNC_BRANCH": (head_branch if sync_branch is None else sync_branch) if is_pr else "",
         "START_SHA": r["start"], "MERGE_SHA": merge_sha,
         "CLAUDE_BRANCH": claude_branch if (engine == "claude" and not is_pr) else "",
         "CODEX_BRANCH": CODEX_BRANCH if (engine == "codex" and not is_pr) else "",
@@ -195,26 +200,63 @@ def test_early_failure_on_an_alternate_base_bundles_nothing(repo):
     # lands on, and emit-landing told to run read-only.
     on(repo, "meridian")
     commit(repo, subject="someone else's merged work", body="")
+    meridian = git("rev-parse", "HEAD", cwd=repo["work"]).stdout.strip()
     m, res, _, out = compose(repo, is_pr=False, claude_branch="", claude_outcome="skipped",
-                             error="⚠️ provisioning failed")
+                             error="⚠️ provisioning failed\n", checkout_sha=meridian)
     assert out["branch"] == "claude/issue-12-run-123" and out["read_only"] == "true"
     assert "pr" not in m and "handback" not in m and "comments" not in m
-    assert m["error"]["fail_run"] is True and m["stage"] == "Review"
-    assert "does not exist locally" in res.stdout
+    assert m["error"] == {"message": "⚠️ provisioning failed\n", "fail_run": True}   # the Surface error alone
+    assert m["stage"] == "Review"
+    assert "never initialized it" in res.stdout
 
 
 def test_commits_off_the_run_branch_are_not_bundled(repo):
     # The action reported its branch, but it does not exist locally and HEAD
-    # is elsewhere (the step died before setupBranch, or the agent removed
-    # it): whatever sits on HEAD is not the run's work, and the branch the
-    # action named must not receive foreign history. No error of the
-    # composer's own — the Surface step's report says what failed.
+    # is elsewhere: the action created the branch (its branch_name output
+    # names it) and the agent removed it — whatever sits on HEAD is not the
+    # run's work, the branch the action named must not receive foreign
+    # history, and the run is an error, not a quiet no-change.
     on(repo, "somewhere-else")
     commit(repo)
     m, res, _, out = compose(repo, is_pr=False)
     assert out["branch"] == ISSUE_BRANCH and out["read_only"] == "true"
-    assert "pr" not in m and m["stage"] == "Review" and "error" not in m
-    assert "does not exist locally" in res.stdout
+    assert "pr" not in m and "comments" not in m and m["stage"] == "Review"
+    assert m["error"]["fail_run"] is True and "no longer exists locally" in m["error"]["message"]
+    assert "::error::landing: the run's branch" in res.stdout
+
+
+def test_renamed_branch_after_a_successful_run_is_an_error(repo):
+    # commit → `git branch -m` to a descriptive name → the agent finishes
+    # green. The action's branch_name output keeps the original name, so the
+    # named branch is gone: refused with an error, no relay, nothing bundled
+    # — through emit-landing (read-only) and the validator (review round 3
+    # of #84 reproduced a green "no code changes" run here).
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    git("branch", "-m", "claude/issue-12-descriptive-name", cwd=repo["work"])
+    m, _, landing, out = compose(repo, is_pr=False, final_message="Done and dusted.")
+    assert out["read_only"] == "true" and "pr" not in m and "comments" not in m
+    assert m["error"]["fail_run"] is True and "renamed or deleted" in m["error"]["message"]
+    assert not (landing / "agent-summary.md").exists()
+    extra = repo["tmp"] / "landing-extra.json"
+    res, landing, output = run_emit_landing(repo["tmp"], cwd=repo["work"], read_only=True, start_sha=repo["start"],
+                                            extra=extra, branch=out["branch"], pr_number="", issue_number="12")
+    assert res.returncode == 0 and "wrote=true" in output
+    manifest = json.loads((landing / "manifest.json").read_text())
+    assert manifest["has_bundle"] is False and manifest["error"]["fail_run"] is True and "pr" not in manifest
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
+    assert v.returncode == 0, v.stdout
+
+
+def test_work_off_an_unnamed_branch_is_an_error(repo):
+    # No branch was ever named (the action step died before its outputs) but
+    # HEAD is no longer where the checkout left it: the agent worked
+    # somewhere, and that is not the fence.
+    on(repo, "somewhere-else")
+    commit(repo)
+    m, _, _, out = compose(repo, is_pr=False, claude_branch="", claude_outcome="failure")
+    assert out["read_only"] == "true" and "pr" not in m
+    assert m["error"]["fail_run"] is True and "away from the checkout" in m["error"]["message"]
 
 
 def test_detached_head_at_the_run_branch_tip_still_lands(repo):
@@ -265,13 +307,27 @@ def test_leaving_the_run_branch_appends_to_the_surface_error(repo):
 
 
 def test_pr_run_with_head_off_the_pr_branch_lands_nothing(repo):
-    # A closed PR the sync skipped: HEAD is still the default ref, whose
-    # history may contain the PR's merged tip — never a push to the branch.
-    # The PR branch does not exist locally, so this is the fence, not a
-    # rejection: no error of the composer's own.
-    commit(repo)
-    m, _, _, out = compose(repo, is_pr=True, trigger="@auto", auto="true")
+    # A closed PR the sync skipped (no SYNC_BRANCH): HEAD is still the
+    # default ref, whose history may contain the PR's merged tip — never a
+    # push to the branch. The PR branch does not exist locally and HEAD is
+    # where the checkout left it, so this is the fence, not a rejection: no
+    # error of the composer's own.
+    m, _, _, out = compose(repo, is_pr=True, trigger="@auto", auto="true", sync_branch="")
     assert out["read_only"] == "true" and "handback" not in m and "error" not in m
+
+
+def test_rejected_autonomous_pr_run_hands_back_to_a_human(repo):
+    # An @auto PR run that committed, then detached at the start SHA: the
+    # work is refused, nothing lands and no re-review is requested — so the
+    # stage must be Review, not left at Agent with a red run (review round 3
+    # of #84).
+    on(repo, PR_BRANCH)
+    commit(repo)
+    git("checkout", "-q", "--detach", repo["start"], cwd=repo["work"])
+    m, _, _, out = compose(repo, is_pr=True, trigger="@auto", auto="true")
+    assert out["read_only"] == "true" and "handback" not in m
+    assert m["error"]["fail_run"] is True and "left its branch" in m["error"]["message"]
+    assert m["stage"] == "Review"
 
 
 def test_issue_run_title_falls_back_and_is_capped(repo):
@@ -385,7 +441,9 @@ def test_agent_manifest_that_is_not_json_is_dropped_not_fatal(repo):
 
 
 def test_error_is_carried_and_no_relay_posts_over_it(repo):
-    m, _, _, _ = compose(repo, is_pr=False, error="⚠️ it broke", claude_outcome="failure")
+    # The action died before naming a branch; HEAD is the checkout: the
+    # Surface error is the manifest's, untouched.
+    m, _, _, _ = compose(repo, is_pr=False, error="⚠️ it broke", claude_outcome="failure", claude_branch="")
     assert m["error"] == {"message": "⚠️ it broke", "fail_run": True}
     assert "comments" not in m and m["stage"] == "Review"
 
