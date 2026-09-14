@@ -74,6 +74,15 @@ That single change yields, in one stroke:
 - the same identity later unblocks automated upstream-PR promotion on the fork
   (architecture.md → two-stage PR flow), today a manual human step.
 
+**Since #84 (2026-09-11) the PAT is no longer passed to the action at all.**
+`claude.yml` is `gate` / `agent` / `land` like the loops (architecture.md →
+Landing job): the job that runs the agent holds only the read-only job token
+and the action's own App token, the agent commits and stops, and the land job
+pushes the branch, opens the PR, applies the labels and posts as marvin from
+the landing manifest. The identity argument above is unchanged — the push and
+the PR still come from the machine account, so CI and `@review` still fire —
+only *where* the token sits moved, out of reach of anything the agent runs.
+
 So **"how do we reliably open the PR" and "how does `@auto` drive the loop" have
 the same answer** — the machine account. There is no way to get *both*
 deterministic PR creation *and* CI on that PR without a non-`GITHUB_TOKEN`
@@ -368,15 +377,17 @@ Each is a trigger on the caller repo (delivered to the workflow on its default
 branch) that, after re-checking the `auto` label + author + round cap, invokes
 the dev agent authenticated as `AUTO_TOKEN`:
 
-1. **Kickoff** — `issues` labeled `auto` / `@auto` comment → fix, push, open PR
-   via the deterministic post-step, carry the label onto the PR. An `@auto`
+1. **Kickoff** — `issues` labeled `auto` / `@auto` comment → fix and commit;
+   the land job pushes, opens the PR and carries the label onto it (since #84;
+   before that a deterministic post-step in the agent's job). An `@auto`
    comment on an *existing* PR runs the same kickoff dev agent against that PR;
-   since it fixes-and-pushes rather than opening a PR, claude.yml must, for that
+   since it fixes in place rather than opening a PR, claude.yml must, for that
    `@auto`-triggered PR run, both (a) apply the `auto` label to the PR — the
    review-fix loop gates on it, and an existing/human-authored PR won't have it
-   — and (b) post `@review` to re-engage the loop (auto-review does not fire on
-   push; the more so on the fork, where the `pull_request` family never fires).
-   Both are `@auto`-gated PR-context steps in claude.yml.
+   (the `gate` job does this before the agent runs) — and (b) post `@review`
+   to re-engage the loop (auto-review does not fire on push; the more so on
+   the fork, where the `pull_request` family never fires) — the landing
+   manifest's `handback`, set whenever an autonomous PR run landed a commit.
 
    **Ordering matters — `@review` must come after the label.** The reviewer's
    summary comment is what fires the review-fix loop, and that loop gates on the
@@ -384,15 +395,17 @@ the dev agent authenticated as `AUTO_TOKEN`:
    post its summary while the PR is still unlabeled and the loop silently skips
    it (observed on inspect_ai#52). So: for the **existing-PR** path the label
    step runs *before* the agent (the PR already exists, so it can be labeled up
-   front, and the agent's later `@review` is safe). For the **issue→PR-open**
-   path the PR doesn't exist until the agent opens it mid-run, so the agent must
-   *not* post `@review` itself; instead the Open-or-adopt post-step posts it
-   *after* propagating the label (gated by the `request_review_after_open` input,
-   which the fork sets — elsewhere PR-open auto-review already covers it).
+   front, and the land job's later `@review` is safe). For the **issue→PR-open**
+   path the PR doesn't exist until the land job opens it, and that job labels
+   it *before* posting the `@review` (the manifest's `handback`, set by the
+   `request_review_after_open` input, which the fork sets — elsewhere PR-open
+   auto-review already covers it). The agent never posts `@review` itself.
 2. **CI completed** — `check_suite`/`workflow_run` completed=failure on the PR's
-   head → if failing, fix and push (CI re-runs because PAT).
+   head → if failing, fix and commit; the land job pushes as marvin (CI re-runs
+   because PAT).
 3. **Review posted** — `pull_request_review` submitted requesting changes → if
-   under the cap, address and push, then re-request review (= next round).
+   under the cap, address and commit; the land job pushes and re-requests
+   review (= next round).
 4. **Converged** — CI green + review approved + no unresolved threads → enable
    auto-merge (or ping a human to merge, per repo policy).
 5. **Exhausted** — the round cap (10) is reached still unresolved, or a fix round
@@ -445,7 +458,10 @@ The simple case ships first and is independently useful:
   external `@main`-pinned workflow never sees the caller's other secrets);
   each caller repo's deployed stub needs that and
   the org secret scoped to it. (The roadmap called this token `AUTO_TOKEN`; the
-  provisioned secret is `MARVIN_TOKEN`.)
+  provisioned secret is `MARVIN_TOKEN`.) **Since #84 (2026-09-11) the PAT is
+  named only in `claude.yml`'s `gate` and `land` jobs**; the job that runs
+  the agent never sees it, and the land job pushes the branch and opens the
+  PR from the landing manifest (architecture.md → Landing job).
 - **Phase 1 — CI-failure → fix trigger. _Verified on inspect_flow._** Reusable
   `claude-auto.yml` + `examples/claude-auto-stub.yml`: on `workflow_run` failure
   for an `auto`-labeled same-repo PR, the dev agent (as marvin) reads the failing
@@ -566,8 +582,9 @@ gate didn't match it, and claude-code-action's `label_trigger`/`trigger_phrase`
 are single-valued). Now `@auto`/`auto` is a **distinct kickoff that coexists
 with `@claude`**: a second dev-agent job (in the caller stub) invokes the same
 reusable `claude.yml` with `trigger_phrase: '@auto'`, `label_trigger: 'auto'`,
-and the dev agent's PR-open post-step **propagates the `auto` label from the
-issue onto the new PR** so the loop engages. `claude`/`@claude` remains the
+and the dev agent's land job **propagates the `auto` label from the issue
+onto the new PR** (the manifest's `pr.labels`, read by the gate) so the loop
+engages. `claude`/`@claude` remains the
 one-shot assisted mode (PR opened, human drives); `auto`/`@auto` is the
 autonomous mode (PR opened, labeled `auto`, loop runs to handoff).
 

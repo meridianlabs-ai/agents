@@ -98,16 +98,16 @@ guard): codex's local commits are exactly what makes ancestry
 alone unsafe here, since a `git commit` over staged-but-still-marked
 paths completes the base merge and moves HEAD, and the old `Land codex
 fix` step's guard gate is what kept that off the branch. In
-`claude.yml` (the dev verb, not yet converted) the landing has been
-three steps, not one, since 2026-09-09: the
-`codexland` step is git-only (commit, push, `pushed`/`merge_only`
-outputs — the only step carrying the pinned git env and the push
-credential), the `resolve-reported-threads` composite consumes the final
-message's `RESOLVED-THREADS:` line (below, under Limitations), and the
-`codexpost` step composes and posts the de-fanged summary with no git
-env at all; the dev verb's `Stage - Review (hand-back)` keys on
-`codexpost`, which implies the two before it, and the Surface step
-names a landed-but-unposted run separately from a failed push. The
+`claude.yml` (the dev verb, converted by #84 on 2026-09-11) the same
+split holds, in three steps: `Commit codex work` is git-only (commit,
+`committed`/`merge_only` outputs — the only step carrying the pinned git
+env; no credential, no push), the `resolve-reported-threads` composite
+runs parse-only on the final message's `RESOLVED-THREADS:` line (below,
+under Limitations) and its `ids` travel as the manifest's
+`resolve_threads`, and `Write codex summary` composes the de-fanged body
+the land job posts, with no git env at all; the manifest composer decides
+PR-open and hand-back from HEAD, and the Surface step names a
+committed-but-unsummarized run separately from a failed commit. The
 review loop has the same three roles since #83 with the credentialed
 halves moved out of the agent job: the composite runs parse-only
 (`resolve: "false"`, `ids` output), `Commit codex fix` commits and
@@ -284,7 +284,8 @@ readable outright (Claude Security findings 4121988, 4121984, 4122332). Since
   hooks (files in `.git/hooks`) and the fsmonitor extension (in the index),
   and the steps that run git after codex are not only the landing — the
   loops' `Ensure hand-back after push` and `Surface agent errors` and
-  `claude.yml`'s `Open or adopt PR` run `git fetch` (which runs
+  `claude.yml`'s `Open or adopt PR` (all gone with the landing-job split,
+  #82–#84) ran `git fetch` (which runs
   `reference-transaction` when it updates the remote-tracking ref — and
   codex, owning `.git` during its step, can delete the local one so the
   next fetch deterministically does) and `git status` (which runs
@@ -518,12 +519,12 @@ Verification for a change here, all cases prompted to codex (any verb):
   ending contract now ends with `RESOLVED-THREADS: <id> ...` naming the
   OPEN threads (ids from the embedded REVIEW THREADS section) it fully
   addressed in code, or `none`; the shared
-  `.github/actions/resolve-reported-threads` composite, run between the
-  landing push and the summary post in `claude.yml` (and, until #83, in
-  `claude-auto-review.yml` — there it now runs parse-only in the fix
-  job, and its `ids` output travels as the landing manifest's
+  `.github/actions/resolve-reported-threads` composite — parse-only in the
+  agent job of `claude.yml` (since #84) and `claude-auto-review.yml`
+  (since #83), its `ids` output travelling as the landing manifest's
   `resolve_threads`, which the land job intersects with the PR's own
-  threads and resolves after the push), resolves exactly those via the
+  threads and resolves after the push (before those conversions it ran
+  between the landing push and the summary post) — resolves exactly those via the
   `resolveReviewThread` mutation — only after a push of real changes,
   only ids that are currently-open threads of this PR (shape-checked and
   intersected with a fresh query, so a hallucinated id is skipped),
