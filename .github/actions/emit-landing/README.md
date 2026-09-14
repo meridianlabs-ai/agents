@@ -55,7 +55,7 @@ to this document together.
   "comments": [ { "number": 456, "body_file": "c1.md" } ],
   "replies":  [ { "review_comment_id": 789, "body_file": "r1.md" } ],
   "resolve_threads": [ "PRRT_…" ],
-  "issues":   [ { "repo": "owner/name", "title": "…", "body_file": "i1.md", "labels": ["auto"], "assignees": ["ransomr"], "comment_on": null, "reopen": false } ],
+  "issues":   [ { "repo": "owner/name", "title": "…", "body_file": "i1.md", "labels": ["auto"], "assignees": ["ransomr"], "comment_on": null } ],
   "slack":    { "text_file": "slack.txt" },
   "stage": "Review",
   "handback": true,

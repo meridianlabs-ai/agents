@@ -547,7 +547,10 @@ runs:
         #    the board's working views filter on assignee, so an unowned or
         #    unboarded issue is invisible to the maintainer (inspect_ai#444).
         #    `assignees` on a comment_on entry are added only when the issue
-        #    has none: never over a human's ownership.
+        #    has none: never over a human's ownership — and when its
+        #    assignees cannot be read, the assignment is a recorded failure,
+        #    not a silent skip. Atlas is touched only after a reopen or
+        #    assignment actually happened.
         created_urls=()
         n=$(jq -r '.issues // [] | length' "$m")
         for ((k = 0; k < n; k++)); do
@@ -565,20 +568,21 @@ runs:
             fi
             adopted=""
             if [ "$(jq -r '.reopen // false' <<<"$it")" = "true" ]; then
-              adopted=1
               if retry 3 "reopen $irepo#$comment_on" gh issue reopen "$comment_on" --repo "$irepo"; then
                 echo "land: reopened $irepo#$comment_on."
+                adopted=1
               else
                 note "reopen of $irepo#$comment_on failed"
               fi
             fi
             if [ "${#assignees[@]}" -gt 0 ]; then
-              adopted=1
-              have=$(gh api "repos/$irepo/issues/$comment_on" --jq '.assignees | length' 2>/dev/null || echo "?")
-              if [ "$have" = "0" ]; then
+              if ! have=$(retry 3 "assignee lookup for $irepo#$comment_on" gh api "repos/$irepo/issues/$comment_on" --jq '.assignees | length'); then
+                note "could not read $irepo#$comment_on's assignees; not assigned"
+              elif [ "$have" = "0" ]; then
                 args=(); for a in "${assignees[@]}"; do args+=(--add-assignee "$a"); done
                 if retry 3 "assign $irepo#$comment_on" gh issue edit "$comment_on" --repo "$irepo" "${args[@]}"; then
                   echo "land: assigned $irepo#$comment_on to ${assignees[*]}."
+                  adopted=1
                 else
                   note "assign of $irepo#$comment_on failed"
                 fi
@@ -622,8 +626,12 @@ runs:
             note "slack text not posted: slack-thread-ts is not a Slack timestamp"
           else
             defang "$DIR/$sfile" "$RUNNER_TEMP/slack.txt"
-            for u in "${created_urls[@]}"; do printf '\nTracking issue: %s\n' "$u" >>"$RUNNER_TEMP/slack.txt"; done
-            if retry 3 "slack post to $SLACK_CHANNEL" slack_post_file "$SLACK_CHANNEL" "$SLACK_THREAD_TS" "$RUNNER_TEMP/slack.txt"; then
+            # The links go in a separate tail file: slack_post_file caps the
+            # agent's text and appends the tail whole, so a long message
+            # loses its own end, never the links.
+            : >"$RUNNER_TEMP/slack-tail.txt"
+            for u in "${created_urls[@]}"; do printf '\nTracking issue: %s\n' "$u" >>"$RUNNER_TEMP/slack-tail.txt"; done
+            if retry 3 "slack post to $SLACK_CHANNEL" slack_post_file "$SLACK_CHANNEL" "$SLACK_THREAD_TS" "$RUNNER_TEMP/slack.txt" "$RUNNER_TEMP/slack-tail.txt"; then
               echo "land: posted the Slack text to $SLACK_CHANNEL${SLACK_THREAD_TS:+ (thread $SLACK_THREAD_TS)}."
             else
               note "slack post to $SLACK_CHANNEL failed"
