@@ -90,6 +90,22 @@ def test_retry_returns_last_status_and_keeps_stdout_clean():
     assert r.stdout.strip() == "[hello]"
 
 
+def test_retry_read_prints_only_the_successful_attempts_stdout(tmp_path):
+    # A failed `gh api` prints its JSON error body to stdout even with --jq;
+    # plain `retry` would stream it into the capture ahead of the real value.
+    flag = tmp_path / "flaked"
+    cmd = "\n".join([
+        "sleep() { :; }",
+        f"flaky() {{ if [ ! -f '{flag}' ]; then touch '{flag}'; echo '{{\"message\": \"Server Error\"}}'; return 1; fi; echo 0; }}",
+        'out=$(retry_read 3 what flaky); echo "rc=$? out=[$out]"',
+    ])
+    r = bash_lib(cmd)
+    assert r.stdout.strip() == "rc=0 out=[0]"
+    assert "retrying" in r.stderr
+    r = bash_lib("sleep() { :; }; out=$(retry_read 2 what sh -c 'echo junk; exit 3'); echo \"rc=$? out=[$out]\"")
+    assert r.stdout.strip() == "rc=3 out=[]"
+
+
 # A stub `gh` for open_or_adopt_pr: `pr list` reports the PR once it exists;
 # `pr create` performs the write, and when LOSE_FIRST is set its FIRST call
 # exits 1 after writing (a timeout / 5xx after the server accepted the PR).
@@ -223,7 +239,9 @@ gh() {
   case "$*" in
     "api repos/"*) echo "I_kwDONODE" ;;
     *addProjectV2ItemById*) echo "PVTI_ITEM" ;;
-    *fieldValueByName*) cat "$STATE/status" 2>/dev/null; echo ;;
+    *fieldValueByName*)
+      if [ -n "${FLAKY:-}" ] && [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo '{"errors":[{"message":"Something went wrong"}]}'; return 1; fi
+      cat "$STATE/status" 2>/dev/null; echo ;;
     *updateProjectV2ItemFieldValue*) echo "status-write" >>"$STATE/writes" ;;
     *) echo "unexpected gh $*" >&2; return 2 ;;
   esac
@@ -231,12 +249,13 @@ gh() {
 """
 
 
-def atlas(tmp_path, status):
+def atlas(tmp_path, status, *, flaky=False):
     state = tmp_path / "state"
     state.mkdir()
     if status is not None:
         (state / "status").write_text(status)
-    r = sh("bash", "-c", f". '{LIB}'\n{ATLAS_STUB}\natlas_todo o/r 7", check=False, env={"STATE": str(state)})
+    env = {"STATE": str(state), **({"FLAKY": "1"} if flaky else {})}
+    r = sh("bash", "-c", f". '{LIB}'\nsleep() {{ :; }}\n{ATLAS_STUB}\natlas_todo o/r 7", check=False, env=env)
     writes = (state / "writes").read_text().splitlines() if (state / "writes").exists() else []
     return r, writes
 
@@ -247,6 +266,16 @@ def test_atlas_todo_sets_todo_when_status_is_unset_or_done(tmp_path, status):
     assert r.returncode == 0, r.stderr
     assert writes == ["status-write"]
     assert "Status=Todo" in r.stdout
+
+
+def test_atlas_todo_writes_todo_after_a_recovered_status_read(tmp_path):
+    # The first read fails with a JSON error body on stdout; the retry's
+    # "Done" is the value that decides — not the two concatenated.
+    r, writes = atlas(tmp_path, "Done", flaky=True)
+    assert r.returncode == 0, r.stderr
+    assert writes == ["status-write"]
+    assert "Status=Todo (was 'Done')" in r.stdout
+    assert "retrying" in r.stderr
 
 
 def test_atlas_todo_leaves_a_status_a_human_set(tmp_path):
@@ -271,7 +300,7 @@ def test_atlas_todo_skips_the_status_write_when_the_read_fails(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     (state / "status").write_text("In progress")
-    stub = ATLAS_STUB.replace('*fieldValueByName*) cat "$STATE/status" 2>/dev/null; echo ;;', '*fieldValueByName*) return 1 ;;')
+    stub = ATLAS_STUB.replace('      cat "$STATE/status" 2>/dev/null; echo ;;', '      echo \'{"errors":[]}\'; return 1 ;;')
     r = sh("bash", "-c", f". '{LIB}'\nsleep() {{ :; }}\n{stub}\natlas_todo o/r 7", check=False, env={"STATE": str(state)})
     assert r.returncode == 0, r.stderr
     calls = (state / "calls").read_text().splitlines()
@@ -388,7 +417,8 @@ gh() {
     "api repos/"*"--jq .node_id") echo "I_kwDONODE" ;;
     "api repos/"*"--jq .assignees | length")
       case "$SCENARIO" in
-        lookup-fails) echo "HTTP 502" >&2; return 1 ;;
+        lookup-fails) echo '{"message": "Server Error"}'; return 1 ;;
+        lookup-flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo '{"message": "Server Error"}'; return 1; fi; echo 0 ;;
         owned) echo 1 ;;
         *) echo 0 ;;
       esac ;;
@@ -440,6 +470,18 @@ def comment_on_manifest(**issue):
 def test_post_assigns_an_unowned_issue_and_puts_it_on_atlas(tmp_path):
     r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(assignees=["ransomr"]), {"i.md": "body\n"})
     assert r.returncode == 0, r.stderr
+    assert "issue edit 9 --repo o/r --add-assignee ransomr" in calls
+    assert writes == ["status-write"]
+    assert failed == ""
+
+
+def test_post_assigns_after_a_recovered_assignee_lookup(tmp_path):
+    # `gh api` prints its error body to STDOUT on a failed attempt; the
+    # retried lookup must yield the successful attempt's `0` alone, or the
+    # assignment is skipped as "already owned" with nothing recorded.
+    r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(assignees=["ransomr"]), {"i.md": "body\n"}, scenario="lookup-flaky")
+    assert r.returncode == 0, r.stderr
+    assert sum(c.endswith("--jq .assignees | length") for c in calls) == 2
     assert "issue edit 9 --repo o/r --add-assignee ransomr" in calls
     assert writes == ["status-write"]
     assert failed == ""

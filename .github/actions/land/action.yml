@@ -576,7 +576,7 @@ runs:
               fi
             fi
             if [ "${#assignees[@]}" -gt 0 ]; then
-              if ! have=$(retry 3 "assignee lookup for $irepo#$comment_on" gh api "repos/$irepo/issues/$comment_on" --jq '.assignees | length'); then
+              if ! have=$(retry_read 3 "assignee lookup for $irepo#$comment_on" gh api "repos/$irepo/issues/$comment_on" --jq '.assignees | length'); then
                 note "could not read $irepo#$comment_on's assignees; not assigned"
               elif [ "$have" = "0" ]; then
                 args=(); for a in "${assignees[@]}"; do args+=(--add-assignee "$a"); done

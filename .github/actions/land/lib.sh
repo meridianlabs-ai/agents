@@ -57,6 +57,25 @@ retry() {
   return "$rc"
 }
 
+# retry_read N WHAT CMD... — `retry` for a command whose STDOUT is the value
+# (`have=$(retry_read 3 what gh api … --jq …)`): each attempt's stdout is
+# captured and only the successful attempt's is printed. A failed `gh api`
+# prints its JSON error body to stdout even with `--jq`, so streaming the
+# attempts through (plain `retry`) poisons a fail-then-succeed capture —
+# the gates' ghr() shape. Stderr passes through.
+retry_read() {
+  local n="$1" what="$2" i rc=0 out
+  shift 2
+  for ((i = 1; i <= n; i++)); do
+    if out=$("$@"); then printf '%s' "$out"; return 0; else rc=$?; fi
+    if [ "$i" -lt "$n" ]; then
+      echo "land: $what failed (attempt $i/$n); retrying" >&2
+      sleep $((i * 15))
+    fi
+  done
+  return "$rc"
+}
+
 # Comment on an issue or PR (the issues endpoint serves both) from a file.
 post_comment_file() {
   local repo="$1" number="$2" file="$3"
@@ -151,7 +170,7 @@ atlas_todo() {
     -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
     -f p="$project" -f c="$node" --jq '.data.addProjectV2ItemById.item.id') || return 1
   [ -n "$item" ] || return 1
-  if ! cur=$(retry 3 "Atlas Status read for $repo#$number" gh api graphql \
+  if ! cur=$(retry_read 3 "Atlas Status read for $repo#$number" gh api graphql \
     -f query='query($i:ID!){node(id:$i){... on ProjectV2Item{s: fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}' \
     -f i="$item" --jq '.data.node.s.name // ""'); then
     echo "::warning::land: $repo#$number is on Atlas but its Status could not be read; not set to Todo."
