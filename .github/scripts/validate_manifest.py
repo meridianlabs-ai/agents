@@ -85,6 +85,11 @@ REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 # zero, and short enough that a GitHub expression's empty string is the only
 # other value they ever take.
 EVENT_NUMBER_RE = re.compile(r"^[1-9][0-9]{0,9}$")
+# A GitHub login: alphanumerics and single hyphens, no leading or trailing
+# hyphen, at most 39 characters — `issues[].assignees` go to `gh issue
+# create --assignee` / `gh issue edit --add-assignee` as-is.
+LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$")
+MAX_ASSIGNEES = 10  # GitHub's cap per issue
 
 # Atlas Stage options (.github/actions/set-stage/action.yml).
 STAGES = ("Contributor", "Agent", "Review", "Sign-off", "Merge")
@@ -110,6 +115,7 @@ KNOWN_TOP_LEVEL = {
     "error",
     "provenance_comment_file",
     "review_verdict",
+    "slack",
 }
 # The reviewer's verdict marker comment (claude-review.yml's codex path): the
 # land job posts one of two FIXED bodies chosen by this value, so the loop's
@@ -120,7 +126,11 @@ KNOWN_PR = {"open", "title", "body_file", "base", "labels", "issue"}
 # is all the land job needs; a field it never reads would only mislead.
 KNOWN_COMMENT = {"number", "body_file"}
 KNOWN_REPLY = {"review_comment_id", "body_file"}
-KNOWN_ISSUE = {"repo", "title", "body_file", "labels", "comment_on"}
+KNOWN_ISSUE = {"repo", "title", "body_file", "labels", "comment_on", "assignees", "reopen"}
+# The Slack message a caller's land job posts (triage-test-failures in the
+# actions repo): only the TEXT comes from the manifest — the channel and
+# thread are the land job's own inputs, from the caller's trusted context.
+KNOWN_SLACK = {"text_file"}
 KNOWN_ERROR = {"message", "fail_run"}
 
 
@@ -294,6 +304,18 @@ class Validator:
         labels = obj["labels"]
         if not isinstance(labels, list) or not all(isinstance(x, str) and 0 < len(x) <= 50 for x in labels):
             self.err(f"{where}: labels must be a list of non-empty strings (≤ 50 chars)")
+
+    def _assignees(self, obj: dict, where: str) -> None:
+        if "assignees" not in obj or obj["assignees"] is None:
+            return
+        assignees = obj["assignees"]
+        if not isinstance(assignees, list) or not all(isinstance(x, str) and LOGIN_RE.fullmatch(x) for x in assignees):
+            self.err(f"{where}: assignees must be a list of GitHub logins")
+            return
+        if len(assignees) > MAX_ASSIGNEES:
+            self.err(f"{where}: assignees lists {len(assignees)} logins; the cap is {MAX_ASSIGNEES}")
+        if len({x.lower() for x in assignees}) != len(assignees):
+            self.err(f"{where}: assignees must not repeat a login")
 
     # -- rules -------------------------------------------------------------
 
@@ -483,7 +505,13 @@ class Validator:
                     self._str(it, "title", where, required=True, max_len=MAX_TITLE_CHARS)
                     self._file_ref(it, "body_file", where, required=True)
                     self._labels(it, where)
-                    self._positive_int(it, "comment_on", where, required=False)
+                    comment_on = self._positive_int(it, "comment_on", where, required=False)
+                    self._assignees(it, where)
+                    # Only an existing issue can be reopened; on a create the
+                    # flag would be a silent no-op the land job never reads.
+                    reopen = self._bool(it, "reopen", where, required=False)
+                    if reopen is not None and comment_on is None:
+                        self.err(f"{where}: reopen needs comment_on (only an existing issue can be reopened)")
 
         stage = m.get("stage")
         if stage is not None and stage not in STAGES:
@@ -502,6 +530,14 @@ class Validator:
                 self.err(f"manifest: review_verdict must be one of {', '.join(VERDICTS)}")
             if pr_number is None:
                 self.err("manifest: review_verdict needs pr_number (the PR the verdict is for)")
+
+        slack = m.get("slack")
+        if slack is not None:
+            if not isinstance(slack, dict):
+                self.err("manifest: slack must be an object")
+            else:
+                self._unknown_keys(slack, KNOWN_SLACK, "slack")
+                self._file_ref(slack, "text_file", "slack", required=True)
 
         error = m.get("error")
         if error is not None:

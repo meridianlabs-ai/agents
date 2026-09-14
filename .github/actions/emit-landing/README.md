@@ -55,7 +55,8 @@ to this document together.
   "comments": [ { "number": 456, "body_file": "c1.md" } ],
   "replies":  [ { "review_comment_id": 789, "body_file": "r1.md" } ],
   "resolve_threads": [ "PRRT_…" ],
-  "issues":   [ { "repo": "owner/name", "title": "…", "body_file": "i1.md", "labels": ["auto"], "comment_on": null } ],
+  "issues":   [ { "repo": "owner/name", "title": "…", "body_file": "i1.md", "labels": ["auto"], "assignees": ["ransomr"], "comment_on": null, "reopen": false } ],
+  "slack":    { "text_file": "slack.txt" },
   "stage": "Review",
   "handback": true,
   "handoff_body_file": "handoff.md",
@@ -79,7 +80,8 @@ to this document together.
 | `comments[]` | workflow | `number` (positive integer — an issue or a PR; the issues endpoint serves both), `body_file` |
 | `replies[]` | workflow | `review_comment_id` positive integer, `body_file`; posted on `pr_number` |
 | `resolve_threads[]` | workflow | `^PRRT_[A-Za-z0-9_-]+$`; `land` resolves only IDs that belong to `pr_number`. Dropped by `emit-landing` with the bundle (see `stage`): a thread is settled by the code that lands |
-| `issues[]` | workflow | `repo` in the land job's `allowed-issue-repos`, `title` (≤ 256), `body_file`, optional `labels`, optional `comment_on` (positive integer: comment on that issue instead of creating one). Created issues are added to Atlas by node ID |
+| `issues[]` | workflow | `repo` in the land job's `allowed-issue-repos`, `title` (≤ 256), `body_file`, optional `labels`, optional `assignees` (≤ 10 GitHub logins, no repeats), optional `comment_on` (positive integer: comment on that issue instead of creating one), optional `reopen` (boolean; needs `comment_on`). A create passes `labels` and `assignees` to `gh issue create`. On `comment_on`, `reopen` reopens the issue and `assignees` are added only when it has none (never over a human's ownership). Every issue `land` creates, reopens or assigns goes on Atlas by node ID with Status set to Todo when unset or Done (the board's own "item added → Todo" flow is unreliable; `atlas_todo` in lib.sh) |
+| `slack` | workflow | `text_file`: the message `land` posts with `chat.postMessage` — de-fanged, with a `Tracking issue: <url>` line appended for each issue created in the same run — to the channel and thread the land job's **`slack-token` / `slack-channel` / `slack-thread-ts` inputs** name, from the caller's trusted context (a validated job output, a secret). The manifest never names the destination: a `channel` or `thread_ts` key is refused. On a land job without the inputs the text is reported as a failed post, not dropped |
 | `stage` | workflow | one of `Contributor`, `Agent`, `Review`, `Sign-off`, `Merge`, or absent. Dropped by `emit-landing`, together with `handback`, `resolve_threads` and `handoff_body_file`, when HEAD moved past `start_sha` but the bundle could not be written (non-descendant HEAD, or a `git bundle` failure): nothing lands, so the stage stays where the gate put it; the drop is recorded in `error` |
 | `handback` | workflow | boolean; posts exactly `@review` on the PR (needs `pr_number` or `pr.open`). A hand-back is owed by a landed commit, so `emit-landing` drops it with the bundle (see `stage`) — the workflow composes it from its own "HEAD moved" test, and this is what keeps the push and the hand-back from coming apart |
 | `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line. Dropped by `emit-landing` with the bundle (see `stage`) when HEAD moved: the hand-off concludes a round whose work must have landed; a no-change round's hand-off (HEAD never moved) is untouched |

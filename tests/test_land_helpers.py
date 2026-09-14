@@ -11,6 +11,7 @@ follow) shows up as a failing test rather than a red land job on every
 caller.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -211,6 +212,112 @@ def test_remote_branch_exists_fails_when_the_error_persists(tmp_path):
     r, calls = branch_exists(tmp_path, "flaky", attempts=1)
     assert r.stdout.strip() == "rc=1 out="
     assert len(calls) == 1
+
+
+# A stub `gh` for atlas_todo: the issue's node id, the board add (an item
+# id), the current Status (from $STATE/status) and the status write, which
+# is logged so the tests see whether Todo was written.
+ATLAS_STUB = r"""
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$*" in
+    "api repos/"*) echo "I_kwDONODE" ;;
+    *addProjectV2ItemById*) echo "PVTI_ITEM" ;;
+    *fieldValueByName*) cat "$STATE/status" 2>/dev/null; echo ;;
+    *updateProjectV2ItemFieldValue*) echo "status-write" >>"$STATE/writes" ;;
+    *) echo "unexpected gh $*" >&2; return 2 ;;
+  esac
+}
+"""
+
+
+def atlas(tmp_path, status):
+    state = tmp_path / "state"
+    state.mkdir()
+    if status is not None:
+        (state / "status").write_text(status)
+    r = sh("bash", "-c", f". '{LIB}'\n{ATLAS_STUB}\natlas_todo o/r 7", check=False, env={"STATE": str(state)})
+    writes = (state / "writes").read_text().splitlines() if (state / "writes").exists() else []
+    return r, writes
+
+
+@pytest.mark.parametrize("status", [None, "", "Done"])
+def test_atlas_todo_sets_todo_when_status_is_unset_or_done(tmp_path, status):
+    r, writes = atlas(tmp_path, status)
+    assert r.returncode == 0, r.stderr
+    assert writes == ["status-write"]
+    assert "Status=Todo" in r.stdout
+
+
+def test_atlas_todo_leaves_a_status_a_human_set(tmp_path):
+    r, writes = atlas(tmp_path, "In progress")
+    assert r.returncode == 0, r.stderr
+    assert writes == []
+    assert "left as is" in r.stdout
+
+
+def test_atlas_todo_fails_when_the_board_add_fails(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    stub = ATLAS_STUB.replace('*addProjectV2ItemById*) echo "PVTI_ITEM" ;;', '*addProjectV2ItemById*) return 1 ;;')
+    r = sh("bash", "-c", f". '{LIB}'\n{stub}\natlas_todo o/r 7", check=False, env={"STATE": str(state)})
+    assert r.returncode == 1
+
+
+# A stub `curl` for slack_post_file: records the request body and answers
+# from $STATE/response.
+SLACK_STUB = r"""
+curl() {
+  cat >"$STATE/body"
+  echo "$*" >"$STATE/curl-args"
+  cat "$STATE/response"
+}
+"""
+
+
+def slack(tmp_path, response, *, thread="1726000000.123456", text="hello <@U1> *bold*\n@review me\n", token="xoxb-test"):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "response").write_text(response)
+    f = tmp_path / "slack.txt"
+    f.write_text(text)
+    r = sh("bash", "-c", f". '{LIB}'\n{SLACK_STUB}\nslack_post_file C0123456789 '{thread}' '{f}'",
+           check=False, env={"STATE": str(state), "SLACK_TOKEN": token})
+    body = json.loads((state / "body").read_text()) if (state / "body").exists() else None
+    args = (state / "curl-args").read_text() if (state / "curl-args").exists() else ""
+    return r, body, args
+
+
+def test_slack_post_file_posts_the_text_as_data_in_the_thread(tmp_path):
+    r, body, args = slack(tmp_path, '{"ok": true, "ts": "1.2"}')
+    assert r.returncode == 0, r.stderr
+    assert body == {"channel": "C0123456789", "thread_ts": "1726000000.123456", "text": "hello <@U1> *bold*\n@review me\n"}
+    assert "Bearer xoxb-test" in args and "chat.postMessage" in args
+
+
+def test_slack_post_file_posts_at_the_channel_root_without_a_thread(tmp_path):
+    r, body, _ = slack(tmp_path, '{"ok": true}', thread="")
+    assert r.returncode == 0, r.stderr
+    assert "thread_ts" not in body
+
+
+def test_slack_post_file_fails_on_a_refused_post(tmp_path):
+    r, _, _ = slack(tmp_path, '{"ok": false, "error": "channel_not_found"}')
+    assert r.returncode == 1
+    assert "channel_not_found" in r.stderr
+
+
+def test_slack_post_file_refuses_an_empty_token(tmp_path):
+    r, body, _ = slack(tmp_path, '{"ok": true}', token="")
+    assert r.returncode == 1
+    assert body is None  # no request was made
+
+
+def test_slack_post_file_caps_the_text(tmp_path):
+    r, body, _ = slack(tmp_path, '{"ok": true}', text="x" * 50000)
+    assert r.returncode == 0, r.stderr
+    assert len(body["text"]) == 39000
+
 
 
 @pytest.mark.parametrize(

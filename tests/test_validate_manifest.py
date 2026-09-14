@@ -68,8 +68,10 @@ def base_manifest(d: Path, **overrides) -> dict:
                 "body_file": write(d, "i1.md"),
                 "labels": ["auto"],
                 "comment_on": None,
+                "assignees": ["ransomr"],
             }
         ],
+        "slack": {"text_file": write(d, "slack.txt")},
         "stage": "Review",
         "handback": True,
         "handoff_body_file": write(d, "handoff.md"),
@@ -158,8 +160,8 @@ def test_run_id_mismatch(tmp_path):
 
 
 def test_unknown_top_level_key(tmp_path):
-    errs = run(tmp_path, base_manifest(tmp_path, slack={"text": "hi"}))
-    assert any("unknown key 'slack'" in e for e in errs)
+    errs = run(tmp_path, base_manifest(tmp_path, webhook={"url": "https://x"}))
+    assert any("unknown key 'webhook'" in e for e in errs)
 
 
 def test_unknown_nested_key(tmp_path):
@@ -519,6 +521,85 @@ def test_issue_repo_malformed(tmp_path):
     m["issues"][0]["repo"] = "not-a-repo"
     errs = run(tmp_path, m)
     assert any("is not owner/name" in e for e in errs)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["ransomr", ["-ransomr"], ["ransomr-"], ["ran--somr"], [""], ["a" * 40], [42], ["ransomr", "RansomR"]],
+)
+def test_issue_assignees_shape(tmp_path, value):
+    # Logins go to `gh issue create --assignee` verbatim: a list of GitHub
+    # logins (alphanumerics and single hyphens, ≤ 39), no repeats.
+    m = base_manifest(tmp_path)
+    m["issues"][0]["assignees"] = value
+    errs = run(tmp_path, m)
+    assert any("issues[0]: assignees" in e for e in errs), errs
+
+
+def test_issue_assignees_capped_at_ten(tmp_path):
+    m = base_manifest(tmp_path)
+    m["issues"][0]["assignees"] = [f"user{i}" for i in range(11)]
+    errs = run(tmp_path, m)
+    assert any("the cap is 10" in e for e in errs), errs
+    m["issues"][0]["assignees"] = [f"user{i}" for i in range(10)]
+    assert run(tmp_path, m) == []
+
+
+def test_issue_reopen_needs_comment_on(tmp_path):
+    # Only an existing issue can be reopened; on a create the flag would be
+    # a no-op the land job never reads, so it is refused rather than ignored.
+    m = base_manifest(tmp_path)
+    m["issues"][0]["reopen"] = True
+    errs = run(tmp_path, m)
+    assert any("reopen needs comment_on" in e for e in errs), errs
+    m["issues"][0]["comment_on"] = 444
+    assert run(tmp_path, m) == []
+    m["issues"][0]["reopen"] = False
+    assert run(tmp_path, m) == []
+
+
+@pytest.mark.parametrize("value", ["true", 1, "yes"])
+def test_issue_reopen_must_be_boolean(tmp_path, value):
+    m = base_manifest(tmp_path)
+    m["issues"][0]["comment_on"] = 444
+    m["issues"][0]["reopen"] = value
+    errs = run(tmp_path, m)
+    assert any("issues[0]: reopen must be a boolean" in e for e in errs), errs
+
+
+def test_slack_text_file_is_a_file_ref(tmp_path):
+    # Only the text comes from the manifest (the channel and thread are the
+    # land job's inputs); the text is a body file under the same rules.
+    m = base_manifest(tmp_path)
+    m["slack"] = {"text_file": "missing.txt"}
+    errs = run(tmp_path, m)
+    assert any("slack: text_file 'missing.txt' does not exist" in e for e in errs), errs
+    m["slack"] = {"text_file": "../outside.txt"}
+    errs = run(tmp_path, m)
+    assert any("slack: text_file" in e and "'..'" in e for e in errs), errs
+    m["slack"] = {}
+    errs = run(tmp_path, m)
+    assert any("slack: text_file is required" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("value", ["slack.txt", ["slack.txt"], True])
+def test_slack_must_be_object(tmp_path, value):
+    m = base_manifest(tmp_path)
+    m["slack"] = value
+    errs = run(tmp_path, m)
+    assert any("slack must be an object" in e for e in errs), errs
+
+
+def test_slack_refuses_a_destination(tmp_path):
+    # A manifest that names a channel or thread is refused outright: the
+    # destination is never the agent's to choose.
+    m = base_manifest(tmp_path)
+    m["slack"] = {"text_file": write(tmp_path, "s.txt"), "channel": "C0123456789", "thread_ts": "1.2"}
+    errs = run(tmp_path, m)
+    assert sorted(e for e in errs if "slack: unknown key" in e) == [
+        "slack: unknown key 'channel' (fail closed on schema drift)",
+        "slack: unknown key 'thread_ts' (fail closed on schema drift)",
+    ], errs
 
 
 @pytest.mark.parametrize("value", [0, -1, "5", 1.5, True, None])

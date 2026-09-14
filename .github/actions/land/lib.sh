@@ -130,3 +130,60 @@ landing_failure_hint() {
   case "$owed" in *,stage,*) hint="${hint:+$hint }Move the Atlas stage by hand." ;; esac
   printf '%s' "$hint"
 }
+
+# atlas_todo REPO NUMBER — put an issue the land job created, reopened or
+# assigned on the Atlas board (org project 1) by node ID and set its Status
+# to Todo when it has none or is Done. Explicit, not via the board's built-in
+# "item added -> Todo" flow, which left inspect_ai#444 at Done on add; and
+# only when unset or Done — never over a status a human moved. Adding is
+# idempotent (an item already on the board comes back with its id). Returns
+# 1 when the item could not be added (a token without the `project` scope);
+# a failed status write is a warning, the add stood.
+atlas_todo() {
+  local repo="$1" number="$2" node item cur
+  local project=PVT_kwDOC7YMCM4BU68p status_field=PVTSSF_lADOC7YMCM4BU68pzhKizZM todo=f75ad846
+  node=$(gh api "repos/$repo/issues/$number" --jq '.node_id') || return 1
+  [ -n "$node" ] || return 1
+  item=$(gh api graphql \
+    -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+    -f p="$project" -f c="$node" --jq '.data.addProjectV2ItemById.item.id') || return 1
+  [ -n "$item" ] || return 1
+  cur=$(gh api graphql \
+    -f query='query($i:ID!){node(id:$i){... on ProjectV2Item{s: fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}' \
+    -f i="$item" --jq '.data.node.s.name // ""' 2>/dev/null) || cur=""
+  if [ -z "$cur" ] || [ "$cur" = "Done" ]; then
+    if gh api graphql \
+         -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+         -f p="$project" -f i="$item" -f f="$status_field" -f o="$todo" --silent; then
+      echo "land: $repo#$number on Atlas, Status=Todo (was '${cur:-unset}')."
+    else
+      echo "::warning::land: $repo#$number is on Atlas but its Status could not be set to Todo."
+    fi
+  else
+    echo "land: $repo#$number on Atlas, Status '$cur' left as is."
+  fi
+  return 0
+}
+
+# slack_post_file CHANNEL THREAD_TS FILE — post FILE's text with
+# chat.postMessage, as a thread reply when THREAD_TS is non-empty. The token
+# is read from $SLACK_TOKEN, never an argument (arguments show in `ps`). The
+# body is built by jq from the file, so the text is data whatever it holds;
+# it is capped below Slack's 40,000-character limit. Slack answers 200 with
+# `{"ok": false, "error": …}` on a refused post, so `ok` is what decides;
+# returns 1 with the error on stderr. Meant to run under `retry`.
+slack_post_file() {
+  local channel="$1" thread_ts="$2" file="$3" body resp
+  [ -n "${SLACK_TOKEN:-}" ] || { echo "slack_post_file: SLACK_TOKEN is empty" >&2; return 1; }
+  body=$(jq -n --arg c "$channel" --arg t "$thread_ts" --rawfile text "$file" \
+           '{channel: $c, text: ($text | .[0:39000])} + (if $t != "" then {thread_ts: $t} else {} end)') || return 1
+  resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+           -H "Authorization: Bearer $SLACK_TOKEN" \
+           -H "Content-Type: application/json; charset=utf-8" \
+           --data @- <<<"$body") || return 1
+  if [ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null)" = "true" ]; then
+    return 0
+  fi
+  echo "slack_post_file: Slack refused the post: $(jq -r '.error // "unparsable response"' <<<"$resp" 2>/dev/null || echo "unparsable response")" >&2
+  return 1
+}

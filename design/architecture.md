@@ -332,7 +332,9 @@ Three rules define the shape:
   separate steps because a step has one `GIT_TOKEN`. After the push it
   opens or adopts the PR, posts comments and review replies, resolves only
   the review threads that belong to that PR, files follow-up issues in
-  allow-listed repos and adds them to Atlas by node ID, posts the hand-back
+  allow-listed repos (or comments on, reopens and assigns existing ones)
+  and puts them on Atlas by node ID at Todo, posts the manifest's Slack text
+  to the channel and thread the caller's own inputs name, posts the hand-back
   or the hand-off, moves the stage (`set-stage`), posts the provenance note,
   and finally reports the manifest's `error` — failing the run when it says
   so, after every other step ran. Once the push has landed, a lost comment,
