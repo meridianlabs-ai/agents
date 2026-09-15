@@ -65,7 +65,10 @@ confirmation if the verdict isn't `clean` or CI shows failures**. Only
 verdict comments posted by the reviewer app (`claude[bot]`, the script's
 `REVIEWER_BOT`) or by a trusted login / write-access collaborator count;
 the PR is public, so others are ignored and the ADVISORY line says how
-many were. It adopts the existing upstream PR via the
+many were. If the comment lookup fails part-way the verdict is reported
+`verdict:unavailable` (partial pages are discarded — an older `clean` must
+not stand in for a newer verdict): treat it as not clean and pause. It
+adopts the existing upstream PR via the
 issue's cross-repo chip (the REST `pulls?head=` filter silently returns
 [] for org-owned heads — observed on the org-fork pair AND same-repo on
 the fork itself — never use it anywhere) or, on the create path, first syncs

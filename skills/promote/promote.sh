@@ -343,20 +343,28 @@ has_login() {
 # oldest-first — a single page never sees recent comments. Only a verdict
 # posted by the reviewer app or a trusted login counts (the PR is public:
 # anyone can post a comment carrying the marker); the latest such verdict
-# wins, and ignored ones are counted on the ADVISORY line.
+# wins, and ignored ones are counted on the ADVISORY line. The lookup must
+# complete: a page that fails after earlier pages returned rows would leave
+# an OLDER verdict standing, so partial rows are discarded and the verdict
+# is reported unavailable (not clean — the SKILL.md pause applies).
 VERDICT="verdict:none"
 VERDICT_IGNORED=0
-while IFS=$'\t' read -r v_login v_body; do
-  [ -n "$v_login" ] || continue
-  if [ "$v_login" = "$REVIEWER_BOT" ] || trusted_login "$v_login"; then
-    VERDICT=$(grep -o 'verdict:[a-z]*' <<<"$v_body" | tail -1 || true)
-    VERDICT=${VERDICT:-verdict:none}
-  else
-    VERDICT_IGNORED=$((VERDICT_IGNORED + 1))
-  fi
-done <<<"$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
-  --jq '.[] | select(.body | contains("claude-review-verdict")) | [.user.login, (.body | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)"
-[ "$VERDICT_IGNORED" -eq 0 ] || VERDICT="$VERDICT ($VERDICT_IGNORED verdict comment(s) by untrusted authors ignored)"
+if VERDICT_ROWS=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
+    --jq '.[] | select(.body | contains("claude-review-verdict")) | [.user.login, (.body | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null); then
+  while IFS=$'\t' read -r v_login v_body; do
+    [ -n "$v_login" ] || continue
+    if [ "$v_login" = "$REVIEWER_BOT" ] || trusted_login "$v_login"; then
+      VERDICT=$(grep -o 'verdict:[a-z]*' <<<"$v_body" | tail -1 || true)
+      VERDICT=${VERDICT:-verdict:none}
+    else
+      VERDICT_IGNORED=$((VERDICT_IGNORED + 1))
+    fi
+  done <<<"$VERDICT_ROWS"
+  [ "$VERDICT_IGNORED" -eq 0 ] || VERDICT="$VERDICT ($VERDICT_IGNORED verdict comment(s) by untrusted authors ignored)"
+else
+  echo "WARN: could not read fork PR #$FPR's comments (gh api failed) — review verdict unavailable; treat as not clean" >&2
+  VERDICT="verdict:unavailable (comment lookup failed)"
+fi
 CI=$(gh pr checks "$FPR" -R "$FORK" 2>&1 | awk -F'\t' '{print $2}' | sort | uniq -c | tr '\n' ' ' || true)
 echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}; reviewer: $REVIEWER"
 

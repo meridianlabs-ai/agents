@@ -59,7 +59,10 @@ case "$args" in
     n=$(sed -E 's#.*/issues/([0-9]+)/comments.*#\1#' <<<"$args"); expr=""
     while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && expr=$2; shift; done
     f="$STUB/comments_$n.json"; [ -f "$f" ] || f=/dev/null
-    { cat "$f"; [ "$f" = /dev/null ] && echo '[]'; } | jq -r "$expr" ;;
+    { cat "$f"; [ "$f" = /dev/null ] && echo '[]'; } | jq -r "$expr"
+    # A later page failing after the first returned rows: gh has already
+    # streamed page one and exits non-zero.
+    if [ -f "$STUB/comments_fail_$n" ]; then echo "gh: HTTP 502 fetching page 2" >&2; exit 1; fi ;;
   "pr checks "*) ;;
   "api repos/UKGovernmentBEIS/inspect_ai/commits/main "*) echo "0123abcd" ;;
   *) echo "stub gh: unexpected call: $args" >&2; exit 97 ;;
@@ -104,7 +107,7 @@ def open_pr(number, *, author=MARVIN, head_repo=FORK, branch, body="", title=Non
 
 class Stub:
     def __init__(self, tmp_path, issue_json, *, perms=(), open_prs=(), pr_views=(), comments=None,
-                 branches=(), prlist_fail=False):
+                 branches=(), prlist_fail=False, comments_fail=()):
         self.dir = tmp_path / "stub"
         self.dir.mkdir(parents=True)
         gh = tmp_path / "bin" / "gh"
@@ -122,6 +125,8 @@ class Stub:
         (self.dir / "branches").write_text("".join(f"{b}={sha}\n" for b, sha in branches))
         if prlist_fail:
             (self.dir / "prlist_fail").touch()
+        for number in comments_fail:
+            (self.dir / f"comments_fail_{number}").touch()
         # checkout.sh resolves the issue's repo from the clone's remotes and
         # guards on a clean tree; an empty repo with the fork as origin is both.
         # The URL is non-routable so no test can reach the network even when a
@@ -555,3 +560,16 @@ def test_promote_fallback_refuses_a_truncated_listing(tmp_path):
     s2 = Stub(tmp_path / "b", issue([]), open_prs=many[1:])
     r2 = s2.run(PROMOTE, str(N), "--dry-run")
     assert r2.returncode == 0 and "RESOLVED: fork PR #2000" in r2.stdout, r2.stderr
+
+
+def test_promote_verdict_is_unavailable_when_the_comment_lookup_fails_part_way(tmp_path):
+    # Page one carried a trusted `clean`; page two (which might hold a newer
+    # blocking verdict) failed. Partial rows must not leave `clean` standing.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")]),
+             comments={400: [(MARVIN, "<!-- claude-review-verdict:clean -->")]}, comments_fail=[400])
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    advisory = [l for l in r.stdout.splitlines() if l.startswith("ADVISORY:")][0]
+    assert "review verdict:unavailable (comment lookup failed);" in advisory
+    assert "clean" not in advisory
+    assert "WARN: could not read fork PR #400's comments" in r.stderr
