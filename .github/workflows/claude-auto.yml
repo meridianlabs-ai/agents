@@ -46,10 +46,13 @@ on:
         type: string
       pr_number:
         description: >-
-          PR number (from workflow_run.pull_requests[0].number) — used only to
-          key the concurrency group so this shares it with claude-auto-review.yml
-          (both serialize per PR). Empty when CI ran on a non-PR branch, which
-          this job skips anyway.
+          PR number (from workflow_run.pull_requests[0].number): the PR this
+          run acts on — the gate views it by number and requires it open,
+          same-repo and on head_branch, never resolving a PR from the branch
+          name (Claude Security finding 4122320) — and the key of the
+          concurrency group shared with claude-auto-review.yml (both
+          serialize per PR). Empty when CI ran on a non-PR branch, which the
+          gate skips.
         required: false
         type: string
         default: ""
@@ -168,6 +171,16 @@ on:
           only by CI-fix rounds on PRs labeled engine:codex.
         required: false
 
+# The identity every author check in this file trusts: the machine account
+# today. Phase 2 (a GitHub App identity; the login becomes `<app-slug>[bot]`)
+# changes this ONE value — no trust decision below names the login itself.
+# Comma-separated. `github-actions[bot]` never belongs here: any repository's
+# workflow run posts as it. (Handoff: ~/Documents/security/
+# remaining-security-work.md → section 3; the same value, by the same name,
+# is being introduced in the sibling workflows.)
+env:
+  TRUSTED_LOGINS: i-am-marvin
+
 jobs:
   # TRUSTED, first: the PR lookup, the `auto`-label gate, the attempt cap and
   # every marvin write that must happen BEFORE the agent runs — stage → Agent,
@@ -232,6 +245,7 @@ jobs:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           HEAD: ${{ inputs.head_branch }}
+          PR_NUMBER: ${{ inputs.pr_number }}
           AUTO_LABEL: ${{ inputs.auto_label }}
           HAS_TOKEN: ${{ secrets.MARVIN_TOKEN != '' }}
         run: |
@@ -265,10 +279,34 @@ jobs:
             echo "No MARVIN_TOKEN; the fix loop can't push as a real identity. Skipping."
             act skip; exit 0
           fi
-          pr=$(ghr gh pr list --repo "$REPO" --head "$HEAD" --state open \
-                 --json number,labels --jq '.[0] // empty')
-          if [ -z "$pr" ]; then
-            echo "No open PR for $HEAD; nothing to do."; act skip; exit 0
+          # The PR is the one the triggering run names (inputs.pr_number, from
+          # workflow_run.pull_requests[0].number), viewed by NUMBER and checked
+          # against the run — never found by branch name (Claude Security
+          # finding 4122320): `gh pr list --head` matches the ref name in ANY
+          # head repository, newest first, so a fork PR whose branch was named
+          # like an open same-repo PR was the one resolved — its labels decided
+          # whether a round ran, and the round's counter, comments, label
+          # removal and board moves landed on it while the fix was pushed to
+          # the same-repo branch. Each check that fails skips with its reason;
+          # there is deliberately no fallback to a branch listing.
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "No PR number from the triggering run (pr_number='$PR_NUMBER': CI ran on a non-PR branch, or the run named no PR); nothing to do."
+            act skip; exit 0
+          fi
+          pr=$(ghr gh pr view "$PR_NUMBER" --repo "$REPO" \
+                 --json number,state,isCrossRepository,headRefName,labels)
+          state=$(jq -r '.state' <<<"$pr")
+          if [ "$state" != "OPEN" ]; then
+            echo "PR #$PR_NUMBER is $state, not open; nothing to do."; act skip; exit 0
+          fi
+          if [ "$(jq -r '.isCrossRepository' <<<"$pr")" != "false" ]; then
+            echo "PR #$PR_NUMBER's head is in a fork; the CI-fix loop works same-repo PRs only. Skipping."
+            act skip; exit 0
+          fi
+          head_ref=$(jq -r '.headRefName' <<<"$pr")
+          if [ "$head_ref" != "$HEAD" ]; then
+            echo "PR #$PR_NUMBER's head branch is '$head_ref' but the failed CI run's is '$HEAD'; skipping."
+            act skip; exit 0
           fi
           number=$(jq -r '.number' <<<"$pr")
           echo "pr=$number" >>"$GITHUB_OUTPUT"
@@ -298,6 +336,7 @@ jobs:
           repo: ${{ github.repository }}
           pr: ${{ steps.resolve.outputs.pr }}
           label: ${{ inputs.auto_label }}
+          trusted-logins: ${{ env.TRUSTED_LOGINS }}
 
       - name: Gate and count
         id: gate
@@ -332,15 +371,77 @@ jobs:
             echo "Labeler check on PR #$PR: ${LABELER_VERDICT:-no verdict}; skipping."; act skip; exit 0
           fi
           number="$PR"
-          # Attempt counter: a single sticky marker comment we own.
-          cid=$(ghr gh api "repos/$REPO/issues/$number/comments" --paginate \
-                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty')
+          # Attempt counter: a single sticky marker comment we own — so only a
+          # comment from a TRUSTED author is the counter (Claude Security
+          # finding 4121987): the newest marker comment by one of
+          # TRUSTED_LOGINS (the loop's own), else the newest by an account
+          # with write access (a maintainer's hand-written count); a marker
+          # from any other login is ignored and never PATCHed. Before this the
+          # LAST marker comment by ANY author was the counter, so any commenter
+          # on a public caller could reset the cap (unbounded rounds) or force
+          # an escalation (the label removed as marvin), and their comment
+          # became the one the loop edited. The land job's refund step reads
+          # the counter the same way; keep the two helpers identical.
+          # `--paginate --jq` runs per page, so the pages are slurped and
+          # flattened locally (as verify-auto-labeler does).
+          cands=$(ghr gh api "repos/$REPO/issues/$number/comments?per_page=100" --paginate \
+                    | jq -cs --arg m "$MARKER" '[.[][] | select(.body|contains($m)) | {id, login: (.user.login // ""), body}]')
+          # trusted_author LOGIN: true when LOGIN is one of TRUSTED_LOGINS or
+          # holds admin/maintain/write (the collaborators endpoint's base
+          # permission, looked up once per login per run — the cache is a
+          # `|login=perm|` list, not an associative array, so the tests can
+          # run it under bash 3). A failed lookup is untrusted (fail closed);
+          # a GitHub App (`*[bot]`, github-actions[bot] included) is never
+          # looked up: the endpoint 404s for Apps, and any repository's
+          # workflow run posts as github-actions[bot].
+          perms=""
+          trusted_author() {
+            local login="$1" perm
+            [ -n "$login" ] || return 1
+            case ",${TRUSTED_LOGINS// /}," in *",$login,"*) return 0 ;; esac
+            case "$login" in *"[bot]") return 1 ;; esac
+            case "$perms" in
+              *"|$login="*) perm=${perms##*"|$login="}; perm=${perm%%"|"*} ;;
+              *) perm=$(ghr gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission') || perm=""
+                 perms="$perms|$login=$perm|" ;;
+            esac
+            case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
+          }
+          # parse_attempts BODY: prints N when BODY carries exactly one
+          # `attempts: N` with N all digits, else nothing (a reset body has no
+          # count; a doubled or malformed one is not believed).
+          parse_attempts() {
+            local n
+            [ "$(printf '%s' "$1" | grep -o 'attempts:' | wc -l | tr -d ' ')" = 1 ] || return 0
+            n=$(printf '%s' "$1" | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
+            [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n"
+            return 0
+          }
+          # The loop's own comment first (no lookups when one exists), else
+          # the newest by a write-access account.
+          cid=$(jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl
+                  | map(select(.login as $l | any($tl[]; . == $l))) | last | .id // empty' <<<"$cands")
+          if [ -z "$cid" ]; then
+            while IFS=$'\t' read -r id login; do
+              [ -n "$id" ] || continue
+              if trusted_author "$login"; then cid="$id"; break; fi
+            done < <(jq -r 'reverse | .[] | [.id, .login] | @tsv' <<<"$cands")
+          fi
           prev=0
           if [ -n "$cid" ]; then
-            mbody=$(ghr gh api "repos/$REPO/issues/comments/$cid" --jq '.body')
-            prev=$(printf '%s' "$mbody" | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
-            prev=${prev:-0}
+            cauthor=$(jq -r --argjson id "$cid" 'map(select(.id == $id)) | first | .login' <<<"$cands")
+            n=$(parse_attempts "$(jq -r --argjson id "$cid" 'map(select(.id == $id)) | first | .body' <<<"$cands")")
+            if [ -n "$n" ]; then
+              prev=$n
+            else
+              echo "Counter comment $cid by $cauthor carries no single 'attempts: N' line; counting from 0."
+            fi
+            echo "Counter: comment $cid by $cauthor reads attempts=$prev."
+          else
+            echo "No counter comment from a trusted author on PR #$number; counting from 0."
           fi
+          jq -r --arg cid "$cid" '.[] | select((.id|tostring) != $cid)
+            | "Ignored marker comment \(.id) by \(.login): not the counter (only a comment by the loop itself, else by a write-access account, counts)."' <<<"$cands"
           next=$((prev + 1))
           echo "attempt=$next" >>"$GITHUB_OUTPUT"
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
@@ -1766,15 +1867,57 @@ jobs:
           MARKER: "<!-- auto-fix-attempts -->"
         run: |
           set -uo pipefail
-          cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' 2>/dev/null || true)
-          [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
+          # Same trusted read as the gate's (finding 4121987; the helpers are
+          # copies of the gate's — keep them identical): the newest marker
+          # comment by one of TRUSTED_LOGINS, else the newest by a
+          # write-access account; any other login's is never PATCHed.
+          # Best-effort throughout, like the rest of this step.
+          ghr() {
+            local n=0 out
+            until out=$("$@"); do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then return 1; fi
+              sleep $((n*3))
+            done
+            printf '%s' "$out"
+          }
+          perms=""
+          trusted_author() {
+            local login="$1" perm
+            [ -n "$login" ] || return 1
+            case ",${TRUSTED_LOGINS// /}," in *",$login,"*) return 0 ;; esac
+            case "$login" in *"[bot]") return 1 ;; esac
+            case "$perms" in
+              *"|$login="*) perm=${perms##*"|$login="}; perm=${perm%%"|"*} ;;
+              *) perm=$(ghr gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission') || perm=""
+                 perms="$perms|$login=$perm|" ;;
+            esac
+            case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
+          }
+          parse_attempts() {
+            local n
+            [ "$(printf '%s' "$1" | grep -o 'attempts:' | wc -l | tr -d ' ')" = 1 ] || return 0
+            n=$(printf '%s' "$1" | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
+            [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n"
+            return 0
+          }
+          cands=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate 2>/dev/null \
+                    | jq -cs --arg m "$MARKER" '[.[][] | select(.body|contains($m)) | {id, login: (.user.login // ""), body}]' 2>/dev/null) || cands=""
+          [ -n "$cands" ] || cands="[]"
+          cid=$(jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl
+                  | map(select(.login as $l | any($tl[]; . == $l))) | last | .id // empty' <<<"$cands")
+          if [ -z "$cid" ]; then
+            while IFS=$'\t' read -r id login; do
+              [ -n "$id" ] || continue
+              if trusted_author "$login"; then cid="$id"; break; fi
+            done < <(jq -r 'reverse | .[] | [.id, .login] | @tsv' <<<"$cands")
+          fi
+          [ -z "$cid" ] && { echo "No counter comment from a trusted author found; nothing to refund."; exit 0; }
           # Re-read the count (same parse as the gate's) rather than trusting
           # the gate's value: the next run's gate may have re-recorded since.
           # Falls back to the gate's value when the body does not parse;
           # never below zero (an escalation's reset may have zeroed it).
-          cur=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null \
-                  | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p' || true)
+          cur=$(parse_attempts "$(jq -r --argjson id "$cid" 'map(select(.id == $id)) | first | .body' <<<"$cands")")
           [[ "$cur" =~ ^[0-9]+$ ]] || cur=$ATTEMPT
           prev=$(( cur > 0 ? cur - 1 : 0 ))
           body="$MARKER

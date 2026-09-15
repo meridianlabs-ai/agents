@@ -13,7 +13,8 @@ description: >-
   step (local composite actions with post steps break teardown on the fork).
 
   Three verdicts (design/auto-agent.md → Trigger surface):
-  - `ok`: the labeler is marvin or holds admin/write. Run.
+  - `ok`: the labeler is one of `trusted-logins` (the machine account by
+    default) or holds admin/write. Run.
   - `disarmed`: positive evidence of an outsider — the labeler is a known
     account whose permission is read/none. The label comes off (as the
     token's identity, so the PR does not stay armed for the next event) and
@@ -74,6 +75,16 @@ inputs:
   label:
     description: The loop's opt-in label (the workflow's `auto_label` input).
     required: true
+  trusted-logins:
+    description: >-
+      Comma-separated logins trusted as the labeler without a permission
+      lookup: the loops' own identity (the machine account today; Phase 2's
+      GitHub App login later). Callers pass their workflow-level
+      `TRUSTED_LOGINS` so the value lives in one place per workflow; the
+      default keeps a caller that does not pass it working. Never list
+      `github-actions[bot]` here (see the description).
+    required: false
+    default: i-am-marvin
 
 outputs:
   verdict:
@@ -105,6 +116,7 @@ runs:
         REPO: ${{ inputs.repo }}
         PR: ${{ inputs.pr }}
         AUTO_LABEL: ${{ inputs.label }}
+        TRUSTED_LOGINS: ${{ inputs.trusted-logins }}
       run: |
         set -euo pipefail
         # Retry with backoff, same shape as the gates' ghr(): a 5xx or
@@ -123,6 +135,8 @@ runs:
           printf '%s' "$out"
         }
         out() { echo "$1=$2" >>"$GITHUB_OUTPUT"; }
+        # Membership in the comma-separated `trusted-logins` (spaces ignored).
+        trusted_login() { case ",${TRUSTED_LOGINS// /}," in *",$1,"*) return 0 ;; esac; return 1; }
         # Most recent `labeled` event for the label. 100 events per page — a
         # PR timeline carries an event per commit, comment, label and
         # cross-reference, so the default 30 would page several times on
@@ -151,7 +165,7 @@ runs:
           echo "::warning::PR #$PR carries '$AUTO_LABEL' but its timeline has no labeled event for it; cannot verify who opted in."
           notice_unverified "its timeline has no labeled event for it"
           verdict=unverified
-        elif [ "$labeler" = "i-am-marvin" ]; then
+        elif trusted_login "$labeler"; then
           :
         else
           case "$labeler" in

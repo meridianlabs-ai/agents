@@ -146,7 +146,7 @@ finding 4121989) that is enforced in three layers rather than assumed:
   `verify-auto-labeler` composite between their label check and their
   counting step (the review loop's merged-PR skip also precedes it, so a
   merged PR still carrying the label costs no timeline fetch and gets no
-  notice; the CI-fix loop lists open PRs only). It reads the PR timeline and
+  notice; the CI-fix loop requires the PR the run names to be open). It reads the PR timeline and
   requires the most recent
   `labeled` event for `auto` to come from the machine account (claude.yml's
   opt-in and PR-open propagation, or triage) or from an account with write
@@ -481,6 +481,22 @@ The simple case ships first and is independently useful:
   marvin, posts the `@review` hand-back and the error/summary comments, and
   refunds the attempt when the agent never ran) — see architecture.md →
   Landing job. The push still goes out as marvin, so CI still re-triggers.
+  **Since 2026-09-15 the gate trusts only what the run and the loop
+  established** (Claude Security findings 4122320 and 4121987): the PR is
+  `inputs.pr_number` (the run's `workflow_run.pull_requests[0].number`),
+  viewed by number and required to be open, same-repo and on the run's head
+  branch — a mismatch skips with its reason, and there is no fallback to a
+  branch-name listing (`gh pr list --head` matches the ref name in any head
+  repository, so a fork PR named like an open same-repo PR was the one
+  resolved); and the attempt counter is read, in the gate and in the land
+  job's refund, only from a marker comment whose author is one of the
+  workflow's `TRUSTED_LOGINS` (the loop's own comment, preferred) or holds
+  write access — an outsider's marker comment is ignored and never edited,
+  and a count that is not exactly one `attempts: N` reads as 0. The
+  `TRUSTED_LOGINS` workflow-level env (`i-am-marvin`) is the one value every
+  author check in `claude-auto.yml` reads, and `verify-auto-labeler` takes it
+  as its `trusted-logins` input, so the Phase 2 identity change flips one
+  value per file.
 - **Phase 2 — review→fix loop. _Verified on inspect_flow via the unified
   `issue_comment` trigger._** Reusable `claude-auto-review.yml`: on the
   reviewer's **dedicated marker comment** (`issue_comment`, body contains
