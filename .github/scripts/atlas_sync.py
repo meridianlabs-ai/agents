@@ -49,6 +49,19 @@ FORK = "meridianlabs-ai/inspect_ai"
 TS_MONO = "meridianlabs-ai/ts-mono"
 REVIEWER = os.environ.get("REVIEWER", "ransomr")
 MACHINE_ACCOUNT = "i-am-marvin"  # the login this sync (and the loop) writes as
+# Authors whose comments and issue-body lines this sync believes as-is: the
+# machine account (the loop's hand-backs, counters and stage comments post as
+# it) and the reviewer's GitHub App (its verdict comment is what a fix round
+# consumes; the review-fix loop's own author gate names the same login). Every
+# author check reads THIS set, so Phase 2 of the credential separation (marvin
+# becomes a GitHub App identity, `<app-slug>[bot]`) changes this one value.
+# Anyone else is believed only with write access — see trusted_author.
+# `github-actions[bot]` is never trusted: any repository's workflow run posts
+# as it.
+TRUSTED_LOGINS = frozenset({MACHINE_ACCOUNT, "claude[bot]"})
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+TRUSTED_PERMISSIONS = frozenset({"admin", "maintain", "write"})
+NEVER_TRUSTED = frozenset({"github-actions[bot]"})
 
 PROJECT_ID = "PVT_kwDOC7YMCM4BU68p"
 PROJECT_NUMBER = 1
@@ -91,6 +104,38 @@ def gql(query: str, **variables):
             f"graphql: {out['errors'][0].get('message', out['errors'])[:300]}"
         )
     return out["data"]
+
+
+_permission_cache: dict[tuple[str, str], bool] = {}
+
+
+def trusted_author(login: str, repo: str, association: str | None = None) -> bool:
+    """Whether text written by `login` may drive this sync (fails closed).
+
+    Comments and issue bodies on the public fork are writable by any GitHub
+    account, so a hand-back signal or a `Companion PR:` line counts only
+    from a trusted identity or a write-access author: TRUSTED_LOGINS, an
+    `author_association` the payload already carries (OWNER / MEMBER /
+    COLLABORATOR short-circuit the lookup), or a collaborator permission of
+    admin / maintain / write on `repo`, looked up once per login per run
+    (the same few logins recur). An empty login, a never-trusted bot, a
+    lookup that fails or a permission below write is untrusted — the
+    endpoint answers `none`/`read` for bots and outsiders on a public repo,
+    so the VALUE decides, not the call succeeding.
+    """
+    if not login or login in NEVER_TRUSTED:
+        return False
+    if login in TRUSTED_LOGINS or association in TRUSTED_ASSOCIATIONS:
+        return True
+    key = (repo, login)
+    if key not in _permission_cache:
+        try:
+            d = gh_json("api", f"repos/{repo}/collaborators/{login}/permission")
+            perms = {d.get("permission"), d.get("role_name")}
+        except (RuntimeError, ValueError, AttributeError):
+            perms = set()  # unreadable: fail closed
+        _permission_cache[key] = bool(perms & TRUSTED_PERMISSIONS)
+    return _permission_cache[key]
 
 
 def set_single_select(item_id: str, field_id: str, option_id: str) -> None:
@@ -410,24 +455,45 @@ def companion_pr(issue: int, head_ref: str):
     issues"): an explicit `Companion PR: <url>` line in the anchor issue
     body wins; otherwise the branch-name convention — the ts-mono PR whose
     head equals the upstream PR's headRefName (the dev agent names
-    companion branches identically in both repos).
+    companion branches identically in both repos). The line is free text
+    its author can edit indefinitely (and /import copies an upstream
+    author's body verbatim), so it is honoured only from a trusted author
+    (trusted_author) and only for a TS_MONO URL: the line decides whether
+    companion_blocks_merge holds an approved promotion at Sign-off. Any
+    other line is treated as absent and the convention decides.
     """
-    body = (
-        gh_json("api", f"repos/{FORK}/issues/{issue}", "--jq", "{body: .body}")["body"]
-        or ""
+    iss = gh_json(
+        "api",
+        f"repos/{FORK}/issues/{issue}",
+        "--jq",
+        "{body: .body, login: .user.login, association: .author_association}",
     )
+    body, login = iss.get("body") or "", iss.get("login") or ""
+    if re.search(r"Companion PR:", body, re.I) and not trusted_author(
+        login, FORK, iss.get("association")
+    ):
+        actions.append(
+            f"#{issue}: `Companion PR:` line ignored — issue author {login} is "
+            "not a trusted author; using the branch-name convention"
+        )
+        body = ""
     # precedence: an explicit URL wins over the `none` opt-out, which wins
     # over the branch-name convention
     m = re.search(
-        r"Companion PR:\s*(https://github\.com/[^/\s]+/[^/\s]+/pull/\d+)",
+        rf"Companion PR:\s*https://github\.com/{re.escape(TS_MONO)}/pull/(\d+)",
         body,
         re.I,
     )
+    if not m and re.search(r"Companion PR:\s*https?://", body, re.I):
+        actions.append(
+            f"#{issue}: `Companion PR:` line ignored — not a {TS_MONO} PR URL; "
+            "using the branch-name convention"
+        )
     if not m and re.search(r"Companion PR:\s*none\b", body, re.I):
         return None  # explicit opt-out: no companion, convention disabled
     if m:
-        cm = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", m.group(1))
-        owner, repo, num = cm.group(1), cm.group(2), int(cm.group(3))
+        owner, repo = TS_MONO.split("/")
+        num = int(m.group(1))
         d = gql(
             """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
                  pullRequest(number:$n){number state merged reviewDecision
@@ -436,7 +502,7 @@ def companion_pr(issue: int, head_ref: str):
             r=repo,
             n=num,
         )["repository"]["pullRequest"]
-        d["_repo"] = f"{owner}/{repo}"
+        d["_repo"] = TS_MONO
         return d
     if not head_ref:
         return None
@@ -1042,7 +1108,14 @@ def retrigger_stale_handbacks() -> None:
     Detection is reconciler-shaped: on an open auto-labeled PR, if the
     last non-counter comment is a continue signal older than
     STALE_MINUTES (and no standing ⚠️ means a human was already told),
-    post a fresh re-review trigger as the machine account.
+    post a fresh re-review trigger as the machine account — but only when
+    that comment's author is trusted (trusted_author): the reviewer
+    refuses, and leaves un-acked, a trigger from anyone without write
+    access, so an outsider's rejected `@review` (or forged verdict text)
+    looks exactly like a dead hand-back. Re-issuing it as the machine
+    account would launder it past every downstream gate. An untrusted
+    author's comment on top therefore ends the search for that PR; it is
+    never skipped past to an older hand-back.
 
     Guards against racing a slow-but-healthy consumer: a re-review
     trigger bearing the reviewer's startup ack (eyes reaction) has a
@@ -1079,18 +1152,35 @@ def retrigger_stale_handbacks() -> None:
             comments = issue_comments(FORK, num)
         except (RuntimeError, ValueError):
             continue
-        last = None
-        for c in comments:
+        # Newest first: the first comment that is not a trusted counter
+        # decides for this PR (the loop posts the counters as the machine
+        # account; a counter-shaped comment from anyone else is a candidate
+        # like any other and fails the author check below).
+        last, login, trusted = None, "", False
+        for c in reversed(comments):
             body = c.get("body") or ""
-            if "auto-fix-attempts" in body or "auto-review-rounds" in body:
+            login = (c.get("user") or {}).get("login") or ""
+            trusted = trusted_author(login, FORK, c.get("author_association"))
+            if trusted and (
+                "auto-fix-attempts" in body or "auto-review-rounds" in body
+            ):
                 continue  # sticky counters, created mid-round — not signals
             last = c
+            break
         if last is None:
             continue
         body = last.get("body") or ""
         is_trigger = body.strip().startswith("@" + "review")
         is_continue = is_trigger or "claude-review-verdict:suggestions" in body
         if not is_continue or "⚠️" in body:
+            continue
+        if not trusted:
+            # Ends the search for this PR (docstring): the untrusted comment
+            # is not revived, and nothing older is looked at either.
+            actions.append(
+                f"PR #{num}: hand-back-shaped comment by {login} ignored — "
+                "not a trusted author, no revival"
+            )
             continue
         ts = datetime.fromisoformat(
             (last.get("created_at") or "").replace("Z", "+00:00")

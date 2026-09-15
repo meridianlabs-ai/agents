@@ -488,7 +488,13 @@ stage, resolved by the hourly sync:
   dev agent names companion branches identically, e.g.
   `claude/issue-251-20260818-2127` in both repos). An explicit
   `Companion PR: <url>` line in the anchor issue body overrides the
-  convention for human-named branches. Like `Upstream PR`, the recorded
+  convention for human-named branches — but only when the issue's author
+  is a trusted identity or has write access (the machine account, an
+  OWNER/MEMBER/COLLABORATOR association, or a write permission looked up
+  on the fork) and the URL is a ts-mono PR; any other line is treated as
+  absent, since an issue body stays editable by its author forever and
+  `/import` copies an upstream author's body verbatim (security finding
+  4121986, fixed 2026-09-15). Like `Upstream PR`, the recorded
   line is the durable form; chips are cosmetic.
 - **Merge gate**: `upstream approved -> Merge` additionally requires the
   companion (when one exists) to be merged or approved. An open
