@@ -63,6 +63,19 @@ on:
         required: false
         type: string
         default: "claude[bot]"
+      review_allowed_bots:
+        description: >-
+          The reviewer's `allowed_bots` for this repo (claude-review.yml; same
+          syntax — comma-separated bot logins, `[bot]` suffix optional, or
+          "*"). A bot the reviewer honours a `@review` from has a review
+          pending when it posts one, so the stale-verdict guard counts its
+          requests; set it to the same value as the reviewer stub's. Empty
+          (default): only the reviewer identities' and the machine account's
+          requests count (plus write-access accounts'). github-actions[bot]
+          is never honoured, whatever the list.
+        required: false
+        type: string
+        default: ""
       auto_label:
         required: false
         type: string
@@ -360,6 +373,7 @@ jobs:
           # A caller's reviewer_login override counts as a verdict author
           # alongside REVIEWER_LOGINS (the workflow-level env, inherited).
           REVIEWER: ${{ inputs.reviewer_login }}
+          ALLOWED_BOTS: ${{ inputs.review_allowed_bots }}
           HANDOFF_MENTION: ${{ inputs.handoff_mention }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           MARKER: "<!-- auto-review-rounds -->"
@@ -520,23 +534,42 @@ jobs:
           reviewers=$(logins "$REVIEWER_LOGINS,$REVIEWER")
           trusted=$(logins "$TRUSTED_LOGINS")
           in_logins() { jq -en --argjson l "$1" --arg x "$2" 'any($l[]; . == $x)' >/dev/null; }
-          # trusted_author <login>: a TRUSTED_LOGINS login, a reviewer
-          # identity (REVIEWER_LOGINS / reviewer_login — a caller that
-          # allow-lists the reviewer bot runs a review on ITS `@review` too,
-          # claude-review.yml's trig step, so that request is as pending as
-          # marvin's), or an account with write access — a collaborator's
-          # manual re-review request is as real as the loop's own. Any other
-          # `[bot]` login is refused without a lookup (the collaborators
-          # endpoint 404s for Apps, and github-actions[bot] is never
-          # trusted: any caller workflow posts as it). One permission lookup
-          # per login per run, cached in a string rather than an associative
-          # array so the step also runs under bash 3 (tests/); a failed
-          # lookup is untrusted — fail closed, like every gate lookup.
+          # bot_allowed <login>: named in review_allowed_bots — the
+          # reviewer's own allow-list, same normalisation as
+          # claude-code-action's isAllowedBot (case-insensitive, `[bot]`
+          # optional, "*" = every bot) — except github-actions[bot], which
+          # no list admits (any repository's workflow run posts as it).
+          bot_allowed() {
+            local bot bots
+            [ "$1" != "github-actions[bot]" ] || return 1
+            [ "$(printf '%s' "$ALLOWED_BOTS" | tr -d ' ')" = "*" ] && return 0
+            bot=$(printf '%s' "$1" | sed 's/\[bot\]$//' | tr '[:upper:]' '[:lower:]')
+            bots=$(printf '%s' "$ALLOWED_BOTS" | tr '[:upper:]' '[:lower:]' | sed 's/\[bot\]//g')
+            case ",$(printf '%s' "$bots" | tr -d ' ')," in *",$bot,"*) return 0 ;; esac
+            return 1
+          }
+          # trusted_author <login> <type>: a TRUSTED_LOGINS login; a
+          # reviewer identity (REVIEWER_LOGINS / reviewer_login) or a bot in
+          # review_allowed_bots — the reviewer runs a review on THEIR
+          # `@review` too (claude-review.yml's trig step), so such a request
+          # is as pending as marvin's; or an account with write access — a
+          # collaborator's manual re-review request is as real as the loop's
+          # own. Any other bot — by the payload's `user.type` (a GitHub App
+          # actor need not carry a `[bot]` suffix; e.g. Copilot) or the
+          # suffix — is refused without a lookup: the collaborators endpoint
+          # 404s for Apps. One permission lookup per login per run, cached
+          # in a string rather than an associative array so the step also
+          # runs under bash 3 (tests/); a failed lookup is untrusted — fail
+          # closed, like every gate lookup.
           perm_cache=""
           trusted_author() {
             in_logins "$trusted" "$1" && return 0
             in_logins "$reviewers" "$1" && return 0
-            case "$1" in ""|*"[bot]") return 1 ;; esac
+            [ -n "$1" ] || return 1
+            if [ "${2:-}" = "Bot" ] || [[ "$1" == *"[bot]" ]]; then
+              bot_allowed "$1" && return 0
+              return 1
+            fi
             case " $perm_cache " in
               *" $1=yes "*) return 0 ;;
               *" $1=no "*) return 1 ;;
@@ -589,9 +622,9 @@ jobs:
             # The latest re-review request by a trusted author: newest first,
             # stop at the first that passes (the lookups are per login).
             rereview_at=""
-            while IFS=$'\t' read -r login created; do
-              if trusted_author "$login"; then rereview_at="$created"; break; fi
-            done < <(jq -r '[.[] | select((.body|test("(^|\\s)@review(\\s|[,.!?;:]|$)")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not))] | sort_by(.created_at) | reverse | .[] | [(.user.login // ""), .created_at] | @tsv' <<<"$comments")
+            while IFS=$'\t' read -r login type created; do
+              if trusted_author "$login" "$type"; then rereview_at="$created"; break; fi
+            done < <(jq -r '[.[] | select((.body|test("(^|\\s)@review(\\s|[,.!?;:]|$)")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not))] | sort_by(.created_at) | reverse | .[] | [(.user.login // ""), (.user.type // ""), .created_at] | @tsv' <<<"$comments")
             # ISO-8601 UTC timestamps compare correctly as strings; an empty
             # rereview_at (no request yet) never compares greater.
             if [[ "$verdict_at" < "$rereview_at" ]]; then

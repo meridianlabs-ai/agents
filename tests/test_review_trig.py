@@ -44,7 +44,11 @@ gh() {
 
 
 def run_trig(tmp_path, *, actor, perms=None, allowed_bots="", head_repo="o/r",
-             is_pr=True, external=False, ibody=""):
+             is_pr=True, external=False, ibody="", actor_type=None):
+    # The payload's account type: "Bot" for a GitHub App (with or without a
+    # `[bot]` suffix), "User" otherwise.
+    if actor_type is None:
+        actor_type = "Bot" if actor.endswith("[bot]") else "User"
     state = fresh_state(tmp_path)
     (state / "perms").write_text("".join(f"{k} {v}\n" for k, v in (perms or {}).items()))
     (state / "pr.json").write_text(json.dumps({
@@ -57,6 +61,7 @@ def run_trig(tmp_path, *, actor, perms=None, allowed_bots="", head_repo="o/r",
         "ACTOR": actor, "GH_REPO": "o/r", "COMMENT": "@review", "IS_PR": "true" if is_pr else "false",
         "PR_NUM": "7", "EXTERNAL": "true" if external else "false", "IBODY": ibody,
         "HEAD_REPO": "", "HEAD_REF": "", "TRUSTED_LOGINS": "i-am-marvin", "ALLOWED_BOTS": allowed_bots,
+        "ACTOR_TYPE": actor_type,
     }
     r = sh("bash", "-c", GH_STUB + lift_step(WORKFLOW, "        id: trig"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -118,6 +123,25 @@ def test_github_actions_bot_is_never_admitted(tmp_path, allowed):
     assert lookups(state) == []
 
 
+@pytest.mark.parametrize("allowed", ["Copilot", "copilot", "*"])
+def test_a_suffixless_app_actor_is_admitted_by_the_allow_list_not_a_lookup(tmp_path, allowed):
+    # Copilot posts as `Copilot`, type Bot, no `[bot]` suffix: the allow-list
+    # decides, as claude-code-action's actor check does; no collaborator
+    # lookup (which would 404 and refuse).
+    _, o, state = run_trig(tmp_path, actor="Copilot", actor_type="Bot", allowed_bots=allowed)
+    assert o["ok"] == "true" and o["ack"] == "false", allowed
+    assert lookups(state) == []
+    _, o, state = run_trig(tmp_path, actor="Copilot", actor_type="Bot")
+    assert o["ok"] == "false" and lookups(state) == []
+
+
+def test_a_user_whose_login_ends_in_bot_is_still_a_user(tmp_path):
+    # Only the payload type or the literal `[bot]` suffix makes a bot; a
+    # human login like `robot` is looked up like any other.
+    _, o, state = run_trig(tmp_path, actor="robot", perms={"robot": "write"})
+    assert o["ok"] == "true" and lookups(state) == ["robot"]
+
+
 def test_an_admitted_bots_review_request_is_pending_for_the_review_fix_gate(tmp_path):
     # Both steps on one fixture: the reviewer admits the allow-listed bot's
     # `@review` on a same-repo head, so a review-fix gate queued behind it
@@ -127,6 +151,14 @@ def test_an_admitted_bots_review_request_is_pending_for_the_review_fix_gate(tmp_
     assert o["ok"] == "true"
     _, g, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
                                       comment(2, "claude[bot]", "@review", T2)])
+    assert g["act"] == "skip" and lookups(state) == []
+    # A caller's custom allow-list, outside the reviewer identities: the same
+    # list on the review-fix side (review_allowed_bots) keeps the two in step.
+    _, o, _ = run_trig(tmp_path, actor="ci-helper[bot]", allowed_bots="ci-helper[bot]")
+    assert o["ok"] == "true"
+    _, g, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                      comment(2, "ci-helper[bot]", "@review", T2)],
+                           env_extra={"ALLOWED_BOTS": "ci-helper[bot]"})
     assert g["act"] == "skip" and lookups(state) == []
 
 

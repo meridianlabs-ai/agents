@@ -54,8 +54,12 @@ def lift_step(workflow: Path, anchor: str) -> str:
     return "\n".join(body) + "\n"
 
 
-def comment(cid, login, body, at):
-    return {"id": cid, "user": {"login": login}, "body": body, "created_at": at}
+def comment(cid, login, body, at, type_=None):
+    # A GitHub App's user object is type "Bot" whether or not the login
+    # carries a `[bot]` suffix (Copilot's does not).
+    if type_ is None:
+        type_ = "Bot" if login.endswith("[bot]") else "User"
+    return {"id": cid, "user": {"login": login, "type": type_}, "body": body, "created_at": at}
 
 
 def verdict(login, word, at, cid=1):
@@ -124,6 +128,7 @@ def run_gate(tmp_path, comments, perms=None, *, env_extra=None):
         "CAP": "10", "REVIEWER": "claude[bot]", "HANDOFF_MENTION": "someone",
         "ANCHOR_REPO": "", "MARKER": MARKER,
         "TRUSTED_LOGINS": "i-am-marvin", "REVIEWER_LOGINS": "i-am-marvin,claude[bot]",
+        "ALLOWED_BOTS": "",
     }
     env.update(env_extra or {})
     r = sh("bash", "-c", GH_STUB + lift_step(WORKFLOW, "        id: gate"), check=False, env=env)
@@ -270,11 +275,38 @@ def test_reviewer_identitys_rereview_request_is_pending_without_a_lookup(tmp_pat
     assert lookups(state) == []
 
 
-def test_other_bots_rereview_request_is_untrusted_without_a_lookup(tmp_path):
+@pytest.mark.parametrize("allowed", ["ci-helper[bot]", "ci-helper", "CI-Helper[bot]", "*", "other, ci-helper"])
+def test_a_bot_in_review_allowed_bots_has_a_pending_request(tmp_path, allowed):
+    # A caller's reviewer honours `@review` from the bots in its allowed_bots;
+    # the same list here makes their requests pending, with no lookup.
     _, o, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
-                                      comment(2, "github-actions[bot]", "@review", T2)])
-    assert o["act"] == "fix"
+                                      comment(2, "ci-helper[bot]", "@review", T2)],
+                           env_extra={"ALLOWED_BOTS": allowed})
+    assert o["act"] == "skip", allowed
     assert lookups(state) == []
+
+
+def test_a_suffixless_app_actor_is_a_bot_by_payload_type(tmp_path):
+    # Copilot: type Bot, no `[bot]` suffix — allow-listed it is pending,
+    # otherwise refused without a permission lookup (the endpoint 404s for
+    # Apps); never mistaken for a user.
+    comments = [verdict("i-am-marvin", "suggestions", T1, cid=1), comment(2, "Copilot", "@review", T2, type_="Bot")]
+    _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": "Copilot"})
+    assert o["act"] == "skip" and lookups(state) == []
+    _, o, state = run_gate(tmp_path, comments)
+    assert o["act"] == "fix" and lookups(state) == []
+
+
+def test_other_bots_rereview_request_is_untrusted_without_a_lookup(tmp_path):
+    for allowed in ("", "*", "github-actions[bot]"):
+        _, o, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                          comment(2, "github-actions[bot]", "@review", T2)],
+                               env_extra={"ALLOWED_BOTS": allowed})
+        assert o["act"] == "fix", allowed
+        assert lookups(state) == []
+    _, o, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                      comment(2, "ci-helper[bot]", "@review", T2)])
+    assert o["act"] == "fix" and lookups(state) == [], "not allow-listed: refused, never looked up"
 
 
 # --- the converged hand-off's double-post check ------------------------------
