@@ -80,21 +80,29 @@ jobs:
     # expected is dropped here silently — trig would have AUTHORIZED them,
     # so this filter is what they hit, and there is no fallback path: a
     # collaborator re-triggers. The loops' hand-back passes: their land jobs
-    # post `@review` as the machine account, a User with write access.
-    # Phase 2 (a GitHub App identity) must add the app's login as an explicit
-    # exception here — an App's association is not a write grant.
+    # post `@review` as the machine account, a User with write access. A
+    # Bot commenter (the payload's user.type — a GitHub App, `[bot]` suffix
+    # or not) passes too: its association is NONE whatever it may do, and
+    # the reusable's `allowed_bots` input is what decides a bot's request
+    # (its trig step refuses every bot not named there), so the filter must
+    # not drop an allow-listed bot first. Bounded cost: only Apps installed
+    # on the repo can comment as a Bot, and github-actions[bot] triggers no
+    # workflow. Phase 2's App identity passes the same way and is admitted
+    # by the reusable's TRUSTED_LOGINS.
     if: >
       (github.event_name == 'pull_request' &&
        github.event.pull_request.draft != true &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event.issue.pull_request != null &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) ||
+        github.event.comment.user.type == 'Bot') &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->')) ||
       (github.event.issue.pull_request == null &&
        contains(github.event.issue.labels.*.name, 'External') &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) ||
+        github.event.comment.user.type == 'Bot') &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->'))

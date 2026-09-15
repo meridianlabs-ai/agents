@@ -184,11 +184,14 @@ finding 4121989) that is enforced in three layers rather than assumed:
   to `REVIEWER_LOGINS`, the counter and the hand-off marker to
   `TRUSTED_LOGINS` (the loop's own comments — a forged marker is ignored
   and never PATCHed, by the gate or the land job's refund), a re-review
-  request to a trusted login, a reviewer identity or a bot in the caller's
-  `review_allowed_bots` (the reviewer's `allowed_bots`: it runs a review on
-  their `@review`) or a write-access account (one cached permission lookup
-  per login, fail-closed; bots are told from users by the payload's
-  `user.type`, not only a `[bot]` suffix). `rounds:` must parse as one
+  request to whoever the reviewer would run for — a trusted login, a bot in
+  the caller's `review_allowed_bots` (the reviewer's `allowed_bots`) or a
+  write-access account (one cached permission lookup per login,
+  fail-closed; bots are told from users by the payload's `user.type`, not
+  only a `[bot]` suffix); a reviewer identity is a verdict author, not a
+  requester, so its request is pending only where the caller allow-lists
+  it. The review stubs' association filter lets a Bot commenter through for
+  the same reason: the reusable's allow-list decides bots. `rounds:` must parse as one
   whole decimal token of at most nine digits and `auto-review-head:` as one
   whole 40-hex SHA, each present exactly once and delimited by whitespace as
   the record step writes them, else the counter counts as

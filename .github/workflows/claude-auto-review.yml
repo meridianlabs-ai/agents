@@ -70,9 +70,10 @@ on:
           "*"). A bot the reviewer honours a `@review` from has a review
           pending when it posts one, so the stale-verdict guard counts its
           requests; set it to the same value as the reviewer stub's. Empty
-          (default): only the reviewer identities' and the machine account's
-          requests count (plus write-access accounts'). github-actions[bot]
-          is never honoured, whatever the list.
+          (default): only the machine account's and write-access accounts'
+          requests count — a reviewer identity's `@review` included, since
+          the reviewer would not run on it either. github-actions[bot] is
+          never honoured, whatever the list.
         required: false
         type: string
         default: ""
@@ -548,23 +549,25 @@ jobs:
             case ",$(printf '%s' "$bots" | tr -d ' ')," in *",$bot,"*) return 0 ;; esac
             return 1
           }
-          # trusted_author <login> <type>: a TRUSTED_LOGINS login; a
-          # reviewer identity (REVIEWER_LOGINS / reviewer_login) or a bot in
-          # review_allowed_bots — the reviewer runs a review on THEIR
-          # `@review` too (claude-review.yml's trig step), so such a request
-          # is as pending as marvin's; or an account with write access — a
-          # collaborator's manual re-review request is as real as the loop's
-          # own. Any other bot — by the payload's `user.type` (a GitHub App
-          # actor need not carry a `[bot]` suffix; e.g. Copilot) or the
-          # suffix — is refused without a lookup: the collaborators endpoint
-          # 404s for Apps. One permission lookup per login per run, cached
-          # in a string rather than an associative array so the step also
-          # runs under bash 3 (tests/); a failed lookup is untrusted — fail
-          # closed, like every gate lookup.
+          # trusted_author <login> <type>: who the REVIEWER would run a
+          # review for (claude-review.yml's trig step), so that a request the
+          # reviewer will honour is pending and one it will refuse is not —
+          # a TRUSTED_LOGINS login; a bot in review_allowed_bots; or an
+          # account with write access (a collaborator's manual re-review
+          # request is as real as the loop's own). A reviewer identity
+          # (REVIEWER_LOGINS) is a verdict AUTHOR, not a requester: its
+          # `@review` counts only where the caller allow-lists the bot, as
+          # the reviewer's does — otherwise the gate would wait for a review
+          # that never runs. Any other bot — by the payload's `user.type` (a
+          # GitHub App actor need not carry a `[bot]` suffix; e.g. Copilot)
+          # or the suffix — is refused without a lookup: the collaborators
+          # endpoint 404s for Apps. One permission lookup per login per run,
+          # cached in a string rather than an associative array so the step
+          # also runs under bash 3 (tests/); a failed lookup is untrusted —
+          # fail closed, like every gate lookup.
           perm_cache=""
           trusted_author() {
             in_logins "$trusted" "$1" && return 0
-            in_logins "$reviewers" "$1" && return 0
             [ -n "$1" ] || return 1
             if [ "${2:-}" = "Bot" ] || [[ "$1" == *"[bot]" ]]; then
               bot_allowed "$1" && return 0

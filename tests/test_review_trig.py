@@ -142,24 +142,37 @@ def test_a_user_whose_login_ends_in_bot_is_still_a_user(tmp_path):
     assert o["ok"] == "true" and lookups(state) == ["robot"]
 
 
-def test_an_admitted_bots_review_request_is_pending_for_the_review_fix_gate(tmp_path):
-    # Both steps on one fixture: the reviewer admits the allow-listed bot's
-    # `@review` on a same-repo head, so a review-fix gate queued behind it
-    # must see a pending review and skip the verdict that request supersedes
-    # (on an unchanged tip it would otherwise escalate for no progress).
-    _, o, _ = run_trig(tmp_path, actor="claude[bot]", allowed_bots="claude[bot]")
+@pytest.mark.parametrize("bot", ["claude[bot]", "ci-helper[bot]"])
+def test_the_gate_treats_a_bots_request_as_pending_exactly_when_the_reviewer_admits_it(tmp_path, bot):
+    # Both steps on one fixture, both ways. Allow-listed on both sides (the
+    # reviewer stub's allowed_bots and the loop's review_allowed_bots): the
+    # reviewer admits the bot's `@review` on a same-repo head, so a review-fix
+    # gate queued behind it sees a pending review and skips the verdict that
+    # request supersedes (on an unchanged tip it would otherwise escalate for
+    # no progress). Neither list (the defaults): the reviewer refuses the
+    # request, so the gate must NOT wait for a review that never runs — this
+    # holds for the reviewer's own identity too.
+    comments = [verdict("i-am-marvin", "suggestions", T1, cid=1), comment(2, bot, "@review", T2)]
+    _, o, _ = run_trig(tmp_path, actor=bot, allowed_bots=bot)
     assert o["ok"] == "true"
-    _, g, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
-                                      comment(2, "claude[bot]", "@review", T2)])
+    _, g, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": bot})
     assert g["act"] == "skip" and lookups(state) == []
-    # A caller's custom allow-list, outside the reviewer identities: the same
-    # list on the review-fix side (review_allowed_bots) keeps the two in step.
-    _, o, _ = run_trig(tmp_path, actor="ci-helper[bot]", allowed_bots="ci-helper[bot]")
-    assert o["ok"] == "true"
-    _, g, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
-                                      comment(2, "ci-helper[bot]", "@review", T2)],
-                           env_extra={"ALLOWED_BOTS": "ci-helper[bot]"})
-    assert g["act"] == "skip" and lookups(state) == []
+    _, o, state = run_trig(tmp_path, actor=bot)
+    assert o["ok"] == "false" and lookups(state) == []
+    _, g, state = run_gate(tmp_path, comments)
+    assert g["act"] == "fix" and lookups(state) == []
+
+
+def test_review_stubs_route_bot_commenters_to_the_reusables_allow_list():
+    # The stubs' association cost filter must not drop an allow-listed bot's
+    # `@review` (a bot's association is NONE): a Bot commenter passes, and
+    # the reusable's allowed_bots decides. Both comment branches, both stubs.
+    clause = "github.event.comment.user.type == 'Bot'"
+    assoc = "contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.comment.author_association)"
+    for stub in (ROOT / ".github" / "workflows" / "claude-review-stub.yml",
+                 ROOT / "examples" / "claude-review-stub.yml"):
+        text = stub.read_text()
+        assert text.count(clause) == 2 and text.count(assoc) == 2, stub
 
 
 def test_allow_listed_bot_never_opens_the_fork_escape_hatch(tmp_path):

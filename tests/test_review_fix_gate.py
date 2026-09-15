@@ -265,14 +265,16 @@ def test_failed_permission_lookup_is_untrusted(tmp_path):
     assert lookups(state) and set(lookups(state)) == {"ghost"}
 
 
-def test_reviewer_identitys_rereview_request_is_pending_without_a_lookup(tmp_path):
-    # A caller that allow-lists the reviewer bot runs a review on its
-    # `@review` (claude-review.yml's trig), so a queued gate must treat that
-    # request as pending rather than act on the verdict it supersedes.
-    _, o, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
-                                      comment(2, "claude[bot]", "@review", T2)])
-    assert o["act"] == "skip"
-    assert lookups(state) == []
+def test_reviewer_identitys_request_is_pending_only_where_the_caller_allow_lists_it(tmp_path):
+    # claude[bot] is a verdict author, not a requester: its `@review` runs a
+    # review only on a caller whose reviewer allow-lists it (allowed_bots),
+    # so only the matching review_allowed_bots makes the request pending —
+    # otherwise the gate would wait for a review that never runs.
+    comments = [verdict("i-am-marvin", "suggestions", T1, cid=1), comment(2, "claude[bot]", "@review", T2)]
+    _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": "claude[bot]"})
+    assert o["act"] == "skip" and lookups(state) == []
+    _, o, state = run_gate(tmp_path, comments)
+    assert o["act"] == "fix" and lookups(state) == []
 
 
 @pytest.mark.parametrize("allowed", ["ci-helper[bot]", "ci-helper", "CI-Helper[bot]", "*", "other, ci-helper"])
