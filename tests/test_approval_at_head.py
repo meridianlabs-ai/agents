@@ -547,7 +547,7 @@ def contributor_pushes_a_hook(q):
 
 
 def run_external_block(q, branch="feature"):
-    block = skill_block("## External PRs").replace("<n>", "42")
+    block = skill_block("- **Checkout/push**").replace("<n>", "42")
     env = {"BRANCH": branch, "APPROVED": q["approved"], "FORK_URL": str(q["fork"])}
     return sh("bash", "-e", "-c", block, cwd=q["work"], env=env, check=False)
 
@@ -600,3 +600,39 @@ def test_skill_pins_every_upstream_merge_request_and_re_approval_to_the_pushed_c
         assert 'commit_id="$(git rev-parse HEAD)"' in line, line
     # Both checkout paths verify the head against the approved SHA.
     assert sum('= "$APPROVED"' in line for line in lines) >= 2
+    # The companion merge is pinned to the head companion_mergeable.py verified (or the one we pushed).
+    companions = [line for line in lines if "gh pr merge" in line and "meridianlabs-ai/ts-mono" in line]
+    assert companions, "SKILL.md no longer shows the companion merge command"
+    for line in companions:
+        assert '--match-head-commit "$COMPANION_HEAD"' in line, line
+
+
+def test_skill_external_path_defers_to_ci_before_the_checkout():
+    text = SKILL.read_text()
+    external = text[text.index("## External PRs") :]
+    checks = external.index("checks_at_head.py")
+    checkout = external.index("- **Checkout/push**")
+    assert checks < checkout, "the CI check must come before the External checkout block"
+    assert '--sha "$APPROVED"' in external[checks : external.index("\n", checks)]
+
+
+def test_skill_companion_head_line_parses_both_helper_outputs():
+    line = next(
+        line.strip() for line in SKILL.read_text().splitlines() if line.strip().startswith("COMPANION_HEAD=$(printf")
+    )
+    sha = "c" * 40
+    for out in (
+        f"approved {sha} by epatey at 2026-09-10T12:00:00Z",
+        f"regenerate-only {sha}: packages/x/generated.ts by i-am-marvin",
+    ):
+        r = sh("bash", "-e", "-c", f'{line}\nprintf "%s" "$COMPANION_HEAD"', cwd=ROOT, env={"OUT": out})
+        assert r.stdout == sha, (out, r.stdout, r.stderr)
+    r = sh(
+        "bash",
+        "-e",
+        "-c",
+        f'{line}\nprintf "%s" "$COMPANION_HEAD"',
+        cwd=ROOT,
+        env={"OUT": f"no approval for head {sha}; not regenerate-only: empty diff"},
+    )
+    assert r.stdout == ""
