@@ -4,7 +4,10 @@ approval-to-head binding (Claude Security finding 4122327).
 The decision function runs on canned API payloads; the command line runs end
 to end against a stub `gh` on PATH that serves those payloads and logs every
 call, so the request shape (GETs only, `--paginate` on the lists) is pinned
-as well as the verdicts. Run with `python3 -m pytest` from the repo root.
+as well as the verdicts. The skill's approval-bound checkout block is lifted
+from SKILL.md and run against local repos, and the merge / re-approval
+commands are checked for the head pin. Run with `python3 -m pytest` from the
+repo root.
 """
 
 import importlib.util
@@ -18,6 +21,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "merge-approved-prs" / "approval_at_head.py"
+SKILL = ROOT / "skills" / "merge-approved-prs" / "SKILL.md"
 
 spec = importlib.util.spec_from_file_location("approval_at_head", SCRIPT)
 aah = importlib.util.module_from_spec(spec)
@@ -270,6 +274,9 @@ if path not in fixtures:
     sys.stderr.write("gh: Not Found (HTTP 404)\n")
     sys.exit(1)
 body = fixtures[path]
+if isinstance(body, dict) and "__sequence__" in body:
+    seen = sum(1 for line in open(os.environ["FAKE_GH_LOG"]) if json.loads(line)[1:2] == [path])
+    body = body["__sequence__"][min(seen - 1, len(body["__sequence__"]) - 1)]
 if isinstance(body, list) and "--paginate" in args and len(body) > 1:
     # The older gh shape: one array per page, back to back.
     sys.stdout.write(json.dumps(body[:1]) + json.dumps(body[1:]))
@@ -319,6 +326,7 @@ def test_cli_passes_with_reads_only(tmp_path):
         PR_PATH,
         f"{PR_PATH}/reviews",
         f"{PR_PATH}/commits",
+        PR_PATH,  # re-read: the head must not have moved while the lists were fetched
         f"repos/{REPO}/collaborators/dragonstyle/permission",
     ]
     for c in calls:
@@ -358,3 +366,148 @@ def test_cli_usage_error_is_exit_2_without_a_request(tmp_path):
     assert r.returncode == 2
     assert calls == []
     assert "usage" in r.stderr
+
+
+def test_cli_head_moved_during_the_check_is_exit_1_without_a_lookup(tmp_path):
+    # Approved at SHA1 when the check started; the contributor pushed SHA2
+    # while the reviews/commits were being read. The stale "approved SHA1"
+    # must not be printed.
+    perms = {"dragonstyle": {"permission": "write", "role_name": "maintain"}}
+    fx = fixtures_for(SHA1, [review("dragonstyle", "APPROVED", SHA1, T_REVIEW)], [commit(SHA1, T_COMMIT)], perms)
+    fx[PR_PATH] = {"__sequence__": [pr(SHA1), pr(SHA2)]}
+    r, calls = run_cli(tmp_path, [REPO, "42"], fx)
+    assert r.returncode == 1
+    assert r.stdout == f"head moved during the check: was {SHA1}, now {SHA2}\n"
+    assert [c[1] for c in calls] == [PR_PATH, f"{PR_PATH}/reviews", f"{PR_PATH}/commits", PR_PATH]
+
+
+# --- the skill's checkout block, against local repos -------------------------
+
+GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "queue",
+    "GIT_AUTHOR_EMAIL": "queue@example.com",
+    "GIT_COMMITTER_NAME": "queue",
+    "GIT_COMMITTER_EMAIL": "queue@example.com",
+}
+
+
+def sh(*cmd, cwd, env=None, check=True):
+    return subprocess.run(
+        cmd, cwd=cwd, text=True, capture_output=True, env={**os.environ, **GIT_ENV, **(env or {})}, check=check
+    )
+
+
+def git(*args, cwd, check=True):
+    return sh("git", *args, cwd=cwd, check=check)
+
+
+def commit_file(repo, name, text, message):
+    (repo / name).write_text(text)
+    git("add", name, cwd=repo)
+    git("commit", "-q", "-m", message, cwd=repo)
+    return git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+
+def skill_block(after_heading):
+    """The first ```bash block after `after_heading` in SKILL.md."""
+    text = SKILL.read_text()
+    start = text.index(after_heading)
+    opened = text.index("```bash\n", start) + len("```bash\n")
+    return text[opened : text.index("```", opened)]
+
+
+@pytest.fixture
+def queue_repos(tmp_path):
+    """`origin` (upstream main), `meridian` (the fork, PR branch at A), and the queue
+    worktree, detached at origin/main."""
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git("init", "-q", "-b", "main", cwd=seed)
+    commit_file(seed, "README", "base\n", "base")
+    origin, meridian = tmp_path / "origin.git", tmp_path / "meridian.git"
+    for bare in (origin, meridian):
+        git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    git("remote", "add", "origin", str(origin), cwd=seed)
+    git("remote", "add", "meridian", str(meridian), cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+    git("checkout", "-q", "-b", "feature", cwd=seed)
+    approved = commit_file(seed, "feature.txt", "A\n", "A: the reviewed commit")
+    git("push", "-q", "meridian", "feature", cwd=seed)
+    git("checkout", "-q", "main", cwd=seed)
+    commit_file(seed, "main.txt", "main moved on\n", "main moves")
+    git("push", "-q", "origin", "main", cwd=seed)
+    work = tmp_path / "work"
+    sh("git", "clone", "-q", str(origin), str(work), cwd=tmp_path)
+    git("remote", "add", "meridian", str(meridian), cwd=work)
+    git("checkout", "-q", "--detach", "origin/main", cwd=work)
+    return {"seed": seed, "work": work, "approved": approved}
+
+
+def push_after_approval(seed, text):
+    """The contributor pushes another commit on the PR branch; returns its SHA."""
+    git("checkout", "-q", "feature", cwd=seed)
+    sha = commit_file(seed, "feature.txt", text, "B: pushed after the approval")
+    git("push", "-q", "meridian", "feature", cwd=seed)
+    return sha
+
+
+def run_checkout_block(work, approved, branch="feature"):
+    return sh(
+        "bash",
+        "-e",
+        "-c",
+        skill_block("## 2. Per PR, in order"),
+        cwd=work,
+        env={"BRANCH": branch, "APPROVED": approved},
+        check=False,
+    )
+
+
+def test_skill_checkout_block_checks_out_the_approved_commit_and_merges_main(queue_repos):
+    q = queue_repos
+    r = run_checkout_block(q["work"], q["approved"])
+    assert r.returncode == 0, r.stderr
+    assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=q["work"]).stdout.strip() == "feature"
+    head = git("rev-parse", "HEAD", cwd=q["work"]).stdout.strip()
+    assert (
+        git("rev-parse", "HEAD^1", cwd=q["work"]).stdout.strip() == q["approved"]
+    )  # the merge sits on the approved commit
+    assert git("merge-base", "--is-ancestor", "origin/main", head, cwd=q["work"]).returncode == 0
+
+
+def test_skill_checkout_block_refuses_a_head_that_moved_after_the_check(queue_repos):
+    q = queue_repos
+    moved = push_after_approval(q["seed"], "B\n")
+    before = git("rev-parse", "HEAD", cwd=q["work"]).stdout.strip()
+    r = run_checkout_block(q["work"], q["approved"])
+    assert r.returncode != 0
+    # Stopped at the verification: nothing checked out, no branch created, no merge.
+    assert git("rev-parse", "HEAD", cwd=q["work"]).stdout.strip() == before
+    assert git("branch", "--list", "feature", cwd=q["work"]).stdout.strip() == ""
+    assert not (q["work"] / "feature.txt").exists()
+    assert git("rev-parse", "meridian/feature", cwd=q["work"]).stdout.strip() == moved  # fetched, seen, refused
+
+
+def test_skill_checkout_block_accepts_a_tip_forced_back_to_the_approved_sha(queue_repos):
+    q = queue_repos
+    push_after_approval(q["seed"], "B\n")
+    git("push", "-q", "-f", "meridian", f"{q['approved']}:refs/heads/feature", cwd=q["seed"])
+    r = run_checkout_block(q["work"], q["approved"])
+    assert r.returncode == 0, r.stderr
+    assert git("rev-parse", "HEAD^1", cwd=q["work"]).stdout.strip() == q["approved"]
+
+
+def test_skill_pins_every_upstream_merge_request_and_re_approval_to_the_pushed_commit():
+    lines = SKILL.read_text().splitlines()
+    merges = [line for line in lines if "gh pr merge" in line and "UKGovernmentBEIS/inspect_ai" in line]
+    assert merges, "SKILL.md no longer shows the upstream merge command"
+    for line in merges:
+        assert '--match-head-commit "$(git rev-parse HEAD)"' in line, line
+    approvals = [line for line in lines if "event=APPROVE" in line]
+    assert approvals, "SKILL.md no longer shows the re-approval"
+    for line in approvals:
+        assert 'commit_id="$(git rev-parse HEAD)"' in line, line
+    # Both checkout paths verify the head against the approved SHA.
+    assert sum('= "$APPROVED"' in line for line in lines) >= 2

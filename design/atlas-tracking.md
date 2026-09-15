@@ -306,11 +306,14 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   APPROVED review naming the current head, with no later changes-requested
   or dismissal from them — because `reviewDecision` is PR-level and survives
   a contributor's push unless upstream dismisses stale approvals, which the
-  queue does not assume. A head pushed after its approval is skipped and
-  reported, never re-approved. APPROVED is sticky, so a queued card that
-  gets moved re-queues hourly — dismissing the approval or requesting
-  changes upstream is the way to pull one back, and a proxy in Merge
-  without a standing approval drops to **Review** (the ball is the
+  queue does not assume. The checkout is of that literal commit, the
+  auto-merge request carries `--match-head-commit` for the commit the queue
+  pushed, and a re-approval names it — so a head pushed after the check is
+  refused at every later step, and a head pushed after its approval is
+  skipped and reported, never re-approved. APPROVED is sticky, so a queued
+  card that gets moved re-queues hourly — dismissing the approval or
+  requesting changes upstream is the way to pull one back, and a proxy in
+  Merge without a standing approval drops to **Review** (the ball is the
   maintainer's to re-decide, not the contributor's).
 - The proxy issue is assigned to the reviewer, links the upstream PR by URL (no
   `@`-mention of the contributor), and is added to Atlas + staged like any item.

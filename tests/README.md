@@ -36,7 +36,12 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   approver without write access; comments never override a verdict; the
   SHA, not commit dates, is the binding) and the command line end to end
   against a stub `gh` on PATH (GETs only, `--paginate` on the lists, the
-  exit codes).
+  exit codes, a head that moves during the check). Also lifts the skill's
+  approval-bound checkout block from `SKILL.md` and runs it against local
+  repos (the approved commit is checked out and merged; a tip moved after
+  the check stops it before anything is checked out), and checks that every
+  upstream merge request and re-approval in the skill names the pushed
+  commit.
 
 Run from the repo root:
 

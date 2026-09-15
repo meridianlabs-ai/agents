@@ -12,9 +12,11 @@ trusted reviewer approved?
     approval_at_head.py https://github.com/OWNER/REPO/pull/N
     approval_at_head.py OWNER/REPO N
 
-Read-only: three `gh api` GETs on the PR (the PR itself for its head SHA,
-its reviews, its commits) plus one collaborator-permission lookup per
-approver considered, cached per login. Exit 0 and one stdout line
+Read-only: four `gh api` GETs on the PR (the PR itself for its head SHA,
+its reviews, its commits, then the PR again so a head that moved while the
+lists were being read fails the check instead of being reported as
+approved) plus one collaborator-permission lookup per approver considered,
+cached per login. Exit 0 and one stdout line
 
     approved <sha> by <login> at <time>
 
@@ -23,6 +25,7 @@ does not:
 
     approval is for <sha>, head is <sha2>; N commits pushed after <time>
     no approval for head <sha>[: <detail>]
+    head moved during the check: was <sha>, now <sha2>
 
 and exit 2 with the error on stderr when `gh` fails or the input is
 malformed. Everything fails closed: what cannot be verified is a skip.
@@ -282,8 +285,15 @@ def main(argv: list[str]) -> int:
         pr = gh_api(f"repos/{repo}/pulls/{number}")
         reviews = gh_api(f"repos/{repo}/pulls/{number}/reviews", paginate=True)
         commits = gh_api(f"repos/{repo}/pulls/{number}/commits", paginate=True)
-        if not isinstance(pr, dict) or not isinstance(reviews, list) or not isinstance(commits, list):
+        # Read the head again: the lists above took time, and a head that moved
+        # meanwhile must fail the check rather than be reported as approved.
+        again = gh_api(f"repos/{repo}/pulls/{number}")
+        shapes = (isinstance(pr, dict), isinstance(again, dict), isinstance(reviews, list), isinstance(commits, list))
+        if not all(shapes):
             raise GhError("unexpected response shape from gh api")
+        if again["head"]["sha"] != pr["head"]["sha"]:
+            print(f"head moved during the check: was {pr['head']['sha']}, now {again['head']['sha']}")
+            return 1
         verdict = check(pr, reviews, commits, make_trust_check(repo), repo)
     except (GhError, KeyError, TypeError, ValueError) as exc:
         print(f"approval_at_head: {exc}", file=sys.stderr)
