@@ -376,11 +376,12 @@ gh() {
 """
 
 
-def run_reset(state: Path, trusted_logins: str):
+def run_reset(state: Path, *, comment_id="", trusted_logins="", counters="rounds"):
     out = state.parent / "reset-out"
     out.write_text("")
     env = {"STATE": str(state), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR": "42",
-           "COUNTERS": "rounds", "REASON": "on escalation", "TRUSTED_LOGINS": trusted_logins}
+           "COUNTERS": counters, "REASON": "on escalation", "COMMENT_ID": comment_id,
+           "TRUSTED_LOGINS": trusted_logins}
     r = sh("bash", "-c", RESET_STUB + lift_step(RESET, "    - id: reset"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     patched = (state / "patched").read_text().split() if (state / "patched").exists() else []
@@ -393,7 +394,9 @@ def test_escalation_reset_targets_the_counter_the_gate_selected(tmp_path):
               counter("nobody", 999, T2, cid=200, head=HEAD)]
     _, o, state = run_gate(tmp_path, at_cap)
     assert o["act"] == "escalate" and o["cid"] == "100"
-    reset, patched = run_reset(state, "i-am-marvin")
+    # As the workflow calls it: the gate's cid as comment-id, TRUSTED_LOGINS
+    # as the fallback lookup's filter.
+    reset, patched = run_reset(state, comment_id=o["cid"], trusted_logins="i-am-marvin")
     assert reset["ok"] == "1"
     assert patched == ["100"], "the loop's counter, never the outsider's marker"
     # The fresh budget is real: the next verdict runs round 1, on the reset comment.
@@ -402,10 +405,35 @@ def test_escalation_reset_targets_the_counter_the_gate_selected(tmp_path):
     assert o["act"] == "fix" and o["round"] == "1" and o["cid"] == "100"
 
 
-def test_reset_without_trusted_logins_keeps_the_any_author_lookup(tmp_path):
-    # The default for the composite's other callers: unchanged behaviour.
+def test_reset_lookup_fallback_honours_trusted_logins_and_defaults_to_any_author(tmp_path):
+    comments = [counter("i-am-marvin", 10, T0, cid=100), counter("nobody", 999, T2, cid=200)]
+    # No cid but trusted logins named (a gate that found nothing): the loop's
+    # own marker is the counter, the newer forgery is not.
     state = fresh_state(tmp_path)
-    (state / "comments.json").write_text(json.dumps([counter("i-am-marvin", 10, T0, cid=100),
-                                                     counter("nobody", 999, T2, cid=200)]))
-    reset, patched = run_reset(state, "")
+    (state / "comments.json").write_text(json.dumps(comments))
+    reset, patched = run_reset(state, trusted_logins="i-am-marvin")
+    assert reset["ok"] == "1" and patched == ["100"]
+    # Neither input (the re-engagement reset in claude.yml): unchanged
+    # behaviour, the newest marker by any author.
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps(comments))
+    reset, patched = run_reset(state)
     assert reset["ok"] == "1" and patched == ["200"]
+
+
+def test_reset_ignores_a_comment_id_when_several_counters_are_requested(tmp_path):
+    # One comment is one counter: with both counters requested the id names
+    # neither, so each is looked up (the rounds marker resets, no attempts
+    # marker exists) and the caller is told.
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps([counter("i-am-marvin", 10, T0, cid=100)]))
+    out = state.parent / "reset-out"
+    env = {"STATE": str(state), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR": "42",
+           "COUNTERS": "rounds attempts", "REASON": "on re-engagement", "COMMENT_ID": "100",
+           "TRUSTED_LOGINS": "i-am-marvin"}
+    out.write_text("")
+    r = sh("bash", "-c", RESET_STUB + lift_step(RESET, "    - id: reset"), check=False, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "looking each up instead" in r.stdout
+    assert (state / "patched").read_text().split() == ["100"]
+    assert outputs(out)["ok"] == "1"

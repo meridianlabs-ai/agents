@@ -2,9 +2,10 @@
 
 The CI-fix loop's gate decides, in shell, whether the agent runs and on
 which PR — so its `run:` scripts (`Resolve PR and check the auto label`,
-`Gate and count`, the escalation's `Reset the attempt counter`, and the
-land job's `Refund infra-crashed attempt`) are lifted out of the workflow
-the way the composer tests lift theirs and run here against a stub `gh`,
+`Gate and count`, and the land job's `Refund infra-crashed attempt`), and
+the escalation's reset (the `reset-auto-counters` composite's step, given
+the gate's `cid` as `comment-id`), are lifted out of the workflow and the
+action the way the composer tests lift theirs and run here against a stub `gh`,
 one case per rule from the 2026-09-04 Claude Security scan:
 
 - 4122320: the PR is `inputs.pr_number`, viewed by number and required to
@@ -28,6 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
 LABELER = ROOT / ".github" / "actions" / "verify-auto-labeler" / "action.yml"
+RESET_ACTION = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
@@ -55,7 +57,7 @@ def step_script(path: Path, anchor: str, indent: int) -> str:
 
 RESOLVE = step_script(WORKFLOW, "        id: resolve", 10)
 GATE = step_script(WORKFLOW, "        id: gate", 10)
-RESET = step_script(WORKFLOW, "        id: reset", 10)
+RESET = step_script(RESET_ACTION, "    - id: reset", 8)
 REFUND = step_script(WORKFLOW, "      - name: Refund infra-crashed attempt", 10)
 VERIFY = step_script(LABELER, "    - id: verify", 8)
 
@@ -73,7 +75,7 @@ case "$1 $2" in
   "pr edit"|"pr comment") exit 0 ;;
   "api repos/o/r/issues/"*)
     case "$2" in
-      */comments\?per_page=100) cat "$STUB/comments" ;;
+      */comments\?per_page=100|*/comments) cat "$STUB/comments" ;;
       */timeline\?per_page=100) cat "$STUB/timeline" ;;
       *) echo "unexpected gh $*" >&2; exit 2 ;;
     esac ;;
@@ -404,16 +406,19 @@ def test_refund_reads_an_unparsable_or_reset_body_as_zero(tmp_path):
 
 
 def reset(tmp_path, cid, fixtures=None):
-    env = {"PR": "7", "CID": cid, "AUTO_LABEL": "auto", "MARKER": MARKER}
+    # The composite as claude-auto.yml calls it: the gate's cid as comment-id,
+    # TRUSTED_LOGINS (run_step's) as the lookup filter for an empty one.
+    env = {"PR": "7", "COMMENT_ID": cid, "COUNTERS": "attempts",
+           "REASON": "on escalation — re-adding `auto` starts a fresh budget"}
     return run_step(RESET, tmp_path, env, fixtures or {})
 
 
 def test_escalation_resets_the_comment_the_gate_counted_from_and_the_gate_restarts(tmp_path):
     # Review round 1: marvin's counter (10) is at the cap and an outsider's
     # newer marker (11) exists. The gate escalates from 10, so the reset must
-    # rewrite 10 — the shared composite would have rewritten the newest
-    # marker, 11, leaving 10 exhausted so that re-adding the label escalated
-    # again on sight.
+    # rewrite 10 — the composite's lookup path would have rewritten the
+    # newest marker, 11, leaving 10 exhausted so that re-adding the label
+    # escalated again on sight; hence the gate's cid travels as comment-id.
     marvin, outsider = counter(10, "i-am-marvin", 3), counter(11, "outsider", 99)
     res, out, _, _ = gate(tmp_path, [marvin, outsider], cap="3", perms={"outsider": "read"})
     assert res.returncode == 0, res.stderr
@@ -431,7 +436,9 @@ def test_escalation_resets_the_comment_the_gate_counted_from_and_the_gate_restar
 
 
 def test_reset_without_a_trusted_counter_has_nothing_to_do(tmp_path):
-    res, out, _, stub = reset(tmp_path, "")
+    # No cid from the gate: the composite's lookup runs, filtered by
+    # TRUSTED_LOGINS, so an outsider's marker is not a counter to reset.
+    res, out, _, stub = reset(tmp_path, "", {"comments": json.dumps([counter(11, "outsider", 99)])})
     assert res.returncode == 0, res.stderr
     assert out == {"ok": "1"} and not list(stub.glob("patched.*"))
     assert "nothing to reset" in res.stdout
@@ -442,7 +449,7 @@ def test_reset_reports_a_patch_that_fails_after_retries(tmp_path):
     assert res.returncode == 0, res.stderr
     assert out == {"ok": "0"}
     assert len([c for c in calls if c.startswith("api -X PATCH")]) == 4
-    assert "::warning::could not reset" in res.stdout
+    assert "could not reset" in res.stdout
 
 
 # --- verify-auto-labeler's trusted-logins input ------------------------------

@@ -190,8 +190,8 @@ finding 4121989) that is enforced in three layers rather than assumed:
   whole 40-hex SHA, each present exactly once and delimited by whitespace as
   the record step writes them, else the counter counts as
   absent rather than aborting the gate or wrapping past the cap. The
-  escalation reset (`reset-auto-counters`, its new `trusted-logins` input)
-  resets the same trusted counter the gate selected. Both lists are
+  escalation reset (`reset-auto-counters`, given the gate's `cid` as
+  `comment-id`) resets the very comment the gate counted from. Both lists are
   workflow-level `env:` values — the one place Phase 2's App identity
   changes.
 
@@ -264,12 +264,12 @@ decision to grant a fresh budget** (escalation reset added 2026-09-09). Neither
 a green CI run nor a clean review round decrements or resets the sticky counter
 — the cap bounds total autonomous churn on a PR, not churn per failure streak.
 Exactly two paths reset a counter, writing the same reset body (the shared
-`.github/actions/reset-auto-counters` composite's — though since 2026-09-15
-the CI-fix loop's escalation resets inline, targeting the comment its gate
-counted from: the composite rewrites the newest marker comment by any author,
-which a gate that reads only a trusted author's comment can no longer rely
-on; the review loop's and the re-engagement's calls to the composite are a
-follow-up):
+`.github/actions/reset-auto-counters` composite's). Since 2026-09-15 each
+loop's escalation passes the comment its gate counted from (`comment-id`):
+the gates read only a trusted author's comment, so "the newest marker
+comment by any author" could be an outsider's forgery, and resetting that
+would leave the loop's real counter exhausted. The re-engagement reset has
+no gate and keeps the lookup (a follow-up for its `trusted-logins`):
 
 - **Re-engagement** — a human comments `@auto` on an existing PR (item 6 under
   "Event-driven implementation sketch" below). claude.yml re-applies the label
@@ -309,8 +309,8 @@ outright step failure in the disarm or reset (not the handled "could not"
 outcomes) must not skip the comment on a PR whose label may already be gone;
 empty outputs route to the conservative wording. The disarm and the hand-off
 are shared composites (`disarm-auto-loop`, `post-pr-comment`) so the two loops
-cannot drift, and the review loop's reset is too (`reset-auto-counters`; the
-CI-fix loop's is inline since 2026-09-15, see above) — as is the gates' labeler check
+cannot drift, and so is the reset (`reset-auto-counters`, given each gate's
+`cid` — see above) — as is the gates' labeler check
 (`verify-auto-labeler`, Trigger surface above); `post-pr-comment` is also what the `land`
 composite posts the loops' `@review` hand-back with, since that comment is
 the loop's other unlosable one. The

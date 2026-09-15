@@ -797,10 +797,11 @@ jobs:
       #      human decision. The reset body is the shared composite's (no
       #      head marker: the no-progress check needs prev >= 1, so a fresh
       #      budget's first round skips it and records a fresh tip first),
-      #      and it resets the counter THE GATE selected — the loop's own
-      #      comment, by TRUSTED_LOGINS — never an outsider's marker (which
-      #      would leave the real counter exhausted: re-add the label and it
-      #      escalates again on sight).
+      #      and it resets the comment THE GATE counted from (its `cid`,
+      #      passed as `comment-id`; TRUSTED_LOGINS filters the fallback
+      #      lookup) — never an outsider's marker, which would leave the
+      #      real counter exhausted: re-add the label and it escalates again
+      #      on sight. The CI-fix loop calls the composite the same way.
       #   3. Hand off: the comment tells the truth about both — a failed reset
       #      leaves the exhausted counter in place, and promising a fresh
       #      budget then would be exactly the false "re-add it" the reset
@@ -838,6 +839,7 @@ jobs:
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           counters: rounds
+          comment-id: ${{ steps.gate.outputs.cid }}
           trusted-logins: ${{ env.TRUSTED_LOGINS }}
           reason: "on escalation — re-adding `${{ inputs.auto_label }}` starts a fresh budget"
 

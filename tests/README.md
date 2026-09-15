@@ -37,8 +37,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   machine account and ends the search), and the `Companion PR:` issue-body
   line counting only from a trusted author and only for a ts-mono URL.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
-  the auto label`, `Gate and count`), the escalation's `Reset the attempt
-  counter` and the land job's `Refund infra-crashed attempt` step, lifted
+  the auto label`, `Gate and count`), the escalation's reset (the
+  `reset-auto-counters` composite's step, given the gate's `cid`) and the
+  land job's `Refund infra-crashed attempt` step, lifted
   the same way and run against a stub
   `gh`: the PR is resolved from `pr_number` and refused when closed, a fork
   head or on another branch (never listed by branch name); the attempt
@@ -55,8 +56,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   a write-access author, a forged marker is never adopted or PATCHed, and a
   malformed counter counts as absent (Claude Security 4121983). Also runs
   the `reset-auto-counters` composite's step (lifted the same way) in a
-  gate → reset → gate sequence: escalation resets the counter the gate
-  selected, so re-adding the label really starts a fresh budget.
+  gate → reset → gate sequence: escalation resets the comment the gate
+  counted from (`comment-id`), so re-adding the label really starts a fresh
+  budget; the lookup fallback and its `trusted-logins` filter are covered
+  too.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS`, or a bot the

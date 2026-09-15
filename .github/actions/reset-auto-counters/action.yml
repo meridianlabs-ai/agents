@@ -17,11 +17,14 @@ description: >-
   for) and carries NO `rounds:` / `attempts:` number and NO
   `auto-review-head:` tip, so each gate's extractor reads the counter as
   absent (0) and the next round's Record step re-initialises the marker.
-  With `trusted-logins` set, only a marker comment by one of those logins is
-  a counter (the review-fix gate's own selection, Claude Security 4121983):
-  resetting the newest marker regardless of author would PATCH an outsider's
-  forgery and leave the loop's real counter exhausted, so "re-add the label"
-  escalated again on sight.
+  Which comment is the counter (Claude Security 4121983 / 4121987): the loops'
+  gates read only a trusted author's marker comment, so resetting "the newest
+  marker comment by any author" would PATCH an outsider's forgery and leave
+  the loop's real counter exhausted — "re-add the label" then escalated again
+  on sight. An escalation therefore passes `comment-id`, the comment its gate
+  counted from, and the composite resets exactly that. Without it (the
+  re-engagement reset has no gate) the lookup is the last marker comment, by
+  one of `trusted-logins` when the caller names them, else by any author.
   Dropping the head marker is deliberate: the no-progress check compares tips
   only once `prev >= 1`, so a fresh budget's first round is never mis-read as
   a stall (re-adding the label without pushing does not trip it), and that
@@ -62,11 +65,18 @@ inputs:
       (renders as "🤖 auto review rounds reset (on escalation — …) — the next
       round starts at 1 with the full cap.").
     required: true
+  comment-id:
+    description: >-
+      The counter comment to reset: the caller's gate selected it already
+      (its `cid` output), so no lookup. For a single counter. Empty
+      (default): look the counter up (see `trusted-logins`).
+    required: false
+    default: ""
   trusted-logins:
     description: >-
       Comma-separated logins whose marker comments count as the counter
-      (the caller's TRUSTED_LOGINS). Empty (default): the newest marker
-      comment by any author, as before.
+      when it is looked up (the caller's TRUSTED_LOGINS). Empty (default):
+      the newest marker comment by any author, as before.
     required: false
     default: ""
 
@@ -88,6 +98,7 @@ runs:
         PR: ${{ inputs.pr }}
         COUNTERS: ${{ inputs.counters }}
         REASON: ${{ inputs.reason }}
+        COMMENT_ID: ${{ inputs.comment-id }}
         TRUSTED_LOGINS: ${{ inputs.trusted-logins }}
       run: |
         set -uo pipefail
@@ -108,23 +119,34 @@ runs:
         }
         ok=1
         # Comma list → jq array (whitespace-tolerant); `[]` when unset, which
-        # the selection below reads as "any author".
+        # the lookup below reads as "any author".
         trusted=$(jq -cn --arg t "$TRUSTED_LOGINS" '$t | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != ""))')
+        # One comment is one counter: with several counters requested the id
+        # names none of them in particular, so fall back to the lookup.
+        counters_n=$(set -- $COUNTERS; echo $#)
+        if [ -n "$COMMENT_ID" ] && [ "$counters_n" -ne 1 ]; then
+          echo "::warning::reset-auto-counters: comment-id names one comment but '$COUNTERS' are $counters_n counters; looking each up instead."
+          COMMENT_ID=""
+        fi
         for counter in $COUNTERS; do
           case "$counter" in
             rounds)   marker="<!-- auto-review-rounds -->"; label="auto review rounds";  unit="round" ;;
             attempts) marker="<!-- auto-fix-attempts -->";  label="auto CI-fix attempts"; unit="attempt" ;;
             *) echo "::warning::reset-auto-counters: unknown counter '$counter'; skipping."; ok=0; continue ;;
           esac
-          # Same lookup the gates use: the LAST comment carrying the marker
-          # — by one of the trusted logins when the caller named them. Gate
-          # on the exit code, not the output: an empty result means no
+          if [ -n "$COMMENT_ID" ]; then
+            # The caller's gate already selected the comment it counted from:
+            # reset exactly that one, no lookup.
+            cid="$COMMENT_ID"
+          # Else the same lookup the gates use: the LAST comment carrying the
+          # marker — by one of the trusted logins when the caller named them.
+          # Gate on the exit code, not the output: an empty result means no
           # counter comment exists (nothing to reset), a persistently failed
           # call means we don't know — report that as not-ok rather than
           # claiming a reset. `--paginate` output is one merged array on
           # current gh, one array per page on older releases; -s plus
           # `.[][]` flattens either.
-          if ! cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          elif ! cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
                        | jq -rs --arg m "$marker" --argjson t "$trusted" \
                            '[.[][] | select((.body|contains($m)) and (($t|length) == 0 or ((.user.login // "") as $l | any($t[]; . == $l))))] | last | .id // empty'); then
             echo "::warning::reset-auto-counters: could not look up the $label comment on #$PR (after retries)."
