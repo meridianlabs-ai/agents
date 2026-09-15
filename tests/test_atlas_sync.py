@@ -93,7 +93,7 @@ def permission(gh, login, perm, role=None):
     "login, association, expected",
     [
         (MARVIN, None, True),
-        (REVIEWER_BOT, "NONE", True),
+        (REVIEWER_BOT, "NONE", False),  # the App is not a collaborator
         ("colleague", "OWNER", True),
         ("colleague", "MEMBER", True),
         ("colleague", "COLLABORATOR", True),
@@ -175,14 +175,16 @@ def test_revives_a_stale_machine_account_handback(gh):
     assert any("review re-triggered" in a for a in atlas.actions)
 
 
-def test_revives_a_stale_reviewer_bot_verdict(gh):
-    # The verdict comment the fix round consumes is authored by the reviewer's
-    # GitHub App, whose collaborator permission is `none` — TRUSTED_LOGINS is
-    # what keeps this revival path alive.
+def test_does_not_revive_a_reviewer_bot_verdict(gh):
+    # On the fork the suggestions verdict is authored by the reviewer's GitHub
+    # App, whose collaborator permission is `none`: it is not in TRUSTED_LOGINS
+    # (decision: Ransom, 2026-09-15), so a stale verdict is left alone — only
+    # the machine account's own hand-backs are revived.
+    permission(gh, REVIEWER_BOT, "none")
     auto_pr(gh, [comment(VERDICT, login=REVIEWER_BOT, association="NONE")])
     atlas.retrigger_stale_handbacks()
-    assert len(revivals(gh)) == 1
-    assert gh.matching(is_permission_lookup) == []
+    assert revivals(gh) == []
+    assert any(f"by {REVIEWER_BOT} ignored" in a for a in atlas.actions)
 
 
 def test_revives_for_a_write_access_author_found_by_lookup(gh):

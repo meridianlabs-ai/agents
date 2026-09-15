@@ -50,15 +50,15 @@ TS_MONO = "meridianlabs-ai/ts-mono"
 REVIEWER = os.environ.get("REVIEWER", "ransomr")
 MACHINE_ACCOUNT = "i-am-marvin"  # the login this sync (and the loop) writes as
 # Authors whose comments and issue-body lines this sync believes as-is: the
-# machine account (the loop's hand-backs, counters and stage comments post as
-# it) and the reviewer's GitHub App (its verdict comment is what a fix round
-# consumes; the review-fix loop's own author gate names the same login). Every
-# author check reads THIS set, so Phase 2 of the credential separation (marvin
-# becomes a GitHub App identity, `<app-slug>[bot]`) changes this one value.
-# Anyone else is believed only with write access — see trusted_author.
-# `github-actions[bot]` is never trusted: any repository's workflow run posts
-# as it.
-TRUSTED_LOGINS = frozenset({MACHINE_ACCOUNT, "claude[bot]"})
+# machine account alone (the loop's hand-backs, counters and stage comments
+# post as it). Every author check reads THIS set, so Phase 2 of the
+# credential separation (marvin becomes a GitHub App identity,
+# `<app-slug>[bot]`) changes this one value. Anyone else — including the
+# reviewer's GitHub App, whose collaborator permission is `none`, so a
+# verdict it posts is not revived (decision: Ransom, 2026-09-15) — is
+# believed only with write access; see trusted_author. `github-actions[bot]`
+# is never trusted: any repository's workflow run posts as it.
+TRUSTED_LOGINS = frozenset({MACHINE_ACCOUNT})
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 TRUSTED_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 NEVER_TRUSTED = frozenset({"github-actions[bot]"})
