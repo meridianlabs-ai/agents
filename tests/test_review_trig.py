@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
 from test_review_fix_gate import fresh_state, lift_step, lookups, outputs  # noqa: E402
+from test_review_fix_gate import run_gate, verdict, comment, T1, T2  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-review.yml"
@@ -115,6 +116,18 @@ def test_github_actions_bot_is_never_admitted(tmp_path, allowed):
     _, o, state = run_trig(tmp_path, actor="github-actions[bot]", allowed_bots=allowed)
     assert o["ok"] == "false", allowed
     assert lookups(state) == []
+
+
+def test_an_admitted_bots_review_request_is_pending_for_the_review_fix_gate(tmp_path):
+    # Both steps on one fixture: the reviewer admits the allow-listed bot's
+    # `@review` on a same-repo head, so a review-fix gate queued behind it
+    # must see a pending review and skip the verdict that request supersedes
+    # (on an unchanged tip it would otherwise escalate for no progress).
+    _, o, _ = run_trig(tmp_path, actor="claude[bot]", allowed_bots="claude[bot]")
+    assert o["ok"] == "true"
+    _, g, state = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                      comment(2, "claude[bot]", "@review", T2)])
+    assert g["act"] == "skip" and lookups(state) == []
 
 
 def test_allow_listed_bot_never_opens_the_fork_escape_hatch(tmp_path):

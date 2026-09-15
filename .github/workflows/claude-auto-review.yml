@@ -195,12 +195,12 @@ env:
   # hand-off as it, the gate records the round counter as it. Only its
   # counter and hand-off comments are loop state, and only they are PATCHed.
   TRUSTED_LOGINS: i-am-marvin
-  # Who posts the reviewer's marked summary (the verdict). i-am-marvin: since
-  # the reviewer's landing-job split, claude-review.yml's land job posts the
-  # summary as the machine account, on both engines. claude[bot]: the
-  # pre-split author and still `reviewer_login`'s default — kept so a verdict
-  # that predates the split still counts. Any other login's verdict is
-  # ignored.
+  # Who posts the reviewer's marked summary (the verdict). Both are active
+  # authors: the Claude engine posts its marked verdict directly, as
+  # claude[bot] (claude-review.yml's review prompt; also `reviewer_login`'s
+  # default); the Codex engine's verdict travels in the landing manifest and
+  # claude-review.yml's land job posts it as i-am-marvin. Any other login's
+  # verdict is ignored.
   REVIEWER_LOGINS: i-am-marvin,claude[bot]
 
 jobs:
@@ -520,18 +520,22 @@ jobs:
           reviewers=$(logins "$REVIEWER_LOGINS,$REVIEWER")
           trusted=$(logins "$TRUSTED_LOGINS")
           in_logins() { jq -en --argjson l "$1" --arg x "$2" 'any($l[]; . == $x)' >/dev/null; }
-          # trusted_author <login>: a TRUSTED_LOGINS login, or an account
-          # with write access — a collaborator's manual re-review request is
-          # as real as the loop's own. Other `[bot]` logins are refused
-          # without a lookup (the collaborators endpoint 404s for Apps, and
-          # github-actions[bot] is never trusted: any caller workflow posts
-          # as it). One permission lookup per login per run, cached in a
-          # string rather than an associative array so the step also runs
-          # under bash 3 (tests/); a failed lookup is untrusted — fail
-          # closed, like every gate lookup.
+          # trusted_author <login>: a TRUSTED_LOGINS login, a reviewer
+          # identity (REVIEWER_LOGINS / reviewer_login — a caller that
+          # allow-lists the reviewer bot runs a review on ITS `@review` too,
+          # claude-review.yml's trig step, so that request is as pending as
+          # marvin's), or an account with write access — a collaborator's
+          # manual re-review request is as real as the loop's own. Any other
+          # `[bot]` login is refused without a lookup (the collaborators
+          # endpoint 404s for Apps, and github-actions[bot] is never
+          # trusted: any caller workflow posts as it). One permission lookup
+          # per login per run, cached in a string rather than an associative
+          # array so the step also runs under bash 3 (tests/); a failed
+          # lookup is untrusted — fail closed, like every gate lookup.
           perm_cache=""
           trusted_author() {
             in_logins "$trusted" "$1" && return 0
+            in_logins "$reviewers" "$1" && return 0
             case "$1" in ""|*"[bot]") return 1 ;; esac
             case " $perm_cache " in
               *" $1=yes "*) return 0 ;;
