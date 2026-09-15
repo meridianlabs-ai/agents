@@ -95,7 +95,11 @@ esac
 '''
 
 
-def run_step(script: str, tmp_path: Path, env: dict, fixtures: dict):
+def run_step(script: str, tmp_path: Path, env: dict, fixtures: dict, *, composite: bool = False):
+    """Run a lifted script under the runner's shell options — `bash -e {0}`
+    for a workflow `run:` step, `bash --noprofile --norc -eo pipefail {0}`
+    for a composite's `shell: bash` step — so a bare non-zero status fails
+    here as it would there."""
     binp = tmp_path / "bin"
     binp.mkdir(exist_ok=True)
     for name, body in (("gh", GH_STUB), ("sleep", "#!/bin/bash\nexit 0\n")):
@@ -110,7 +114,8 @@ def run_step(script: str, tmp_path: Path, env: dict, fixtures: dict):
     out.write_text("")
     e = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
          "REPO": "o/r", "GH_TOKEN": "x", "TRUSTED_LOGINS": "i-am-marvin", **env}
-    res = sh("bash", "-c", script, check=False, env=e)
+    opts = ["-e", "-o", "pipefail"] if composite else ["-e"]
+    res = sh("bash", "--noprofile", "--norc", *opts, "-c", script, check=False, env=e)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     calls = (stub / "calls").read_text().splitlines() if (stub / "calls").exists() else []
     return res, outputs, calls, stub
@@ -410,7 +415,7 @@ def reset(tmp_path, cid, fixtures=None):
     # TRUSTED_LOGINS (run_step's) as the lookup filter for an empty one.
     env = {"PR": "7", "COMMENT_ID": cid, "COUNTERS": "attempts",
            "REASON": "on escalation — re-adding `auto` starts a fresh budget"}
-    return run_step(RESET, tmp_path, env, fixtures or {})
+    return run_step(RESET, tmp_path, env, fixtures or {}, composite=True)
 
 
 def test_escalation_resets_the_comment_the_gate_counted_from_and_the_gate_restarts(tmp_path):
@@ -442,7 +447,7 @@ def reengage(tmp_path, comments, perms=None):
     fixtures = {"comments": json.dumps(comments)}
     for login, perm in (perms or {}).items():
         fixtures[f"perm.{login}"] = perm
-    return run_step(RESET, tmp_path, env, fixtures)
+    return run_step(RESET, tmp_path, env, fixtures, composite=True)
 
 
 def test_reengagement_resets_a_maintainers_counter_the_gate_counts_from(tmp_path):
@@ -494,6 +499,20 @@ def test_reset_without_a_trusted_counter_has_nothing_to_do(tmp_path):
     assert "nothing to reset" in res.stdout
 
 
+def test_reengagement_passes_an_outsiders_newer_marker_to_reach_a_maintainers_counter(tmp_path):
+    # Review round 7: `shell: bash` runs the composite under -e, and a bare
+    # `write_access; rc=$?` ended the step on the outsider's verified
+    # non-write (status 1) before `ok` was written — the re-engagement died
+    # and Alice's exhausted counter stayed. The status is captured, so the
+    # walk continues to her comment.
+    alice, outsider = counter(12, "alice", 3), counter(13, "outsider", 99)
+    res, out, calls, stub = reengage(tmp_path, [alice, outsider], perms={"alice": "write", "outsider": "read"})
+    assert res.returncode == 0, res.stderr
+    assert out == {"ok": "1"}
+    assert (stub / "patched.12").exists() and not (stub / "patched.13").exists()
+    assert len(lookups(calls, "outsider")) == 1 and len(lookups(calls, "alice")) == 1
+
+
 def test_reset_with_an_unverifiable_marker_author_is_unresolved_not_nothing(tmp_path):
     # The permission lookup fails after retries (no fixture: gh's 404 or an
     # unavailable API). "Nothing to reset, ok=1" would leave Alice's
@@ -523,7 +542,7 @@ def verify(tmp_path, labeler, *, trusted, perms=None):
     fixtures = {"timeline": timeline, "comments": "[]"}
     for login, perm in (perms or {}).items():
         fixtures[f"perm.{login}"] = perm
-    return run_step(VERIFY, tmp_path, env, fixtures)
+    return run_step(VERIFY, tmp_path, env, fixtures, composite=True)
 
 
 def test_labeler_trusts_a_listed_bot_login_without_a_lookup(tmp_path):

@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
-from test_review_fix_gate import fresh_state, lift_step, lookups, outputs  # noqa: E402
+from test_review_fix_gate import STEP_BASH, fresh_state, lift_step, lookups, outputs  # noqa: E402
 from test_review_fix_gate import run_gate, verdict, comment, review_allowed_bots_default, T1, T2  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,7 +63,7 @@ def run_trig(tmp_path, *, actor, perms=None, allowed_bots="", head_repo="o/r",
         "HEAD_REPO": "", "HEAD_REF": "", "TRUSTED_LOGINS": "i-am-marvin", "ALLOWED_BOTS": allowed_bots,
         "ACTOR_TYPE": actor_type,
     }
-    r = sh("bash", "-c", GH_STUB + lift_step(WORKFLOW, "        id: trig"), check=False, env=env)
+    r = sh(*STEP_BASH, GH_STUB + lift_step(WORKFLOW, "        id: trig"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     return r, outputs(out), state
 

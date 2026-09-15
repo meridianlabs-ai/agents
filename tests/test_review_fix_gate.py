@@ -28,6 +28,13 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto-review.yml"
 RESET = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.yml"
 
+# The runner's shell options, so a bare non-zero status fails here as it
+# would there: GitHub runs a workflow `run:` step (no `shell:` key) with
+# `bash -e {0}` and a composite's `shell: bash` step with
+# `bash --noprofile --norc -eo pipefail {0}`.
+STEP_BASH = ("bash", "--noprofile", "--norc", "-e", "-c")
+COMPOSITE_BASH = ("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c")
+
 HEAD = "a" * 40
 OLD = "b" * 40
 MARKER = "<!-- auto-review-rounds -->"
@@ -132,7 +139,7 @@ def run_gate(tmp_path, comments, perms=None, *, env_extra=None):
         "ALLOWED_BOTS": "",
     }
     env.update(env_extra or {})
-    r = sh("bash", "-c", GH_STUB + lift_step(WORKFLOW, "        id: gate"), check=False, env=env)
+    r = sh(*STEP_BASH, GH_STUB + lift_step(WORKFLOW, "        id: gate"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     return r, outputs(out), state
 
@@ -343,7 +350,7 @@ def run_handoff(tmp_path, comments):
     env = {"STATE": str(state), "REPO": "o/r", "PR": "42", "MENTION": "someone",
            "CONTINUATION": "false", "CLOSED_AT": "", "MARKER": "<!-- auto-converged -->",
            "TRUSTED_LOGINS": "i-am-marvin"}
-    r = sh("bash", "-c", HANDOFF_STUB + lift_step(WORKFLOW, "      - name: Converged handoff"),
+    r = sh(*STEP_BASH, HANDOFF_STUB + lift_step(WORKFLOW, "      - name: Converged handoff"),
            check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     return r, (state / "posted").read_text() if (state / "posted").exists() else None
@@ -383,7 +390,7 @@ def run_refund(tmp_path, comments, *, body_fail=False):
         (state / "body-fail").write_text("")
     env = {"STATE": str(state), "REPO": "o/r", "PR": "42", "ROUND": "3", "CAP": "10",
            "MARKER": MARKER, "TRUSTED_LOGINS": "i-am-marvin"}
-    r = sh("bash", "-c", REFUND_STUB + lift_step(WORKFLOW, "      - name: Refund infra-crashed round"),
+    r = sh(*STEP_BASH, REFUND_STUB + lift_step(WORKFLOW, "      - name: Refund infra-crashed round"),
            check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     patched = (state / "patched").read_text().split() if (state / "patched").exists() else []
@@ -469,7 +476,7 @@ def run_reset(state: Path, *, comment_id="", trusted_logins="", counters="rounds
     env = {"STATE": str(state), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR": "42",
            "COUNTERS": counters, "REASON": "on escalation", "COMMENT_ID": comment_id,
            "TRUSTED_LOGINS": trusted_logins}
-    r = sh("bash", "-c", RESET_STUB + lift_step(RESET, "    - id: reset"), check=False, env=env)
+    r = sh(*COMPOSITE_BASH, RESET_STUB + lift_step(RESET, "    - id: reset"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     patched = (state / "patched").read_text().split() if (state / "patched").exists() else []
     return outputs(out), patched
@@ -526,7 +533,7 @@ def test_reset_ignores_a_comment_id_when_several_counters_are_requested(tmp_path
            "COUNTERS": "rounds attempts", "REASON": "on re-engagement", "COMMENT_ID": "100",
            "TRUSTED_LOGINS": "i-am-marvin"}
     out.write_text("")
-    r = sh("bash", "-c", RESET_STUB + lift_step(RESET, "    - id: reset"), check=False, env=env)
+    r = sh(*COMPOSITE_BASH, RESET_STUB + lift_step(RESET, "    - id: reset"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "looking each up instead" in r.stdout
     assert (state / "patched").read_text().split() == ["100"]

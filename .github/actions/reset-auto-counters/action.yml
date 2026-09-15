@@ -195,7 +195,9 @@ runs:
               unresolved=0
               while IFS=$'\t' read -r id login; do
                 [ -n "$id" ] || continue
-                write_access "$login"; rc=$?
+                # `shell: bash` runs this under -e: a bare non-zero return
+                # would end the step before `ok` is written, so capture it.
+                rc=0; write_access "$login" || rc=$?
                 if [ "$rc" -eq 0 ]; then cid="$id"; break; fi
                 # A newer candidate whose author could not be verified makes
                 # any older selection uncertain: stop and report unresolved.

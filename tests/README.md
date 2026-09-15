@@ -93,6 +93,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   caller's `allowed_bots` names (same-repo heads only) — with the fork head
   admitted sandboxed and a failed lookup refused (Claude Security 4085111).
 
+The lifted `run:` scripts execute under the runner's shell options — `bash
+-e` for a workflow step without a `shell:` key, `bash --noprofile --norc
+-eo pipefail` for a composite's `shell: bash` step — so a bare non-zero
+status fails in a test as it would on the runner.
+
 Run from the repo root:
 
 ```sh
