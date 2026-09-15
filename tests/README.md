@@ -63,6 +63,15 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the approved head the fork wiring makes a plain push land on the
   contributor's branch) — and checks that every upstream merge request and
   re-approval in the skill names the pushed commit.
+- `test_skill_resolution.py` — the trust rule in `skills/checkout/checkout.sh`
+  and `skills/promote/promote.sh`, run against a stub `gh` that answers from
+  fixtures and logs every call: a chip from a personal fork or an untrusted
+  author is refused (naming it and the reason) before any write, the
+  permission lookup admits write-access collaborators and fails closed, the
+  External-proxy body line is honoured only on a genuine proxy, and promote
+  refuses ambiguity without `--pr`, resolves with it, and falls back to
+  closing refs / the branch convention when no chip exists. Acceptance paths
+  run through `--dry-run` only; the test clone's remote is non-routable.
 
 Run from the repo root:
 

@@ -13,17 +13,62 @@ the terminal sync".
 ## Fast path (issue number in hand)
 
 Run the script that lives next to this skill (substitute this skill's base
-directory). Add `--dry-run` first if the user asked to preview:
+directory). Add `--dry-run` if the user asked to preview; add `--pr <number>`
+when the script reports more than one qualifying fork PR (exit 6) or when
+the user names the PR:
 
 ```sh
-bash <skill-base-dir>/promote.sh <N> [--dry-run]
+bash <skill-base-dir>/promote.sh <N> [--dry-run] [--pr <number>]
 ```
+
+`--dry-run` prints every candidate with its verdict, the decision
+(`RESOLVED: fork PR #M (STATE) via <how>`) and each write that would happen;
+nothing is written.
+
+**Trust rule, applied before any PR text is read.** A fork PR qualifies only
+when its head repository is `meridianlabs-ai/inspect_ai` itself AND its
+author is in the script's `TRUSTED_LOGINS` (`i-am-marvin`; one variable at
+the top of the script — Phase 2's GitHub App identity changes that one
+value) or holds write access on the fork (admin/maintain/write via the
+collaborator permission API; a failed lookup is untrusted). Anyone can open
+a `Fixes #N` PR from a personal fork into the fork's default branch and
+GitHub links it to the issue natively, so a chip alone proves nothing; a
+branch inside the org fork can only be pushed by a write-access account,
+which makes the head-repository check the load-bearing one and the author
+check defence in depth. The picked PR's title, body and head branch become
+the upstream PR opened as the user, which is why nothing is read from a
+candidate until it has passed.
+
+Resolution order, every candidate judged by the rule first: (1) the
+qualifying OPEN fork-PR chip — exactly one, or exit 6; (2) with none, the
+open fork PRs (`gh pr list --repo meridianlabs-ai/inspect_ai --state open`)
+that pass the rule and either carry a closing reference to the issue in
+their body (`Fixes|Closes|Resolves #N`, or fully qualified
+`meridianlabs-ai/inspect_ai#N` — fork closing refs are inert, so the agent's
+own PR usually has no chip) or whose head branch matches
+`claude/issue-N-*` / `issue-N-*` — exactly one, or exit 6 (the listing must
+succeed and be complete — under the script's `LIST_LIMIT` of 500 open PRs —
+or the step aborts with exit 5 rather than falling through); (3) with none,
+the qualifying CLOSED fork-PR chip (the heal path) — exactly one, or exit 6.
+`--pr <number>` skips the search and names the fork PR (chip or not, open or
+closed); it must still pass the rule, and the script warns when the pinned
+PR carries no link to the issue.
 
 One invocation does everything, each write check-before-write (idempotent —
 rerunning heals an already-promoted issue): resolves the fork PR + branch
-from the issue's chips; prints preflight ADVISORY lines (review verdict, fork
-CI) — **relay these to the user, and pause for confirmation if the verdict
-isn't `clean` or CI shows failures**; adopts the existing upstream PR via the
+as above; preflight refuses a head branch named `main`/`meridian` and a
+fork branch that has moved past the resolved PR's head (exit 5, before any
+write — except when a CLOSED fork PR's upstream PR is adopted, where a
+moved branch is normal and only noted); prints preflight ADVISORY lines
+(review verdict, fork CI) — **relay these to the user, and pause for
+confirmation if the verdict isn't `clean` or CI shows failures**. Only
+verdict comments posted by the reviewer app (`claude[bot]`, the script's
+`REVIEWER_BOT`) or by a trusted login / write-access collaborator count;
+the PR is public, so others are ignored and the ADVISORY line says how
+many were. If the comment lookup fails part-way the verdict is reported
+`verdict:unavailable` (partial pages are discarded — an older `clean` must
+not stand in for a newer verdict): treat it as not clean and pause. It
+adopts the existing upstream PR via the
 issue's cross-repo chip (the REST `pulls?head=` filter silently returns
 [] for org-owned heads — observed on the org-fork pair AND same-repo on
 the fork itself — never use it anywhere) or, on the create path, first syncs
@@ -43,23 +88,37 @@ on a CLOSED issue, never downgrading Sign-off/Merge); comments the upstream
 link on the fork issue; supersedes and closes the open fork PR.
 
 Exit codes: **0** ok (report the `OK …` line plus which steps were created
-vs already present); **3** no fork-PR chip — resolve inputs via the slow
-path below, then run the script anyway if a branch emerges (it only needs
-the chip for resolution); **4** branch not on the fork; **5** preflight
-hard failure (a `REVIEWER` who is provably not a collaborator on upstream or
-on the ts-mono companion's repo, or a conflict merging upstream main into the
-branch — either way no upstream PR was opened; fix the login / resolve the
-conflict on the branch and re-run).
+vs already present); **3** no qualifying fork PR — stderr says what it
+looked for and lists every candidate
+(`#M STATE head=<head repo>:<branch> author=<login>`) with its verdict,
+`qualifies` or `REFUSED: <reason>` (head repository not the fork, or an
+author neither trusted nor a write-access collaborator), plus the open PRs
+that carried no reference to the issue. Relay the listing; resolve via the
+slow path below and re-run with `--pr <number>`. **Never promote a REFUSED
+candidate**, by `--pr` or by hand-executing the steps: its text would be
+published upstream as the user. **4** branch not on the fork; **5** hard
+failure before any write: the open-PR listing the fallback needs failed or
+hit the limit (re-run, or pin with `--pr`); the resolved PR's head is
+`main`/`meridian` (never promote it); the fork branch moved past the
+resolved PR's head (re-run — the PR data was stale, or someone pushed); a
+`REVIEWER` who is provably not a collaborator on upstream or on the ts-mono
+companion's repo; or a conflict merging upstream main into the branch
+(resolve on the branch and re-run). No upstream PR was opened in any of
+these; **6** ambiguous — more
+than one fork PR qualifies at the same step (stderr lists them): ask the
+user which one and re-run with `--pr <number>`. Never guess — the
+2026-08-27 incident (agents #32) promoted the wrong PR and closed a live one
+as superseded.
 
-## Slow path (no chip)
+## Slow path (exit 3: nothing qualified)
 
-From an issue with no linked-PR chip: scan machine-account comments for
-`/pull/` refs (take the still-open one). From a PR or branch: the issue
-number comes from the branch name (`claude/issue-N-*`), else a same-repo
-`Fixes` ref in the PR body. Human-named branches: get the branch from the
-fork PR's head. Once resolved, prefer fixing the chip (run the
-link-upstream-chips sweep) and re-running the script over hand-executing
-its steps.
+The script already tried the open fork PRs' closing refs and branch names,
+so this is for the rest: scan machine-account comments on the issue for
+`/pull/` refs (take the still-open one); for a human-named branch, find the
+fork PR whose head is that branch. Once a fork PR number is in hand, re-run
+the script with `--pr <number>` — it applies the trust rule to the pinned
+PR too, so a candidate the listing REFUSED is refused again, by design.
+Prefer that over hand-executing the script's steps.
 
 Multiple chips are normal: an issue can carry its fork PR, a ts-mono
 companion, and (after promotion) the upstream PR. Resolution filters by
