@@ -236,7 +236,12 @@ path = args[1] if len(args) > 1 and args[0] == "api" else None
 if path not in fixtures:
     sys.stderr.write("gh: Not Found (HTTP 404)\n")
     sys.exit(1)
-sys.stdout.write(json.dumps(fixtures[path]) + "\n")
+body = fixtures[path]
+if isinstance(body, list) and "--paginate" in args and len(body) > 1:
+    # The older gh shape: one array per page, back to back.
+    sys.stdout.write(json.dumps(body[:1]) + json.dumps(body[1:]))
+else:
+    sys.stdout.write(json.dumps(body) + "\n")
 """
 
 
@@ -248,10 +253,13 @@ def status_path(sha):
     return f"repos/{REPO}/commits/{sha}/status?per_page=100"
 
 
+RULES_PATH = f"repos/{REPO}/rules/branches/main"
+
+
 def fixtures_for(head, runs, statuses=(), rls=None):
     return {
         PR_PATH: pr(head),
-        f"repos/{REPO}/rules/branches/main": rules() if rls is None else rls,
+        RULES_PATH: rules() if rls is None else rls,
         runs_path(head): {"total_count": len(runs), "check_runs": runs},
         status_path(head): {
             "state": "success" if statuses else "pending",
@@ -289,10 +297,23 @@ def test_cli_passes_with_reads_only(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert r.stdout == f"checks passed at {SHA1}: 8 check runs, 0 statuses; required (5): {', '.join(REQUIRED)}\n"
-    assert [c[1] for c in calls] == [PR_PATH, f"repos/{REPO}/rules/branches/main", runs_path(SHA1), status_path(SHA1)]
+    assert [c[1] for c in calls] == [PR_PATH, RULES_PATH, runs_path(SHA1), status_path(SHA1)]
     for c in calls:
-        # GETs only: `gh api <path>` and nothing else — no -X/--method, no -f/-F/--input.
-        assert c == ["api", c[1]], c
+        # GETs only: `gh api <path>` and at most --paginate — no -X/--method, no -f/-F/--input.
+        assert c[0] == "api" and all(a == "--paginate" for a in c[2:]), c
+    # The rules are paged (30 a page, inherited rules included); the rest are single reads.
+    assert [("--paginate" in c) for c in calls] == [False, True, False, False]
+
+
+def test_cli_required_check_on_a_later_rules_page_is_enforced(tmp_path):
+    # Page 1 of the rules requires only checks that passed; page 2 requires one
+    # that never reported. Without paging the second page, this would pass.
+    fx = fixtures_for(SHA1, green_runs())
+    fx[RULES_PATH] = [rules(required=REQUIRED[:1])[1], rules(required=["slow-tests (full)"])[1]]
+    r, calls = run_cli(tmp_path, [REPO, "42"], fx)
+    assert r.returncode == 1
+    assert r.stdout == f"checks at {SHA1} not green: missing required: slow-tests (full)\n"
+    assert any(c[1] == RULES_PATH and "--paginate" in c for c in calls)
 
 
 def test_cli_wrong_head_is_exit_1_before_any_other_read(tmp_path):

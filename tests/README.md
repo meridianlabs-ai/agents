@@ -66,8 +66,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the approved head the fork wiring makes a plain push land on the
   contributor's branch) — and checks that every upstream merge request and
   re-approval in the skill names the pushed commit, that the External path
-  runs `checks_at_head.py` before its checkout, and that the companion
-  merge is pinned to the head `companion_mergeable.py` verified.
+  runs `checks_at_head.py` before its checkout, and — lifting the ts-mono
+  step 3 block with the helper and `gh` stubbed — that the companion merge
+  happens only after `companion_mergeable.py` passes on the head as it is
+  then, pinned to the SHA it returned, and never after a failed recheck.
 - `test_checks_at_head.py` — the merge queue's deferral of External PR
   trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
   Claude Security 4122327 criterion 2): the decision on canned payloads
@@ -76,8 +78,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   check; `skipped`/`neutral` pass as on GitHub; app-id matching; a
   non-success commit status; no required checks configured fails closed;
   the head must be the approved SHA) and the command line end to end
-  against a stub `gh` (GETs only, explicit paging by `total_count`, exit
-  codes).
+  against a stub `gh` (GETs only, the rules `--paginate`d with a required
+  check on a later page enforced, explicit check-run paging by
+  `total_count`, exit codes).
 - `test_companion_mergeable.py` — the merge queue's check of a ts-mono
   companion's own review state before merging it
   (`skills/merge-approved-prs/companion_mergeable.py`, Claude Security

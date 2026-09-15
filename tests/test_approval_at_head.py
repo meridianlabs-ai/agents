@@ -616,10 +616,18 @@ def test_skill_external_path_defers_to_ci_before_the_checkout():
     assert '--sha "$APPROVED"' in external[checks : external.index("\n", checks)]
 
 
-def test_skill_companion_head_line_parses_both_helper_outputs():
-    line = next(
+def companion_head_lines():
+    lines = [
         line.strip() for line in SKILL.read_text().splitlines() if line.strip().startswith("COMPANION_HEAD=$(printf")
+    ]
+    assert len(lines) == 2, (
+        "SKILL.md should derive COMPANION_HEAD before the update (step 2) and before the merge (step 3)"
     )
+    return lines
+
+
+@pytest.mark.parametrize("line", companion_head_lines())
+def test_skill_companion_head_line_parses_both_helper_outputs(line):
     sha = "c" * 40
     for out in (
         f"approved {sha} by epatey at 2026-09-10T12:00:00Z",
@@ -636,3 +644,59 @@ def test_skill_companion_head_line_parses_both_helper_outputs():
         env={"OUT": f"no approval for head {sha}; not regenerate-only: empty diff"},
     )
     assert r.stdout == ""
+
+
+# --- the companion merge block: re-verify on the final head, merge pinned to that SHA ---
+
+FAKE_HELPER_PY = """
+import os, sys
+print(os.environ["FAKE_HELPER_OUT"])
+sys.exit(int(os.environ["FAKE_HELPER_RC"]))
+"""
+
+
+def run_companion_merge_block(tmp_path, helper_out, helper_rc):
+    """Step 3 of the ts-mono sequence, lifted from SKILL.md, with the helper and `gh` stubbed and logged."""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "companion_mergeable.py").write_text(FAKE_HELPER_PY)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "gh.log"
+    log.write_text("")
+    gh = bin_dir / "gh"
+    gh.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n')
+    gh.chmod(0o755)
+    block = skill_block("3. **Merge the companion**").replace("<skill-base-dir>", str(skill_dir)).replace("<n>", "7")
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_HELPER_OUT": helper_out,
+        "FAKE_HELPER_RC": str(helper_rc),
+    }
+    r = sh("bash", "-c", block, cwd=tmp_path, env=env, check=False)  # plain bash: the block must guard itself
+    return r, log.read_text().splitlines()
+
+
+def test_skill_companion_merge_block_merges_only_what_the_helper_verified(tmp_path):
+    sha = "d" * 40
+    r, gh_calls = run_companion_merge_block(
+        tmp_path, f"regenerate-only {sha}: packages/x/generated.ts by i-am-marvin", 0
+    )
+    assert r.returncode == 0, r.stderr
+    assert gh_calls == [f"pr merge 7 --repo meridianlabs-ai/ts-mono --squash --match-head-commit {sha}"]
+    r, gh_calls = run_companion_merge_block(tmp_path, f"approved {sha} by epatey at 2026-09-10T12:00:00Z", 0)
+    assert gh_calls == [f"pr merge 7 --repo meridianlabs-ai/ts-mono --squash --match-head-commit {sha}"]
+
+
+def test_skill_companion_merge_block_never_merges_after_a_failed_recheck(tmp_path):
+    # The update-to-merge sequence: step 2 pushed a new head of a hand-written
+    # companion (or an approval was withdrawn), so the recheck fails — no merge.
+    sha = "d" * 40
+    r, gh_calls = run_companion_merge_block(
+        tmp_path,
+        f"approval is for {'c' * 40}, head is {sha}; 1 commit pushed after 2026-09-10T12:00:00Z; not regenerate-only: diff touches packages/inspect-common/src/types/index.ts, outside the generated set",
+        1,
+    )
+    assert r.returncode != 0
+    assert gh_calls == []
+    assert "approval is for" in r.stdout  # the reason is echoed for the report

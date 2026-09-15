@@ -406,17 +406,25 @@ workflow (`.github/workflows/log_viewer.yml`):
    submodule**. In the submodule: `git fetch origin`, refuse a moved head
    (`test "$(git rev-parse origin/<branch>)" = "$COMPANION_HEAD"` — SKIP on
    mismatch), `git checkout -B <branch> "$COMPANION_HEAD"`, `git merge
-   origin/main`, restore the regenerated `generated.ts`, commit, push, then
-   `COMPANION_HEAD=$(git rev-parse HEAD)` and wait for its CI. Your push adds
-   only main's content and the regenerated file, so it needs no fresh
-   review; the merge below is pinned to it.
-3. **Merge the companion**, pinned to the head you verified or pushed —
+   origin/main`, restore the regenerated `generated.ts`, commit and push
+   ONLY if there is something to commit (ts-mono's required checks are not
+   strict, so an unchanged companion need not have main merged in), and wait
+   for its CI. A push moves the head: a regenerate-only companion passes
+   step 3 again on its own, but a hand-written one now needs a ts-mono
+   approval of the pushed head — the skill never supplies it. Ask for one,
+   report, and skip the item if it does not come.
+3. **Merge the companion**, re-verified on the head as it is NOW — a push
+   in step 2, or an approval withdrawn while CI ran, must be seen here, so
+   the helper runs again and the merge is pinned to the SHA it returns.
    ts-mono main is squash-only:
    ```bash
-   test "$(gh pr view <n> --repo meridianlabs-ai/ts-mono --json headRefOid --jq .headRefOid)" = "$COMPANION_HEAD"   # anything else: someone pushed — re-run companion_mergeable.py, SKIP
-   gh pr merge <n> --repo meridianlabs-ai/ts-mono --squash --match-head-commit "$COMPANION_HEAD"
+   OUT=$(python3 <skill-base-dir>/companion_mergeable.py https://github.com/meridianlabs-ai/ts-mono/pull/<n>); RC=$?; echo "$OUT"
+   COMPANION_HEAD=$(printf '%s\n' "$OUT" | awk '$1 == "approved" || $1 == "regenerate-only" { sub(":$", "", $2); print $2 }')   # empty unless RC is 0
+   [ "$RC" -eq 0 ] && [ -n "$COMPANION_HEAD" ] && gh pr merge <n> --repo meridianlabs-ai/ts-mono --squash --match-head-commit "$COMPANION_HEAD"   # a non-zero RC: SKIP the whole item, report the line
    ```
-   (The old rule "regenerate-style companions merge without human review,
+   `--match-head-commit` makes GitHub refuse the merge if the head is no
+   longer the commit the helper verified. (The old rule "regenerate-style
+   companions merge without human review,
    precedent #427, #439" is now the helper's regenerate-only rule, checked
    against the diff; #439's `index.ts` edit would need an approval today.)
    **Then immediately re-check the tracking issue** — companions are

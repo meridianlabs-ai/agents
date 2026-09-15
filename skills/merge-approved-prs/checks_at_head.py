@@ -14,8 +14,8 @@ upstream's own CI has already run the approved commit and passed.
     checks_at_head.py OWNER/REPO N [--sha SHA]
 
 Read-only: `gh api` GETs on the PR (for its head SHA and base branch), the
-base branch's rules (for the required status checks), the check runs on the
-SHA and its commit statuses. Exit 0 and one stdout line
+base branch's rules (`--paginate`d: the required status checks may sit on
+any page), the check runs on the SHA and its commit statuses. Exit 0 and one stdout line
 
     checks passed at <sha>: N check runs, M statuses; required (K): <names>
 
@@ -228,7 +228,7 @@ def main(argv: list[str]) -> int:
             # Say so before reading anything about a commit nobody approved.
             print(f"head is {head}, not the approved {expected}")
             return 1
-        rules = gh_api(f"repos/{repo}/rules/branches/{base}")
+        rules = gh_api(f"repos/{repo}/rules/branches/{base}", paginate=True)  # 30 rules a page, inherited ones included
         if not isinstance(rules, list):
             raise GhError("unexpected response shape from rules")
         runs = fetch_check_runs(repo, head)
