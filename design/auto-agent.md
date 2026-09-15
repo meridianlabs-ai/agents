@@ -269,7 +269,9 @@ loop's escalation passes the comment its gate counted from (`comment-id`):
 the gates read only a trusted author's comment, so "the newest marker
 comment by any author" could be an outsider's forgery, and resetting that
 would leave the loop's real counter exhausted. The re-engagement reset has
-no gate and keeps the lookup (a follow-up for its `trusted-logins`):
+no gate and looks each counter up by its gate's own rule — the loop's newest
+marker; for attempts, else the newest by a write-access account — so it
+resets the comment the next gate will count from:
 
 - **Re-engagement** — a human comments `@auto` on an existing PR (item 6 under
   "Event-driven implementation sketch" below). claude.yml re-applies the label

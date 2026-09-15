@@ -23,8 +23,14 @@ description: >-
   the loop's real counter exhausted — "re-add the label" then escalated again
   on sight. An escalation therefore passes `comment-id`, the comment its gate
   counted from, and the composite resets exactly that. Without it (the
-  re-engagement reset has no gate) the lookup is the last marker comment, by
-  one of `trusted-logins` when the caller names them, else by any author.
+  re-engagement reset has no gate) each counter is looked up by ITS gate's
+  own rule, so the reset finds the comment the next gate will count from:
+  the newest marker comment by one of `trusted-logins`; for the CI-fix
+  attempts counter, else the newest by a write-access account (the CI-fix
+  gate counts a maintainer's hand-written counter, so re-engagement must
+  reset it too — permission looked up once per login, fail-closed, `[bot]`
+  logins never looked up); the review-rounds counter is the loop's own or
+  nothing, as its gate reads it. Never a marker by any other author.
   Dropping the head marker is deliberate: the no-progress check compares tips
   only once `prev >= 1`, so a fresh budget's first round is never mis-read as
   a stall (re-adding the label without pushing does not trip it), and that
@@ -74,9 +80,10 @@ inputs:
     default: ""
   trusted-logins:
     description: >-
-      Comma-separated logins whose marker comments count as the counter
-      when it is looked up (the caller's TRUSTED_LOGINS). Empty (default):
-      the newest marker comment by any author, as before.
+      Comma-separated logins whose marker comments are the loops' own (the
+      caller's TRUSTED_LOGINS), preferred when a counter is looked up. Empty
+      (default): no comment is the loop's own — `rounds` is then never found
+      by lookup, `attempts` only as a write-access account's.
     required: false
     default: ""
 
@@ -118,9 +125,27 @@ runs:
           printf '%s' "$out"
         }
         ok=1
-        # Comma list → jq array (whitespace-tolerant); `[]` when unset, which
-        # the lookup below reads as "any author".
+        # Comma list → jq array (whitespace-tolerant); `[]` when unset.
         trusted=$(jq -cn --arg t "$TRUSTED_LOGINS" '$t | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != ""))')
+        # write_access LOGIN: the CI-fix gate's fallback test — admin,
+        # maintain or write per the collaborators endpoint, looked up once
+        # per login (the cache is a `|login=perm|` list, not an associative
+        # array, so the tests can run this under bash 3). A failed lookup is
+        # untrusted (fail closed); a `[bot]` login is never looked up (the
+        # endpoint 404s for Apps, and any repository's workflow run posts as
+        # github-actions[bot]). Keep in step with claude-auto.yml's gate.
+        perms=""
+        write_access() {
+          local login="$1" perm
+          [ -n "$login" ] || return 1
+          case "$login" in *"[bot]") return 1 ;; esac
+          case "$perms" in
+            *"|$login="*) perm=${perms##*"|$login="}; perm=${perm%%"|"*} ;;
+            *) perm=$(ghr gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission') || perm=""
+               perms="$perms|$login=$perm|" ;;
+          esac
+          case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
+        }
         # One comment is one counter: with several counters requested the id
         # names none of them in particular, so fall back to the lookup.
         counters_n=$(set -- $COUNTERS; echo $#)
@@ -129,28 +154,41 @@ runs:
           COMMENT_ID=""
         fi
         for counter in $COUNTERS; do
+          # `fallback` is the counter's gate rule beyond the loop's own
+          # comment: the CI-fix gate also counts a write-access author's
+          # marker, the review-fix gate does not.
           case "$counter" in
-            rounds)   marker="<!-- auto-review-rounds -->"; label="auto review rounds";  unit="round" ;;
-            attempts) marker="<!-- auto-fix-attempts -->";  label="auto CI-fix attempts"; unit="attempt" ;;
+            rounds)   marker="<!-- auto-review-rounds -->"; label="auto review rounds";  unit="round";   fallback="none" ;;
+            attempts) marker="<!-- auto-fix-attempts -->";  label="auto CI-fix attempts"; unit="attempt"; fallback="write" ;;
             *) echo "::warning::reset-auto-counters: unknown counter '$counter'; skipping."; ok=0; continue ;;
           esac
           if [ -n "$COMMENT_ID" ]; then
             # The caller's gate already selected the comment it counted from:
             # reset exactly that one, no lookup.
             cid="$COMMENT_ID"
-          # Else the same lookup the gates use: the LAST comment carrying the
-          # marker — by one of the trusted logins when the caller named them.
-          # Gate on the exit code, not the output: an empty result means no
-          # counter comment exists (nothing to reset), a persistently failed
-          # call means we don't know — report that as not-ok rather than
-          # claiming a reset. `--paginate` output is one merged array on
-          # current gh, one array per page on older releases; -s plus
-          # `.[][]` flattens either.
-          elif ! cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                       | jq -rs --arg m "$marker" --argjson t "$trusted" \
-                           '[.[][] | select((.body|contains($m)) and (($t|length) == 0 or ((.user.login // "") as $l | any($t[]; . == $l))))] | last | .id // empty'); then
-            echo "::warning::reset-auto-counters: could not look up the $label comment on #$PR (after retries)."
-            ok=0; continue
+          else
+            # Else the counter's gate rule over the marker comments. Gate the
+            # fetch on the exit code, not the output: no candidates means no
+            # counter comment exists (nothing to reset), a persistently
+            # failed call means we don't know — report that as not-ok rather
+            # than claiming a reset. `--paginate` output is one merged array
+            # on current gh, one array per page on older releases; -s plus
+            # `.[][]` flattens either.
+            if ! cands=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                         | jq -cs --arg m "$marker" '[.[][] | select(.body|contains($m)) | {id, login: (.user.login // "")}]'); then
+              echo "::warning::reset-auto-counters: could not look up the $label comment on #$PR (after retries)."
+              ok=0; continue
+            fi
+            # The loop's own comment first (no lookups when one exists) …
+            cid=$(jq -r --argjson t "$trusted" 'map(select(.login as $l | any($t[]; . == $l))) | last | .id // empty' <<<"$cands")
+            # … else, where the gate does the same, the newest by a
+            # write-access account.
+            if [ -z "$cid" ] && [ "$fallback" = write ]; then
+              while IFS=$'\t' read -r id login; do
+                [ -n "$id" ] || continue
+                if write_access "$login"; then cid="$id"; break; fi
+              done < <(jq -r 'reverse | .[] | [.id, .login] | @tsv' <<<"$cands")
+            fi
           fi
           if [ -z "$cid" ]; then
             echo "reset-auto-counters: no $label comment on #$PR; nothing to reset (the next $unit starts at 1)."

@@ -365,6 +365,12 @@ sleep() { :; }
 gh() {
   case "$*" in
     "api repos/o/r/issues/42/comments --paginate") cat "$STATE/comments.json" ;;
+    "api repos/o/r/collaborators/"*"/permission --jq .permission")
+      local login=${2#repos/o/r/collaborators/}; login=${login%/permission}
+      echo "$login" >>"$STATE/lookups"
+      local p; p=$(awk -v l="$login" '$1==l {print $2}' "$STATE/perms")
+      [ -n "$p" ] || { echo '{"message":"Not Found"}'; return 1; }
+      echo "$p" ;;
     "api -X PATCH repos/o/r/issues/comments/"*)
       local id=${4##*/} body=${6#body=}
       echo "$id" >>"$STATE/patched"
@@ -376,9 +382,10 @@ gh() {
 """
 
 
-def run_reset(state: Path, *, comment_id="", trusted_logins="", counters="rounds"):
+def run_reset(state: Path, *, comment_id="", trusted_logins="", counters="rounds", perms=None):
     out = state.parent / "reset-out"
     out.write_text("")
+    (state / "perms").write_text("".join(f"{k} {v}\n" for k, v in (perms or {}).items()))
     env = {"STATE": str(state), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR": "42",
            "COUNTERS": counters, "REASON": "on escalation", "COMMENT_ID": comment_id,
            "TRUSTED_LOGINS": trusted_logins}
@@ -405,20 +412,28 @@ def test_escalation_reset_targets_the_counter_the_gate_selected(tmp_path):
     assert o["act"] == "fix" and o["round"] == "1" and o["cid"] == "100"
 
 
-def test_reset_lookup_fallback_honours_trusted_logins_and_defaults_to_any_author(tmp_path):
-    comments = [counter("i-am-marvin", 10, T0, cid=100), counter("nobody", 999, T2, cid=200)]
-    # No cid but trusted logins named (a gate that found nothing): the loop's
-    # own marker is the counter, the newer forgery is not.
+def test_reset_lookup_follows_the_review_gates_rule_for_rounds(tmp_path):
+    # No cid (the re-engagement reset has no gate): the rounds counter is the
+    # loop's own newest marker — never a newer forgery, and never a
+    # write-access human's either, since the review gate reads neither.
+    comments = [counter("i-am-marvin", 10, T0, cid=100), counter("nobody", 999, T2, cid=200),
+                counter("alice", 5, T3, cid=300)]
     state = fresh_state(tmp_path)
     (state / "comments.json").write_text(json.dumps(comments))
-    reset, patched = run_reset(state, trusted_logins="i-am-marvin")
+    reset, patched = run_reset(state, trusted_logins="i-am-marvin", perms={"alice": "write"})
     assert reset["ok"] == "1" and patched == ["100"]
-    # Neither input (the re-engagement reset in claude.yml): unchanged
-    # behaviour, the newest marker by any author.
+    assert lookups(state) == [], "the review gate never looks up a rounds author"
+    # Only a maintainer's rounds marker: nothing the review gate would count.
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps([counter("alice", 5, T3, cid=300)]))
+    r_out = state.parent / "reset-out"
+    reset, patched = run_reset(state, trusted_logins="i-am-marvin", perms={"alice": "write"})
+    assert reset["ok"] == "1" and patched == [] and lookups(state) == []
+    # No trusted logins at all: no comment is the loop's own.
     state = fresh_state(tmp_path)
     (state / "comments.json").write_text(json.dumps(comments))
     reset, patched = run_reset(state)
-    assert reset["ok"] == "1" and patched == ["200"]
+    assert reset["ok"] == "1" and patched == []
 
 
 def test_reset_ignores_a_comment_id_when_several_counters_are_requested(tmp_path):

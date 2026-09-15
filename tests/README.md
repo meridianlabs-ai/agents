@@ -46,7 +46,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   counter is read only from a trusted author's marker comment (the loop's
   own first, else a write-access account's; permission lookups cached and
   fail-closed; `[bot]` logins never looked up) and parsed strictly; the
-  reset and the refund PATCH only that comment. Also `verify-auto-labeler`'s
+  reset and the refund PATCH only that comment, and re-engagement's no-id
+  reset follows the gate's rule (a maintainer's counter the gate counts
+  from is reset; outsiders' and Apps' never). Also `verify-auto-labeler`'s
   `trusted-logins` input.
 - `test_approval_at_head.py` — the merge queue's approval-to-head binding
   (`skills/merge-approved-prs/approval_at_head.py`): the decision on canned
@@ -83,8 +85,8 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the `reset-auto-counters` composite's step (lifted the same way) in a
   gate → reset → gate sequence: escalation resets the comment the gate
   counted from (`comment-id`), so re-adding the label really starts a fresh
-  budget; the lookup fallback and its `trusted-logins` filter are covered
-  too.
+  budget; the no-id lookup follows the review gate's rule (the loop's own
+  marker or nothing) and is covered too.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS`, or a bot the

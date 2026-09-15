@@ -435,6 +435,54 @@ def test_escalation_resets_the_comment_the_gate_counted_from_and_the_gate_restar
     assert out["act"] == "fix" and out["attempt"] == "1" and out["cid"] == "10"
 
 
+def reengage(tmp_path, comments, perms=None):
+    # The composite as claude.yml's re-engagement calls it: both counters,
+    # no gate and so no comment-id, TRUSTED_LOGINS (run_step's).
+    env = {"PR": "7", "COMMENT_ID": "", "COUNTERS": "rounds attempts", "REASON": "on re-engagement — fresh cap"}
+    fixtures = {"comments": json.dumps(comments)}
+    for login, perm in (perms or {}).items():
+        fixtures[f"perm.{login}"] = perm
+    return run_step(RESET, tmp_path, env, fixtures)
+
+
+def test_reengagement_resets_a_maintainers_counter_the_gate_counts_from(tmp_path):
+    # Alice (write access) hand-wrote the counter and it sits at the cap; the
+    # gate counts from it, so re-engagement must reset THAT comment — a
+    # lookup that knew only the loop's own logins found nothing, returned
+    # ok=1, and the next red CI escalated again at attempt 4.
+    alice = counter(12, "alice", 3)
+    res, out, gate_calls, _ = gate(tmp_path, [alice], cap="3", perms={"alice": "write"})
+    assert res.returncode == 0, res.stderr
+    assert out["act"] == "escalate" and out["cid"] == "12"
+    res, rout, calls, stub = reengage(tmp_path, [alice], perms={"alice": "write"})
+    assert res.returncode == 0, res.stderr
+    assert rout == {"ok": "1"}
+    assert (stub / "patched.12").exists()
+    # The stub's call log spans both runs: the reset itself looked alice up once.
+    assert len(lookups(calls, "alice")) - len(lookups(gate_calls, "alice")) == 1
+    alice["body"] = (stub / "patched.12").read_text()
+    assert "attempts:" not in alice["body"]
+    res, out, _, _ = gate(tmp_path, [alice], cap="3", perms={"alice": "write"})
+    assert res.returncode == 0, res.stderr
+    assert out["act"] == "fix" and out["attempt"] == "1" and out["cid"] == "12"
+
+
+def test_reengagement_prefers_the_loops_own_counter_and_ignores_outsiders_and_bots(tmp_path):
+    marvin, alice = counter(10, "i-am-marvin", 3), counter(12, "alice", 3)
+    outsider, bot = counter(13, "outsider", 99), counter(14, "some-app[bot]", 99, type_="Bot")
+    # The loop's own comment wins over a newer maintainer's, with no lookup —
+    # the gate's precedence.
+    res, out, calls, stub = reengage(tmp_path, [marvin, alice], perms={"alice": "write"})
+    assert res.returncode == 0 and out == {"ok": "1"}, res.stderr
+    assert (stub / "patched.10").exists() and not (stub / "patched.12").exists() and lookups(calls) == []
+    # Outsiders and Apps are never the counter: nothing to reset, the App never looked up.
+    res, out, calls, stub = reengage(tmp_path, [outsider, bot], perms={"outsider": "read"})
+    assert res.returncode == 0 and out == {"ok": "1"}, res.stderr
+    assert not (stub / "patched.13").exists() and not (stub / "patched.14").exists()
+    assert lookups(calls, "some-app[bot]") == [] and len(lookups(calls, "outsider")) == 1
+    assert "nothing to reset" in res.stdout
+
+
 def test_reset_without_a_trusted_counter_has_nothing_to_do(tmp_path):
     # No cid from the gate: the composite's lookup runs, filtered by
     # TRUSTED_LOGINS, so an outsider's marker is not a counter to reset.
