@@ -240,6 +240,14 @@ on:
           loudly at that step (never a silent Claude fallback).
         required: false
 
+# The loops' trusted identity, in ONE place (the Class B principle: a comment
+# is believed only if its author is a trusted identity or holds write
+# access): the machine account today. Phase 2 (a GitHub App identity; the
+# login becomes `<app-slug>[bot]`) changes this one value. Read here by the
+# re-engagement reset, so it rewrites only the loops' own counter comments.
+env:
+  TRUSTED_LOGINS: i-am-marvin
+
 jobs:
   # TRUSTED: the trigger check and every write that must happen BEFORE the
   # agent runs — the 👀 ack, the stage move to Agent, the @auto opt-in and
@@ -666,7 +674,11 @@ jobs:
       # Both counters are reset (the CI-fixer gets its full attempt budget
       # again too); the reset body is the shared composite's, which also
       # drops the stored auto-review-head so the no-progress check is
-      # re-baselined. Best-effort: the composite never fails the run, and the
+      # re-baselined. Only the loops' own counter comments are reset
+      # (trusted-logins): the loop gates read only a trusted author's marker,
+      # so rewriting the newest marker by any author could hit an outsider's
+      # forgery and leave the real counters exhausted. Best-effort: the
+      # composite never fails the run, and the
       # result is not needed here — the label above is what arms the loop.
       - name: Reset the @auto counters (re-engagement)
         if: >-
@@ -678,6 +690,7 @@ jobs:
           token: ${{ secrets.MARVIN_TOKEN || github.token }}
           repo: ${{ github.repository }}
           pr: ${{ github.event.issue.number }}
+          trusted-logins: ${{ env.TRUSTED_LOGINS }}
           reason: "on re-engagement — fresh cap"
 
 

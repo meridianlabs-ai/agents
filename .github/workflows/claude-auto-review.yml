@@ -345,6 +345,7 @@ jobs:
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           label: ${{ inputs.auto_label }}
+          trusted-logins: ${{ env.TRUSTED_LOGINS }}
 
       - name: Gate and count
         id: gate

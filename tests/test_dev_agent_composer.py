@@ -517,3 +517,11 @@ def test_every_workflow_call_input_declares_a_type():
     missing = [name for name, keys in inputs.items() if "type" not in keys]
     assert not missing, f"inputs without a type: {missing}"
     assert {"required", "type", "default"} <= inputs["request_review_after_open"]
+
+
+def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_reset():
+    # The re-engagement reset rewrites only the loops' own counter comments;
+    # Phase 2 flips the one env value.
+    text = WORKFLOW.read_text()
+    assert text.count("\nenv:\n") == 1 and "\n  TRUSTED_LOGINS: i-am-marvin\n" in text
+    assert "trusted-logins: ${{ env.TRUSTED_LOGINS }}" in text

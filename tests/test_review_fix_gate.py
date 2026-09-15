@@ -437,3 +437,21 @@ def test_reset_ignores_a_comment_id_when_several_counters_are_requested(tmp_path
     assert "looking each up instead" in r.stdout
     assert (state / "patched").read_text().split() == ["100"]
     assert outputs(out)["ok"] == "1"
+
+
+# --- one trusted-logins value per workflow -----------------------------------
+
+
+def test_workflow_declares_trusted_logins_once_and_passes_it_to_every_composite():
+    # Phase 2 flips the env value; every composite that decides trust reads
+    # it from there (the labeler check and the escalation reset), and no
+    # trust decision names the login itself. (The gate's one remaining
+    # literal is the @-mention derivation's exclusion of the machine account
+    # as a ping target — not a trust decision; a follow-up.)
+    text = WORKFLOW.read_text()
+    assert text.count("\nenv:\n") == 1 and "\n  TRUSTED_LOGINS: i-am-marvin\n" in text
+    assert text.count("trusted-logins: ${{ env.TRUSTED_LOGINS }}") == 2
+    for anchor in ("      - name: Converged handoff", "      - name: Refund infra-crashed round"):
+        assert "i-am-marvin" not in lift_step(WORKFLOW, anchor), anchor
+    gate = lift_step(WORKFLOW, "        id: gate")
+    assert gate.count("i-am-marvin") == 2 and "trusted_author" in gate  # the mention jq only
