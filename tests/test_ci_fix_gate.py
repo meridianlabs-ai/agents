@@ -484,12 +484,26 @@ def test_reengagement_prefers_the_loops_own_counter_and_ignores_outsiders_and_bo
 
 
 def test_reset_without_a_trusted_counter_has_nothing_to_do(tmp_path):
-    # No cid from the gate: the composite's lookup runs, filtered by
-    # TRUSTED_LOGINS, so an outsider's marker is not a counter to reset.
-    res, out, _, stub = reset(tmp_path, "", {"comments": json.dumps([counter(11, "outsider", 99)])})
+    # No cid from the gate: the composite's lookup runs — the loop's own
+    # marker first, else a VERIFIED write-access author's — so an outsider's
+    # marker (permission read, no write) is not a counter to reset.
+    res, out, _, stub = reset(tmp_path, "", {"comments": json.dumps([counter(11, "outsider", 99)]),
+                                             "perm.outsider": "read"})
     assert res.returncode == 0, res.stderr
     assert out == {"ok": "1"} and not list(stub.glob("patched.*"))
     assert "nothing to reset" in res.stdout
+
+
+def test_reset_with_an_unverifiable_marker_author_is_unresolved_not_nothing(tmp_path):
+    # The permission lookup fails after retries (no fixture: gh's 404 or an
+    # unavailable API). "Nothing to reset, ok=1" would leave Alice's
+    # exhausted counter in place for the next gate to escalate on once
+    # permissions read again; the composite says it could not decide.
+    res, out, calls, stub = reengage(tmp_path, [counter(12, "alice", 3)])
+    assert res.returncode == 0, res.stderr
+    assert out == {"ok": "0"} and not list(stub.glob("patched.*"))
+    assert len(lookups(calls, "alice")) == 4, "retried, then unresolved"
+    assert "::warning::reset-auto-counters: could not verify" in res.stdout
 
 
 def test_reset_reports_a_patch_that_fails_after_retries(tmp_path):

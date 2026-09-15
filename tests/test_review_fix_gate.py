@@ -365,6 +365,7 @@ gh() {
   case "$*" in
     "api repos/o/r/issues/42/comments --paginate") cat "$STATE/comments.json" ;;
     "api repos/o/r/issues/comments/"*" --jq .body")
+      [ -f "$STATE/body-fail" ] && { echo '{"message":"Server Error"}'; return 1; }
       local id=${2##*/}
       jq -r --argjson i "$id" '.[] | select(.id==$i) | .body' "$STATE/comments.json" ;;
     "api -X PATCH repos/o/r/issues/comments/"*)
@@ -375,9 +376,11 @@ gh() {
 """
 
 
-def run_refund(tmp_path, comments):
+def run_refund(tmp_path, comments, *, body_fail=False):
     state = fresh_state(tmp_path)
     (state / "comments.json").write_text(json.dumps(comments))
+    if body_fail:
+        (state / "body-fail").write_text("")
     env = {"STATE": str(state), "REPO": "o/r", "PR": "42", "ROUND": "3", "CAP": "10",
            "MARKER": MARKER, "TRUSTED_LOGINS": "i-am-marvin"}
     r = sh("bash", "-c", REFUND_STUB + lift_step(WORKFLOW, "      - name: Refund infra-crashed round"),
@@ -393,6 +396,15 @@ def test_refund_patches_only_the_loops_own_counter(tmp_path):
                                              counter("nobody", 999, T2, cid=200, head=HEAD)])
     assert patched == ["100"]
     assert "rounds: 2" in body and OLD in body
+
+
+def test_refund_skips_when_the_counter_body_cannot_be_read(tmp_path):
+    # A failed GET is not an absent count: zeroing the counter on it would
+    # erase the budget and the no-progress baseline. No PATCH, a warning,
+    # one round of slack.
+    r, patched, _ = run_refund(tmp_path, [counter("i-am-marvin", 3, T0, cid=100, head=OLD)], body_fail=True)
+    assert patched == []
+    assert "::warning::could not read counter comment 100" in r.stdout
 
 
 def test_refund_ignores_a_counter_that_is_only_an_outsiders(tmp_path):

@@ -28,9 +28,12 @@ description: >-
   the newest marker comment by one of `trusted-logins`; for the CI-fix
   attempts counter, else the newest by a write-access account (the CI-fix
   gate counts a maintainer's hand-written counter, so re-engagement must
-  reset it too — permission looked up once per login, fail-closed, `[bot]`
-  logins never looked up); the review-rounds counter is the loop's own or
-  nothing, as its gate reads it. Never a marker by any other author.
+  reset it too — permission looked up once per login, `[bot]` logins never
+  looked up; a lookup that fails after retries leaves the selection
+  UNRESOLVED: nothing is reset and `ok` is "0", never a "nothing to reset"
+  that would leave an exhausted counter for the next gate to escalate on);
+  the review-rounds counter is the loop's own or nothing, as its gate reads
+  it. Never a marker by any other author.
   Dropping the head marker is deliberate: the no-progress check compares tips
   only once `prev >= 1`, so a fresh budget's first round is never mis-read as
   a stall (re-adding the label without pushing does not trip it), and that
@@ -130,9 +133,14 @@ runs:
         # write_access LOGIN: the CI-fix gate's fallback test — admin,
         # maintain or write per the collaborators endpoint, looked up once
         # per login (the cache is a `|login=perm|` list, not an associative
-        # array, so the tests can run this under bash 3). A failed lookup is
-        # untrusted (fail closed); a `[bot]` login is never looked up (the
-        # endpoint 404s for Apps, and any repository's workflow run posts as
+        # array, so the tests can run this under bash 3). Returns 0 for
+        # write access, 1 for a VERIFIED lesser permission, 2 when the
+        # lookup failed after retries (cached as `?`): unlike the gate,
+        # which fails closed and counts from 0, a reset must not mistake
+        # "could not check" for "not a counter" — reporting ok=1 without
+        # resetting would leave the exhausted counter for the next gate to
+        # escalate on. A `[bot]` login is never looked up (the endpoint 404s
+        # for Apps, and any repository's workflow run posts as
         # github-actions[bot]). Keep in step with claude-auto.yml's gate.
         perms=""
         write_access() {
@@ -141,10 +149,10 @@ runs:
           case "$login" in *"[bot]") return 1 ;; esac
           case "$perms" in
             *"|$login="*) perm=${perms##*"|$login="}; perm=${perm%%"|"*} ;;
-            *) perm=$(ghr gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission') || perm=""
+            *) perm=$(ghr gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission') || perm="?"
                perms="$perms|$login=$perm|" ;;
           esac
-          case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
+          case "$perm" in admin|maintain|write) return 0 ;; "?") return 2 ;; *) return 1 ;; esac
         }
         # One comment is one counter: with several counters requested the id
         # names none of them in particular, so fall back to the lookup.
@@ -183,11 +191,20 @@ runs:
             cid=$(jq -r --argjson t "$trusted" 'map(select(.login as $l | any($t[]; . == $l))) | last | .id // empty' <<<"$cands")
             # … else, where the gate does the same, the newest by a
             # write-access account.
-            if [ -z "$cid" ] && [ "$fallback" = write ]; then
+            if [ -z "$cid" ] && [ "$fallback" = "write" ]; then
+              unresolved=0
               while IFS=$'\t' read -r id login; do
                 [ -n "$id" ] || continue
-                if write_access "$login"; then cid="$id"; break; fi
+                write_access "$login"; rc=$?
+                if [ "$rc" -eq 0 ]; then cid="$id"; break; fi
+                # A newer candidate whose author could not be verified makes
+                # any older selection uncertain: stop and report unresolved.
+                if [ "$rc" -eq 2 ]; then unresolved=1; break; fi
               done < <(jq -r 'reverse | .[] | [.id, .login] | @tsv' <<<"$cands")
+              if [ "$unresolved" = 1 ]; then
+                echo "::warning::reset-auto-counters: could not verify a $label marker author's permission on #$PR (after retries); not resetting — that comment may be the counter."
+                ok=0; continue
+              fi
             fi
           fi
           if [ -z "$cid" ]; then

@@ -2420,7 +2420,14 @@ jobs:
             [[ "$after" =~ $re ]] || return 0
             printf '%s' "${BASH_REMATCH[1]}"
           }
-          mbody=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null || true)
+          # Only a body that was actually READ gets the absent-is-0 reading:
+          # a failed GET is not an absent count, and zeroing the counter on
+          # it would erase the budget and the no-progress baseline. Skip the
+          # refund instead — one round of slack, the accepted cost here.
+          if ! mbody=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null); then
+            echo "::warning::could not read counter comment $cid on #$PR; not refunding (the count stays as recorded — one round of slack, never a reset)."
+            exit 0
+          fi
           cur=$(field rounds '[0-9]{1,9}' "$mbody")
           cur=$((10#${cur:-0}))
           head=$(field auto-review-head '[0-9a-f]{40}' "$mbody")
