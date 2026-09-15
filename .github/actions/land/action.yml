@@ -8,8 +8,10 @@ description: >-
   privileged token: push the bundled commits (never --force, and never over
   a branch that moved during the run), open or adopt the PR, post the
   de-fanged comments and review replies, resolve review threads that belong
-  to that PR, file follow-up issues in allow-listed repos and add them to
-  Atlas, post the reviewer's verdict comment (a fixed marker body chosen by
+  to that PR, file follow-up issues in allow-listed repos (or comment on,
+  reopen and assign existing ones) and put them on Atlas at Todo, post the
+  manifest's Slack text to the channel and thread the CALLER's inputs name,
+  post the reviewer's verdict comment (a fixed marker body chosen by
   `review_verdict`), the `@review` hand-back or the escalation hand-off,
   move the board stage, post the model-provenance note, and finally report the
   manifest's error (failing the run when it says so — after everything else
@@ -142,6 +144,27 @@ inputs:
       SAME expression the caller passes to `emit-landing`: the validator pins
       the manifest's `issue_number` to it the same way, and it is the
       report's fallback target when there is no PR.
+    required: false
+    default: ""
+  slack-token:
+    description: >-
+      Slack bot token for the manifest's `slack.text_file` (the triage
+      workflow in the actions repo). Empty (the default): a manifest that
+      carries `slack` is reported as a failed post — the caller opted out of
+      Slack, the agent did not.
+    required: false
+    default: ""
+  slack-channel:
+    description: >-
+      Channel ID the Slack text is posted to, from the caller's TRUSTED
+      context (a validated job output, a secret) — the manifest names the
+      text only, never the destination. Shape-checked here (`^[CGD][A-Z0-9]{8,}$`).
+    required: false
+    default: ""
+  slack-thread-ts:
+    description: >-
+      Thread timestamp to reply in (`^[0-9]+\.[0-9]+$`), from the caller's
+      trusted context; empty posts at the channel root.
     required: false
     default: ""
   refuse-bundle:
@@ -443,11 +466,12 @@ runs:
         fi
         echo "number=$number" >>"$GITHUB_OUTPUT"
 
-    # Comments, review replies, thread resolutions, follow-up issues. Every
-    # body passes through defang (lib.sh) first — agent text posts from a
-    # write-access account. Thread IDs are checked against the PR's own
-    # threads before any resolve, so a manifest cannot resolve a thread on
-    # another PR.
+    # Comments, review replies, thread resolutions, follow-up issues, the
+    # Slack text. Every body passes through defang (lib.sh) first — agent
+    # text posts from a write-access account. Thread IDs are checked against
+    # the PR's own threads before any resolve, so a manifest cannot resolve a
+    # thread on another PR. The Slack destination is this action's own
+    # inputs; the manifest supplies the text and nothing else.
     #
     # Never exits non-zero: the push has already landed, and a lost comment
     # or follow-up issue is a far weaker reason to withhold the hand-back,
@@ -464,7 +488,9 @@ runs:
         DIR: ${{ runner.temp }}/landing
         LIB: ${{ github.action_path }}/lib.sh
         PR_NUMBER: ${{ steps.pr.outputs.number }}
-        PROJECT: PVT_kwDOC7YMCM4BU68p
+        SLACK_TOKEN: ${{ inputs.slack-token }}
+        SLACK_CHANNEL: ${{ inputs.slack-channel }}
+        SLACK_THREAD_TS: ${{ inputs.slack-thread-ts }}
       run: |
         set -uo pipefail
         . "$LIB"
@@ -515,41 +541,103 @@ runs:
             fi
           done <<<"$wanted"
         fi
-        # -- follow-up issues (repos allow-listed by the validator), added
-        #    to Atlas by the node ID the create call's number resolves to.
+        # -- follow-up issues (repos allow-listed by the validator). A create
+        #    goes on Atlas at Todo (atlas_todo, lib.sh); so does an existing
+        #    issue the manifest reopens or assigns — it is being adopted, and
+        #    the board's working views filter on assignee, so an unowned or
+        #    unboarded issue is invisible to the maintainer (inspect_ai#444).
+        #    `assignees` on a comment_on entry are added only when the issue
+        #    has none: never over a human's ownership — and when its
+        #    assignees cannot be read, the assignment is a recorded failure,
+        #    not a silent skip. Atlas is touched only after a reopen or
+        #    assignment actually happened.
+        created_urls=()
         n=$(jq -r '.issues // [] | length' "$m")
         for ((k = 0; k < n; k++)); do
           it=$(jq -c ".issues[$k]" "$m")
           irepo=$(jq -r '.repo' <<<"$it")
           defang "$DIR/$(jq -r '.body_file' <<<"$it")" "$RUNNER_TEMP/issue-$k.md"
           comment_on=$(jq -r '.comment_on // ""' <<<"$it")
+          assignees=()
+          while IFS= read -r a; do [ -n "$a" ] && assignees+=("$a"); done <<<"$(jq -r '.assignees // [] | .[]' <<<"$it")"
           if [ -n "$comment_on" ]; then
             if retry 3 "comment on $irepo#$comment_on" post_comment_file "$irepo" "$comment_on" "$RUNNER_TEMP/issue-$k.md"; then
               echo "land: commented on $irepo#$comment_on."
             else
               note "comment on $irepo#$comment_on failed"
             fi
+            adopted=""
+            if [ "$(jq -r '.reopen // false' <<<"$it")" = "true" ]; then
+              if retry 3 "reopen $irepo#$comment_on" gh issue reopen "$comment_on" --repo "$irepo"; then
+                echo "land: reopened $irepo#$comment_on."
+                adopted=1
+              else
+                note "reopen of $irepo#$comment_on failed"
+              fi
+            fi
+            if [ "${#assignees[@]}" -gt 0 ]; then
+              if ! have=$(retry_read 3 "assignee lookup for $irepo#$comment_on" gh api "repos/$irepo/issues/$comment_on" --jq '.assignees | length'); then
+                note "could not read $irepo#$comment_on's assignees; not assigned"
+              elif [ "$have" = "0" ]; then
+                args=(); for a in "${assignees[@]}"; do args+=(--add-assignee "$a"); done
+                if retry 3 "assign $irepo#$comment_on" gh issue edit "$comment_on" --repo "$irepo" "${args[@]}"; then
+                  echo "land: assigned $irepo#$comment_on to ${assignees[*]}."
+                  adopted=1
+                else
+                  note "assign of $irepo#$comment_on failed"
+                fi
+              else
+                echo "land: $irepo#$comment_on already has $have assignee(s); leaving ownership as is."
+              fi
+            fi
+            if [ -n "$adopted" ]; then
+              atlas_todo "$irepo" "$comment_on" \
+                || echo "::warning::land: could not put $irepo#$comment_on on Atlas (token lacks project scope?)."
+            fi
             continue
           fi
           title=$(defang_str "$(jq -r '.title' <<<"$it")")
           args=()
           while IFS= read -r lbl; do [ -n "$lbl" ] && args+=(--label "$lbl"); done <<<"$(jq -r '.labels // [] | .[]' <<<"$it")"
+          for a in "${assignees[@]}"; do args+=(--assignee "$a"); done
           if url=$(retry 3 "gh issue create in $irepo" gh issue create --repo "$irepo" --title "$title" \
                      --body-file "$RUNNER_TEMP/issue-$k.md" "${args[@]}"); then
             inum="${url##*/}"
             echo "land: opened $irepo#$inum ($url)."
-            node=$(gh api "repos/$irepo/issues/$inum" --jq '.node_id' 2>/dev/null || true)
-            if [ -n "$node" ] && gh api graphql \
-                 -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
-                 -f p="$PROJECT" -f c="$node" --silent 2>/dev/null; then
-              echo "land: added $irepo#$inum to Atlas."
-            else
-              echo "::warning::land: could not add $irepo#$inum to Atlas (token lacks project scope?)."
-            fi
+            created_urls+=("$url")
+            atlas_todo "$irepo" "$inum" \
+              || echo "::warning::land: could not add $irepo#$inum to Atlas (token lacks project scope?)."
           else
             note "issue create in $irepo failed"
           fi
         done
+        # -- Slack: the manifest's text (de-fanged, plus a link to each issue
+        #    created above — the agent cannot know those URLs) to the channel
+        #    and thread THIS action's inputs name. A manifest that carries
+        #    `slack` on a caller without the inputs is a failed post, not a
+        #    silent drop: the run's Slack reply was owed.
+        sfile=$(jq -r '.slack.text_file // ""' "$m")
+        if [ -n "$sfile" ]; then
+          if [ -z "$SLACK_TOKEN" ] || [ -z "$SLACK_CHANNEL" ]; then
+            note "slack text not posted: this land job has no slack-token / slack-channel"
+          elif ! [[ "$SLACK_CHANNEL" =~ ^[CGD][A-Z0-9]{8,}$ ]]; then
+            note "slack text not posted: slack-channel is not a channel ID"
+          elif [ -n "$SLACK_THREAD_TS" ] && ! [[ "$SLACK_THREAD_TS" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            note "slack text not posted: slack-thread-ts is not a Slack timestamp"
+          else
+            defang "$DIR/$sfile" "$RUNNER_TEMP/slack.txt"
+            # The links go in a separate tail file: slack_post_file caps the
+            # agent's text and appends the tail whole, so a long message
+            # loses its own end, never the links.
+            : >"$RUNNER_TEMP/slack-tail.txt"
+            for u in "${created_urls[@]}"; do printf '\nTracking issue: %s\n' "$u" >>"$RUNNER_TEMP/slack-tail.txt"; done
+            if retry 3 "slack post to $SLACK_CHANNEL" slack_post_file "$SLACK_CHANNEL" "$SLACK_THREAD_TS" "$RUNNER_TEMP/slack.txt" "$RUNNER_TEMP/slack-tail.txt"; then
+              echo "land: posted the Slack text to $SLACK_CHANNEL${SLACK_THREAD_TS:+ (thread $SLACK_THREAD_TS)}."
+            else
+              note "slack post to $SLACK_CHANNEL failed"
+            fi
+          fi
+        fi
         echo "failed=$failed" >>"$GITHUB_OUTPUT"
         exit 0
 

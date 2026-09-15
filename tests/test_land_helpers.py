@@ -11,6 +11,7 @@ follow) shows up as a failing test rather than a red land job on every
 caller.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -87,6 +88,22 @@ def test_retry_returns_last_status_and_keeps_stdout_clean():
     assert r.stdout.strip() == "rc=1"
     r = bash_lib("out=$(retry 1 what echo hello); echo \"[$out]\"")
     assert r.stdout.strip() == "[hello]"
+
+
+def test_retry_read_prints_only_the_successful_attempts_stdout(tmp_path):
+    # A failed `gh api` prints its JSON error body to stdout even with --jq;
+    # plain `retry` would stream it into the capture ahead of the real value.
+    flag = tmp_path / "flaked"
+    cmd = "\n".join([
+        "sleep() { :; }",
+        f"flaky() {{ if [ ! -f '{flag}' ]; then touch '{flag}'; echo '{{\"message\": \"Server Error\"}}'; return 1; fi; echo 0; }}",
+        'out=$(retry_read 3 what flaky); echo "rc=$? out=[$out]"',
+    ])
+    r = bash_lib(cmd)
+    assert r.stdout.strip() == "rc=0 out=[0]"
+    assert "retrying" in r.stderr
+    r = bash_lib("sleep() { :; }; out=$(retry_read 2 what sh -c 'echo junk; exit 3'); echo \"rc=$? out=[$out]\"")
+    assert r.stdout.strip() == "rc=3 out=[]"
 
 
 # A stub `gh` for open_or_adopt_pr: `pr list` reports the PR once it exists;
@@ -211,6 +228,330 @@ def test_remote_branch_exists_fails_when_the_error_persists(tmp_path):
     r, calls = branch_exists(tmp_path, "flaky", attempts=1)
     assert r.stdout.strip() == "rc=1 out="
     assert len(calls) == 1
+
+
+# A stub `gh` for atlas_todo: the issue's node id, the board add (an item
+# id), the current Status (from $STATE/status) and the status write, which
+# is logged so the tests see whether Todo was written.
+ATLAS_STUB = r"""
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$*" in
+    "api repos/"*) echo "I_kwDONODE" ;;
+    *addProjectV2ItemById*) echo "PVTI_ITEM" ;;
+    *fieldValueByName*)
+      if [ -n "${FLAKY:-}" ] && [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo '{"errors":[{"message":"Something went wrong"}]}'; return 1; fi
+      cat "$STATE/status" 2>/dev/null; echo ;;
+    *updateProjectV2ItemFieldValue*) echo "status-write" >>"$STATE/writes" ;;
+    *) echo "unexpected gh $*" >&2; return 2 ;;
+  esac
+}
+"""
+
+
+def atlas(tmp_path, status, *, flaky=False):
+    state = tmp_path / "state"
+    state.mkdir()
+    if status is not None:
+        (state / "status").write_text(status)
+    env = {"STATE": str(state), **({"FLAKY": "1"} if flaky else {})}
+    r = sh("bash", "-c", f". '{LIB}'\nsleep() {{ :; }}\n{ATLAS_STUB}\natlas_todo o/r 7", check=False, env=env)
+    writes = (state / "writes").read_text().splitlines() if (state / "writes").exists() else []
+    return r, writes
+
+
+@pytest.mark.parametrize("status", [None, "", "Done"])
+def test_atlas_todo_sets_todo_when_status_is_unset_or_done(tmp_path, status):
+    r, writes = atlas(tmp_path, status)
+    assert r.returncode == 0, r.stderr
+    assert writes == ["status-write"]
+    assert "Status=Todo" in r.stdout
+
+
+def test_atlas_todo_writes_todo_after_a_recovered_status_read(tmp_path):
+    # The first read fails with a JSON error body on stdout; the retry's
+    # "Done" is the value that decides — not the two concatenated.
+    r, writes = atlas(tmp_path, "Done", flaky=True)
+    assert r.returncode == 0, r.stderr
+    assert writes == ["status-write"]
+    assert "Status=Todo (was 'Done')" in r.stdout
+    assert "retrying" in r.stderr
+
+
+def test_atlas_todo_leaves_a_status_a_human_set(tmp_path):
+    r, writes = atlas(tmp_path, "In progress")
+    assert r.returncode == 0, r.stderr
+    assert writes == []
+    assert "left as is" in r.stdout
+
+
+def test_atlas_todo_fails_when_the_board_add_fails(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    stub = ATLAS_STUB.replace('*addProjectV2ItemById*) echo "PVTI_ITEM" ;;', '*addProjectV2ItemById*) return 1 ;;')
+    r = sh("bash", "-c", f". '{LIB}'\n{stub}\natlas_todo o/r 7", check=False, env={"STATE": str(state)})
+    assert r.returncode == 1
+
+
+def test_atlas_todo_skips_the_status_write_when_the_read_fails(tmp_path):
+    # A failed read is not "unset": writing Todo on it would overwrite a
+    # status a human chose. The read is retried; when it still fails the
+    # add stands (exit 0), the write is skipped and a warning says so.
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "status").write_text("In progress")
+    stub = ATLAS_STUB.replace('      cat "$STATE/status" 2>/dev/null; echo ;;', '      echo \'{"errors":[]}\'; return 1 ;;')
+    r = sh("bash", "-c", f". '{LIB}'\nsleep() {{ :; }}\n{stub}\natlas_todo o/r 7", check=False, env={"STATE": str(state)})
+    assert r.returncode == 0, r.stderr
+    calls = (state / "calls").read_text().splitlines()
+    assert sum("fieldValueByName" in c for c in calls) == 3
+    assert not (state / "writes").exists()
+    assert "Status could not be read; not set to Todo" in r.stdout
+
+
+# A stub `curl` for slack_post_file: records the request body and answers
+# from $STATE/response.
+SLACK_STUB = r"""
+curl() {
+  cat >"$STATE/body"
+  echo "$*" >"$STATE/curl-args"
+  cat "$STATE/response"
+}
+"""
+
+
+def slack(tmp_path, response, *, thread="1726000000.123456", text="hello <@U1> *bold*\n@review me\n", token="xoxb-test"):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "response").write_text(response)
+    f = tmp_path / "slack.txt"
+    f.write_text(text)
+    r = sh("bash", "-c", f". '{LIB}'\n{SLACK_STUB}\nslack_post_file C0123456789 '{thread}' '{f}'",
+           check=False, env={"STATE": str(state), "SLACK_TOKEN": token})
+    body = json.loads((state / "body").read_text()) if (state / "body").exists() else None
+    args = (state / "curl-args").read_text() if (state / "curl-args").exists() else ""
+    return r, body, args
+
+
+def test_slack_post_file_posts_the_text_as_data_in_the_thread(tmp_path):
+    r, body, args = slack(tmp_path, '{"ok": true, "ts": "1.2"}')
+    assert r.returncode == 0, r.stderr
+    assert body == {"channel": "C0123456789", "thread_ts": "1726000000.123456", "text": "hello <@U1> *bold*\n@review me\n"}
+    assert "Bearer xoxb-test" in args and "chat.postMessage" in args
+
+
+def test_slack_post_file_posts_at_the_channel_root_without_a_thread(tmp_path):
+    r, body, _ = slack(tmp_path, '{"ok": true}', thread="")
+    assert r.returncode == 0, r.stderr
+    assert "thread_ts" not in body
+
+
+def test_slack_post_file_fails_on_a_refused_post(tmp_path):
+    r, _, _ = slack(tmp_path, '{"ok": false, "error": "channel_not_found"}')
+    assert r.returncode == 1
+    assert "channel_not_found" in r.stderr
+
+
+def test_slack_post_file_refuses_an_empty_token(tmp_path):
+    r, body, _ = slack(tmp_path, '{"ok": true}', token="")
+    assert r.returncode == 1
+    assert body is None  # no request was made
+
+
+def test_slack_post_file_caps_the_text(tmp_path):
+    r, body, _ = slack(tmp_path, '{"ok": true}', text="x" * 50000)
+    assert r.returncode == 0, r.stderr
+    assert len(body["text"]) == 39000
+
+
+def test_slack_post_file_appends_the_tail_after_the_cap(tmp_path):
+    # The land job's own `Tracking issue:` lines ride in a tail file that
+    # is appended whole: the cap cuts the agent's text, never the links.
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "response").write_text('{"ok": true}')
+    (tmp_path / "slack.txt").write_text("x" * 50000)
+    tail = "\nTracking issue: https://github.com/o/r/issues/7\n"
+    (tmp_path / "tail.txt").write_text(tail)
+    r = sh("bash", "-c", f". '{LIB}'\n{SLACK_STUB}\nslack_post_file C0123456789 '' '{tmp_path}/slack.txt' '{tmp_path}/tail.txt'",
+           check=False, env={"STATE": str(state), "SLACK_TOKEN": "xoxb-test"})
+    assert r.returncode == 0, r.stderr
+    body = json.loads((state / "body").read_text())
+    assert len(body["text"]) == 39000
+    assert body["text"].endswith(tail)
+
+
+# --- the Post step ---------------------------------------------------------
+#
+# The `post` step's bash, lifted from the action (see emit_landing_script for
+# the extraction) and run against a manifest with `gh` and `curl` stubbed:
+# the issues loop's assign / reopen / Atlas decisions and the Slack post are
+# where a wrong branch writes to someone else's issue or board item.
+
+
+def post_script() -> str:
+    lines = LAND.read_text().splitlines()
+    start = lines.index("    - id: post")
+    run_at = next(i for i in range(start, len(lines)) if lines[i] == "      run: |")
+    body = []
+    for line in lines[run_at + 1:]:
+        if line.strip() == "":
+            body.append("")
+        elif line.startswith("        "):
+            body.append(line[8:])
+        else:
+            break
+    return "\n".join(body) + "\n"
+
+
+# `gh` answers from $SCENARIO: the issue's assignee count (`0`, `1`, or a
+# failed lookup), whether `issue edit` / `issue reopen` succeed. `curl`
+# records the Slack request. Every call is logged; the Atlas status write is
+# logged separately so a test can assert the board was not touched.
+POST_STUB = r"""
+sleep() { :; }
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$*" in
+    "api repos/"*"/comments "*) return 0 ;;
+    "api repos/"*"--jq .node_id") echo "I_kwDONODE" ;;
+    "api repos/"*"--jq .assignees | length")
+      case "$SCENARIO" in
+        lookup-fails) echo '{"message": "Server Error"}'; return 1 ;;
+        lookup-flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo '{"message": "Server Error"}'; return 1; fi; echo 0 ;;
+        owned) echo 1 ;;
+        *) echo 0 ;;
+      esac ;;
+    "issue create "*) echo "https://github.com/o/r/issues/7" ;;
+    "issue edit "*) [ "$SCENARIO" != edit-fails ] ;;
+    "issue reopen "*) [ "$SCENARIO" != reopen-fails ] ;;
+    *addProjectV2ItemById*) echo "PVTI_ITEM" ;;
+    *fieldValueByName*) echo "Done" ;;
+    *updateProjectV2ItemFieldValue*) echo "status-write" >>"$STATE/writes" ;;
+    *) echo "unexpected gh $*" >&2; return 2 ;;
+  esac
+}
+curl() {
+  cat >"$STATE/slack-request"
+  echo '{"ok": true}'
+}
+"""
+
+
+def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None):
+    state = tmp_path / "state"
+    state.mkdir()
+    landing = tmp_path / "landing"
+    landing.mkdir()
+    for name, text in files.items():
+        (landing / name).write_text(text)
+    (landing / "manifest.json").write_text(json.dumps(manifest))
+    out = tmp_path / "out.txt"
+    out.write_text("")
+    env = {
+        "STATE": str(state), "SCENARIO": scenario, "LIB": str(LIB), "DIR": str(landing),
+        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR_NUMBER": "",
+        "SLACK_TOKEN": "", "SLACK_CHANNEL": "", "SLACK_THREAD_TS": "",
+        **(slack_env or {}),
+    }
+    r = sh("bash", "-c", POST_STUB + post_script(), check=False, env=env)
+    calls = (state / "calls").read_text().splitlines() if (state / "calls").exists() else []
+    writes = (state / "writes").read_text().splitlines() if (state / "writes").exists() else []
+    failed = out.read_text().strip().removeprefix("failed=")
+    return r, calls, writes, failed
+
+
+def comment_on_manifest(**issue):
+    return {"schema": 1, "repo": "o/r", "run_id": 123, "branch": "b", "start_sha": "a" * 40, "head_sha": "a" * 40,
+            "has_bundle": False,
+            "issues": [{"repo": "o/r", "title": "t", "body_file": "i.md", "comment_on": 9, **issue}]}
+
+
+def test_post_assigns_an_unowned_issue_and_puts_it_on_atlas(tmp_path):
+    r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(assignees=["ransomr"]), {"i.md": "body\n"})
+    assert r.returncode == 0, r.stderr
+    assert "issue edit 9 --repo o/r --add-assignee ransomr" in calls
+    assert writes == ["status-write"]
+    assert failed == ""
+
+
+def test_post_assigns_after_a_recovered_assignee_lookup(tmp_path):
+    # `gh api` prints its error body to STDOUT on a failed attempt; the
+    # retried lookup must yield the successful attempt's `0` alone, or the
+    # assignment is skipped as "already owned" with nothing recorded.
+    r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(assignees=["ransomr"]), {"i.md": "body\n"}, scenario="lookup-flaky")
+    assert r.returncode == 0, r.stderr
+    assert sum(c.endswith("--jq .assignees | length") for c in calls) == 2
+    assert "issue edit 9 --repo o/r --add-assignee ransomr" in calls
+    assert writes == ["status-write"]
+    assert failed == ""
+
+
+def test_post_leaves_an_owned_issue_and_its_board_item_alone(tmp_path):
+    # Nothing was adopted: no assignment over a human's ownership, and no
+    # Atlas write on the strength of a request that was declined.
+    r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(assignees=["ransomr"]), {"i.md": "body\n"}, scenario="owned")
+    assert r.returncode == 0, r.stderr
+    assert not any(c.startswith("issue edit") for c in calls)
+    assert not any("addProjectV2ItemById" in c for c in calls)
+    assert writes == []
+    assert failed == ""
+    assert "already has 1 assignee(s)" in r.stdout
+
+
+def test_post_records_a_failed_assignee_lookup(tmp_path):
+    # Ownership unknown is not ownership taken: the lookup is retried, then
+    # the assignment is a recorded failure (`failed` output) and nothing is
+    # written to the issue or the board.
+    r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(assignees=["ransomr"]), {"i.md": "body\n"}, scenario="lookup-fails")
+    assert r.returncode == 0, r.stderr
+    assert sum(c.endswith("--jq .assignees | length") for c in calls) == 3
+    assert not any(c.startswith("issue edit") for c in calls)
+    assert writes == []
+    assert "could not read o/r#9's assignees; not assigned" in failed
+    assert "already has" not in r.stdout
+
+
+@pytest.mark.parametrize("scenario,issue,message", [
+    ("edit-fails", {"assignees": ["ransomr"]}, "assign of o/r#9 failed"),
+    ("reopen-fails", {"reopen": True}, "reopen of o/r#9 failed"),
+])
+def test_post_does_not_board_an_issue_whose_adoption_failed(tmp_path, scenario, issue, message):
+    r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(**issue), {"i.md": "body\n"}, scenario=scenario)
+    assert r.returncode == 0, r.stderr
+    assert not any("addProjectV2ItemById" in c for c in calls)
+    assert writes == []
+    assert message in failed
+
+
+def test_post_reopens_and_boards_an_issue(tmp_path):
+    r, calls, writes, failed = run_post(tmp_path, comment_on_manifest(reopen=True), {"i.md": "body\n"})
+    assert r.returncode == 0, r.stderr
+    assert "issue reopen 9 --repo o/r" in calls
+    assert writes == ["status-write"]
+    assert failed == ""
+
+
+def test_post_slack_tracking_links_survive_the_cap(tmp_path):
+    # A message at the cap plus an issue created in the same run: every
+    # created URL is in the post, inside the cap; the agent's text is cut.
+    m = {"schema": 1, "repo": "o/r", "run_id": 123, "branch": "b", "start_sha": "a" * 40, "head_sha": "a" * 40,
+         "has_bundle": False,
+         "issues": [{"repo": "o/r", "title": "t", "body_file": "i.md", "assignees": ["ransomr"]}],
+         "slack": {"text_file": "slack.txt"}}
+    r, calls, writes, failed = run_post(
+        tmp_path, m, {"i.md": "body\n", "slack.txt": "x" * 39000},
+        slack_env={"SLACK_TOKEN": "xoxb-test", "SLACK_CHANNEL": "C0123456789", "SLACK_THREAD_TS": "1726000000.123456"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert "issue create --repo o/r --title t --body-file" in " ".join(calls) and "--assignee ransomr" in " ".join(calls)
+    assert writes == ["status-write"]
+    assert failed == ""
+    req = json.loads((tmp_path / "state" / "slack-request").read_text())
+    assert req["channel"] == "C0123456789" and req["thread_ts"] == "1726000000.123456"
+    assert len(req["text"]) <= 39000
+    assert req["text"].endswith("\nTracking issue: https://github.com/o/r/issues/7\n")
+
 
 
 @pytest.mark.parametrize(
