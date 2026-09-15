@@ -30,14 +30,15 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `branch-prefix`. Also checks every `workflow_call` input declares a
   `type`.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
-  the auto label`, `Gate and count`) and the land job's `Refund
-  infra-crashed attempt` step, lifted the same way and run against a stub
+  the auto label`, `Gate and count`), the escalation's `Reset the attempt
+  counter` and the land job's `Refund infra-crashed attempt` step, lifted
+  the same way and run against a stub
   `gh`: the PR is resolved from `pr_number` and refused when closed, a fork
   head or on another branch (never listed by branch name); the attempt
   counter is read only from a trusted author's marker comment (the loop's
   own first, else a write-access account's; permission lookups cached and
   fail-closed; `[bot]` logins never looked up) and parsed strictly; the
-  refund PATCHes only that comment. Also `verify-auto-labeler`'s
+  reset and the refund PATCH only that comment. Also `verify-auto-labeler`'s
   `trusted-logins` input.
 
 Run from the repo root:

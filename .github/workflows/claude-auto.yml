@@ -407,14 +407,18 @@ jobs:
             esac
             case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
           }
-          # parse_attempts BODY: prints N when BODY carries exactly one
-          # `attempts: N` with N all digits, else nothing (a reset body has no
-          # count; a doubled or malformed one is not believed).
+          # parse_attempts BODY: prints the count, in decimal, when BODY carries
+          # exactly one `attempts:` whose following token is one to nine digits
+          # (the generated `attempts: N (cap C).`), else nothing — a reset body
+          # has no count; a doubled one, a token with any other character
+          # (`3junk`) or an oversized one is not believed. Nine digits keeps
+          # the arithmetic in range, and `10#` reads a leading zero as decimal
+          # (bash would otherwise take `08` as octal and abort the gate).
           parse_attempts() {
             local n
             [ "$(printf '%s' "$1" | grep -o 'attempts:' | wc -l | tr -d ' ')" = 1 ] || return 0
-            n=$(printf '%s' "$1" | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
-            [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n"
+            n=$(printf '%s' "$1" | sed -n 's/.*attempts:[[:space:]]*\([^[:space:]]*\).*/\1/p')
+            [[ "$n" =~ ^[0-9]{1,9}$ ]] && printf '%s' "$((10#$n))"
             return 0
           }
           # The loop's own comment first (no lookups when one exists), else
@@ -434,7 +438,7 @@ jobs:
             if [ -n "$n" ]; then
               prev=$n
             else
-              echo "Counter comment $cid by $cauthor carries no single 'attempts: N' line; counting from 0."
+              echo "Counter comment $cid by $cauthor carries no single valid 'attempts: N' (one to nine digits); counting from 0."
             fi
             echo "Counter: comment $cid by $cauthor reads attempts=$prev."
           else
@@ -527,8 +531,9 @@ jobs:
       #      with nobody pinged and only a red job as the trace. Empty
       #      disarm/reset outputs (the step never wrote them) route to the
       #      conservative wording — "still armed", "could not reset".
-      # The disarm and the reset are shared composites (AGENTS.md convention:
-      # step bodies copied between the loops live in .github/actions/).
+      # The disarm is a shared composite (AGENTS.md convention: step bodies
+      # copied between the loops live in .github/actions/); the reset is
+      # inline — see its step.
       - name: Disarm the loop (escalation)
         if: steps.gate.outputs.act == 'escalate'
         id: disarm
@@ -539,16 +544,52 @@ jobs:
           pr: ${{ steps.gate.outputs.pr }}
           label: ${{ inputs.auto_label }}
 
+      # The reset targets the comment the gate COUNTED FROM (its `cid`), not
+      # "the newest marker comment": the gate reads only a trusted author's
+      # comment (finding 4121987), so a reset that picked the newest marker
+      # by any author — what the shared reset-auto-counters composite does —
+      # could rewrite an outsider's comment and leave the loop's own
+      # exhausted, and re-adding the label would escalate again on sight:
+      # the false "re-add it" the reset exists to fix. Hence inline here
+      # rather than the composite (the review loop's and claude.yml's calls
+      # to it are a follow-up). The body is the composite's, so both readers
+      # count it as 0, and `ok` keeps the composite's meaning: 1 = reset, or
+      # nothing to reset; 0 = the PATCH failed after retries.
       - name: Reset the attempt counter (escalation)
         if: steps.gate.outputs.act == 'escalate' && steps.disarm.outputs.disarmed == '1'
         id: reset
-        uses: meridianlabs-ai/agents/.github/actions/reset-auto-counters@main
-        with:
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
-          repo: ${{ github.repository }}
-          pr: ${{ steps.gate.outputs.pr }}
-          counters: attempts
-          reason: "on escalation — re-adding `${{ inputs.auto_label }}` starts a fresh budget"
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          CID: ${{ steps.gate.outputs.cid }}
+          AUTO_LABEL: ${{ inputs.auto_label }}
+          MARKER: "<!-- auto-fix-attempts -->"
+        run: |
+          set -uo pipefail
+          # Same ghr as the gate's.
+          ghr() {
+            local n=0 out
+            until out=$("$@"); do
+              n=$((n+1))
+              if [ "$n" -ge 4 ]; then return 1; fi
+              sleep $((n*3))
+            done
+            printf '%s' "$out"
+          }
+          if [ -z "$CID" ]; then
+            echo "No trusted counter comment on #$PR; nothing to reset (the next attempt starts at 1)."
+            echo "ok=1" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          body="$MARKER
+          🤖 auto CI-fix attempts reset (on escalation — re-adding \`$AUTO_LABEL\` starts a fresh budget) — the next attempt starts at 1 with the full cap."
+          if ghr gh api -X PATCH "repos/$REPO/issues/comments/$CID" -f body="$body" --silent; then
+            echo "Reset auto CI-fix attempts on #$PR (comment $CID)."
+            echo "ok=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::could not reset auto CI-fix attempts on #$PR (comment $CID) after retries; it keeps its old value."
+            echo "ok=0" >>"$GITHUB_OUTPUT"
+          fi
 
       # Trigger-free ON PURPOSE (like every bot-authored comment here): the
       # re-engagement path is described, never spelled as its literal trigger.
@@ -1897,8 +1938,8 @@ jobs:
           parse_attempts() {
             local n
             [ "$(printf '%s' "$1" | grep -o 'attempts:' | wc -l | tr -d ' ')" = 1 ] || return 0
-            n=$(printf '%s' "$1" | sed -n 's/.*attempts:[[:space:]]*\([0-9]*\).*/\1/p')
-            [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n"
+            n=$(printf '%s' "$1" | sed -n 's/.*attempts:[[:space:]]*\([^[:space:]]*\).*/\1/p')
+            [[ "$n" =~ ^[0-9]{1,9}$ ]] && printf '%s' "$((10#$n))"
             return 0
           }
           cands=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate 2>/dev/null \
@@ -1914,11 +1955,15 @@ jobs:
           fi
           [ -z "$cid" ] && { echo "No counter comment from a trusted author found; nothing to refund."; exit 0; }
           # Re-read the count (same parse as the gate's) rather than trusting
-          # the gate's value: the next run's gate may have re-recorded since.
-          # Falls back to the gate's value when the body does not parse;
-          # never below zero (an escalation's reset may have zeroed it).
+          # the gate's value: the next run's gate may have re-recorded since,
+          # and an escalation's reset may have zeroed it — a body without a
+          # valid count reads as 0, as in the gate (the old fallback to this
+          # run's ATTEMPT would have undone such a reset); never below zero.
           cur=$(parse_attempts "$(jq -r --argjson id "$cid" 'map(select(.id == $id)) | first | .body' <<<"$cands")")
-          [[ "$cur" =~ ^[0-9]+$ ]] || cur=$ATTEMPT
+          if [ -z "$cur" ]; then
+            echo "Counter comment $cid carries no single valid 'attempts: N'; treating the count as 0."
+            cur=0
+          fi
           prev=$(( cur > 0 ? cur - 1 : 0 ))
           body="$MARKER
           🤖 auto CI-fix attempts: $prev (cap $CAP). (one attempt refunded — the fix agent never ran to a result and nothing landed: infrastructure, not the fix)"

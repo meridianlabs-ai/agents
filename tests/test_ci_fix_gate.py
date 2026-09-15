@@ -1,10 +1,11 @@
 """Tests for claude-auto.yml's gate and the land job's attempt refund.
 
 The CI-fix loop's gate decides, in shell, whether the agent runs and on
-which PR — so its three `run:` scripts (`Resolve PR and check the auto
-label`, `Gate and count`, `Refund infra-crashed attempt`) are lifted out of
-the workflow the way the composer tests lift theirs and run here against a
-stub `gh`, one case per rule from the 2026-09-04 Claude Security scan:
+which PR — so its `run:` scripts (`Resolve PR and check the auto label`,
+`Gate and count`, the escalation's `Reset the attempt counter`, and the
+land job's `Refund infra-crashed attempt`) are lifted out of the workflow
+the way the composer tests lift theirs and run here against a stub `gh`,
+one case per rule from the 2026-09-04 Claude Security scan:
 
 - 4122320: the PR is `inputs.pr_number`, viewed by number and required to
   be open, same-repo and on the run's head branch; a PR is never resolved
@@ -12,8 +13,8 @@ stub `gh`, one case per rule from the 2026-09-04 Claude Security scan:
 - 4121987: the attempt counter is read only from a marker comment whose
   author is one of `TRUSTED_LOGINS` (preferred) or holds write access;
   permission lookups are cached per login and fail closed, `[bot]` logins
-  are never looked up, the count is parsed strictly, and the refund
-  PATCHes only that comment.
+  are never looked up, the count is parsed strictly, and the refund and
+  the escalation's reset PATCH only that comment.
 
 `verify-auto-labeler`'s `trusted-logins` input is covered the same way.
 """
@@ -54,13 +55,15 @@ def step_script(path: Path, anchor: str, indent: int) -> str:
 
 RESOLVE = step_script(WORKFLOW, "        id: resolve", 10)
 GATE = step_script(WORKFLOW, "        id: gate", 10)
+RESET = step_script(WORKFLOW, "        id: reset", 10)
 REFUND = step_script(WORKFLOW, "      - name: Refund infra-crashed attempt", 10)
 VERIFY = step_script(LABELER, "    - id: verify", 8)
 
 # A stub `gh` answering from fixture files in $STUB and appending every call
 # to $STUB/calls. `pr list` is a hard failure: the gate must never list PRs
 # by branch name. A missing permission fixture is gh's 404 (a deleted account
-# or an unavailable API); a missing `pr` fixture is a PR that does not exist.
+# or an unavailable API); a missing `pr` fixture is a PR that does not exist;
+# a `patch-fail` fixture makes every PATCH fail.
 GH_STUB = r'''#!/bin/bash
 printf '%s\n' "$*" >>"$STUB/calls"
 case "$1 $2" in
@@ -79,7 +82,9 @@ case "$1 $2" in
     if [ -f "$STUB/perm.$login" ]; then cat "$STUB/perm.$login"; else echo '{"message":"Not Found"}'; exit 1; fi ;;
   "api -X")
     case "$3 $4" in
-      PATCH\ repos/o/r/issues/comments/*) printf '%s' "${6#body=}" >"$STUB/patched.${4##*/}" ;;
+      PATCH\ repos/o/r/issues/comments/*)
+        if [ -f "$STUB/patch-fail" ]; then echo '{"message":"Server Error"}'; exit 1; fi
+        printf '%s' "${6#body=}" >"$STUB/patched.${4##*/}" ;;
       POST\ repos/o/r/issues/*/comments) printf '%s' "${6#body=}" >"$STUB/posted" ;;
       *) echo "unexpected gh $*" >&2; exit 2 ;;
     esac ;;
@@ -296,10 +301,29 @@ def test_gate_parses_the_count_strictly(tmp_path):
     res, out, _, _ = gate(tmp_path, [doubled])
     assert res.returncode == 0, res.stderr
     assert out["attempt"] == "1" and out["cid"] == "10"
-    assert "carries no single 'attempts: N' line; counting from 0" in res.stdout
+    assert "carries no single valid 'attempts: N'" in res.stdout
     junk = comment(10, "i-am-marvin", f"{MARKER}\nattempts: many")
     res, out, _, _ = gate(tmp_path, [junk])
     assert res.returncode == 0 and out["attempt"] == "1"
+
+
+def test_gate_rejects_a_count_token_that_is_not_one_to_nine_digits(tmp_path):
+    # Review round 1: `3junk` used to read as 3 (the sed kept the digits and
+    # dropped the rest) and a 19-digit count wrapped `next` negative.
+    for bad in ("3junk", "9223372036854775807", "1234567890", "3.", "-1", "0x10"):
+        res, out, _, _ = gate(tmp_path, [comment(10, "i-am-marvin", f"{MARKER}\nattempts: {bad} (cap 3).")], cap="3")
+        assert res.returncode == 0, (bad, res.stderr)
+        assert out["attempt"] == "1" and out["act"] == "fix", bad
+        assert "no single valid 'attempts: N'" in res.stdout, bad
+
+
+def test_gate_reads_a_leading_zero_as_decimal(tmp_path):
+    # `08` is octal to bash arithmetic and aborted the gate under set -e.
+    res, out, _, _ = gate(tmp_path, [comment(10, "i-am-marvin", f"{MARKER}\nattempts: 08 (cap 3).")], cap="3")
+    assert res.returncode == 0, res.stderr
+    assert out["attempt"] == "9" and out["act"] == "escalate"
+    res, out, _, _ = gate(tmp_path, [comment(10, "i-am-marvin", f"{MARKER}\nattempts: 000000002 (cap 3).")], cap="3")
+    assert res.returncode == 0 and out["attempt"] == "3" and out["act"] == "fix"
 
 
 def test_gate_reads_a_reset_body_as_zero(tmp_path):
@@ -360,11 +384,65 @@ def test_refund_does_nothing_without_a_trusted_counter(tmp_path):
     assert "nothing to refund" in res.stdout
 
 
-def test_refund_falls_back_to_the_gates_attempt_when_the_body_does_not_parse(tmp_path):
+def test_refund_reads_an_unparsable_or_reset_body_as_zero(tmp_path):
+    # As in the gate. The old fallback to this run's ATTEMPT would have undone
+    # an escalation's reset that landed between this run's gate and its refund.
+    reset_body = comment(10, "i-am-marvin", f"{MARKER}\n🤖 auto CI-fix attempts reset (on escalation) — the next attempt starts at 1 with the full cap.")
+    res, _, _, stub = refund(tmp_path, [reset_body], attempt="3")
+    assert res.returncode == 0, res.stderr
+    assert "attempts: 0 (cap 3)" in (stub / "patched.10").read_text()
+    assert "treating the count as 0" in res.stdout
     doubled = comment(10, "i-am-marvin", f"{MARKER}\nattempts: 2\nattempts: 7")
     res, _, _, stub = refund(tmp_path, [doubled], attempt="3")
+    assert res.returncode == 0 and "attempts: 0 (cap 3)" in (stub / "patched.10").read_text()
+    octal = comment(10, "i-am-marvin", f"{MARKER}\nattempts: 08 (cap 3).")
+    res, _, _, stub = refund(tmp_path, [octal], attempt="3")
+    assert res.returncode == 0 and "attempts: 7 (cap 3)" in (stub / "patched.10").read_text()
+
+
+# --- Reset the attempt counter (escalation) -----------------------------------
+
+
+def reset(tmp_path, cid, fixtures=None):
+    env = {"PR": "7", "CID": cid, "AUTO_LABEL": "auto", "MARKER": MARKER}
+    return run_step(RESET, tmp_path, env, fixtures or {})
+
+
+def test_escalation_resets_the_comment_the_gate_counted_from_and_the_gate_restarts(tmp_path):
+    # Review round 1: marvin's counter (10) is at the cap and an outsider's
+    # newer marker (11) exists. The gate escalates from 10, so the reset must
+    # rewrite 10 — the shared composite would have rewritten the newest
+    # marker, 11, leaving 10 exhausted so that re-adding the label escalated
+    # again on sight.
+    marvin, outsider = counter(10, "i-am-marvin", 3), counter(11, "outsider", 99)
+    res, out, _, _ = gate(tmp_path, [marvin, outsider], cap="3", perms={"outsider": "read"})
     assert res.returncode == 0, res.stderr
-    assert "attempts: 2 (cap 3)" in (stub / "patched.10").read_text()
+    assert out["act"] == "escalate" and out["cid"] == "10"
+    res, rout, _, stub = reset(tmp_path, out["cid"])
+    assert res.returncode == 0, res.stderr
+    assert rout == {"ok": "1"}
+    assert (stub / "patched.10").exists() and not (stub / "patched.11").exists()
+    marvin["body"] = (stub / "patched.10").read_text()
+    assert marvin["body"].startswith(MARKER + "\n") and "attempts:" not in marvin["body"]
+    # Re-armed: the next red CI counts from the reset comment, not the outsider's.
+    res, out, _, _ = gate(tmp_path, [marvin, outsider], cap="3", perms={"outsider": "read"})
+    assert res.returncode == 0, res.stderr
+    assert out["act"] == "fix" and out["attempt"] == "1" and out["cid"] == "10"
+
+
+def test_reset_without_a_trusted_counter_has_nothing_to_do(tmp_path):
+    res, out, _, stub = reset(tmp_path, "")
+    assert res.returncode == 0, res.stderr
+    assert out == {"ok": "1"} and not list(stub.glob("patched.*"))
+    assert "nothing to reset" in res.stdout
+
+
+def test_reset_reports_a_patch_that_fails_after_retries(tmp_path):
+    res, out, calls, _ = reset(tmp_path, "10", {"patch-fail": ""})
+    assert res.returncode == 0, res.stderr
+    assert out == {"ok": "0"}
+    assert len([c for c in calls if c.startswith("api -X PATCH")]) == 4
+    assert "::warning::could not reset" in res.stdout
 
 
 # --- verify-auto-labeler's trusted-logins input ------------------------------
@@ -409,5 +487,5 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_composite():
     assert "trusted-logins: ${{ env.TRUSTED_LOGINS }}" in text
     # No trust decision names the login itself: the remaining literals are
     # the env value, the cc-target exclusion and the commit identity.
-    for script in (RESOLVE, GATE, REFUND):
+    for script in (RESOLVE, GATE, RESET, REFUND):
         assert "i-am-marvin" not in script

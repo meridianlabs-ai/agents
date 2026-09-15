@@ -243,9 +243,13 @@ summary rather than leaving the board at Agent.
 decision to grant a fresh budget** (escalation reset added 2026-09-09). Neither
 a green CI run nor a clean review round decrements or resets the sticky counter
 — the cap bounds total autonomous churn on a PR, not churn per failure streak.
-Exactly two paths reset a counter, and both go through the shared
-`.github/actions/reset-auto-counters` composite so the reset body cannot drift
-between them:
+Exactly two paths reset a counter, writing the same reset body (the shared
+`.github/actions/reset-auto-counters` composite's — though since 2026-09-15
+the CI-fix loop's escalation resets inline, targeting the comment its gate
+counted from: the composite rewrites the newest marker comment by any author,
+which a gate that reads only a trusted author's comment can no longer rely
+on; the review loop's and the re-engagement's calls to the composite are a
+follow-up):
 
 - **Re-engagement** — a human comments `@auto` on an existing PR (item 6 under
   "Event-driven implementation sketch" below). claude.yml re-applies the label
@@ -283,9 +287,10 @@ PR with nobody pinged and only a red job as the trace. For the same reason the
 hand-off step is gated on `!cancelled()` rather than the default success — an
 outright step failure in the disarm or reset (not the handled "could not"
 outcomes) must not skip the comment on a PR whose label may already be gone;
-empty outputs route to the conservative wording. Each of the three steps is a
-shared composite (`disarm-auto-loop`, `reset-auto-counters`, `post-pr-comment`)
-so the two loops cannot drift — as is the gates' labeler check
+empty outputs route to the conservative wording. The disarm and the hand-off
+are shared composites (`disarm-auto-loop`, `post-pr-comment`) so the two loops
+cannot drift, and the review loop's reset is too (`reset-auto-counters`; the
+CI-fix loop's is inline since 2026-09-15, see above) — as is the gates' labeler check
 (`verify-auto-labeler`, Trigger surface above); `post-pr-comment` is also what the `land`
 composite posts the loops' `@review` hand-back with, since that comment is
 the loop's other unlosable one. The
