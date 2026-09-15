@@ -2,9 +2,10 @@
 
 The CI-fix loop's gate decides, in shell, whether the agent runs and on
 which PR — so its `run:` scripts (`Resolve PR and check the auto label`,
-`Gate and count`, the escalation's `Reset the attempt counter`, and the
-land job's `Refund infra-crashed attempt`) are lifted out of the workflow
-the way the composer tests lift theirs and run here against a stub `gh`,
+`Gate and count`, and the land job's `Refund infra-crashed attempt`), and
+the escalation's reset (the `reset-auto-counters` composite's step, given
+the gate's `cid` as `comment-id`), are lifted out of the workflow and the
+action the way the composer tests lift theirs and run here against a stub `gh`,
 one case per rule from the 2026-09-04 Claude Security scan:
 
 - 4122320: the PR is `inputs.pr_number`, viewed by number and required to
@@ -28,6 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
 LABELER = ROOT / ".github" / "actions" / "verify-auto-labeler" / "action.yml"
+RESET_ACTION = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
@@ -55,7 +57,7 @@ def step_script(path: Path, anchor: str, indent: int) -> str:
 
 RESOLVE = step_script(WORKFLOW, "        id: resolve", 10)
 GATE = step_script(WORKFLOW, "        id: gate", 10)
-RESET = step_script(WORKFLOW, "        id: reset", 10)
+RESET = step_script(RESET_ACTION, "    - id: reset", 8)
 REFUND = step_script(WORKFLOW, "      - name: Refund infra-crashed attempt", 10)
 VERIFY = step_script(LABELER, "    - id: verify", 8)
 
@@ -73,7 +75,7 @@ case "$1 $2" in
   "pr edit"|"pr comment") exit 0 ;;
   "api repos/o/r/issues/"*)
     case "$2" in
-      */comments\?per_page=100) cat "$STUB/comments" ;;
+      */comments\?per_page=100|*/comments) cat "$STUB/comments" ;;
       */timeline\?per_page=100) cat "$STUB/timeline" ;;
       *) echo "unexpected gh $*" >&2; exit 2 ;;
     esac ;;
@@ -93,7 +95,11 @@ esac
 '''
 
 
-def run_step(script: str, tmp_path: Path, env: dict, fixtures: dict):
+def run_step(script: str, tmp_path: Path, env: dict, fixtures: dict, *, composite: bool = False):
+    """Run a lifted script under the runner's shell options — `bash -e {0}`
+    for a workflow `run:` step, `bash --noprofile --norc -eo pipefail {0}`
+    for a composite's `shell: bash` step — so a bare non-zero status fails
+    here as it would there."""
     binp = tmp_path / "bin"
     binp.mkdir(exist_ok=True)
     for name, body in (("gh", GH_STUB), ("sleep", "#!/bin/bash\nexit 0\n")):
@@ -108,7 +114,8 @@ def run_step(script: str, tmp_path: Path, env: dict, fixtures: dict):
     out.write_text("")
     e = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
          "REPO": "o/r", "GH_TOKEN": "x", "TRUSTED_LOGINS": "i-am-marvin", **env}
-    res = sh("bash", "-c", script, check=False, env=e)
+    opts = ["-e", "-o", "pipefail"] if composite else ["-e"]
+    res = sh("bash", "--noprofile", "--norc", *opts, "-c", script, check=False, env=e)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     calls = (stub / "calls").read_text().splitlines() if (stub / "calls").exists() else []
     return res, outputs, calls, stub
@@ -404,16 +411,19 @@ def test_refund_reads_an_unparsable_or_reset_body_as_zero(tmp_path):
 
 
 def reset(tmp_path, cid, fixtures=None):
-    env = {"PR": "7", "CID": cid, "AUTO_LABEL": "auto", "MARKER": MARKER}
-    return run_step(RESET, tmp_path, env, fixtures or {})
+    # The composite as claude-auto.yml calls it: the gate's cid as comment-id,
+    # TRUSTED_LOGINS (run_step's) as the lookup filter for an empty one.
+    env = {"PR": "7", "COMMENT_ID": cid, "COUNTERS": "attempts",
+           "REASON": "on escalation — re-adding `auto` starts a fresh budget"}
+    return run_step(RESET, tmp_path, env, fixtures or {}, composite=True)
 
 
 def test_escalation_resets_the_comment_the_gate_counted_from_and_the_gate_restarts(tmp_path):
     # Review round 1: marvin's counter (10) is at the cap and an outsider's
     # newer marker (11) exists. The gate escalates from 10, so the reset must
-    # rewrite 10 — the shared composite would have rewritten the newest
-    # marker, 11, leaving 10 exhausted so that re-adding the label escalated
-    # again on sight.
+    # rewrite 10 — the composite's lookup path would have rewritten the
+    # newest marker, 11, leaving 10 exhausted so that re-adding the label
+    # escalated again on sight; hence the gate's cid travels as comment-id.
     marvin, outsider = counter(10, "i-am-marvin", 3), counter(11, "outsider", 99)
     res, out, _, _ = gate(tmp_path, [marvin, outsider], cap="3", perms={"outsider": "read"})
     assert res.returncode == 0, res.stderr
@@ -430,11 +440,89 @@ def test_escalation_resets_the_comment_the_gate_counted_from_and_the_gate_restar
     assert out["act"] == "fix" and out["attempt"] == "1" and out["cid"] == "10"
 
 
+def reengage(tmp_path, comments, perms=None):
+    # The composite as claude.yml's re-engagement calls it: both counters,
+    # no gate and so no comment-id, TRUSTED_LOGINS (run_step's).
+    env = {"PR": "7", "COMMENT_ID": "", "COUNTERS": "rounds attempts", "REASON": "on re-engagement — fresh cap"}
+    fixtures = {"comments": json.dumps(comments)}
+    for login, perm in (perms or {}).items():
+        fixtures[f"perm.{login}"] = perm
+    return run_step(RESET, tmp_path, env, fixtures, composite=True)
+
+
+def test_reengagement_resets_a_maintainers_counter_the_gate_counts_from(tmp_path):
+    # Alice (write access) hand-wrote the counter and it sits at the cap; the
+    # gate counts from it, so re-engagement must reset THAT comment — a
+    # lookup that knew only the loop's own logins found nothing, returned
+    # ok=1, and the next red CI escalated again at attempt 4.
+    alice = counter(12, "alice", 3)
+    res, out, gate_calls, _ = gate(tmp_path, [alice], cap="3", perms={"alice": "write"})
+    assert res.returncode == 0, res.stderr
+    assert out["act"] == "escalate" and out["cid"] == "12"
+    res, rout, calls, stub = reengage(tmp_path, [alice], perms={"alice": "write"})
+    assert res.returncode == 0, res.stderr
+    assert rout == {"ok": "1"}
+    assert (stub / "patched.12").exists()
+    # The stub's call log spans both runs: the reset itself looked alice up once.
+    assert len(lookups(calls, "alice")) - len(lookups(gate_calls, "alice")) == 1
+    alice["body"] = (stub / "patched.12").read_text()
+    assert "attempts:" not in alice["body"]
+    res, out, _, _ = gate(tmp_path, [alice], cap="3", perms={"alice": "write"})
+    assert res.returncode == 0, res.stderr
+    assert out["act"] == "fix" and out["attempt"] == "1" and out["cid"] == "12"
+
+
+def test_reengagement_prefers_the_loops_own_counter_and_ignores_outsiders_and_bots(tmp_path):
+    marvin, alice = counter(10, "i-am-marvin", 3), counter(12, "alice", 3)
+    outsider, bot = counter(13, "outsider", 99), counter(14, "some-app[bot]", 99, type_="Bot")
+    # The loop's own comment wins over a newer maintainer's, with no lookup —
+    # the gate's precedence.
+    res, out, calls, stub = reengage(tmp_path, [marvin, alice], perms={"alice": "write"})
+    assert res.returncode == 0 and out == {"ok": "1"}, res.stderr
+    assert (stub / "patched.10").exists() and not (stub / "patched.12").exists() and lookups(calls) == []
+    # Outsiders and Apps are never the counter: nothing to reset, the App never looked up.
+    res, out, calls, stub = reengage(tmp_path, [outsider, bot], perms={"outsider": "read"})
+    assert res.returncode == 0 and out == {"ok": "1"}, res.stderr
+    assert not (stub / "patched.13").exists() and not (stub / "patched.14").exists()
+    assert lookups(calls, "some-app[bot]") == [] and len(lookups(calls, "outsider")) == 1
+    assert "nothing to reset" in res.stdout
+
+
 def test_reset_without_a_trusted_counter_has_nothing_to_do(tmp_path):
-    res, out, _, stub = reset(tmp_path, "")
+    # No cid from the gate: the composite's lookup runs — the loop's own
+    # marker first, else a VERIFIED write-access author's — so an outsider's
+    # marker (permission read, no write) is not a counter to reset.
+    res, out, _, stub = reset(tmp_path, "", {"comments": json.dumps([counter(11, "outsider", 99)]),
+                                             "perm.outsider": "read"})
     assert res.returncode == 0, res.stderr
     assert out == {"ok": "1"} and not list(stub.glob("patched.*"))
     assert "nothing to reset" in res.stdout
+
+
+def test_reengagement_passes_an_outsiders_newer_marker_to_reach_a_maintainers_counter(tmp_path):
+    # Review round 7: `shell: bash` runs the composite under -e, and a bare
+    # `write_access; rc=$?` ended the step on the outsider's verified
+    # non-write (status 1) before `ok` was written — the re-engagement died
+    # and Alice's exhausted counter stayed. The status is captured, so the
+    # walk continues to her comment.
+    alice, outsider = counter(12, "alice", 3), counter(13, "outsider", 99)
+    res, out, calls, stub = reengage(tmp_path, [alice, outsider], perms={"alice": "write", "outsider": "read"})
+    assert res.returncode == 0, res.stderr
+    assert out == {"ok": "1"}
+    assert (stub / "patched.12").exists() and not (stub / "patched.13").exists()
+    assert len(lookups(calls, "outsider")) == 1 and len(lookups(calls, "alice")) == 1
+
+
+def test_reset_with_an_unverifiable_marker_author_is_unresolved_not_nothing(tmp_path):
+    # The permission lookup fails after retries (no fixture: gh's 404 or an
+    # unavailable API). "Nothing to reset, ok=1" would leave Alice's
+    # exhausted counter in place for the next gate to escalate on once
+    # permissions read again; the composite says it could not decide.
+    res, out, calls, stub = reengage(tmp_path, [counter(12, "alice", 3)])
+    assert res.returncode == 0, res.stderr
+    assert out == {"ok": "0"} and not list(stub.glob("patched.*"))
+    assert len(lookups(calls, "alice")) == 4, "retried, then unresolved"
+    assert "::warning::reset-auto-counters: could not verify" in res.stdout
 
 
 def test_reset_reports_a_patch_that_fails_after_retries(tmp_path):
@@ -442,7 +530,7 @@ def test_reset_reports_a_patch_that_fails_after_retries(tmp_path):
     assert res.returncode == 0, res.stderr
     assert out == {"ok": "0"}
     assert len([c for c in calls if c.startswith("api -X PATCH")]) == 4
-    assert "::warning::could not reset" in res.stdout
+    assert "could not reset" in res.stdout
 
 
 # --- verify-auto-labeler's trusted-logins input ------------------------------
@@ -454,7 +542,7 @@ def verify(tmp_path, labeler, *, trusted, perms=None):
     fixtures = {"timeline": timeline, "comments": "[]"}
     for login, perm in (perms or {}).items():
         fixtures[f"perm.{login}"] = perm
-    return run_step(VERIFY, tmp_path, env, fixtures)
+    return run_step(VERIFY, tmp_path, env, fixtures, composite=True)
 
 
 def test_labeler_trusts_a_listed_bot_login_without_a_lookup(tmp_path):

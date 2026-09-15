@@ -40,13 +40,38 @@ jobs:
     # mentions like agents#20's; prompt-driven). Cost: a comment carrying
     # either alongside a genuine bare trigger is wrongly skipped — rare,
     # recoverable by re-commenting the bare token alone.
+    # author_association filter (OWNER/MEMBER/COLLABORATOR) on both comment
+    # paths: a COST filter, not the gate (the shape the dev stub's
+    # `claude-auto` job uses). On a public repo anyone can comment `@review`;
+    # without this every such comment spun a runner (Claude Security
+    # 4085111). It is not authoritative — CONTRIBUTOR is anyone with a
+    # merged commit, and whether org members show as MEMBER depends on org
+    # settings — so the reusable workflow's trig check (a fail-closed
+    # permission lookup on the actor, before any write or checkout) remains
+    # the authority. A writer whose association is reported looser than
+    # expected is dropped here silently — trig would have AUTHORIZED them,
+    # so this filter is what they hit, and there is no fallback path: a
+    # collaborator re-triggers. The loops' hand-back passes: their land jobs
+    # post `@review` as the machine account, a User with write access. A
+    # Bot commenter (the payload's user.type — a GitHub App, `[bot]` suffix
+    # or not) passes too: its association is NONE whatever it may do, and
+    # the reusable's `allowed_bots` input is what decides a bot's request
+    # (its trig step refuses every bot not named there), so the filter must
+    # not drop an allow-listed bot first. Bounded cost: only Apps installed
+    # on the repo can comment as a Bot, and github-actions[bot] triggers no
+    # workflow. Phase 2's App identity passes the same way and is admitted
+    # by the reusable's TRUSTED_LOGINS.
     if: >
       (github.event.issue.pull_request != null &&
+       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) ||
+        github.event.comment.user.type == 'Bot') &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->')) ||
       (github.event.issue.pull_request == null &&
        contains(github.event.issue.labels.*.name, 'External') &&
+       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) ||
+        github.event.comment.user.type == 'Bot') &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->'))

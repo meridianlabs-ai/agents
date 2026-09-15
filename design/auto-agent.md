@@ -174,6 +174,35 @@ finding 4121989) that is enforced in three layers rather than assumed:
   permanent, not a blip — a deleted account 404s forever and an App stays an
   App — which would otherwise be the silent labeled-and-stalled state the
   gate-failure failsafe (below) exists to prevent.
+- **The review-fix gate believes only trusted authors** (Claude Security
+  finding 4121983, 2026-09-15). `claude-auto-review.yml`'s gate recovers the
+  loop's state from PR comments by marker substring — the reviewer's
+  verdict, the round counter with the previous head SHA, the re-review
+  requests the stale-verdict guard compares against, and the converged
+  hand-off's double-post marker — and on a public caller any account can
+  post those substrings. Each read now also filters by author: the verdict
+  to `REVIEWER_LOGINS`, the counter and the hand-off marker to
+  `TRUSTED_LOGINS` (the loop's own comments — a forged marker is ignored
+  and never PATCHed, by the gate or the land job's refund), a re-review
+  request to whoever the reviewer would run for — a trusted login, a bot in
+  the caller's `review_allowed_bots` (the reviewer's `allowed_bots`) or a
+  write-access account (one cached permission lookup per login,
+  fail-closed; bots are told from users by the payload's `user.type`, not
+  only a `[bot]` suffix); a reviewer identity is a verdict author, not a
+  requester by right — its request counts through that list, whose default
+  names the reviewer bot as the deployed reviewer stubs do, so existing
+  callers need no change and one whose reviewer refuses bots passes an
+  explicit empty string. The review stubs' association filter lets a Bot
+  commenter through for the same reason: the reusable's allow-list decides
+  bots. `rounds:` must parse as one
+  whole decimal token of at most nine digits and `auto-review-head:` as one
+  whole 40-hex SHA, each present exactly once and delimited by whitespace as
+  the record step writes them, else the counter counts as
+  absent rather than aborting the gate or wrapping past the cap. The
+  escalation reset (`reset-auto-counters`, given the gate's `cid` as
+  `comment-id`) resets the very comment the gate counted from. Both lists are
+  workflow-level `env:` values — the one place Phase 2's App identity
+  changes.
 
 The injection blast-radius argument in architecture.md → Permissions is
 unchanged.
@@ -244,12 +273,14 @@ decision to grant a fresh budget** (escalation reset added 2026-09-09). Neither
 a green CI run nor a clean review round decrements or resets the sticky counter
 — the cap bounds total autonomous churn on a PR, not churn per failure streak.
 Exactly two paths reset a counter, writing the same reset body (the shared
-`.github/actions/reset-auto-counters` composite's — though since 2026-09-15
-the CI-fix loop's escalation resets inline, targeting the comment its gate
-counted from: the composite rewrites the newest marker comment by any author,
-which a gate that reads only a trusted author's comment can no longer rely
-on; the review loop's and the re-engagement's calls to the composite are a
-follow-up):
+`.github/actions/reset-auto-counters` composite's). Since 2026-09-15 each
+loop's escalation passes the comment its gate counted from (`comment-id`):
+the gates read only a trusted author's comment, so "the newest marker
+comment by any author" could be an outsider's forgery, and resetting that
+would leave the loop's real counter exhausted. The re-engagement reset has
+no gate and looks each counter up by its gate's own rule — the loop's newest
+marker; for attempts, else the newest by a write-access account — so it
+resets the comment the next gate will count from:
 
 - **Re-engagement** — a human comments `@auto` on an existing PR (item 6 under
   "Event-driven implementation sketch" below). claude.yml re-applies the label
@@ -289,8 +320,8 @@ outright step failure in the disarm or reset (not the handled "could not"
 outcomes) must not skip the comment on a PR whose label may already be gone;
 empty outputs route to the conservative wording. The disarm and the hand-off
 are shared composites (`disarm-auto-loop`, `post-pr-comment`) so the two loops
-cannot drift, and the review loop's reset is too (`reset-auto-counters`; the
-CI-fix loop's is inline since 2026-09-15, see above) — as is the gates' labeler check
+cannot drift, and so is the reset (`reset-auto-counters`, given each gate's
+`cid` — see above) — as is the gates' labeler check
 (`verify-auto-labeler`, Trigger surface above); `post-pr-comment` is also what the `land`
 composite posts the loops' `@review` hand-back with, since that comment is
 the loop's other unlosable one. The

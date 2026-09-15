@@ -37,15 +37,18 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   machine account and ends the search), and the `Companion PR:` issue-body
   line counting only from a trusted author and only for a ts-mono URL.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
-  the auto label`, `Gate and count`), the escalation's `Reset the attempt
-  counter` and the land job's `Refund infra-crashed attempt` step, lifted
+  the auto label`, `Gate and count`), the escalation's reset (the
+  `reset-auto-counters` composite's step, given the gate's `cid`) and the
+  land job's `Refund infra-crashed attempt` step, lifted
   the same way and run against a stub
   `gh`: the PR is resolved from `pr_number` and refused when closed, a fork
   head or on another branch (never listed by branch name); the attempt
   counter is read only from a trusted author's marker comment (the loop's
   own first, else a write-access account's; permission lookups cached and
   fail-closed; `[bot]` logins never looked up) and parsed strictly; the
-  reset and the refund PATCH only that comment. Also `verify-auto-labeler`'s
+  reset and the refund PATCH only that comment, and re-engagement's no-id
+  reset follows the gate's rule (a maintainer's counter the gate counts
+  from is reset; outsiders' and Apps' never). Also `verify-auto-labeler`'s
   `trusted-logins` input.
 - `test_approval_at_head.py` — the merge queue's approval-to-head binding
   (`skills/merge-approved-prs/approval_at_head.py`): the decision on canned
@@ -72,6 +75,28 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   refuses ambiguity without `--pr`, resolves with it, and falls back to
   closing refs / the branch convention when no chip exists. Acceptance paths
   run through `--dry-run` only; the test clone's remote is non-routable.
+- `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
+  `Converged handoff` and `Refund infra-crashed round` steps, lifted the
+  same way and run against a stub `gh`: the loop state each reads back from
+  PR comments (verdict, round counter and head SHA, re-review requests,
+  hand-off marker) counts only from `REVIEWER_LOGINS` / `TRUSTED_LOGINS` or
+  a write-access author, a forged marker is never adopted or PATCHed, and a
+  malformed counter counts as absent (Claude Security 4121983). Also runs
+  the `reset-auto-counters` composite's step (lifted the same way) in a
+  gate → reset → gate sequence: escalation resets the comment the gate
+  counted from (`comment-id`), so re-adding the label really starts a fresh
+  budget; the no-id lookup follows the review gate's rule (the loop's own
+  marker or nothing) and is covered too.
+- `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
+  comment-triggered reviews: every `@review` needs a trusted commenter
+  whatever the head repo — write access, `TRUSTED_LOGINS`, or a bot the
+  caller's `allowed_bots` names (same-repo heads only) — with the fork head
+  admitted sandboxed and a failed lookup refused (Claude Security 4085111).
+
+The lifted `run:` scripts execute under the runner's shell options — `bash
+-e` for a workflow step without a `shell:` key, `bash --noprofile --norc
+-eo pipefail` for a composite's `shell: bash` step — so a bare non-zero
+status fails in a test as it would on the runner.
 
 Run from the repo root:
 

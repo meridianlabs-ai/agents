@@ -194,6 +194,10 @@ on:
           auto-review-on-open can't fire there (the workflow isn't on the PR's
           base branch). Keep this empty on the dev workflow: allowing bots there
           would let the reviewer's own comments retrigger the dev agent.
+          The trig step reads it too: a `[bot]` commenter's @review is
+          admitted only when named here (same-repo heads only; the fork
+          escape hatch stays a write-access human's decision) — except
+          github-actions[bot], which no list and not even "*" admits.
         required: false
         type: string
         default: ""
@@ -220,6 +224,15 @@ on:
           loudly at that step (never a silent Claude fallback, which would
           misattribute output).
         required: false
+
+# The loops' trusted identity, in ONE place (Claude Security 4085111; the
+# Class B principle: a comment is believed only if its author is a trusted
+# identity or holds write access). The trig step admits a comment-triggered
+# review from this login without a permission lookup: it is what the loops'
+# land jobs post the `@review` hand-back as. Phase 2 (the GitHub App
+# identity) changes this value to the app's `<slug>[bot]`.
+env:
+  TRUSTED_LOGINS: i-am-marvin
 
 jobs:
   # TRUSTED, first: the trigger check, the pre-agent marvin writes, and the
@@ -275,10 +288,18 @@ jobs:
       # PR plus the attacker's own @review comment could otherwise execute
       # attacker-supplied setup code with the job token and OIDC minting
       # available (issue #13 — the comment-path twin of the prt fork-head
-      # refusal above). Admission requires a same-repo head (write-access
-      # authors only — covers claude[bot]'s loop-posted @review on agent
-      # branches) or a commenter WITH WRITE ACCESS (the explicit fork-PR
-      # escape hatch the stub documents). External mode always requires the
+      # refusal above). Admission requires a TRUSTED commenter whatever the
+      # head repo (Claude Security 4085111): a TRUSTED_LOGINS login (the
+      # loops' hand-back, posted by their land jobs as the machine account),
+      # a bot the caller named in allowed_bots (same-repo heads only), or an
+      # account with write access — for a fork head, that is the explicit
+      # escape hatch the stub documents. A same-repo head alone admits
+      # nothing: it used to, on the reasoning that same-repo heads have
+      # write-access AUTHORS, but the commenter is who starts the run, and
+      # on a public caller any account can comment @review on any PR — a
+      # run with the machine account's ack/stage writes, a review of
+      # attacker-chosen content posted from the machine account, and model
+      # spend. External mode always requires the
       # trusted commenter — its checkout is an untrusted upstream head, and
       # the trigger is a write-access human's (or marvin's) manual @review
       # on the proxy. `ack`
@@ -316,8 +337,14 @@ jobs:
           IBODY: ${{ github.event.issue.body }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          ALLOWED_BOTS: ${{ inputs.allowed_bots }}
+          # The commenter's account type from the payload: a GitHub App
+          # actor is "Bot" whether or not its login carries a `[bot]` suffix
+          # (Copilot's does not), which is how claude-code-action's own actor
+          # check tells bots from users.
+          ACTOR_TYPE: ${{ github.event.comment.user.type }}
         run: |
-          ok=false mode=pr upstream="" trusted=false head_sha="" continuation=false fork_head=false
+          ok=false mode=pr upstream="" trusted=false allowed_bot=false head_sha="" continuation=false fork_head=false
           # head_ref: the admitted PR's head branch name — the landing
           # manifest's `branch` (the reviewer never pushes to it; the
           # validator pins a PR run's branch to the PR's head ref, and this
@@ -355,18 +382,42 @@ jobs:
               [ "$HEAD_REPO" = "$GH_REPO" ] || fork_head=true
             fi
           elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
-            # Commenter trust: a non-bot actor with write access. Bots never
-            # pass (claude[bot]'s loop-posted @review rides the same-repo-head
-            # branch below; marvin is a machine account with write, not a
-            # "[bot]"). API failure degrades to none — refuse, don't admit.
-            case "$ACTOR" in
-              *"[bot]") ;;
-              *)
-                perm=$(api "repos/$GH_REPO/collaborators/$ACTOR/permission" \
-                         --jq '.permission' || echo none)
-                case "$perm" in admin|write|maintain) trusted=true ;; esac
-                ;;
-            esac
+            # Commenter trust, in order. A TRUSTED_LOGINS login (the loops'
+            # hand-back identity — a User with write today, an App bot after
+            # Phase 2, hence decided before the [bot] case and without a
+            # lookup, which 404s for Apps) is trusted outright. A "[bot]"
+            # actor — the payload says "Bot", or the login carries the
+            # `[bot]` suffix — is `allowed_bot` only if the caller's
+            # allowed_bots names it — same normalisation as
+            # claude-code-action's isAllowedBot, which runs later and refuses
+            # every other bot anyway — and that admits same-repo heads only,
+            # below, with no ack; github-actions[bot] is never admitted, not
+            # even by "*" (any repository's workflow run posts as it, so it
+            # identifies nobody). Any other
+            # actor needs write access by permission lookup; API failure
+            # degrades to none — refuse, don't admit.
+            in_list() { case ",$(printf '%s' "$2" | tr -d ' ')," in *",$1,"*) return 0 ;; esac; return 1; }
+            actor_kind="user"
+            if [ "${ACTOR_TYPE:-}" = "Bot" ] || [[ "$ACTOR" == *"[bot]" ]]; then actor_kind="bot"; fi
+            if in_list "$ACTOR" "$TRUSTED_LOGINS"; then
+              trusted=true
+            else
+              case "$actor_kind:$ACTOR" in
+                "bot:github-actions[bot]") ;;
+                bot:*)
+                  bot=$(printf '%s' "$ACTOR" | sed 's/\[bot\]$//' | tr '[:upper:]' '[:lower:]')
+                  bots=$(printf '%s' "$ALLOWED_BOTS" | tr '[:upper:]' '[:lower:]' | sed 's/\[bot\]//g')
+                  if [ "$(printf '%s' "$ALLOWED_BOTS" | tr -d ' ')" = "*" ] || in_list "$bot" "$bots"; then
+                    allowed_bot=true
+                  fi
+                  ;;
+                *)
+                  perm=$(api "repos/$GH_REPO/collaborators/$ACTOR/permission" \
+                           --jq '.permission' || echo none)
+                  case "$perm" in admin|write|maintain) trusted=true ;; esac
+                  ;;
+              esac
+            fi
             if [ "$IS_PR" = "true" ]; then
               # One lookup pins BOTH gate inputs: the head repo (same-repo
               # check) and the head SHA the checkout will use. Trust is
@@ -407,13 +458,21 @@ jobs:
               fi
               if [ -z "$head_sha" ]; then
                 echo "::warning::@review on PR #$PR_NUM — the head lookup failed, so there is no pinned SHA to check out; refusing. A collaborator can re-trigger"
-              elif [ "$head_repo" = "$GH_REPO" ]; then
+              elif [ "$trusted" = "true" ] && [ "$head_repo" = "$GH_REPO" ]; then
                 ok=true
               elif [ "$trusted" = "true" ]; then
                 # The explicit escape hatch: admitted, but as UNTRUSTED code —
                 # sandboxed path (see the fork_head note above).
                 ok=true fork_head=true
-                echo "PR #$PR_NUM has a fork head ($head_repo); admitted by write-access commenter $ACTOR — taking the sandboxed review path."
+                echo "PR #$PR_NUM has a fork head ($head_repo); admitted by trusted commenter $ACTOR — taking the sandboxed review path."
+              elif [ "$allowed_bot" = "true" ] && [ "$head_repo" = "$GH_REPO" ]; then
+                # A caller-allow-listed bot's @review on a same-repo head (the
+                # pre-split hand-back shape: the dev agent requesting a review
+                # of the agent branch it opened). Never the fork escape hatch
+                # — that is a write-access human's decision.
+                ok=true
+              elif [ "$head_repo" = "$GH_REPO" ]; then
+                echo "::warning::@review by $ACTOR (no write access, not a trusted or allow-listed identity, or the permission lookup failed) on PR #$PR_NUM — refusing; a collaborator can re-trigger"
               else
                 echo "::warning::@review by $ACTOR (no write access, or the permission lookup failed) on a fork-head PR — refusing (the run would check out and execute the fork head); a collaborator can re-trigger"
               fi
