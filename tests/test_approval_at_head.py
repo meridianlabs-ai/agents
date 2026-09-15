@@ -4,10 +4,10 @@ approval-to-head binding (Claude Security finding 4122327).
 The decision function runs on canned API payloads; the command line runs end
 to end against a stub `gh` on PATH that serves those payloads and logs every
 call, so the request shape (GETs only, `--paginate` on the lists) is pinned
-as well as the verdicts. The skill's approval-bound checkout block is lifted
-from SKILL.md and run against local repos, and the merge / re-approval
-commands are checked for the head pin. Run with `python3 -m pytest` from the
-repo root.
+as well as the verdicts. The skill's approval-bound checkout blocks (promotion
+and External) are lifted from SKILL.md and run against local repos, and the
+merge / re-approval commands are checked for the head pin. Run with
+`python3 -m pytest` from the repo root.
 """
 
 import importlib.util
@@ -497,6 +497,95 @@ def test_skill_checkout_block_accepts_a_tip_forced_back_to_the_approved_sha(queu
     r = run_checkout_block(q["work"], q["approved"])
     assert r.returncode == 0, r.stderr
     assert git("rev-parse", "HEAD^1", cwd=q["work"]).stdout.strip() == q["approved"]
+
+
+# --- the External checkout block: fetch, refuse, then check out the approved SHA ---
+
+
+@pytest.fixture
+def external_repos(tmp_path):
+    """`origin` (upstream, serving refs/pull/42/head), the contributor's `fork` (branch
+    feature at A) and the queue clone, whose hooks path points into the tree."""
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git("init", "-q", "-b", "main", cwd=seed)
+    commit_file(seed, "README", "base\n", "base")
+    origin, fork = tmp_path / "origin.git", tmp_path / "fork.git"
+    for bare in (origin, fork):
+        git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    git("remote", "add", "origin", str(origin), cwd=seed)
+    git("remote", "add", "fork", str(fork), cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+    git("checkout", "-q", "-b", "feature", cwd=seed)
+    approved = commit_file(seed, "feature.txt", "A\n", "A: the reviewed commit")
+    git("push", "-q", "fork", "feature", cwd=seed)
+    git("push", "-q", "origin", "feature:refs/pull/42/head", cwd=seed)  # what GitHub serves for the PR head
+    git("checkout", "-q", "main", cwd=seed)
+    commit_file(seed, "main.txt", "main moved on\n", "main moves")
+    git("push", "-q", "origin", "main", cwd=seed)
+    work = tmp_path / "work"
+    sh("git", "clone", "-q", str(origin), str(work), cwd=tmp_path)
+    git("config", "core.hooksPath", ".githooks", cwd=work)  # the reviewer's scenario: hooks resolved inside the tree
+    git("checkout", "-q", "--detach", "origin/main", cwd=work)
+    return {"seed": seed, "work": work, "fork": fork, "approved": approved, "marker": tmp_path / "hook-ran"}
+
+
+def contributor_pushes_a_hook(q):
+    """After the approval, the contributor pushes B carrying a post-checkout hook; GitHub moves refs/pull/42/head."""
+    seed = q["seed"]
+    git("checkout", "-q", "feature", cwd=seed)
+    hooks = seed / ".githooks"
+    hooks.mkdir()
+    hook = hooks / "post-checkout"
+    hook.write_text(f'#!/bin/sh\ntouch "{q["marker"]}"\n')
+    hook.chmod(0o755)
+    git("add", ".githooks", cwd=seed)
+    git("commit", "-q", "-m", "B: pushed after the approval, with a hook", cwd=seed)
+    git("push", "-q", "fork", "feature", cwd=seed)
+    git("push", "-q", "origin", "feature:refs/pull/42/head", cwd=seed)
+    return git("rev-parse", "HEAD", cwd=seed).stdout.strip()
+
+
+def run_external_block(q, branch="feature"):
+    block = skill_block("## External PRs").replace("<n>", "42")
+    env = {"BRANCH": branch, "APPROVED": q["approved"], "FORK_URL": str(q["fork"])}
+    return sh("bash", "-e", "-c", block, cwd=q["work"], env=env, check=False)
+
+
+def test_skill_external_block_checks_out_the_approved_commit_and_pushes_to_the_fork(external_repos):
+    q = external_repos
+    r = run_external_block(q)
+    assert r.returncode == 0, r.stderr
+    assert git("rev-parse", "HEAD", cwd=q["work"]).stdout.strip() == q["approved"]
+    assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=q["work"]).stdout.strip() == "feature"
+    for key in ("remote", "pushRemote"):
+        assert git("config", f"branch.feature.{key}", cwd=q["work"]).stdout.strip() == str(q["fork"])
+    assert git("config", "branch.feature.merge", cwd=q["work"]).stdout.strip() == "refs/heads/feature"
+    # The rest of the skill's flow: merge main, then a plain push lands on the contributor's branch.
+    git("merge", "-q", "--no-edit", "origin/main", cwd=q["work"])
+    git("push", "-q", cwd=q["work"])
+    merged = git("rev-parse", "HEAD", cwd=q["work"]).stdout.strip()
+    assert git("rev-parse", "feature", cwd=q["fork"]).stdout.strip() == merged
+    assert git("rev-parse", "HEAD^1", cwd=q["work"]).stdout.strip() == q["approved"]
+
+
+def test_skill_external_block_never_materializes_a_moved_head_or_runs_its_hook(external_repos):
+    q = external_repos
+    moved = contributor_pushes_a_hook(q)
+    before = git("rev-parse", "HEAD", cwd=q["work"]).stdout.strip()
+    r = run_external_block(q)
+    assert r.returncode != 0
+    # Fetched and compared, then refused: nothing checked out, no branch, no tree, no hook run.
+    assert git("rev-parse", "FETCH_HEAD", cwd=q["work"]).stdout.strip() == moved
+    assert git("rev-parse", "HEAD", cwd=q["work"]).stdout.strip() == before
+    assert git("branch", "--list", "feature", cwd=q["work"]).stdout.strip() == ""
+    assert not (q["work"] / "feature.txt").exists() and not (q["work"] / ".githooks").exists()
+    assert not q["marker"].exists()
+    # The fixture is potent: what `gh pr checkout` amounts to (fetch the PR head into a
+    # branch and check it out) runs B's hook before any comparison could refuse it.
+    git("fetch", "-q", "origin", "refs/pull/42/head:naive", cwd=q["work"])
+    git("checkout", "-q", "naive", cwd=q["work"])
+    assert q["marker"].exists()
 
 
 def test_skill_pins_every_upstream_merge_request_and_re_approval_to_the_pushed_commit():

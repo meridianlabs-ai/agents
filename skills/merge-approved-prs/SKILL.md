@@ -26,10 +26,9 @@ Worktree rules (learned the hard way):
 - NEVER run `git submodule update --init` inside the worktree — git's
   worktree+submodule handling writes a broken `.git` pointer file that then
   poisons every later command. Run fetch/checkout with submodule recursion
-  off instead: `git fetch --no-recurse-submodules`, and for `gh pr checkout`
-  set `GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=fetch.recurseSubmodules
-  GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=submodule.recurse
-  GIT_CONFIG_VALUE_1=false`. The queue never needs submodule contents
+  off instead: `git fetch --no-recurse-submodules` and
+  `git -c submodule.recurse=false checkout …` (the External checkout block
+  below already does). The queue never needs submodule contents
   (the gitlink invariant is checked via `git diff`, not the worktree).
 - A branch already checked out in another worktree (e.g. the user has it
   open in the main clone) can't be checked out again — coordinate rather
@@ -239,20 +238,32 @@ what just landed.
 Same flow as above with these substitutions — the branch lives on the
 *contributor's* fork, not meridianlabs-ai:
 
-- **Checkout/push**: instead of the fetch/checkout lines of section 2, use
-  `gh pr checkout <n> --repo UKGovernmentBEIS/inspect_ai` in the worktree
-  (with the submodule-recursion-off GIT_CONFIG env from the worktree rules),
-  then bind it before anything else runs:
+- **Checkout/push**: instead of the fetch/checkout lines of section 2,
+  fetch the PR head WITHOUT checking it out, refuse it unless it is the
+  approved commit, and only then check that commit out — wiring the branch
+  to the contributor's fork the way `gh pr checkout` would have:
   ```bash
-  test "$(git rev-parse HEAD)" = "$APPROVED"   # non-zero: the contributor pushed since the check — `git checkout --detach origin/main`, SKIP, report both SHAs
+  git fetch --no-tags --no-recurse-submodules origin "refs/pull/<n>/head"   # the PR head, fetched but NOT checked out: nothing from its tree runs
+  test "$(git rev-parse FETCH_HEAD)" = "$APPROVED"                  # non-zero: the contributor pushed since the check — SKIP, report both SHAs
+  git -c submodule.recurse=false checkout -B "$BRANCH" "$APPROVED"  # the literal approved commit
+  git config "branch.$BRANCH.remote" "$FORK_URL"                    # `git push` goes to the contributor's fork, as after `gh pr checkout`
+  git config "branch.$BRANCH.pushRemote" "$FORK_URL"
+  git config "branch.$BRANCH.merge" "refs/heads/$BRANCH"
   ```
-  `gh pr checkout` follows `refs/pull/<n>/head`, i.e. whatever the
-  contributor's branch points at now, and takes no SHA; a checkout executes
-  nothing from the tree, so verifying HEAD immediately after it and before
-  the merge is the binding. With `maintainerCanModify` it wires the branch's
-  push remote to the contributor's fork, so after `git merge origin/main` a
-  plain `git push` lands on their branch (verify with `git push --dry-run`
-  the first time). Never rebase or force-push a contributor branch — merge
+  `BRANCH` is `headRefName` and `FORK_URL` is
+  `https://github.com/<headRepositoryOwner.login>/<headRepository.name>.git`,
+  both from `gh pr view <n> --repo UKGovernmentBEIS/inspect_ai --json
+  headRefName,headRepositoryOwner,headRepository,maintainerCanModify`. Not
+  `gh pr checkout`: it checks out whatever `refs/pull/<n>/head` points at
+  right now and takes no SHA, and a checkout is not inert — in a clone whose
+  `core.hooksPath` points into the tree, a contributor's `post-checkout`
+  hook runs during the checkout, before any comparison could refuse it.
+  Fetching materializes nothing; the only checkout is of the approved
+  commit. (tests/test_approval_at_head.py lifts this block too: a moved head
+  carrying such a hook is refused without the hook ever running.) With
+  `maintainerCanModify` that wiring makes a plain `git push` land on their
+  branch after `git merge origin/main` (verify with `git push --dry-run` the
+  first time). Never rebase or force-push a contributor branch — merge
   commits only; their local clone must stay fast-forwardable.
 - **Your own push can dismiss the approval** (repo setting–dependent). This
   is the `origin/main` merge commit you push AFTER the approval-at-head
