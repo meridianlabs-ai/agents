@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
 from test_review_fix_gate import fresh_state, lift_step, lookups, outputs  # noqa: E402
-from test_review_fix_gate import run_gate, verdict, comment, T1, T2  # noqa: E402
+from test_review_fix_gate import run_gate, verdict, comment, review_allowed_bots_default, T1, T2  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-review.yml"
@@ -149,9 +149,9 @@ def test_the_gate_treats_a_bots_request_as_pending_exactly_when_the_reviewer_adm
     # reviewer admits the bot's `@review` on a same-repo head, so a review-fix
     # gate queued behind it sees a pending review and skips the verdict that
     # request supersedes (on an unchanged tip it would otherwise escalate for
-    # no progress). Neither list (the defaults): the reviewer refuses the
-    # request, so the gate must NOT wait for a review that never runs — this
-    # holds for the reviewer's own identity too.
+    # no progress). On neither list: the reviewer refuses the request, so
+    # the gate must NOT wait for a review that never runs — for the
+    # reviewer's own identity too, once the caller says so explicitly.
     comments = [verdict("i-am-marvin", "suggestions", T1, cid=1), comment(2, bot, "@review", T2)]
     _, o, _ = run_trig(tmp_path, actor=bot, allowed_bots=bot)
     assert o["ok"] == "true"
@@ -159,8 +159,22 @@ def test_the_gate_treats_a_bots_request_as_pending_exactly_when_the_reviewer_adm
     assert g["act"] == "skip" and lookups(state) == []
     _, o, state = run_trig(tmp_path, actor=bot)
     assert o["ok"] == "false" and lookups(state) == []
-    _, g, state = run_gate(tmp_path, comments)
+    _, g, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": ""})
     assert g["act"] == "fix" and lookups(state) == []
+
+
+def test_a_deployed_caller_that_allow_lists_the_reviewer_bot_needs_no_loop_stub_change(tmp_path):
+    # The inspect_ai fork's reviewer stub sets `allowed_bots: "claude[bot]"`
+    # and its loop stub passes no review_allowed_bots (the input is new):
+    # with the loop's DEFAULT the two agree, so the reviewer admits the
+    # bot's `@review` and a queued gate treats it as pending rather than
+    # converging on the older verdict — the base behaviour, kept without a
+    # coordinated caller update.
+    comments = [verdict("i-am-marvin", "clean", T1, cid=1), comment(2, "claude[bot]", "@review", T2)]
+    _, o, _ = run_trig(tmp_path, actor="claude[bot]", allowed_bots="claude[bot]")
+    assert o["ok"] == "true"
+    _, g, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": review_allowed_bots_default()})
+    assert g["act"] == "skip" and lookups(state) == []
 
 
 def test_review_stubs_route_bot_commenters_to_the_reusables_allow_list():

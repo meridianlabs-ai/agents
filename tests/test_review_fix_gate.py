@@ -15,6 +15,7 @@ runs the manifest composer.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -140,7 +141,7 @@ def run_gate(tmp_path, comments, perms=None, *, env_extra=None):
 
 
 def test_forged_clean_verdict_from_an_outsider_is_ignored(tmp_path):
-    r, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
                                   verdict("nobody", "clean", T2, cid=2)])
     assert o["verdict"] == "suggestions"
     assert o["act"] == "fix"
@@ -265,15 +266,27 @@ def test_failed_permission_lookup_is_untrusted(tmp_path):
     assert lookups(state) and set(lookups(state)) == {"ghost"}
 
 
+def review_allowed_bots_default() -> str:
+    """The `review_allowed_bots` input's default, read from the workflow."""
+    text = WORKFLOW.read_text()
+    block = text[text.index("      review_allowed_bots:"):]
+    block = block[:re.search(r"\n {6}\S", block[1:]).start() + 1]  # up to the next input key
+    return re.search(r'default: "([^"]*)"', block).group(1)
+
+
 def test_reviewer_identitys_request_is_pending_only_where_the_caller_allow_lists_it(tmp_path):
-    # claude[bot] is a verdict author, not a requester: its `@review` runs a
-    # review only on a caller whose reviewer allow-lists it (allowed_bots),
-    # so only the matching review_allowed_bots makes the request pending —
-    # otherwise the gate would wait for a review that never runs.
+    # claude[bot] is a verdict author, not a requester by right: its `@review`
+    # counts through review_allowed_bots like any bot's. The input's DEFAULT
+    # names it — the deployed reviewer stubs that allow-list a bot name the
+    # reviewer bot, and the loop counted its requests before the author
+    # filters — so a caller passing nothing keeps that; one whose reviewer
+    # admits no bot passes an explicit empty string and the gate no longer
+    # waits for a review that never runs.
     comments = [verdict("i-am-marvin", "suggestions", T1, cid=1), comment(2, "claude[bot]", "@review", T2)]
-    _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": "claude[bot]"})
+    assert review_allowed_bots_default() == "claude[bot]"
+    _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": review_allowed_bots_default()})
     assert o["act"] == "skip" and lookups(state) == []
-    _, o, state = run_gate(tmp_path, comments)
+    _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": ""})
     assert o["act"] == "fix" and lookups(state) == []
 
 
@@ -470,7 +483,6 @@ def test_reset_lookup_follows_the_review_gates_rule_for_rounds(tmp_path):
     # Only a maintainer's rounds marker: nothing the review gate would count.
     state = fresh_state(tmp_path)
     (state / "comments.json").write_text(json.dumps([counter("alice", 5, T3, cid=300)]))
-    r_out = state.parent / "reset-out"
     reset, patched = run_reset(state, trusted_logins="i-am-marvin", perms={"alice": "write"})
     assert reset["ok"] == "1" and patched == [] and lookups(state) == []
     # No trusted logins at all: no comment is the loop's own.

@@ -69,14 +69,16 @@ on:
           syntax — comma-separated bot logins, `[bot]` suffix optional, or
           "*"). A bot the reviewer honours a `@review` from has a review
           pending when it posts one, so the stale-verdict guard counts its
-          requests; set it to the same value as the reviewer stub's. Empty
-          (default): only the machine account's and write-access accounts'
-          requests count — a reviewer identity's `@review` included, since
-          the reviewer would not run on it either. github-actions[bot] is
-          never honoured, whatever the list.
+          requests; keep it equal to the reviewer stub's value. The default
+          is the reviewer bot: that is what the deployed reviewer stubs that
+          allow-list any bot name (the inspect_ai fork's, for the dev agent's
+          PR-open request), and the loop's behaviour for its requests before
+          the author filters — so existing callers need no change. A caller
+          whose reviewer admits no bot passes an explicit empty string.
+          github-actions[bot] is never honoured, whatever the list.
         required: false
         type: string
-        default: ""
+        default: "claude[bot]"
       auto_label:
         required: false
         type: string
@@ -555,10 +557,11 @@ jobs:
           # a TRUSTED_LOGINS login; a bot in review_allowed_bots; or an
           # account with write access (a collaborator's manual re-review
           # request is as real as the loop's own). A reviewer identity
-          # (REVIEWER_LOGINS) is a verdict AUTHOR, not a requester: its
-          # `@review` counts only where the caller allow-lists the bot, as
-          # the reviewer's does — otherwise the gate would wait for a review
-          # that never runs. Any other bot — by the payload's `user.type` (a
+          # (REVIEWER_LOGINS) is a verdict AUTHOR, not a requester by right:
+          # its `@review` counts through the allow-list like any bot's (the
+          # input's default names it, as the deployed reviewer stubs do), so
+          # a caller whose reviewer refuses bots can say so and the gate will
+          # not wait for a review that never runs. Any other bot — by the payload's `user.type` (a
           # GitHub App actor need not carry a `[bot]` suffix; e.g. Copilot)
           # or the suffix — is refused without a lookup: the collaborators
           # endpoint 404s for Apps. One permission lookup per login per run,

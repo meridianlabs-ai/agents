@@ -189,9 +189,12 @@ finding 4121989) that is enforced in three layers rather than assumed:
   write-access account (one cached permission lookup per login,
   fail-closed; bots are told from users by the payload's `user.type`, not
   only a `[bot]` suffix); a reviewer identity is a verdict author, not a
-  requester, so its request is pending only where the caller allow-lists
-  it. The review stubs' association filter lets a Bot commenter through for
-  the same reason: the reusable's allow-list decides bots. `rounds:` must parse as one
+  requester by right — its request counts through that list, whose default
+  names the reviewer bot as the deployed reviewer stubs do, so existing
+  callers need no change and one whose reviewer refuses bots passes an
+  explicit empty string. The review stubs' association filter lets a Bot
+  commenter through for the same reason: the reusable's allow-list decides
+  bots. `rounds:` must parse as one
   whole decimal token of at most nine digits and `auto-review-head:` as one
   whole 40-hex SHA, each present exactly once and delimited by whitespace as
   the record step writes them, else the counter counts as
