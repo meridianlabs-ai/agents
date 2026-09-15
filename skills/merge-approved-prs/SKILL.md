@@ -26,10 +26,9 @@ Worktree rules (learned the hard way):
 - NEVER run `git submodule update --init` inside the worktree — git's
   worktree+submodule handling writes a broken `.git` pointer file that then
   poisons every later command. Run fetch/checkout with submodule recursion
-  off instead: `git fetch --no-recurse-submodules`, and for `gh pr checkout`
-  set `GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=fetch.recurseSubmodules
-  GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=submodule.recurse
-  GIT_CONFIG_VALUE_1=false`. The queue never needs submodule contents
+  off instead: `git fetch --no-recurse-submodules` and
+  `git -c submodule.recurse=false checkout …` (the External checkout block
+  below already does). The queue never needs submodule contents
   (the gitlink invariant is checked via `git diff`, not the worktree).
 - A branch already checked out in another worktree (e.g. the user has it
   open in the main clone) can't be checked out again — coordinate rather
@@ -69,17 +68,55 @@ gh project item-list 1 --owner meridianlabs-ai --format json --limit 1000 \
   PRs" section below.
 - Confirm each upstream PR: `state=OPEN`, `reviewDecision=APPROVED`, note
   `mergeable` (usually `CONFLICTING`).
+- **Bind the approval to the head commit** — every PR, promotions and
+  externals alike, BEFORE anything of it is checked out or has `main`
+  merged into it (the script lives next to this skill; substitute its base
+  directory):
+  ```bash
+  OUT=$(python3 <skill-base-dir>/approval_at_head.py https://github.com/UKGovernmentBEIS/inspect_ai/pull/<n>); RC=$?; echo "$OUT"
+  APPROVED=$(printf '%s\n' "$OUT" | awk '$1 == "approved" { print $2 }')   # the approved SHA; empty unless RC is 0
+  ```
+  Exit 0 prints `approved <sha> by <login> at <time>`: a reviewer with write
+  access approved the PR's CURRENT `headRefOid` and has not since requested
+  changes or been dismissed. Any other exit prints the reason (`approval is
+  for <sha>, head is <sha2>; N commits pushed after <time>`, `no approval
+  for head <sha>`, `head moved during the check: was <sha>, now <sha2>`, or
+  a `gh` error) and means **SKIP**: leave the item
+  queued, report that line verbatim, and do not check the branch out, merge
+  `origin/main` into it, run anything from its tree, or arm auto-merge.
+  NEVER re-approve to get past it — the head moved after the review, so it
+  is unreviewed code, and `reviewDecision` alone cannot tell you that (it is
+  PR-level and survives a push unless upstream dismisses stale approvals,
+  which this skill does not assume). The check is read-only; the one push
+  this skill makes to a PR branch, the `origin/main` merge commit, happens
+  later and only after this has passed (see "Your own push" under External
+  PRs). Keep `APPROVED`: section 2 checks out that literal commit, and the
+  merge request is pinned to the commit you push.
 
 ## 2. Per PR, in order (repeat from here after each merge)
 
+Re-run the approval-at-head check (section 1) for THIS PR now, immediately
+before its checkout, and set `APPROVED` from its line: a queue run takes
+hours, and an approval that bound when you listed the queue may not bind by
+the time you reach the item. Skip and report on a non-zero exit exactly as
+above. Then check out the approved commit ITSELF, never the branch tip: the
+branch can move between the check and the checkout, and `git checkout
+meridian/<branch>` (or `gh pr checkout`) would silently follow it — so the
+sequence verifies the fetched tip against `APPROVED` and checks out that
+literal SHA. `BRANCH` is `headRefName` from the PR JSON.
+
 ```bash
 git fetch origin main
-git fetch meridian <branch>
-git checkout -B <branch> meridian/<branch>
+git fetch meridian "$BRANCH"
+test "$(git rev-parse "meridian/$BRANCH")" = "$APPROVED"   # non-zero: the head moved since the check — SKIP, report both SHAs
+git checkout -B "$BRANCH" "$APPROVED"                        # the literal approved commit, never the branch tip
 git merge origin/main
 ```
 
-Take `<branch>` from the PR JSON already in hand (`headRefName`) — NEVER
+(tests/test_approval_at_head.py lifts this block and runs it against local
+repos: a moved tip must stop it before anything is checked out.)
+
+Take `BRANCH` from the PR JSON already in hand (`headRefName`) — NEVER
 type it from memory: a guessed branch name once failed the checkout and the
 follow-on `git merge origin/main` landed on whatever branch was current.
 Same rule for chained commands: don't pipe state-changing git commands
@@ -139,9 +176,18 @@ conflicted area. Pure CHANGELOG/docs conflicts can go straight to CI.
 ### Push, arm auto-merge, watch
 
 ```bash
-git push meridian <branch>   # externals: plain `git push` (contributor fork)
-gh pr merge <n> --repo UKGovernmentBEIS/inspect_ai --auto --squash
+git push meridian "$BRANCH"   # externals: plain `git push` (contributor fork)
+gh pr merge <n> --repo UKGovernmentBEIS/inspect_ai --auto --squash --match-head-commit "$(git rev-parse HEAD)"
 ```
+
+`--match-head-commit` pins the merge request to the commit you just pushed
+(gh sends it as `expectedHeadOid` on the auto-merge mutation as well as on
+a direct merge): if the PR head is anything else when the request lands,
+GitHub refuses it instead of arming whatever is there. A refusal means
+someone moved the head in the window between your push and the arming —
+skip and report; never retry without the flag or with a SHA you did not
+push. A push rejected as non-fast-forward is the same event one step
+earlier: the head moved, so never pull the new commits in and retry.
 
 Arm auto-merge (squash — repo history uses it) **per PR as you reach it,
 never on the whole queue up front**: the later PRs' green CI is against
@@ -163,6 +209,11 @@ until someone happened to look):
   more CI round; expect several on a busy release day.
 - **checks green but `mergeStateStatus: DIRTY`** → main now genuinely
   conflicts; resolve per the invariants above.
+- **checks green but `autoMergeRequest` is null** → auto-merge was disarmed:
+  GitHub drops it when someone without write access pushes to the PR (an
+  external contributor, after you armed it). Do NOT re-arm — the head is no
+  longer the commit you pushed; re-run `approval_at_head.py` (it fails for
+  it), skip and report.
 - **runs stuck in `action_required`** → the fork-PR workflow-approval gate:
   first-time contributors need a maintainer "Approve and run" on EVERY push,
   including ours (repeat externals don't hit this). Detect via
@@ -187,19 +238,52 @@ what just landed.
 Same flow as above with these substitutions — the branch lives on the
 *contributor's* fork, not meridianlabs-ai:
 
-- **Checkout/push**: instead of `git checkout -B <branch> meridian/<branch>`,
-  use `gh pr checkout <n> --repo UKGovernmentBEIS/inspect_ai` in the worktree
-  (with the submodule-recursion-off GIT_CONFIG env from the worktree rules)
-  — with `maintainerCanModify` it wires the branch's push remote to the
-  contributor's fork, so after `git merge origin/main` a plain `git push`
-  lands on their branch (verify with `git push --dry-run` the first time).
-  Never rebase or force-push a contributor branch — merge commits only;
-  their local clone must stay fast-forwardable.
-- **Approval can be dismissed by your push** (repo setting–dependent):
-  re-check `reviewDecision` after pushing. You can re-approve — pushing to
-  someone else's PR doesn't make you its author — but if branch protection
-  requires approval of the most recent push by someone else, surface that in
-  the report instead of looping.
+- **Checkout/push**: instead of the fetch/checkout lines of section 2,
+  fetch the PR head WITHOUT checking it out, refuse it unless it is the
+  approved commit, and only then check that commit out — wiring the branch
+  to the contributor's fork the way `gh pr checkout` would have:
+  ```bash
+  git fetch --no-tags --no-recurse-submodules origin "refs/pull/<n>/head"   # the PR head, fetched but NOT checked out: nothing from its tree runs
+  test "$(git rev-parse FETCH_HEAD)" = "$APPROVED"                  # non-zero: the contributor pushed since the check — SKIP, report both SHAs
+  git -c submodule.recurse=false checkout -B "$BRANCH" "$APPROVED"  # the literal approved commit
+  git config "branch.$BRANCH.remote" "$FORK_URL"                    # `git push` goes to the contributor's fork, as after `gh pr checkout`
+  git config "branch.$BRANCH.pushRemote" "$FORK_URL"
+  git config "branch.$BRANCH.merge" "refs/heads/$BRANCH"
+  ```
+  `BRANCH` is `headRefName` and `FORK_URL` is
+  `https://github.com/<headRepositoryOwner.login>/<headRepository.name>.git`,
+  both from `gh pr view <n> --repo UKGovernmentBEIS/inspect_ai --json
+  headRefName,headRepositoryOwner,headRepository,maintainerCanModify`. Not
+  `gh pr checkout`: it checks out whatever `refs/pull/<n>/head` points at
+  right now and takes no SHA, and a checkout is not inert — in a clone whose
+  `core.hooksPath` points into the tree, a contributor's `post-checkout`
+  hook runs during the checkout, before any comparison could refuse it.
+  Fetching materializes nothing; the only checkout is of the approved
+  commit. (tests/test_approval_at_head.py lifts this block too: a moved head
+  carrying such a hook is refused without the hook ever running.) With
+  `maintainerCanModify` that wiring makes a plain `git push` land on their
+  branch after `git merge origin/main` (verify with `git push --dry-run` the
+  first time). Never rebase or force-push a contributor branch — merge
+  commits only; their local clone must stay fast-forwardable.
+- **Your own push can dismiss the approval** (repo setting–dependent). This
+  is the `origin/main` merge commit you push AFTER the approval-at-head
+  check passed — the only content it adds is main's — so it is the one push
+  you may re-approve: re-check `reviewDecision` after pushing, and if it
+  dropped, approve only when the PR's `headRefOid` is exactly the commit you
+  pushed — and name that commit in the review, so the approval binds to it
+  rather than to whatever the head is when the request lands:
+  ```bash
+  test "$(gh pr view <n> --repo UKGovernmentBEIS/inspect_ai --json headRefOid --jq .headRefOid)" = "$(git rev-parse HEAD)"
+  gh api -X POST repos/UKGovernmentBEIS/inspect_ai/pulls/<n>/reviews -f event=APPROVE -f commit_id="$(git rev-parse HEAD)" \
+    -f body="Re-approving the merge queue's origin/main merge commit; the reviewed content is $APPROVED."
+  ```
+  (Pushing to someone else's PR doesn't make you its author.) A head that is
+  anything else moved under you: the contributor pushed — re-run
+  `approval_at_head.py` (it will fail), skip and report. The same applies
+  when your plain `git push` is rejected as non-fast-forward: that rejection
+  IS the contributor's push, so never pull their new commits in and retry.
+  If branch protection requires approval of the most recent push by someone
+  else, surface that in the report instead of looping.
 - **Invariants are unchanged** (CHANGELOG entries under `## Unreleased`, no
   net submodule change) — but they were *reviewed*, not authored, by us, so
   check them even more mechanically. A violation that needs real rework goes

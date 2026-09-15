@@ -47,6 +47,22 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   fail-closed; `[bot]` logins never looked up) and parsed strictly; the
   reset and the refund PATCH only that comment. Also `verify-auto-labeler`'s
   `trusted-logins` input.
+- `test_approval_at_head.py` — the merge queue's approval-to-head binding
+  (`skills/merge-approved-prs/approval_at_head.py`): the decision on canned
+  review/commit payloads (approved at head; approved then pushed; no
+  approval; approval then changes requested by the same reviewer; an
+  approver without write access; comments never override a verdict; the
+  SHA, not commit dates, is the binding) and the command line end to end
+  against a stub `gh` on PATH (GETs only, `--paginate` on the lists, the
+  exit codes, a head that moves during the check). Also lifts the skill's
+  approval-bound checkout blocks from `SKILL.md` and runs them against local
+  repos — promotions (the approved commit is checked out and merged; a tip
+  moved after the check stops it before anything is checked out) and
+  External PRs (the PR head is fetched without checkout and a moved head
+  carrying a `post-checkout` hook is refused without the hook running; on
+  the approved head the fork wiring makes a plain push land on the
+  contributor's branch) — and checks that every upstream merge request and
+  re-approval in the skill names the pushed commit.
 
 Run from the repo root:
 
