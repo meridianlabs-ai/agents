@@ -614,23 +614,38 @@ jobs:
           cid=$(jq -r '.id // empty' <<<"${marker_json:-null}")
           prev=0
           prevsha=""
+          # field <name> <re> <body>: the value of the body's ONE
+          # `<name>:<value>` token, the value being the WHOLE token — <re>
+          # followed by a non-alphanumeric or the end, so `10oops` is
+          # malformed rather than 10 and a 41-hex head is not a SHA — and
+          # present exactly once; empty when absent, malformed or repeated.
+          field() {
+            local re="$1:[[:space:]]*($2)([^[:alnum:]]|\$)" rest
+            [[ "$3" =~ $re ]] || return 0
+            rest=${3#*"${BASH_REMATCH[0]}"}
+            [[ "$rest" == *"$1:"* ]] && return 0
+            printf '%s' "${BASH_REMATCH[1]}"
+          }
           if [ -n "$cid" ]; then
             mbody=$(jq -r '.body // ""' <<<"$marker_json")
-            prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
             # Strict shapes, or the value counts as absent: `prev` feeds
             # arithmetic and `prevsha` a tip comparison, and a body that does
-            # not parse (two `rounds:` lines after a hand edit — the
-            # escalation text invites one) would otherwise make `$((prev + 1))`
-            # fail under set -e on every trigger: a persistent stall with the
-            # label on and a failsafe comment per verdict. 0 keeps the loop
-            # running; Record round rewrites the body in shape.
-            if ! [[ "$prev" =~ ^[0-9]+$ ]]; then
-              echo "Counter comment $cid has no single 'rounds: N' value (got '$(printf '%s' "$prev" | tr '\n' ' ')'); counting from 0."
+            # not parse (a hand edit — the escalation text invites one) would
+            # otherwise make the arithmetic fail under set -e on every
+            # trigger (a persistent stall with the label on and a failsafe
+            # comment per verdict), read `10oops` as 10, or a partial SHA as
+            # the tip. At most nine digits, read as DECIMAL (`08` is not
+            # octal, and a wider value would wrap negative and never reach
+            # the cap). 0 keeps the loop running; Record round rewrites the
+            # body in shape.
+            prev=$(field rounds '[0-9]{1,9}' "$mbody")
+            if [ -z "$prev" ]; then
+              echo "Counter comment $cid has no single well-formed 'rounds: N' value; counting from 0."
               prev=0
             fi
+            prev=$((10#$prev))
             # Branch tip recorded when the previous round started (see Record round).
-            prevsha=$(printf '%s' "$mbody" | sed -n 's/.*auto-review-head:\([0-9a-f]*\).*/\1/p')
-            [[ "$prevsha" =~ ^[0-9a-f]{40}$ ]] || prevsha=""
+            prevsha=$(field auto-review-head '[0-9a-f]{40}' "$mbody")
           fi
           next=$((prev + 1))
           head=$(jq -r '.headRefOid' <<<"$pr_json")
@@ -776,7 +791,11 @@ jobs:
       #      retries the removal) instead of running a fresh budget with no
       #      human decision. The reset body is the shared composite's (no
       #      head marker: the no-progress check needs prev >= 1, so a fresh
-      #      budget's first round skips it and records a fresh tip first).
+      #      budget's first round skips it and records a fresh tip first),
+      #      and it resets the counter THE GATE selected — the loop's own
+      #      comment, by TRUSTED_LOGINS — never an outsider's marker (which
+      #      would leave the real counter exhausted: re-add the label and it
+      #      escalates again on sight).
       #   3. Hand off: the comment tells the truth about both — a failed reset
       #      leaves the exhausted counter in place, and promising a fresh
       #      budget then would be exactly the false "re-add it" the reset
@@ -814,6 +833,7 @@ jobs:
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           counters: rounds
+          trusted-logins: ${{ env.TRUSTED_LOGINS }}
           reason: "on escalation — re-adding `${{ inputs.auto_label }}` starts a fresh budget"
 
       # Trigger-free ON PURPOSE (like every bot-authored comment here): the
@@ -2322,16 +2342,29 @@ jobs:
                   | jq -rs --arg m "$MARKER" --argjson t "$trusted" \
                       '[.[][] | select((.body|contains($m)) and ((.user.login // "") as $l | any($t[]; . == $l)))] | last | .id // empty' 2>/dev/null || true)
           [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
-          # Re-read the count and the head marker (same parse as the gate's)
-          # rather than trusting the gate's values: the next run's gate may
-          # have re-recorded since. Falls back to the gate's values when the
-          # body does not parse; never below zero (an escalation's reset may
-          # have zeroed it).
+          # Re-read the count and the head marker (same strict whole-token
+          # parse as the gate's `field`) rather than trusting the gate's
+          # values: the next run's gate may have re-recorded since. Falls
+          # back to the gate's values when the body does not parse; never
+          # below zero (an escalation's reset may have zeroed it).
+          # field <name> <re> <body>: the value of the body's ONE
+          # `<name>:<value>` token, the value being the WHOLE token — <re>
+          # followed by a non-alphanumeric or the end, so `10oops` is
+          # malformed rather than 10 and a 41-hex head is not a SHA — and
+          # present exactly once; empty when absent, malformed or repeated.
+          field() {
+            local re="$1:[[:space:]]*($2)([^[:alnum:]]|\$)" rest
+            [[ "$3" =~ $re ]] || return 0
+            rest=${3#*"${BASH_REMATCH[0]}"}
+            [[ "$rest" == *"$1:"* ]] && return 0
+            printf '%s' "${BASH_REMATCH[1]}"
+          }
           mbody=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null || true)
-          cur=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
-          [[ "$cur" =~ ^[0-9]+$ ]] || cur=$ROUND
-          head=$(printf '%s' "$mbody" | sed -n 's/.*auto-review-head:\([0-9a-f]*\).*/\1/p')
-          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || head=$HEAD
+          cur=$(field rounds '[0-9]{1,9}' "$mbody")
+          [ -n "$cur" ] || cur=$ROUND
+          cur=$((10#$cur))
+          head=$(field auto-review-head '[0-9a-f]{40}' "$mbody")
+          [ -n "$head" ] || head=$HEAD
           prev=$(( cur > 0 ? cur - 1 : 0 ))
           body="$MARKER
           🤖 auto review rounds: $prev (cap $CAP). (one round refunded — the fix agent never ran to a result and nothing landed: infrastructure, not the fix)

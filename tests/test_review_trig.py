@@ -108,6 +108,15 @@ def test_bot_not_in_allowed_bots_is_refused(tmp_path, allowed):
     assert lookups(state) == []
 
 
+@pytest.mark.parametrize("allowed", ["*", "github-actions", "github-actions[bot]"])
+def test_github_actions_bot_is_never_admitted(tmp_path, allowed):
+    # Any repository's workflow run posts as it, so it identifies nobody —
+    # no allow-list entry and not even the wildcard admits it.
+    _, o, state = run_trig(tmp_path, actor="github-actions[bot]", allowed_bots=allowed)
+    assert o["ok"] == "false", allowed
+    assert lookups(state) == []
+
+
 def test_allow_listed_bot_never_opens_the_fork_escape_hatch(tmp_path):
     _, o, _ = run_trig(tmp_path, actor="claude[bot]", allowed_bots="claude[bot]", head_repo="someone/r")
     assert o["ok"] == "false"

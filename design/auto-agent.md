@@ -186,8 +186,11 @@ finding 4121989) that is enforced in three layers rather than assumed:
   and never PATCHed, by the gate or the land job's refund), a re-review
   request to a trusted login or a write-access account (one cached
   permission lookup per login, fail-closed). `rounds:` must parse as one
-  digit run and `auto-review-head:` as a 40-hex SHA, else the counter
-  counts as absent rather than aborting the gate. Both lists are
+  whole decimal token of at most nine digits and `auto-review-head:` as one
+  whole 40-hex SHA, each present exactly once, else the counter counts as
+  absent rather than aborting the gate or wrapping past the cap. The
+  escalation reset (`reset-auto-counters`, its new `trusted-logins` input)
+  resets the same trusted counter the gate selected. Both lists are
   workflow-level `env:` values — the one place Phase 2's App identity
   changes.
 

@@ -35,7 +35,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   PR comments (verdict, round counter and head SHA, re-review requests,
   hand-off marker) counts only from `REVIEWER_LOGINS` / `TRUSTED_LOGINS` or
   a write-access author, a forged marker is never adopted or PATCHed, and a
-  malformed counter counts as absent (Claude Security 4121983).
+  malformed counter counts as absent (Claude Security 4121983). Also runs
+  the `reset-auto-counters` composite's step (lifted the same way) in a
+  gate → reset → gate sequence: escalation resets the counter the gate
+  selected, so re-adding the label really starts a fresh budget.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS`, or a bot the

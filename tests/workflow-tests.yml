@@ -12,6 +12,7 @@ on:
       - ".github/actions/emit-landing/**"
       - ".github/workflows/claude-auto-review.yml"
       - ".github/workflows/claude-review.yml"
+      - ".github/actions/reset-auto-counters/**"
       - "tests/**"
       - "pytest.ini"
   pull_request:
@@ -21,6 +22,7 @@ on:
       - ".github/actions/emit-landing/**"
       - ".github/workflows/claude-auto-review.yml"
       - ".github/workflows/claude-review.yml"
+      - ".github/actions/reset-auto-counters/**"
       - "tests/**"
       - "pytest.ini"
 

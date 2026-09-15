@@ -196,7 +196,8 @@ on:
           would let the reviewer's own comments retrigger the dev agent.
           The trig step reads it too: a `[bot]` commenter's @review is
           admitted only when named here (same-repo heads only; the fork
-          escape hatch stays a write-access human's decision).
+          escape hatch stays a write-access human's decision) — except
+          github-actions[bot], which no list and not even "*" admits.
         required: false
         type: string
         default: ""
@@ -383,7 +384,10 @@ jobs:
             # actor is `allowed_bot` only if the caller's allowed_bots names
             # it — same normalisation as claude-code-action's isAllowedBot,
             # which runs later and refuses every other bot anyway — and that
-            # admits same-repo heads only, below, with no ack. Any other
+            # admits same-repo heads only, below, with no ack;
+            # github-actions[bot] is never admitted, not even by "*" (any
+            # repository's workflow run posts as it, so it identifies
+            # nobody). Any other
             # actor needs write access by permission lookup; API failure
             # degrades to none — refuse, don't admit.
             in_list() { case ",$(printf '%s' "$2" | tr -d ' ')," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -391,6 +395,7 @@ jobs:
               trusted=true
             else
               case "$ACTOR" in
+                "github-actions[bot]") ;;
                 *"[bot]")
                   bot=$(printf '%s' "$ACTOR" | sed 's/\[bot\]$//' | tr '[:upper:]' '[:lower:]')
                   bots=$(printf '%s' "$ALLOWED_BOTS" | tr '[:upper:]' '[:lower:]' | sed 's/\[bot\]//g')

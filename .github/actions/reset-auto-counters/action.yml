@@ -15,8 +15,13 @@ description: >-
 
   The reset body keeps the marker on line 1 (that is what the gates search
   for) and carries NO `rounds:` / `attempts:` number and NO
-  `auto-review-head:` tip, so each gate's `sed` extractor reads 0 via
-  `${prev:-0}` and the next round's Record step re-initialises the marker.
+  `auto-review-head:` tip, so each gate's extractor reads the counter as
+  absent (0) and the next round's Record step re-initialises the marker.
+  With `trusted-logins` set, only a marker comment by one of those logins is
+  a counter (the review-fix gate's own selection, Claude Security 4121983):
+  resetting the newest marker regardless of author would PATCH an outsider's
+  forgery and leave the loop's real counter exhausted, so "re-add the label"
+  escalated again on sight.
   Dropping the head marker is deliberate: the no-progress check compares tips
   only once `prev >= 1`, so a fresh budget's first round is never mis-read as
   a stall (re-adding the label without pushing does not trip it), and that
@@ -57,6 +62,13 @@ inputs:
       (renders as "🤖 auto review rounds reset (on escalation — …) — the next
       round starts at 1 with the full cap.").
     required: true
+  trusted-logins:
+    description: >-
+      Comma-separated logins whose marker comments count as the counter
+      (the caller's TRUSTED_LOGINS). Empty (default): the newest marker
+      comment by any author, as before.
+    required: false
+    default: ""
 
 outputs:
   ok:
@@ -76,6 +88,7 @@ runs:
         PR: ${{ inputs.pr }}
         COUNTERS: ${{ inputs.counters }}
         REASON: ${{ inputs.reason }}
+        TRUSTED_LOGINS: ${{ inputs.trusted-logins }}
       run: |
         set -uo pipefail
         # Retry with backoff, same shape as the gates' ghr(): a 5xx or
@@ -94,19 +107,26 @@ runs:
           printf '%s' "$out"
         }
         ok=1
+        # Comma list → jq array (whitespace-tolerant); `[]` when unset, which
+        # the selection below reads as "any author".
+        trusted=$(jq -cn --arg t "$TRUSTED_LOGINS" '$t | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != ""))')
         for counter in $COUNTERS; do
           case "$counter" in
             rounds)   marker="<!-- auto-review-rounds -->"; label="auto review rounds";  unit="round" ;;
             attempts) marker="<!-- auto-fix-attempts -->";  label="auto CI-fix attempts"; unit="attempt" ;;
             *) echo "::warning::reset-auto-counters: unknown counter '$counter'; skipping."; ok=0; continue ;;
           esac
-          # Same lookup the gates use: the LAST comment carrying the marker.
-          # Gate on the exit code, not the output: an empty result means no
+          # Same lookup the gates use: the LAST comment carrying the marker
+          # — by one of the trusted logins when the caller named them. Gate
+          # on the exit code, not the output: an empty result means no
           # counter comment exists (nothing to reset), a persistently failed
           # call means we don't know — report that as not-ok rather than
-          # claiming a reset.
+          # claiming a reset. `--paginate` output is one merged array on
+          # current gh, one array per page on older releases; -s plus
+          # `.[][]` flattens either.
           if ! cid=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                       --jq 'map(select(.body|contains("'"$marker"'"))) | last | .id // empty'); then
+                       | jq -rs --arg m "$marker" --argjson t "$trusted" \
+                           '[.[][] | select((.body|contains($m)) and (($t|length) == 0 or ((.user.login // "") as $l | any($t[]; . == $l))))] | last | .id // empty'); then
             echo "::warning::reset-auto-counters: could not look up the $label comment on #$PR (after retries)."
             ok=0; continue
           fi

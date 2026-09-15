@@ -18,11 +18,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto-review.yml"
+RESET = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.yml"
 
 HEAD = "a" * 40
 OLD = "b" * 40
@@ -185,6 +188,35 @@ def test_malformed_counter_counts_from_zero_instead_of_failing_the_gate(tmp_path
     assert "counting from 0" in r.stdout
 
 
+@pytest.mark.parametrize("value", ["10oops", "9223372036854775807", "3\\nrounds: 4", "x"])
+def test_malformed_or_repeated_or_oversized_counter_counts_as_absent(tmp_path, value):
+    # Whole-token parsing: `10oops` is not 10, a value wider than nine digits
+    # would wrap negative in bash arithmetic and never reach the cap, and a
+    # repeated token is ambiguous — each counts as absent (0), never as an
+    # escalation or a gate failure.
+    body = f"{MARKER}\n🤖 auto review rounds: {value} (cap 10)."
+    r, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  comment(100, "i-am-marvin", body, T0)])
+    assert o["act"] == "fix" and o["round"] == "1", value
+    assert "counting from 0" in r.stdout
+
+
+def test_counter_is_read_as_decimal(tmp_path):
+    # `09` is invalid octal: bash arithmetic on it fails the gate (set -e)
+    # unless the value is forced decimal; 9 + 1 = 10 is not past the cap.
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  counter("i-am-marvin", "09", T0, cid=100)])
+    assert o["act"] == "fix" and o["round"] == "10"
+
+
+def test_head_that_is_not_exactly_a_sha_never_trips_no_progress(tmp_path):
+    for head in (HEAD + "g", HEAD[:-1], HEAD.upper()):
+        _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                      counter("i-am-marvin", 1, T0, cid=100, head=head)])
+        assert o["act"] == "fix" and o["round"] == "2", head
+        assert o.get("stalled") is None, head
+
+
 def test_no_progress_escalation_still_fires_on_the_loops_own_counter(tmp_path):
     _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
                                   counter("i-am-marvin", 1, T0, cid=100, head=HEAD)])
@@ -308,3 +340,70 @@ def test_refund_ignores_a_counter_that_is_only_an_outsiders(tmp_path):
     r, patched, _ = run_refund(tmp_path, [counter("nobody", 999, T2, cid=200, head=HEAD)])
     assert patched == []
     assert "No counter comment found" in r.stdout
+
+
+def test_refund_falls_back_to_the_gates_values_on_a_malformed_body(tmp_path):
+    body = f"{MARKER}\n🤖 auto review rounds: 3oops (cap 10).\n<!-- auto-review-head:{OLD}g -->"
+    _, patched, patched_body = run_refund(tmp_path, [comment(100, "i-am-marvin", body, T0)])
+    assert patched == ["100"]
+    assert "rounds: 2" in patched_body and HEAD in patched_body, "ROUND=3 and HEAD, the gate's values"
+
+
+# --- escalation's reset (the shared composite) -------------------------------
+#
+# The escalation hand-off promises "re-add the label and the loop starts a
+# fresh budget". That holds only if the reset PATCHes the SAME counter the
+# gate reads: selecting the newest marker regardless of author edited an
+# outsider's forgery, left the loop's own counter exhausted, and the next
+# verdict escalated again. The stub applies each PATCH to the comment list,
+# so the sequence gate → reset → gate runs against the state it produces.
+
+RESET_STUB = r"""
+sleep() { :; }
+gh() {
+  case "$*" in
+    "api repos/o/r/issues/42/comments --paginate") cat "$STATE/comments.json" ;;
+    "api -X PATCH repos/o/r/issues/comments/"*)
+      local id=${4##*/} body=${6#body=}
+      echo "$id" >>"$STATE/patched"
+      jq --argjson i "$id" --arg b "$body" 'map(if .id == $i then .body = $b else . end)' \
+        "$STATE/comments.json" >"$STATE/comments.new" && mv "$STATE/comments.new" "$STATE/comments.json" ;;
+    *) echo "unexpected gh call: $*" >&2; return 1 ;;
+  esac
+}
+"""
+
+
+def run_reset(state: Path, trusted_logins: str):
+    out = state.parent / "reset-out"
+    out.write_text("")
+    env = {"STATE": str(state), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR": "42",
+           "COUNTERS": "rounds", "REASON": "on escalation", "TRUSTED_LOGINS": trusted_logins}
+    r = sh("bash", "-c", RESET_STUB + lift_step(RESET, "    - id: reset"), check=False, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    patched = (state / "patched").read_text().split() if (state / "patched").exists() else []
+    return outputs(out), patched
+
+
+def test_escalation_reset_targets_the_counter_the_gate_selected(tmp_path):
+    at_cap = [verdict("i-am-marvin", "suggestions", T1, cid=1),
+              counter("i-am-marvin", 10, T0, cid=100, head=OLD),
+              counter("nobody", 999, T2, cid=200, head=HEAD)]
+    _, o, state = run_gate(tmp_path, at_cap)
+    assert o["act"] == "escalate" and o["cid"] == "100"
+    reset, patched = run_reset(state, "i-am-marvin")
+    assert reset["ok"] == "1"
+    assert patched == ["100"], "the loop's counter, never the outsider's marker"
+    # The fresh budget is real: the next verdict runs round 1, on the reset comment.
+    comments = json.loads((state / "comments.json").read_text())
+    _, o, _ = run_gate(tmp_path, comments)
+    assert o["act"] == "fix" and o["round"] == "1" and o["cid"] == "100"
+
+
+def test_reset_without_trusted_logins_keeps_the_any_author_lookup(tmp_path):
+    # The default for the composite's other callers: unchanged behaviour.
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps([counter("i-am-marvin", 10, T0, cid=100),
+                                                     counter("nobody", 999, T2, cid=200)]))
+    reset, patched = run_reset(state, "")
+    assert reset["ok"] == "1" and patched == ["200"]
