@@ -347,3 +347,39 @@ def test_merge_gate_still_holds_on_the_real_companion_despite_an_outsiders_opt_o
 def test_merge_gate_honours_a_trusted_opt_out(gh):
     anchor(gh, "Companion PR: none")
     assert atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD}) is False
+
+
+def imported(snapshot, header_extra=""):
+    """The body skills/import/import.sh writes: a machine-readable header, a
+    `---` rule, then the upstream author's body verbatim."""
+    return (
+        f"Upstream issue: https://github.com/{atlas.UPSTREAM}/issues/2615\n\n"
+        "Imported from upstream so the agents can work it here (no upstream write\n"
+        "access). Canonical discussion stays upstream; below is a snapshot of the\n"
+        f"upstream body at import time.\n{header_extra}\n---\n\n{snapshot}"
+    )
+
+
+@pytest.mark.parametrize(
+    "directive", ["Companion PR: none", f"Companion PR: {TS_MONO_URL}"]
+)
+@pytest.mark.parametrize(
+    "login, association", [(MARVIN, "MEMBER"), ("importer", "COLLABORATOR")]
+)
+def test_an_imported_snapshots_directive_is_ignored(gh, directive, login, association):
+    # The fork issue's author is the trusted importer, but everything below the
+    # rule is the upstream (outsider) author's text.
+    body = imported(f"The viewer crashes.\n\n{directive}\n\nSteps: ...", "")
+    anchor(gh, body, login=login, association=association)
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9
+    assert gh.matching(is_url_query) == []
+    assert atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD}) is True
+    assert any("imported upstream snapshot ignored" in a for a in atlas.actions)
+
+
+def test_an_importers_own_directive_above_the_rule_is_honoured(gh):
+    anchor(
+        gh, imported("Companion PR: none  <- upstream text", "\nCompanion PR: none\n")
+    )
+    assert atlas.companion_pr(ISSUE, HEAD) is None
+    assert gh.matching(is_discovery_query) == []

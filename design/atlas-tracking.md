@@ -491,10 +491,11 @@ stage, resolved by the hourly sync:
   convention for human-named branches — but only when the issue's author
   is a trusted identity or has write access (the machine account, an
   OWNER/MEMBER/COLLABORATOR association, or a write permission looked up
-  on the fork) and the URL is a ts-mono PR; any other line is treated as
-  absent, since an issue body stays editable by its author forever and
-  `/import` copies an upstream author's body verbatim (security finding
-  4121986, fixed 2026-09-15). Like `Upstream PR`, the recorded
+  on the fork) and the URL is a ts-mono PR — and, on an imported issue,
+  only above the import's `---` rule, since the snapshot below it is the
+  upstream author's text copied verbatim under the importer's name. Any
+  other line is treated as absent: an issue body stays editable by its
+  author forever (security finding 4121986, fixed 2026-09-15). Like `Upstream PR`, the recorded
   line is the durable form; chips are cosmetic.
 - **Merge gate**: `upstream approved -> Merge` additionally requires the
   companion (when one exists) to be merged or approved. An open

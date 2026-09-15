@@ -459,8 +459,12 @@ def companion_pr(issue: int, head_ref: str):
     its author can edit indefinitely (and /import copies an upstream
     author's body verbatim), so it is honoured only from a trusted author
     (trusted_author) and only for a TS_MONO URL: the line decides whether
-    companion_blocks_merge holds an approved promotion at Sign-off. Any
-    other line is treated as absent and the convention decides.
+    companion_blocks_merge holds an approved promotion at Sign-off. On an
+    imported issue (skills/import: a trusted importer's header opening
+    with `Upstream issue:`, a `---` rule, then the upstream author's body
+    verbatim) only the header is read — the snapshot is an outsider's text
+    under a trusted author's name. Any other line is treated as absent and
+    the convention decides.
     """
     iss = gh_json(
         "api",
@@ -469,6 +473,16 @@ def companion_pr(issue: int, head_ref: str):
         "{body: .body, login: .user.login, association: .author_association}",
     )
     body, login = iss.get("body") or "", iss.get("login") or ""
+    if re.search(r"^Upstream issue:\s*https?://", body, re.M):
+        # /import's body: the importer's header, a `---` rule, the upstream
+        # author's text verbatim — only the header may carry a directive
+        parts = re.split(r"^---\s*$", body, maxsplit=1, flags=re.M)
+        if len(parts) == 2 and re.search(r"Companion PR:", parts[1], re.I):
+            actions.append(
+                f"#{issue}: `Companion PR:` line in the imported upstream snapshot "
+                "ignored — only the import header counts"
+            )
+        body = parts[0]
     if re.search(r"Companion PR:", body, re.I) and not trusted_author(
         login, FORK, iss.get("association")
     ):
