@@ -3,12 +3,30 @@
 # tracking bookkeeping, in one invocation. Every write is check-before-write
 # (idempotent), so re-running heals an already-promoted issue.
 #
-# Usage: promote.sh <issue-number> [--dry-run]
-# Exit codes: 0 ok; 3 no open same-repo fork PR chip (resolve inputs via the
+# Trust rule (applied BEFORE any PR text — title, body, branch name — is
+# consulted): a fork PR qualifies only when its head repository is the fork
+# itself AND its author is in TRUSTED_LOGINS or has write access on the
+# fork. Anyone can open a PR from a personal fork into the org fork and link
+# it to an issue (GitHub creates the chip natively for `Fixes #N` on a PR
+# based on the default branch), so a chip alone proves nothing; a branch
+# inside the org fork can only be pushed by a write-access account, which
+# makes the head-repository check the load-bearing one and the author check
+# defence in depth. The picked PR's title, body and head branch become the
+# upstream PR opened as the operator, so nothing an outsider wrote may reach
+# that step.
+#
+# Usage: promote.sh <issue-number> [--dry-run] [--pr <number>]
+#   --dry-run      print the candidates, each verdict, the decision and every
+#                  write that would happen; nothing is written.
+#   --pr <number>  pin the fork PR to promote (needed when more than one
+#                  qualifies); it must still pass the trust rule.
+# Exit codes: 0 ok; 3 no qualifying fork PR (stderr lists every candidate,
+# why it was refused and what the fallback looked for; resolve via the
 # skill's slow path); 4 branch not on the fork; 5 preflight hard failure
 # (a REVIEWER who is provably not a collaborator on upstream or on the ts-mono
 # companion's repo, or a conflict merging upstream main into the branch — both
-# abort before any upstream PR is opened).
+# abort before any upstream PR is opened); 6 ambiguous — more than one fork
+# PR qualifies; re-run with --pr <number>.
 set -euo pipefail
 
 FORK=meridianlabs-ai/inspect_ai
@@ -29,16 +47,76 @@ UPSTREAM_PR_FIELD=PVTF_lADOC7YMCM4BU68pzhYZp9Q
 DEFAULT_REVIEWER=dragonstyle
 REVIEWER=$(tr 'A-Z' 'a-z' <<<"${REVIEWER:-$DEFAULT_REVIEWER}")
 
-N=${1:?usage: promote.sh <issue-number> [--dry-run]}
-DRY=${2:-}
+N=""
+DRY=""
+PIN=""
+usage() { echo "usage: promote.sh <issue-number> [--dry-run] [--pr <number>]" >&2; exit 1; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=--dry-run ;;
+    --pr) [ -n "${2:-}" ] || usage; PIN=$2; shift ;;
+    -*) usage ;;
+    *) N=$1 ;;
+  esac
+  shift
+done
+[ -n "$N" ] || usage
+case "$PIN" in *[!0-9]*) echo "--pr takes a PR number, got '$PIN'" >&2; exit 1 ;; esac
 
 write() {  # guard every mutation; --dry-run prints instead
   if [ "$DRY" = "--dry-run" ]; then echo "DRY-RUN: $*"; else "$@"; fi
 }
 
+# Trusted identities (comma-separated). Phase 2 (GitHub App identity) changes
+# this ONE value: marvin's login becomes `<app-slug>[bot]`.
+TRUSTED_LOGINS="i-am-marvin"
+
+# trusted_login <login>: 0 when <login> is in TRUSTED_LOGINS or has write
+# access on the fork (admin/maintain/write from the collaborator permission
+# API — a public repo answers `read` for everyone else). A failed or
+# unexpected lookup is untrusted (fail closed). Cached per login for the
+# run; call it in the main shell, not inside $(...), or the cache is lost.
+PERM_CACHE=""
+trusted_login() {
+  local login perm
+  login=$(tr 'A-Z' 'a-z' <<<"$1")
+  [ -n "$login" ] || return 1
+  case ",$(tr 'A-Z' 'a-z' <<<"$TRUSTED_LOGINS")," in *",$login,"*) return 0 ;; esac
+  case "$PERM_CACHE" in *"|$login=ok|"*) return 0 ;; *"|$login=no|"*) return 1 ;; esac
+  perm=$(gh api "repos/$FORK/collaborators/$login/permission" --jq .permission 2>/dev/null || true)
+  case "$perm" in
+    admin|maintain|write) PERM_CACHE="$PERM_CACHE|$login=ok|"; return 0 ;;
+    *) PERM_CACHE="$PERM_CACHE|$login=no|"; return 1 ;;
+  esac
+}
+# check_pr <pr-json>: applies the trust rule; sets REASON to "" when the PR
+# qualifies, else to why it was refused. Reads only headRepository and
+# author — never the PR's title, body or branch name.
+check_pr() {
+  local head login
+  head=$(jq -r '.headRepository.nameWithOwner // ""' <<<"$1")
+  login=$(jq -r '.author.login // ""' <<<"$1")
+  REASON=""
+  if [ "$head" != "$FORK" ]; then
+    REASON="head repository is '${head:-unknown}', not $FORK"
+  elif ! trusted_login "$login"; then
+    REASON="author '${login:-unknown}' is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $FORK"
+  fi
+}
+# fmt_pr <pr-json>: one listing line for the operator.
+fmt_pr() {
+  jq -r '"  #\(.number) \(.state) head=\(.headRepository.nameWithOwner // "?"):\(.headRefName) author=\(.author.login // "?")"' <<<"$1"
+}
+# `gh pr list/view --json` → the chip shape used everywhere below (head repo
+# as owner/repo; null when the head repository was deleted).
+NORM='{number, state, isDraft, title, body, headRefName, author:{login:(.author.login // "")},
+  repository:{nameWithOwner:$fork},
+  headRepository:{nameWithOwner:(if (.headRepositoryOwner.login // "") != "" and (.headRepository.name // "") != ""
+    then "\(.headRepositoryOwner.login)/\(.headRepository.name)" else null end)}}'
+
 # ---- one GraphQL round trip: chips (with PR bodies) + board item + fields
 JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state body
-  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName repository{nameWithOwner}}}
+  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName author{login} repository{nameWithOwner} headRepository{nameWithOwner}}}
   projectItems(first:5){nodes{id project{number}
     stage: fieldValueByName(name:"Stage"){... on ProjectV2ItemFieldSingleSelectValue{name}}
     up: fieldValueByName(name:"Upstream PR"){... on ProjectV2ItemFieldTextValue{text}}}}}}}' -F n="$N")
@@ -53,14 +131,114 @@ ISSUE_STATE=$(jq -r '.data.repository.issue.state' <<<"$JSON")
 UP_ISSUE=$(jq -r '.data.repository.issue.body // ""' <<<"$JSON" \
   | grep -oE 'Upstream issue: https://github.com/UKGovernmentBEIS/inspect_ai/issues/[0-9]+' \
   | head -1 | grep -oE '[0-9]+$' || true)
-# Prefer the OPEN fork PR; fall back to a closed one (the heal path — a
-# promoted issue's fork PR is already superseded and closed).
-PICK=$(jq -c --arg repo "$FORK" '([.data.repository.issue.closedByPullRequestsReferences.nodes[]
-  | select(.repository.nameWithOwner==$repo)] | (map(select(.state=="OPEN")) + .))[0] // empty' <<<"$JSON")
+
+# ---- resolve the fork PR: trust rule first, then the pick. Every fork-base
+# chip is judged by check_pr before its state or text is looked at. OPEN_OK /
+# CLOSED_OK collect qualifying chips (one compact JSON object per line);
+# LISTING is the human record of every candidate and its verdict.
+LISTING=""
+OPEN_OK=""
+CLOSED_OK=""
+CHIP_NUMS=" "
+while IFS= read -r chip; do
+  [ -n "$chip" ] || continue
+  CHIP_NUMS="$CHIP_NUMS$(jq -r .number <<<"$chip") "
+  line=$(fmt_pr "$chip")
+  check_pr "$chip"
+  if [ -n "$REASON" ]; then
+    LISTING="$LISTING$line — REFUSED: $REASON"$'\n'
+  elif [ "$(jq -r .state <<<"$chip")" = "OPEN" ]; then
+    OPEN_OK="$OPEN_OK$chip"$'\n'
+    LISTING="$LISTING$line — qualifies"$'\n'
+  else
+    CLOSED_OK="$CLOSED_OK$chip"$'\n'
+    LISTING="$LISTING$line — qualifies (closed: heal path)"$'\n'
+  fi
+done <<<"$(jq -c --arg repo "$FORK" '.data.repository.issue.closedByPullRequestsReferences.nodes[]
+  | select(.repository.nameWithOwner==$repo)' <<<"$JSON")"
+
+# Closing reference to THIS issue (the same keyword set the body transform
+# below rewrites — a wider match here would let an unrewritten bare ref reach
+# upstream) or the agent branch convention. Read only after the rule passed.
+REF_TEST='((.body // "") | test("(Fixes|Closes|Resolves)\\s+(meridianlabs-ai/inspect_ai)?#" + $n + "\\b"))
+  or (.headRefName | test("^(claude/)?issue-" + $n + "-"))'
+ambiguous() {  # $1 = what, $2 = the qualifying candidates (one per line)
+  echo "AMBIGUOUS: more than one $1 qualifies for issue #$N — re-run with --pr <number>:" >&2
+  while IFS= read -r c; do [ -n "$c" ] && fmt_pr "$c" >&2; done <<<"$2"
+  exit 6
+}
+PICK=""
+HOW=""
+if [ -n "$PIN" ]; then
+  # Pinned: a chip of any state, else the fork PR itself. The rule still
+  # applies — pinning names the candidate, it does not vouch for it.
+  PICK=$(jq -c --arg repo "$FORK" --argjson pin "$PIN" '[.data.repository.issue.closedByPullRequestsReferences.nodes[]
+    | select(.repository.nameWithOwner==$repo and .number==$pin)][0] // empty' <<<"$JSON")
+  [ -n "$PICK" ] || PICK=$(gh pr view "$PIN" --repo "$FORK" \
+      --json number,state,isDraft,title,body,headRefName,author,headRepository,headRepositoryOwner 2>/dev/null \
+    | jq -c --arg fork "$FORK" "$NORM" || true)
+  [ -n "$PICK" ] || { echo "--pr $PIN is not a PR on $FORK" >&2; exit 3; }
+  check_pr "$PICK"
+  if [ -n "$REASON" ]; then
+    echo "REFUSED --pr $PIN: $REASON" >&2
+    fmt_pr "$PICK" >&2
+    exit 3
+  fi
+  HOW="--pr $PIN"
+  case "$CHIP_NUMS" in
+    *" $PIN "*) ;;
+    *) jq -e --arg n "$N" "$REF_TEST" <<<"$PICK" >/dev/null ||
+         echo "WARN: --pr $PIN is not linked to issue #$N (no chip, no Fixes/Closes/Resolves #$N, head branch is not issue-$N-*); the upstream PR will still say Fixes meridianlabs-ai/inspect_ai#$N" >&2 ;;
+  esac
+else
+  case "$(jq -sc length <<<"$OPEN_OK")" in
+    1) PICK=$(jq -sc '.[0]' <<<"$OPEN_OK"); HOW="open fork-PR chip" ;;
+    0) ;;
+    *) ambiguous "open fork-PR chip" "$OPEN_OK" ;;
+  esac
+fi
 if [ -z "$PICK" ]; then
-  echo "NO FORK PR CHIP for issue #$N — resolve inputs via the slow path. Chips seen:" >&2
-  jq -r '.data.repository.issue.closedByPullRequestsReferences.nodes[]
-         | "  #\(.number) \(.state) \(.repository.nameWithOwner) head=\(.headRefName)"' <<<"$JSON" >&2
+  # No single open chip: fork closing refs are inert (non-default base), so
+  # the agent's own PR usually has no chip at all. Fall back to the open
+  # fork PRs — rule first, then the closing ref / branch convention.
+  LOOKED="open fork PRs (gh pr list --repo $FORK --state open) passing the trust rule and carrying Fixes|Closes|Resolves #$N (or meridianlabs-ai/inspect_ai#$N) or a head branch claude/issue-$N-* / issue-$N-*"
+  FB_OK=""
+  while IFS= read -r pr; do
+    [ -n "$pr" ] || continue
+    case "$CHIP_NUMS" in *" $(jq -r .number <<<"$pr") "*) continue ;; esac  # judged above
+    line=$(fmt_pr "$pr")
+    check_pr "$pr"
+    if [ -n "$REASON" ]; then
+      LISTING="$LISTING$line — REFUSED: $REASON"$'\n'
+    elif jq -e --arg n "$N" "$REF_TEST" <<<"$pr" >/dev/null; then
+      FB_OK="$FB_OK$pr"$'\n'
+      LISTING="$LISTING$line — qualifies (no chip; closing ref or branch names issue #$N)"$'\n'
+    else
+      LISTING="$LISTING$line — no reference to issue #$N"$'\n'
+    fi
+  done <<<"$(gh pr list --repo "$FORK" --state open --limit 100 \
+      --json number,state,isDraft,title,body,headRefName,author,headRepository,headRepositoryOwner \
+    | jq -c --arg fork "$FORK" ".[] | $NORM")"
+  case "$(jq -sc length <<<"$FB_OK")" in
+    1) PICK=$(jq -sc '.[0]' <<<"$FB_OK"); HOW="open fork PR matched by closing ref or branch convention (no chip)" ;;
+    0) ;;
+    *) ambiguous "open fork PR matched by closing ref or branch convention" "$FB_OK" ;;
+  esac
+fi
+if [ -z "$PICK" ]; then
+  # Heal path: a promoted issue's fork PR is already superseded and closed.
+  case "$(jq -sc length <<<"$CLOSED_OK")" in
+    1) PICK=$(jq -sc '.[0]' <<<"$CLOSED_OK"); HOW="closed fork-PR chip (heal path)" ;;
+    0) ;;
+    *) ambiguous "closed fork-PR chip (heal path)" "$CLOSED_OK" ;;
+  esac
+fi
+if [ -z "$PICK" ]; then
+  echo "NO QUALIFYING FORK PR for issue #$N — resolve via the slow path, then re-run with --pr <number>." >&2
+  echo "Looked for: (a) open fork-PR chips passing the trust rule; (b) $LOOKED; (c) closed fork-PR chips (heal path)." >&2
+  echo "Candidates seen (TRUSTED_LOGINS=$TRUSTED_LOGINS):" >&2
+  [ -n "$LISTING" ] || LISTING="  (none)"$'\n'
+  printf '%s' "$LISTING" >&2
   exit 3
 fi
 FPR_STATE=$(jq -r .state <<<"$PICK")
@@ -68,6 +246,13 @@ FPR=$(jq -r .number <<<"$PICK")
 BRANCH=$(jq -r .headRefName <<<"$PICK")
 FPR_TITLE=$(jq -r .title <<<"$PICK")
 FPR_BODY=$(jq -r .body <<<"$PICK")
+echo "RESOLVED: fork PR #$FPR ($FPR_STATE) via $HOW — branch=$BRANCH author=$(jq -r '.author.login // "?"' <<<"$PICK") head=$(jq -r '.headRepository.nameWithOwner // "?"' <<<"$PICK"); TRUSTED_LOGINS=$TRUSTED_LOGINS"
+if [ "$DRY" = "--dry-run" ]; then
+  printf '%s' "$LISTING"
+else
+  # A refused candidate sat next to the one we took — say so.
+  grep -F -- '— REFUSED' <<<"$LISTING" | sed 's/^ */note: refused /' >&2 || true
+fi
 
 ITEM=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].id // empty' <<<"$JSON")
 CUR_STAGE=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].stage.name // empty' <<<"$JSON")

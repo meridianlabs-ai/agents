@@ -29,6 +29,15 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   case run on through `emit-landing` and the validator under the land job's
   `branch-prefix`. Also checks every `workflow_call` input declares a
   `type`.
+- `test_skill_resolution.py` — the trust rule in `skills/checkout/checkout.sh`
+  and `skills/promote/promote.sh`, run against a stub `gh` that answers from
+  fixtures and logs every call: a chip from a personal fork or an untrusted
+  author is refused (naming it and the reason) before any write, the
+  permission lookup admits write-access collaborators and fails closed, the
+  External-proxy body line is honoured only on a genuine proxy, and promote
+  refuses ambiguity without `--pr`, resolves with it, and falls back to
+  closing refs / the branch convention when no chip exists. Acceptance paths
+  run through `--dry-run` only; the test clone's remote is non-routable.
 
 Run from the repo root:
 
