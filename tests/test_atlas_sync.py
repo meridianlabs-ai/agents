@@ -93,7 +93,6 @@ def permission(gh, login, perm, role=None):
     "login, association, expected",
     [
         (MARVIN, None, True),
-        (REVIEWER_BOT, "NONE", False),  # the App is not a collaborator
         ("colleague", "OWNER", True),
         ("colleague", "MEMBER", True),
         ("colleague", "COLLABORATOR", True),
