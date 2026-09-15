@@ -187,7 +187,8 @@ finding 4121989) that is enforced in three layers rather than assumed:
   request to a trusted login or a write-access account (one cached
   permission lookup per login, fail-closed). `rounds:` must parse as one
   whole decimal token of at most nine digits and `auto-review-head:` as one
-  whole 40-hex SHA, each present exactly once, else the counter counts as
+  whole 40-hex SHA, each present exactly once and delimited by whitespace as
+  the record step writes them, else the counter counts as
   absent rather than aborting the gate or wrapping past the cap. The
   escalation reset (`reset-auto-counters`, its new `trusted-logins` input)
   resets the same trusted counter the gate selected. Both lists are

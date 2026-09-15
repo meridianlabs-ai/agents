@@ -188,12 +188,14 @@ def test_malformed_counter_counts_from_zero_instead_of_failing_the_gate(tmp_path
     assert "counting from 0" in r.stdout
 
 
-@pytest.mark.parametrize("value", ["10oops", "9223372036854775807", "3\\nrounds: 4", "x"])
+@pytest.mark.parametrize("value", ["10oops", "10.5", "9223372036854775807", "3\\nrounds: 4",
+                                   "x\\nrounds: 10", "x"])
 def test_malformed_or_repeated_or_oversized_counter_counts_as_absent(tmp_path, value):
-    # Whole-token parsing: `10oops` is not 10, a value wider than nine digits
-    # would wrap negative in bash arithmetic and never reach the cap, and a
-    # repeated token is ambiguous — each counts as absent (0), never as an
-    # escalation or a gate failure.
+    # Whole-token parsing up to the format's own delimiter (whitespace):
+    # `10oops` and `10.5` are not 10, a value wider than nine digits would
+    # wrap negative in bash arithmetic and never reach the cap, and a
+    # repeated token is ambiguous whichever of the two is well-formed — each
+    # counts as absent (0), never as an escalation or a gate failure.
     body = f"{MARKER}\n🤖 auto review rounds: {value} (cap 10)."
     r, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
                                   comment(100, "i-am-marvin", body, T0)])
@@ -210,7 +212,7 @@ def test_counter_is_read_as_decimal(tmp_path):
 
 
 def test_head_that_is_not_exactly_a_sha_never_trips_no_progress(tmp_path):
-    for head in (HEAD + "g", HEAD[:-1], HEAD.upper()):
+    for head in (HEAD + "g", HEAD + "-extra", HEAD[:-1], HEAD.upper()):
         _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
                                       counter("i-am-marvin", 1, T0, cid=100, head=head)])
         assert o["act"] == "fix" and o["round"] == "2", head
@@ -343,7 +345,7 @@ def test_refund_ignores_a_counter_that_is_only_an_outsiders(tmp_path):
 
 
 def test_refund_falls_back_to_the_gates_values_on_a_malformed_body(tmp_path):
-    body = f"{MARKER}\n🤖 auto review rounds: 3oops (cap 10).\n<!-- auto-review-head:{OLD}g -->"
+    body = f"{MARKER}\n🤖 auto review rounds: 3.5 (cap 10).\n<!-- auto-review-head:{OLD}-x -->"
     _, patched, patched_body = run_refund(tmp_path, [comment(100, "i-am-marvin", body, T0)])
     assert patched == ["100"]
     assert "rounds: 2" in patched_body and HEAD in patched_body, "ROUND=3 and HEAD, the gate's values"

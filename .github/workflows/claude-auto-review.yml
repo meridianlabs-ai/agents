@@ -615,15 +615,20 @@ jobs:
           prev=0
           prevsha=""
           # field <name> <re> <body>: the value of the body's ONE
-          # `<name>:<value>` token, the value being the WHOLE token — <re>
-          # followed by a non-alphanumeric or the end, so `10oops` is
-          # malformed rather than 10 and a 41-hex head is not a SHA — and
-          # present exactly once; empty when absent, malformed or repeated.
+          # `<name>:<value>` token. `<name>:` must occur exactly once — every
+          # occurrence is counted BEFORE any value is read, so a malformed
+          # first token cannot hide behind a valid later one — and the WHOLE
+          # value must match <re> up to the format's own delimiter,
+          # whitespace or the end (`rounds: N (cap …`, `auto-review-head:SHA
+          # -->`), so `10oops`, `10.5` and a suffixed SHA are malformed, not
+          # 10, 10 and a tip. Empty when absent, malformed or repeated.
           field() {
-            local re="$1:[[:space:]]*($2)([^[:alnum:]]|\$)" rest
-            [[ "$3" =~ $re ]] || return 0
-            rest=${3#*"${BASH_REMATCH[0]}"}
-            [[ "$rest" == *"$1:"* ]] && return 0
+            local name="$1:" body="$3" stripped after re
+            stripped=${body//"$name"/}
+            [ $(( (${#body} - ${#stripped}) / ${#name} )) -eq 1 ] || return 0
+            after=${body#*"$name"}
+            re="^[[:space:]]*($2)([[:space:]]|\$)"
+            [[ "$after" =~ $re ]] || return 0
             printf '%s' "${BASH_REMATCH[1]}"
           }
           if [ -n "$cid" ]; then
@@ -2348,15 +2353,20 @@ jobs:
           # back to the gate's values when the body does not parse; never
           # below zero (an escalation's reset may have zeroed it).
           # field <name> <re> <body>: the value of the body's ONE
-          # `<name>:<value>` token, the value being the WHOLE token — <re>
-          # followed by a non-alphanumeric or the end, so `10oops` is
-          # malformed rather than 10 and a 41-hex head is not a SHA — and
-          # present exactly once; empty when absent, malformed or repeated.
+          # `<name>:<value>` token. `<name>:` must occur exactly once — every
+          # occurrence is counted BEFORE any value is read, so a malformed
+          # first token cannot hide behind a valid later one — and the WHOLE
+          # value must match <re> up to the format's own delimiter,
+          # whitespace or the end (`rounds: N (cap …`, `auto-review-head:SHA
+          # -->`), so `10oops`, `10.5` and a suffixed SHA are malformed, not
+          # 10, 10 and a tip. Empty when absent, malformed or repeated.
           field() {
-            local re="$1:[[:space:]]*($2)([^[:alnum:]]|\$)" rest
-            [[ "$3" =~ $re ]] || return 0
-            rest=${3#*"${BASH_REMATCH[0]}"}
-            [[ "$rest" == *"$1:"* ]] && return 0
+            local name="$1:" body="$3" stripped after re
+            stripped=${body//"$name"/}
+            [ $(( (${#body} - ${#stripped}) / ${#name} )) -eq 1 ] || return 0
+            after=${body#*"$name"}
+            re="^[[:space:]]*($2)([[:space:]]|\$)"
+            [[ "$after" =~ $re ]] || return 0
             printf '%s' "${BASH_REMATCH[1]}"
           }
           mbody=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null || true)
