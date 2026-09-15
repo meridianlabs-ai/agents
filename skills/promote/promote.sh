@@ -22,11 +22,13 @@
 #                  qualifies); it must still pass the trust rule.
 # Exit codes: 0 ok; 3 no qualifying fork PR (stderr lists every candidate,
 # why it was refused and what the fallback looked for; resolve via the
-# skill's slow path); 4 branch not on the fork; 5 preflight hard failure
-# (a REVIEWER who is provably not a collaborator on upstream or on the ts-mono
-# companion's repo, or a conflict merging upstream main into the branch — both
-# abort before any upstream PR is opened); 6 ambiguous — more than one fork
-# PR qualifies; re-run with --pr <number>.
+# skill's slow path); 4 branch not on the fork; 5 hard failure before any
+# write (the open-PR listing the fallback needs failed or was truncated; the
+# resolved PR's head is a protected branch; the fork branch has moved past
+# the resolved PR's head; a REVIEWER who is provably not a collaborator on
+# upstream or on the ts-mono companion's repo; a conflict merging upstream
+# main into the branch); 6 ambiguous — more than one fork PR qualifies;
+# re-run with --pr <number>.
 set -euo pipefail
 
 FORK=meridianlabs-ai/inspect_ai
@@ -70,6 +72,13 @@ write() {  # guard every mutation; --dry-run prints instead
 # Trusted identities (comma-separated). Phase 2 (GitHub App identity) changes
 # this ONE value: marvin's login becomes `<app-slug>[bot]`.
 TRUSTED_LOGINS="i-am-marvin"
+# The reviewer app's own login, trusted ONLY where its review verdicts are
+# read back (the ADVISORY line): the app posts on this repo only through
+# this repo's own workflows. Never trusted for PR authorship.
+REVIEWER_BOT="claude[bot]"
+# Open fork PRs the fallback lists at most; a listing this long is treated
+# as truncated (uniqueness cannot be established) and refused.
+LIST_LIMIT=500
 
 # trusted_login <login>: 0 when <login> is in TRUSTED_LOGINS or has write
 # access on the fork (admin/maintain/write from the collaborator permission
@@ -109,14 +118,14 @@ fmt_pr() {
 }
 # `gh pr list/view --json` → the chip shape used everywhere below (head repo
 # as owner/repo; null when the head repository was deleted).
-NORM='{number, state, isDraft, title, body, headRefName, author:{login:(.author.login // "")},
+NORM='{number, state, isDraft, title, body, headRefName, headRefOid, author:{login:(.author.login // "")},
   repository:{nameWithOwner:$fork},
   headRepository:{nameWithOwner:(if (.headRepositoryOwner.login // "") != "" and (.headRepository.name // "") != ""
     then "\(.headRepositoryOwner.login)/\(.headRepository.name)" else null end)}}'
 
 # ---- one GraphQL round trip: chips (with PR bodies) + board item + fields
 JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state body
-  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName author{login} repository{nameWithOwner} headRepository{nameWithOwner}}}
+  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName headRefOid author{login} repository{nameWithOwner} headRepository{nameWithOwner}}}
   projectItems(first:5){nodes{id project{number}
     stage: fieldValueByName(name:"Stage"){... on ProjectV2ItemFieldSingleSelectValue{name}}
     up: fieldValueByName(name:"Upstream PR"){... on ProjectV2ItemFieldTextValue{text}}}}}}}' -F n="$N")
@@ -175,7 +184,7 @@ if [ -n "$PIN" ]; then
   PICK=$(jq -c --arg repo "$FORK" --argjson pin "$PIN" '[.data.repository.issue.closedByPullRequestsReferences.nodes[]
     | select(.repository.nameWithOwner==$repo and .number==$pin)][0] // empty' <<<"$JSON")
   [ -n "$PICK" ] || PICK=$(gh pr view "$PIN" --repo "$FORK" \
-      --json number,state,isDraft,title,body,headRefName,author,headRepository,headRepositoryOwner 2>/dev/null \
+      --json number,state,isDraft,title,body,headRefName,headRefOid,author,headRepository,headRepositoryOwner 2>/dev/null \
     | jq -c --arg fork "$FORK" "$NORM" || true)
   [ -n "$PICK" ] || { echo "--pr $PIN is not a PR on $FORK" >&2; exit 3; }
   check_pr "$PICK"
@@ -202,6 +211,19 @@ if [ -z "$PICK" ]; then
   # the agent's own PR usually has no chip at all. Fall back to the open
   # fork PRs — rule first, then the closing ref / branch convention.
   LOOKED="open fork PRs (gh pr list --repo $FORK --state open) passing the trust rule and carrying Fixes|Closes|Resolves #$N (or meridianlabs-ai/inspect_ai#$N) or a head branch claude/issue-$N-* / issue-$N-*"
+  # The listing must be known-good and complete before it decides anything:
+  # a failed lookup read as "no open PRs" would fall through to the closed
+  # chip and re-promote an old branch; a full page could hide a second match.
+  if ! OPEN_PRS=$(gh pr list --repo "$FORK" --state open --limit "$LIST_LIMIT" \
+        --json number,state,isDraft,title,body,headRefName,headRefOid,author,headRepository,headRepositoryOwner \
+      | jq -c --arg fork "$FORK" ".[] | $NORM"); then
+    echo "ABORT: could not list the open fork PRs (gh pr list --repo $FORK --state open failed) — the fallback cannot decide; re-run, or pin with --pr <number>" >&2
+    exit 5
+  fi
+  if [ "$(jq -sc length <<<"$OPEN_PRS")" -ge "$LIST_LIMIT" ]; then
+    echo "ABORT: $FORK has $LIST_LIMIT or more open PRs — the listing is truncated, so a unique match cannot be established; pin with --pr <number>" >&2
+    exit 5
+  fi
   FB_OK=""
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
@@ -216,9 +238,7 @@ if [ -z "$PICK" ]; then
     else
       LISTING="$LISTING$line — no reference to issue #$N"$'\n'
     fi
-  done <<<"$(gh pr list --repo "$FORK" --state open --limit 100 \
-      --json number,state,isDraft,title,body,headRefName,author,headRepository,headRepositoryOwner \
-    | jq -c --arg fork "$FORK" ".[] | $NORM")"
+  done <<<"$OPEN_PRS"
   case "$(jq -sc length <<<"$FB_OK")" in
     1) PICK=$(jq -sc '.[0]' <<<"$FB_OK"); HOW="open fork PR matched by closing ref or branch convention (no chip)" ;;
     0) ;;
@@ -259,8 +279,36 @@ CUR_STAGE=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.projec
 CUR_UP=$(jq -r '[.data.repository.issue.projectItems.nodes[] | select(.project.number==1)][0].up.text // empty' <<<"$JSON")
 
 # ---- preflight (branch pushed + reviewer valid; review verdict + CI are advisory)
-gh api "repos/$FORK/branches/$BRANCH" --silent 2>/dev/null ||
+# Protected branches are never promotion heads: the create path merges
+# upstream main INTO $BRANCH (SKILL.md → Cautions: never push to main/meridian).
+case "$BRANCH" in
+  main|meridian)
+    echo "REFUSED: fork PR #$FPR's head is the protected branch $BRANCH — never a promotion branch" >&2
+    exit 5 ;;
+esac
+BRANCH_SHA=$(gh api "repos/$FORK/branches/$BRANCH" --jq .commit.sha 2>/dev/null) ||
   { echo "branch $BRANCH not on the fork" >&2; exit 4; }
+# Adoption detection uses the issue's own cross-repo chip (same branch,
+# upstream repo) — the REST `pulls?head=org:br` filter silently returns []
+# for this org-fork pair (verified against a known merged PR), so it cannot
+# be trusted. Looked up here because the head check below depends on it.
+UP_PICK=$(jq -c --arg up "$UPSTREAM" --arg br "$BRANCH" \
+  '[.data.repository.issue.closedByPullRequestsReferences.nodes[]
+    | select(.repository.nameWithOwner==$up) | select(.headRefName==$br)][0] // empty' <<<"$JSON")
+# The fork branch must be at the resolved PR's head: the create path writes
+# a merge commit onto that branch and promotes it, so a branch that moved
+# since the PR was read (or stale PR data) is refused. Only the adopt path
+# of a CLOSED PR tolerates a moved branch — nothing touches the branch
+# there, and a promoted branch legitimately moves on (upstream reviewers
+# push fixes to it after the fork PR was superseded).
+FPR_HEAD=$(jq -r '.headRefOid // ""' <<<"$PICK")
+if [ "$FPR_HEAD" != "$BRANCH_SHA" ]; then
+  if [ "$FPR_STATE" = "OPEN" ] || [ -z "$UP_PICK" ]; then
+    echo "ABORT: fork PR #$FPR's head is ${FPR_HEAD:-unknown} but $FORK:$BRANCH is at $BRANCH_SHA — the branch moved since the PR was read; re-run" >&2
+    exit 5
+  fi
+  echo "note: $BRANCH is at $BRANCH_SHA, past closed fork PR #$FPR's head ${FPR_HEAD:-unknown} — adopting the existing upstream PR, nothing is written to the branch" >&2
+fi
 # A typo'd or non-collaborator REVIEWER would 422 the review request AFTER the
 # upstream PR exists (set -e then exits mid-bookkeeping); fail before any write.
 # The collaborator lookup is permission-gated (push access on the repo; a
@@ -292,20 +340,27 @@ has_login() {
   jq -e --arg u "$REVIEWER" --arg k "$1" '(.[$k] // []) | map(ascii_downcase) | index($u)' <<<"$2" >/dev/null 2>&1
 }
 # --paginate: busy @auto issues/PRs exceed 100 comments, and the API returns
-# oldest-first — a single page never sees recent comments.
-VERDICT=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
-  --jq '.[] | select(.body | contains("claude-review-verdict")) | .body' 2>/dev/null \
-  | tail -1 | grep -o 'verdict:[a-z]*' || echo "verdict:none")
+# oldest-first — a single page never sees recent comments. Only a verdict
+# posted by the reviewer app or a trusted login counts (the PR is public:
+# anyone can post a comment carrying the marker); the latest such verdict
+# wins, and ignored ones are counted on the ADVISORY line.
+VERDICT="verdict:none"
+VERDICT_IGNORED=0
+while IFS=$'\t' read -r v_login v_body; do
+  [ -n "$v_login" ] || continue
+  if [ "$v_login" = "$REVIEWER_BOT" ] || trusted_login "$v_login"; then
+    VERDICT=$(grep -o 'verdict:[a-z]*' <<<"$v_body" | tail -1 || true)
+    VERDICT=${VERDICT:-verdict:none}
+  else
+    VERDICT_IGNORED=$((VERDICT_IGNORED + 1))
+  fi
+done <<<"$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=100" \
+  --jq '.[] | select(.body | contains("claude-review-verdict")) | [.user.login, (.body | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)"
+[ "$VERDICT_IGNORED" -eq 0 ] || VERDICT="$VERDICT ($VERDICT_IGNORED verdict comment(s) by untrusted authors ignored)"
 CI=$(gh pr checks "$FPR" -R "$FORK" 2>&1 | awk -F'\t' '{print $2}' | sort | uniq -c | tr '\n' ' ' || true)
 echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}; reviewer: $REVIEWER"
 
-# ---- upstream PR: adopt or create. Adoption detection uses the issue's own
-# cross-repo chip (same branch, upstream repo) — the REST `pulls?head=org:br`
-# filter silently returns [] for this org-fork pair (verified against a known
-# merged PR), so it cannot be trusted.
-UP_PICK=$(jq -c --arg up "$UPSTREAM" --arg br "$BRANCH" \
-  '[.data.repository.issue.closedByPullRequestsReferences.nodes[]
-    | select(.repository.nameWithOwner==$up) | select(.headRefName==$br)][0] // empty' <<<"$JSON")
+# ---- upstream PR: adopt (UP_PICK, looked up in preflight) or create.
 M=$(jq -r '.number // empty' <<<"$UP_PICK")
 if [ -n "$M" ]; then
   UP_URL="https://github.com/$UPSTREAM/pull/$M"
