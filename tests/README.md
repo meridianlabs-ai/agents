@@ -29,6 +29,14 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   case run on through `emit-landing` and the validator under the land job's
   `branch-prefix`. Also checks every `workflow_call` input declares a
   `type`.
+- `test_approval_at_head.py` — the merge queue's approval-to-head binding
+  (`skills/merge-approved-prs/approval_at_head.py`): the decision on canned
+  review/commit payloads (approved at head; approved then pushed; no
+  approval; approval then changes requested by the same reviewer; an
+  approver without write access; comments never override a verdict; the
+  SHA, not commit dates, is the binding) and the command line end to end
+  against a stub `gh` on PATH (GETs only, `--paginate` on the lists, the
+  exit codes).
 
 Run from the repo root:
 

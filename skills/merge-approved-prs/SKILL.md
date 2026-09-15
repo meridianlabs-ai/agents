@@ -69,8 +69,34 @@ gh project item-list 1 --owner meridianlabs-ai --format json --limit 1000 \
   PRs" section below.
 - Confirm each upstream PR: `state=OPEN`, `reviewDecision=APPROVED`, note
   `mergeable` (usually `CONFLICTING`).
+- **Bind the approval to the head commit** — every PR, promotions and
+  externals alike, BEFORE anything of it is checked out or has `main`
+  merged into it (the script lives next to this skill; substitute its base
+  directory):
+  ```bash
+  python3 <skill-base-dir>/approval_at_head.py https://github.com/UKGovernmentBEIS/inspect_ai/pull/<n>
+  ```
+  Exit 0 prints `approved <sha> by <login> at <time>`: a reviewer with write
+  access approved the PR's CURRENT `headRefOid` and has not since requested
+  changes or been dismissed. Any other exit prints the reason (`approval is
+  for <sha>, head is <sha2>; N commits pushed after <time>`, `no approval
+  for head <sha>`, or a `gh` error) and means **SKIP**: leave the item
+  queued, report that line verbatim, and do not check the branch out, merge
+  `origin/main` into it, run anything from its tree, or arm auto-merge.
+  NEVER re-approve to get past it — the head moved after the review, so it
+  is unreviewed code, and `reviewDecision` alone cannot tell you that (it is
+  PR-level and survives a push unless upstream dismisses stale approvals,
+  which this skill does not assume). The check is read-only; the one push
+  this skill makes to a PR branch, the `origin/main` merge commit, happens
+  later and only after this has passed (see "Your own push" under External
+  PRs).
 
 ## 2. Per PR, in order (repeat from here after each merge)
+
+Re-run the approval-at-head check (section 1) for THIS PR now, immediately
+before its checkout: a queue run takes hours, and an approval that bound
+when you listed the queue may not bind by the time you reach the item. Skip
+and report on a non-zero exit exactly as above.
 
 ```bash
 git fetch origin main
@@ -189,17 +215,25 @@ Same flow as above with these substitutions — the branch lives on the
 
 - **Checkout/push**: instead of `git checkout -B <branch> meridian/<branch>`,
   use `gh pr checkout <n> --repo UKGovernmentBEIS/inspect_ai` in the worktree
-  (with the submodule-recursion-off GIT_CONFIG env from the worktree rules)
-  — with `maintainerCanModify` it wires the branch's push remote to the
+  (with the submodule-recursion-off GIT_CONFIG env from the worktree rules;
+  only once `approval_at_head.py` has passed for the current head) — with
+  `maintainerCanModify` it wires the branch's push remote to the
   contributor's fork, so after `git merge origin/main` a plain `git push`
   lands on their branch (verify with `git push --dry-run` the first time).
   Never rebase or force-push a contributor branch — merge commits only;
   their local clone must stay fast-forwardable.
-- **Approval can be dismissed by your push** (repo setting–dependent):
-  re-check `reviewDecision` after pushing. You can re-approve — pushing to
-  someone else's PR doesn't make you its author — but if branch protection
-  requires approval of the most recent push by someone else, surface that in
-  the report instead of looping.
+- **Your own push can dismiss the approval** (repo setting–dependent). This
+  is the `origin/main` merge commit you push AFTER the approval-at-head
+  check passed — the only content it adds is main's — so it is the one push
+  you may re-approve: re-check `reviewDecision` after pushing, and if it
+  dropped, approve only when the PR's `headRefOid` is exactly the commit you
+  pushed (`git rev-parse HEAD`; pushing to someone else's PR doesn't make you
+  its author). A head that is anything else moved under you: the contributor
+  pushed — re-run `approval_at_head.py` (it will fail), skip and report. The
+  same applies when your plain `git push` is rejected as non-fast-forward:
+  that rejection IS the contributor's push, so never pull their new commits
+  in and retry. If branch protection requires approval of the most recent
+  push by someone else, surface that in the report instead of looping.
 - **Invariants are unchanged** (CHANGELOG entries under `## Unreleased`, no
   net submodule change) — but they were *reviewed*, not authored, by us, so
   check them even more mechanically. A violation that needs real rework goes

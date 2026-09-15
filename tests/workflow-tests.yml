@@ -11,6 +11,7 @@ on:
       - ".github/actions/land/**"
       - ".github/actions/emit-landing/**"
       - ".github/workflows/claude-auto-review.yml"
+      - "skills/merge-approved-prs/**"
       - "tests/**"
       - "pytest.ini"
   pull_request:
@@ -19,6 +20,7 @@ on:
       - ".github/actions/land/**"
       - ".github/actions/emit-landing/**"
       - ".github/workflows/claude-auto-review.yml"
+      - "skills/merge-approved-prs/**"
       - "tests/**"
       - "pytest.ini"
 
