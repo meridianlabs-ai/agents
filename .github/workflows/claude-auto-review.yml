@@ -17,7 +17,10 @@ name: Claude Auto Review (reusable)
 # comment (<!-- claude-review-summary -->) so this keys on it; @auto then reads
 # the actual review + inline findings via the API.
 #
-# Only the automated reviewer's comments drive the loop (reviewer_login); the
+# Only the automated reviewer's comments drive the loop (reviewer_login), and
+# the state the gate reads back from PR comments — verdict, round counter,
+# re-review requests, hand-off marker — counts only from the trusted logins
+# in the workflow-level env below (Claude Security 4121983); the
 # `auto` label authorizes — and the gate verifies who applied it (issue #92:
 # the machine account or a write-access account, else the label is removed and
 # no round runs); cross-repo (fork) PRs are skipped (the fix job checks out
@@ -182,6 +185,24 @@ on:
           only by fix rounds on PRs labeled engine:codex.
         required: false
 
+# Trusted identities, in ONE place (Claude Security 4121983; the Class B
+# principle: a comment drives the loop only if its author is a trusted
+# identity or holds write access). Every author check in this file reads
+# these lists; no check names a login inline. Phase 2 (the GitHub App
+# identity) changes TRUSTED_LOGINS' one value to the app's `<slug>[bot]`.
+env:
+  # The loop's own identity: the land job posts the hand-back and the
+  # hand-off as it, the gate records the round counter as it. Only its
+  # counter and hand-off comments are loop state, and only they are PATCHed.
+  TRUSTED_LOGINS: i-am-marvin
+  # Who posts the reviewer's marked summary (the verdict). i-am-marvin: since
+  # the reviewer's landing-job split, claude-review.yml's land job posts the
+  # summary as the machine account, on both engines. claude[bot]: the
+  # pre-split author and still `reviewer_login`'s default — kept so a verdict
+  # that predates the split still counts. Any other login's verdict is
+  # ignored.
+  REVIEWER_LOGINS: i-am-marvin,claude[bot]
+
 jobs:
   # TRUSTED, first: the PR lookup, the `auto`-label gate, the stale-verdict
   # guard, convergence, the round cap and every marvin write that must happen
@@ -335,6 +356,9 @@ jobs:
           RESOLVED: ${{ steps.resolve.outputs.act }}
           LABELER_VERDICT: ${{ steps.labeler.outputs.verdict }}
           CAP: ${{ inputs.review_round_cap }}
+          # A caller's reviewer_login override counts as a verdict author
+          # alongside REVIEWER_LOGINS (the workflow-level env, inherited).
+          REVIEWER: ${{ inputs.reviewer_login }}
           HANDOFF_MENTION: ${{ inputs.handoff_mention }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
           MARKER: "<!-- auto-review-rounds -->"
@@ -478,6 +502,48 @@ jobs:
           # per page on older releases; -s plus `.[][]` flattens either.
           comments=$(ghr gh api "repos/$REPO/issues/$PR/comments" --paginate | jq -s '[.[][]]')
 
+          # Author filters (Claude Security 4121983). Everything the loop
+          # recovers from that list below — the verdict, the round counter
+          # with its head SHA, the re-review requests, and (in the hand-off
+          # step) the hand-off marker — is selected by marker substring, and
+          # on a public caller any account can comment on an auto-labeled
+          # PR. Unfiltered, a forged verdict converged the loop with findings
+          # still open; a forged counter escalated it (dropping the label) or
+          # reset the cap that bounds spend — and the loop adopted the
+          # forgery as its sticky comment, PATCHing it as marvin from then
+          # on; a forged `@review` made the stale-verdict guard skip a real
+          # verdict with no review pending. The logins come from the
+          # workflow-level env (TRUSTED_LOGINS, REVIEWER_LOGINS), never
+          # inline. Comma lists → jq arrays, whitespace-tolerant.
+          logins() { jq -cn --arg t "$1" '$t | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != ""))'; }
+          reviewers=$(logins "$REVIEWER_LOGINS,$REVIEWER")
+          trusted=$(logins "$TRUSTED_LOGINS")
+          in_logins() { jq -en --argjson l "$1" --arg x "$2" 'any($l[]; . == $x)' >/dev/null; }
+          # trusted_author <login>: a TRUSTED_LOGINS login, or an account
+          # with write access — a collaborator's manual re-review request is
+          # as real as the loop's own. Other `[bot]` logins are refused
+          # without a lookup (the collaborators endpoint 404s for Apps, and
+          # github-actions[bot] is never trusted: any caller workflow posts
+          # as it). One permission lookup per login per run, cached in a
+          # string rather than an associative array so the step also runs
+          # under bash 3 (tests/); a failed lookup is untrusted — fail
+          # closed, like every gate lookup.
+          perm_cache=""
+          trusted_author() {
+            in_logins "$trusted" "$1" && return 0
+            case "$1" in ""|*"[bot]") return 1 ;; esac
+            case " $perm_cache " in
+              *" $1=yes "*) return 0 ;;
+              *" $1=no "*) return 1 ;;
+            esac
+            local perm
+            perm=$(ghr gh api "repos/$REPO/collaborators/$1/permission" --jq '.permission' 2>/dev/null) || perm=none
+            case "$perm" in
+              admin|maintain|write) perm_cache="$perm_cache $1=yes"; return 0 ;;
+              *) perm_cache="$perm_cache $1=no"; return 1 ;;
+            esac
+          }
+
           # Stale-verdict guard: this job fires on the verdict comment but can
           # queue for many minutes behind a ci-fix run (shared per-PR
           # concurrency group, cancel-in-progress: false), and by the time it
@@ -508,13 +574,19 @@ jobs:
           # ahead of GitHub's could skip the verdict for the very commit the
           # reviewer reviewed. Such a push keeps the prior behavior: the
           # verdict is acted on against the new tip.
-          summary_json=$(jq -c 'map(select(.body|contains("claude-review-summary"))) | last // empty' <<<"$comments")
+          # The verdict: the reviewer identities' latest marked summary.
+          summary_json=$(jq -c --argjson r "$reviewers" 'map(select((.body|contains("claude-review-summary")) and ((.user.login // "") as $l | any($r[]; . == $l)))) | last // empty' <<<"$comments")
           summary=$(jq -r '.body' <<<"${summary_json:-null}")
           verdict=$(printf '%s' "$summary" | sed -n 's/.*claude-review-verdict:\([a-z]*\).*/\1/p')
           echo "verdict=$verdict" >>"$GITHUB_OUTPUT"
           if [ -n "$verdict" ]; then
             verdict_at=$(jq -r '.created_at' <<<"$summary_json")
-            rereview_at=$(jq -r '[.[] | select((.body|test("(^|\\s)@review(\\s|[,.!?;:]|$)")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not)) | .created_at] | max // ""' <<<"$comments")
+            # The latest re-review request by a trusted author: newest first,
+            # stop at the first that passes (the lookups are per login).
+            rereview_at=""
+            while IFS=$'\t' read -r login created; do
+              if trusted_author "$login"; then rereview_at="$created"; break; fi
+            done < <(jq -r '[.[] | select((.body|test("(^|\\s)@review(\\s|[,.!?;:]|$)")) and (.body|contains("`@review`")|not) and (.body|contains("<!-- claude-review-comment -->")|not))] | sort_by(.created_at) | reverse | .[] | [(.user.login // ""), .created_at] | @tsv' <<<"$comments")
             # ISO-8601 UTC timestamps compare correctly as strings; an empty
             # rereview_at (no request yet) never compares greater.
             if [[ "$verdict_at" < "$rereview_at" ]]; then
@@ -533,18 +605,32 @@ jobs:
             act converged; exit 0
           fi
 
-          # Latest rounds-marker comment, captured once like summary_json above;
-          # cid feeds the Record round PATCH, the body the counters below.
-          marker_json=$(jq -c --arg m "$MARKER" 'map(select(.body|contains($m))) | last // empty' <<<"$comments")
+          # Latest rounds-marker comment BY THE LOOP (TRUSTED_LOGINS — the
+          # gate writes it as marvin; the land job's refund step selects the
+          # same way), captured once like summary_json above; cid feeds the
+          # Record round PATCH, the body the counters below. A marker in any
+          # other login's comment is ignored and never PATCHed.
+          marker_json=$(jq -c --arg m "$MARKER" --argjson t "$trusted" 'map(select((.body|contains($m)) and ((.user.login // "") as $l | any($t[]; . == $l)))) | last // empty' <<<"$comments")
           cid=$(jq -r '.id // empty' <<<"${marker_json:-null}")
           prev=0
           prevsha=""
           if [ -n "$cid" ]; then
             mbody=$(jq -r '.body // ""' <<<"$marker_json")
             prev=$(printf '%s' "$mbody" | sed -n 's/.*rounds:[[:space:]]*\([0-9]*\).*/\1/p')
-            prev=${prev:-0}
+            # Strict shapes, or the value counts as absent: `prev` feeds
+            # arithmetic and `prevsha` a tip comparison, and a body that does
+            # not parse (two `rounds:` lines after a hand edit — the
+            # escalation text invites one) would otherwise make `$((prev + 1))`
+            # fail under set -e on every trigger: a persistent stall with the
+            # label on and a failsafe comment per verdict. 0 keeps the loop
+            # running; Record round rewrites the body in shape.
+            if ! [[ "$prev" =~ ^[0-9]+$ ]]; then
+              echo "Counter comment $cid has no single 'rounds: N' value (got '$(printf '%s' "$prev" | tr '\n' ' ')'); counting from 0."
+              prev=0
+            fi
             # Branch tip recorded when the previous round started (see Record round).
             prevsha=$(printf '%s' "$mbody" | sed -n 's/.*auto-review-head:\([0-9a-f]*\).*/\1/p')
+            [[ "$prevsha" =~ ^[0-9a-f]{40}$ ]] || prevsha=""
           fi
           next=$((prev + 1))
           head=$(jq -r '.headRefOid' <<<"$pr_json")
@@ -653,9 +739,14 @@ jobs:
           # and falls through to posting — same as before.
           since=""
           [ "${CONTINUATION:-}" = "true" ] && since="${CLOSED_AT:-}"
+          # Only the loop's own hand-offs count (TRUSTED_LOGINS: this step
+          # posts as the machine account); the marker in anyone else's
+          # comment would otherwise silence the owed ping (Claude Security
+          # 4121983).
+          trusted=$(jq -cn --arg t "$TRUSTED_LOGINS" '$t | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != ""))')
           posted=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                     | jq -rs --arg m "$MARKER" --arg since "$since" \
-                         'any(.[][]; (.body|contains($m)) and (.created_at > $since))' || true)
+                     | jq -rs --arg m "$MARKER" --arg since "$since" --argjson t "$trusted" \
+                         'any(.[][]; (.body|contains($m)) and (.created_at > $since) and ((.user.login // "") as $l | any($t[]; . == $l)))' || true)
           if [ "$posted" = "true" ]; then
             echo "Handoff already posted${since:+ since close ($since)}; skipping."; exit 0
           fi
@@ -2221,8 +2312,15 @@ jobs:
           MARKER: "<!-- auto-review-rounds -->"
         run: |
           set -uo pipefail
-          cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-                  --jq 'map(select(.body|contains("'"$MARKER"'"))) | last | .id // empty' 2>/dev/null || true)
+          # The loop's own counter only (TRUSTED_LOGINS), selected as the
+          # gate selects it: a marker in another login's comment is never
+          # PATCHed (Claude Security 4121983). `--paginate` output is one
+          # merged array on current gh, one array per page on older
+          # releases; -s plus `.[][]` flattens either.
+          trusted=$(jq -cn --arg t "$TRUSTED_LOGINS" '$t | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != ""))')
+          cid=$(gh api "repos/$REPO/issues/$PR/comments" --paginate 2>/dev/null \
+                  | jq -rs --arg m "$MARKER" --argjson t "$trusted" \
+                      '[.[][] | select((.body|contains($m)) and ((.user.login // "") as $l | any($t[]; . == $l)))] | last | .id // empty' 2>/dev/null || true)
           [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
           # Re-read the count and the head marker (same parse as the gate's)
           # rather than trusting the gate's values: the next run's gate may

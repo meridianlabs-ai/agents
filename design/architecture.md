@@ -1474,8 +1474,15 @@ substring collision in trigger gates). Design choices:
   reusable trig step's fork-head refusal) is a SECURITY boundary, not an
   ergonomic skip. Same-repo heads imply write-access authors — the same
   trust level the `@review` comment path enforces in the reusable's trig
-  check (issue #13): before checkout, the comment path requires a same-repo
-  head or a commenter with write access, and external mode always requires
+  check (issue #13): before checkout, the comment path requires a trusted
+  commenter — a `TRUSTED_LOGINS` login (the loops' hand-back, posted by
+  their land jobs as the machine account), a caller-allow-listed bot on a
+  same-repo head, or an account with write access — whatever the head repo
+  (Claude Security 4085111, 2026-09-15: a same-repo head used to admit any
+  commenter, on the reasoning that its *author* had write access; the
+  caller stubs' `issue_comment` branches now also carry the
+  `author_association` cost filter the dev stub's `claude-auto` job has),
+  and external mode always requires
   the trusted commenter (its checkout is an untrusted upstream head; the
   `claude-setup` step is additionally mode-gated so an upstream tree can
   never supply it). No TOCTOU on either path: prt's head *repo* is

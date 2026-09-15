@@ -68,16 +68,33 @@ jobs:
     # mentions like agents#20's; prompt-driven). Cost: a comment carrying
     # either alongside a genuine bare trigger is wrongly skipped — rare,
     # recoverable by re-commenting the bare token alone.
+    # author_association filter (OWNER/MEMBER/COLLABORATOR) on both comment
+    # paths: a COST filter, not the gate (the shape the dev stub's
+    # `claude-auto` job uses). On a public repo anyone can comment `@review`;
+    # without this every such comment spun a runner (Claude Security
+    # 4085111). It is not authoritative — CONTRIBUTOR is anyone with a
+    # merged commit, and whether org members show as MEMBER depends on org
+    # settings — so the reusable workflow's trig check (a fail-closed
+    # permission lookup on the actor, before any write or checkout) remains
+    # the authority. A writer whose association is reported looser than
+    # expected is dropped here silently — trig would have AUTHORIZED them,
+    # so this filter is what they hit, and there is no fallback path: a
+    # collaborator re-triggers. The loops' hand-back passes: their land jobs
+    # post `@review` as the machine account, a User with write access.
+    # Phase 2 (a GitHub App identity) must add the app's login as an explicit
+    # exception here — an App's association is not a write grant.
     if: >
       (github.event_name == 'pull_request' &&
        github.event.pull_request.draft != true &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event.issue.pull_request != null &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->')) ||
       (github.event.issue.pull_request == null &&
        contains(github.event.issue.labels.*.name, 'External') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->'))

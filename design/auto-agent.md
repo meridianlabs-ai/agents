@@ -174,6 +174,22 @@ finding 4121989) that is enforced in three layers rather than assumed:
   permanent, not a blip — a deleted account 404s forever and an App stays an
   App — which would otherwise be the silent labeled-and-stalled state the
   gate-failure failsafe (below) exists to prevent.
+- **The review-fix gate believes only trusted authors** (Claude Security
+  finding 4121983, 2026-09-15). `claude-auto-review.yml`'s gate recovers the
+  loop's state from PR comments by marker substring — the reviewer's
+  verdict, the round counter with the previous head SHA, the re-review
+  requests the stale-verdict guard compares against, and the converged
+  hand-off's double-post marker — and on a public caller any account can
+  post those substrings. Each read now also filters by author: the verdict
+  to `REVIEWER_LOGINS`, the counter and the hand-off marker to
+  `TRUSTED_LOGINS` (the loop's own comments — a forged marker is ignored
+  and never PATCHed, by the gate or the land job's refund), a re-review
+  request to a trusted login or a write-access account (one cached
+  permission lookup per login, fail-closed). `rounds:` must parse as one
+  digit run and `auto-review-head:` as a 40-hex SHA, else the counter
+  counts as absent rather than aborting the gate. Both lists are
+  workflow-level `env:` values — the one place Phase 2's App identity
+  changes.
 
 The injection blast-radius argument in architecture.md → Permissions is
 unchanged.

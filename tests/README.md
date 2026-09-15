@@ -29,6 +29,18 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   case run on through `emit-landing` and the validator under the land job's
   `branch-prefix`. Also checks every `workflow_call` input declares a
   `type`.
+- `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
+  `Converged handoff` and `Refund infra-crashed round` steps, lifted the
+  same way and run against a stub `gh`: the loop state each reads back from
+  PR comments (verdict, round counter and head SHA, re-review requests,
+  hand-off marker) counts only from `REVIEWER_LOGINS` / `TRUSTED_LOGINS` or
+  a write-access author, a forged marker is never adopted or PATCHed, and a
+  malformed counter counts as absent (Claude Security 4121983).
+- `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
+  comment-triggered reviews: every `@review` needs a trusted commenter
+  whatever the head repo — write access, `TRUSTED_LOGINS`, or a bot the
+  caller's `allowed_bots` names (same-repo heads only) — with the fork head
+  admitted sandboxed and a failed lookup refused (Claude Security 4085111).
 
 Run from the repo root:
 
