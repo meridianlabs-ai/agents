@@ -2379,7 +2379,6 @@ jobs:
           PR: ${{ inputs.pr_number }}
           ROUND: ${{ needs.gate.outputs.round }}
           CAP: ${{ inputs.review_round_cap }}
-          HEAD: ${{ needs.gate.outputs.head }}
           MARKER: "<!-- auto-review-rounds -->"
         run: |
           set -uo pipefail
@@ -2395,9 +2394,15 @@ jobs:
           [ -z "$cid" ] && { echo "No counter comment found; nothing to refund."; exit 0; }
           # Re-read the count and the head marker (same strict whole-token
           # parse as the gate's `field`) rather than trusting the gate's
-          # values: the next run's gate may have re-recorded since. Falls
-          # back to the gate's values when the body does not parse; never
-          # below zero (an escalation's reset may have zeroed it).
+          # values: the next run's gate may have re-recorded since. An
+          # absent or unparsable count is 0 and an absent head is none — NOT
+          # this run's values: a reset body (escalation or re-engagement)
+          # carries neither on purpose, and a late refund writing this run's
+          # round and tip back over it would undo the fresh budget and
+          # re-arm the no-progress check on the very next verdict. Refunding
+          # from 0 stays at 0 (never below), with no head marker, so the
+          # next round starts at 1 and records a fresh tip — the reset's
+          # promise.
           # field <name> <re> <body>: the value of the body's ONE
           # `<name>:<value>` token. `<name>:` must occur exactly once — every
           # occurrence is counted BEFORE any value is read, so a malformed
@@ -2417,13 +2422,12 @@ jobs:
           }
           mbody=$(gh api "repos/$REPO/issues/comments/$cid" --jq '.body' 2>/dev/null || true)
           cur=$(field rounds '[0-9]{1,9}' "$mbody")
-          [ -n "$cur" ] || cur=$ROUND
-          cur=$((10#$cur))
+          cur=$((10#${cur:-0}))
           head=$(field auto-review-head '[0-9a-f]{40}' "$mbody")
-          [ -n "$head" ] || head=$HEAD
           prev=$(( cur > 0 ? cur - 1 : 0 ))
           body="$MARKER
-          🤖 auto review rounds: $prev (cap $CAP). (one round refunded — the fix agent never ran to a result and nothing landed: infrastructure, not the fix)
+          🤖 auto review rounds: $prev (cap $CAP). (one round refunded — the fix agent never ran to a result and nothing landed: infrastructure, not the fix)"
+          [ -n "$head" ] && body="$body
           <!-- auto-review-head:$head -->"
           gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
           echo "Refunded round: counter $cur -> $prev (this run was round $ROUND)."

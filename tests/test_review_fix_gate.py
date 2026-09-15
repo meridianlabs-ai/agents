@@ -379,7 +379,7 @@ def run_refund(tmp_path, comments):
     state = fresh_state(tmp_path)
     (state / "comments.json").write_text(json.dumps(comments))
     env = {"STATE": str(state), "REPO": "o/r", "PR": "42", "ROUND": "3", "CAP": "10",
-           "HEAD": HEAD, "MARKER": MARKER, "TRUSTED_LOGINS": "i-am-marvin"}
+           "MARKER": MARKER, "TRUSTED_LOGINS": "i-am-marvin"}
     r = sh("bash", "-c", REFUND_STUB + lift_step(WORKFLOW, "      - name: Refund infra-crashed round"),
            check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -401,11 +401,22 @@ def test_refund_ignores_a_counter_that_is_only_an_outsiders(tmp_path):
     assert "No counter comment found" in r.stdout
 
 
-def test_refund_falls_back_to_the_gates_values_on_a_malformed_body(tmp_path):
-    body = f"{MARKER}\n🤖 auto review rounds: 3.5 (cap 10).\n<!-- auto-review-head:{OLD}-x -->"
-    _, patched, patched_body = run_refund(tmp_path, [comment(100, "i-am-marvin", body, T0)])
+def test_refund_reads_an_absent_or_unparsable_count_as_zero_with_no_head(tmp_path):
+    # A reset body (escalation or re-engagement) carries no count and no
+    # head on purpose; a late refund that wrote this run's round (3) and tip
+    # back over it would undo the fresh budget and re-arm the no-progress
+    # check. From 0 the refund stays at 0 and records no head, so the next
+    # gate runs round 1 with a fresh baseline. A malformed body reads the same.
+    reset_body = f"{MARKER}\n🤖 auto review rounds reset (on escalation) — the next round starts at 1 with the full cap."
+    _, patched, patched_body = run_refund(tmp_path, [comment(100, "i-am-marvin", reset_body, T0)])
     assert patched == ["100"]
-    assert "rounds: 2" in patched_body and HEAD in patched_body, "ROUND=3 and HEAD, the gate's values"
+    assert "rounds: 0" in patched_body and "auto-review-head:" not in patched_body
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  comment(100, "i-am-marvin", patched_body, T0)])
+    assert o["act"] == "fix" and o["round"] == "1" and o.get("stalled") is None
+    malformed = f"{MARKER}\n🤖 auto review rounds: 3.5 (cap 10).\n<!-- auto-review-head:{OLD}-x -->"
+    _, patched, patched_body = run_refund(tmp_path, [comment(100, "i-am-marvin", malformed, T0)])
+    assert patched == ["100"] and "rounds: 0" in patched_body and "auto-review-head:" not in patched_body
 
 
 # --- escalation's reset (the shared composite) -------------------------------
