@@ -11,6 +11,8 @@ on:
       - ".github/actions/land/**"
       - ".github/actions/emit-landing/**"
       - ".github/workflows/claude-auto-review.yml"
+      - ".github/workflows/claude-auto.yml"
+      - ".github/actions/verify-auto-labeler/**"
       - "tests/**"
       - "pytest.ini"
   pull_request:
@@ -19,6 +21,8 @@ on:
       - ".github/actions/land/**"
       - ".github/actions/emit-landing/**"
       - ".github/workflows/claude-auto-review.yml"
+      - ".github/workflows/claude-auto.yml"
+      - ".github/actions/verify-auto-labeler/**"
       - "tests/**"
       - "pytest.ini"
 

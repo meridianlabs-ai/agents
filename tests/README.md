@@ -29,6 +29,24 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   case run on through `emit-landing` and the validator under the land job's
   `branch-prefix`. Also checks every `workflow_call` input declares a
   `type`.
+- `test_atlas_sync.py` — the hourly Atlas sync's author checks
+  (`.github/scripts/atlas_sync.py`, against a fake `gh`): `trusted_author`
+  (trusted logins, `author_association`, the cached write-permission lookup,
+  fail-closed), the stale hand-back revival honouring only trusted authors
+  (an outsider's `@review` or forged verdict is never re-issued as the
+  machine account and ends the search), and the `Companion PR:` issue-body
+  line counting only from a trusted author and only for a ts-mono URL.
+- `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
+  the auto label`, `Gate and count`), the escalation's `Reset the attempt
+  counter` and the land job's `Refund infra-crashed attempt` step, lifted
+  the same way and run against a stub
+  `gh`: the PR is resolved from `pr_number` and refused when closed, a fork
+  head or on another branch (never listed by branch name); the attempt
+  counter is read only from a trusted author's marker comment (the loop's
+  own first, else a write-access account's; permission lookups cached and
+  fail-closed; `[bot]` logins never looked up) and parsed strictly; the
+  reset and the refund PATCH only that comment. Also `verify-auto-labeler`'s
+  `trusted-logins` input.
 - `test_skill_resolution.py` — the trust rule in `skills/checkout/checkout.sh`
   and `skills/promote/promote.sh`, run against a stub `gh` that answers from
   fixtures and logs every call: a chip from a personal fork or an untrusted
