@@ -146,7 +146,7 @@ finding 4121989) that is enforced in three layers rather than assumed:
   `verify-auto-labeler` composite between their label check and their
   counting step (the review loop's merged-PR skip also precedes it, so a
   merged PR still carrying the label costs no timeline fetch and gets no
-  notice; the CI-fix loop lists open PRs only). It reads the PR timeline and
+  notice; the CI-fix loop requires the PR the run names to be open). It reads the PR timeline and
   requires the most recent
   `labeled` event for `auto` to come from the machine account (claude.yml's
   opt-in and PR-open propagation, or triage) or from an account with write
@@ -263,9 +263,13 @@ summary rather than leaving the board at Agent.
 decision to grant a fresh budget** (escalation reset added 2026-09-09). Neither
 a green CI run nor a clean review round decrements or resets the sticky counter
 — the cap bounds total autonomous churn on a PR, not churn per failure streak.
-Exactly two paths reset a counter, and both go through the shared
-`.github/actions/reset-auto-counters` composite so the reset body cannot drift
-between them:
+Exactly two paths reset a counter, writing the same reset body (the shared
+`.github/actions/reset-auto-counters` composite's — though since 2026-09-15
+the CI-fix loop's escalation resets inline, targeting the comment its gate
+counted from: the composite rewrites the newest marker comment by any author,
+which a gate that reads only a trusted author's comment can no longer rely
+on; the review loop's and the re-engagement's calls to the composite are a
+follow-up):
 
 - **Re-engagement** — a human comments `@auto` on an existing PR (item 6 under
   "Event-driven implementation sketch" below). claude.yml re-applies the label
@@ -303,9 +307,10 @@ PR with nobody pinged and only a red job as the trace. For the same reason the
 hand-off step is gated on `!cancelled()` rather than the default success — an
 outright step failure in the disarm or reset (not the handled "could not"
 outcomes) must not skip the comment on a PR whose label may already be gone;
-empty outputs route to the conservative wording. Each of the three steps is a
-shared composite (`disarm-auto-loop`, `reset-auto-counters`, `post-pr-comment`)
-so the two loops cannot drift — as is the gates' labeler check
+empty outputs route to the conservative wording. The disarm and the hand-off
+are shared composites (`disarm-auto-loop`, `post-pr-comment`) so the two loops
+cannot drift, and the review loop's reset is too (`reset-auto-counters`; the
+CI-fix loop's is inline since 2026-09-15, see above) — as is the gates' labeler check
 (`verify-auto-labeler`, Trigger surface above); `post-pr-comment` is also what the `land`
 composite posts the loops' `@review` hand-back with, since that comment is
 the loop's other unlosable one. The
@@ -501,6 +506,22 @@ The simple case ships first and is independently useful:
   marvin, posts the `@review` hand-back and the error/summary comments, and
   refunds the attempt when the agent never ran) — see architecture.md →
   Landing job. The push still goes out as marvin, so CI still re-triggers.
+  **Since 2026-09-15 the gate trusts only what the run and the loop
+  established** (Claude Security findings 4122320 and 4121987): the PR is
+  `inputs.pr_number` (the run's `workflow_run.pull_requests[0].number`),
+  viewed by number and required to be open, same-repo and on the run's head
+  branch — a mismatch skips with its reason, and there is no fallback to a
+  branch-name listing (`gh pr list --head` matches the ref name in any head
+  repository, so a fork PR named like an open same-repo PR was the one
+  resolved); and the attempt counter is read, in the gate and in the land
+  job's refund, only from a marker comment whose author is one of the
+  workflow's `TRUSTED_LOGINS` (the loop's own comment, preferred) or holds
+  write access — an outsider's marker comment is ignored and never edited,
+  and a count that is not exactly one `attempts: N` reads as 0. The
+  `TRUSTED_LOGINS` workflow-level env (`i-am-marvin`) is the one value every
+  author check in `claude-auto.yml` reads, and `verify-auto-labeler` takes it
+  as its `trusted-logins` input, so the Phase 2 identity change flips one
+  value per file.
 - **Phase 2 — review→fix loop. _Verified on inspect_flow via the unified
   `issue_comment` trigger._** Reusable `claude-auto-review.yml`: on the
   reviewer's **dedicated marker comment** (`issue_comment`, body contains
