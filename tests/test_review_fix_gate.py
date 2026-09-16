@@ -499,6 +499,32 @@ def run_reset(state: Path, *, comment_id="", trusted_logins="", counters="rounds
     return outputs(out), patched
 
 
+def reset_trusted_logins_default() -> str:
+    """The reset composite's `trusted-logins` default, read from the action."""
+    text = RESET.read_text()
+    block = text[text.index("  trusted-logins:"):]
+    block = block[:re.search(r"\n {2}\S", block[1:]).start() + 1]  # up to the next input key
+    return re.search(r"default: (.*)", block).group(1).strip()
+
+
+def test_reset_default_trusts_the_machine_account_under_both_logins(tmp_path):
+    # A caller that passes no trusted-logins still resets the loops' own
+    # counters — under Phase 2 the App's, which the attempts fallback would
+    # otherwise refuse as an App's marker. An explicit empty string is the
+    # opt-out: nothing is the loop's own, so nothing is reset.
+    assert reset_trusted_logins_default() == f"{MARVIN},{MARVIN_BOT}"
+    comments = [counter(MARVIN_BOT, 10, T0, cid=100),
+                comment(101, MARVIN_BOT, "<!-- auto-fix-attempts -->\nattempts: 3 (cap 3).", T0)]
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps(comments))
+    reset, patched = run_reset(state, trusted_logins=reset_trusted_logins_default(), counters="rounds attempts")
+    assert reset["ok"] == "1" and sorted(patched) == ["100", "101"] and lookups(state) == []
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps(comments))
+    reset, patched = run_reset(state, trusted_logins="", counters="rounds attempts")
+    assert reset["ok"] == "1" and patched == [] and lookups(state) == []
+
+
 def test_escalation_reset_targets_the_counter_the_gate_selected(tmp_path):
     at_cap = [verdict("i-am-marvin", "suggestions", T1, cid=1),
               counter("i-am-marvin", 10, T0, cid=100, head=OLD),

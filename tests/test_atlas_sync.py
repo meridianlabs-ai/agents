@@ -307,8 +307,9 @@ def companion(number, **fields):
     return d
 
 
-def opinion(login, state, sha=COMP_HEAD):
-    return {"state": state, "commit": {"oid": sha}, "author": {"login": login}}
+def opinion(login, state, sha=COMP_HEAD, typename="User"):
+    # As GraphQL renders a review author: a Bot's login comes BARE.
+    return {"state": state, "commit": {"oid": sha}, "author": {"login": login, "__typename": typename}}
 
 
 def anchor(gh, body, login=MARVIN, association="MEMBER"):
@@ -480,8 +481,57 @@ def test_companion_queries_ask_for_the_head_and_each_reviews_commit_and_author(g
         assert (
             "headRefOid" in query[3]
             and "commit{oid}" in query[3]
-            and "author{login}" in query[3]
+            and "author{login __typename}" in query[3]
         )
+
+
+def gate_with_url(gh, comp):
+    """Anchor #42 naming `comp` by its `Companion PR:` URL line."""
+    gh.route(
+        is_issue_fetch,
+        {"body": f"Companion PR: {TS_MONO_URL}", "login": MARVIN, "association": "MEMBER"},
+    )
+    gh.route(is_url_query, {"data": {"repository": {"pullRequest": comp}}})
+    return atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD})
+
+
+def test_graphql_login_restores_the_rest_suffix_for_bots_only():
+    assert atlas.graphql_login({"login": "meridian-marvin", "__typename": "Bot"}) == MARVIN_BOT
+    assert atlas.graphql_login({"login": "meridian-marvin[bot]", "__typename": "Bot"}) == MARVIN_BOT
+    assert atlas.graphql_login({"login": "meridian-marvin", "__typename": "User"}) == "meridian-marvin"
+    assert atlas.graphql_login({"login": MARVIN}) == MARVIN
+    assert atlas.graphql_login(None) == "" and atlas.graphql_login({}) == ""
+
+
+@pytest.mark.parametrize("gate", [gate_with, gate_with_url])
+@pytest.mark.parametrize("login, typename", [(MARVIN, "User"), ("meridian-marvin", "Bot")])
+def test_companion_approved_at_head_by_the_machine_account_clears_the_hold_on_both_discovery_paths(
+    gh, gate, login, typename
+):
+    # The machine account under either login, as GraphQL renders each (the
+    # App's bare), found by the branch convention or by the URL line: trusted
+    # by name, so no lookup — the endpoint would answer `none` for the App.
+    comp = companion(9, latestOpinionatedReviews={"nodes": [opinion(login, "APPROVED", typename=typename)]})
+    assert gate(gh, comp) is False
+    assert gh.matching(is_permission_lookup) == []
+
+
+def test_companion_approved_by_a_user_named_after_the_apps_slug_is_looked_up_and_holds(gh):
+    # Only the type restores the suffix: a User who registered `meridian-marvin`
+    # is not the App and gets an ordinary lookup under its own login.
+    permission(gh, "meridian-marvin", "read")
+    comp = companion(9, latestOpinionatedReviews={"nodes": [opinion("meridian-marvin", "APPROVED", typename="User")]})
+    assert gate_with(gh, comp) is True
+    (lookup,) = gh.matching(is_permission_lookup)
+    assert lookup[1] == f"repos/{TS_MONO}/collaborators/meridian-marvin/permission"
+
+
+def test_companion_approved_by_another_app_is_looked_up_under_its_rest_login_and_holds(gh):
+    permission(gh, "foo[bot]", "none")
+    comp = companion(9, latestOpinionatedReviews={"nodes": [opinion("foo", "APPROVED", typename="Bot")]})
+    assert gate_with(gh, comp) is True
+    (lookup,) = gh.matching(is_permission_lookup)
+    assert lookup[1] == f"repos/{TS_MONO}/collaborators/foo[bot]/permission"
 
 
 def imported(snapshot, header_extra=""):

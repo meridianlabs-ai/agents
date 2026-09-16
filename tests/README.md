@@ -39,7 +39,8 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   line counting only from a trusted author and only for a ts-mono URL, and
   the companion merge gate clearing only on a write-access reviewer's
   APPROVED review naming the companion's current head (never on
-  `reviewDecision` alone).
+  `reviewDecision` alone) — the machine account's App login included, with
+  GraphQL's bare Bot login restored to its REST form before the check.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
   the auto label`, `Gate and count`), the escalation's reset (the
   `reset-auto-counters` composite's step, given the gate's `cid`) and the
@@ -116,7 +117,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   gate → reset → gate sequence: escalation resets the comment the gate
   counted from (`comment-id`), so re-adding the label really starts a fresh
   budget; the no-id lookup follows the review gate's rule (the loop's own
-  marker or nothing) and is covered too.
+  marker or nothing) and is covered too, as is the composite's
+  `trusted-logins` default (both machine-account logins; an explicit empty
+  string resets nothing).
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS` (the machine

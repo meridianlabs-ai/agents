@@ -53,8 +53,10 @@ MACHINE_ACCOUNT = "i-am-marvin"  # the User login this sync (and the loop) write
 # separation): once the workflows mint app tokens instead of using the PAT,
 # every write that is MACHINE_ACCOUNT's today carries this login. REST
 # payloads (what this module reads for comments) render it with the `[bot]`
-# suffix; GraphQL renders a Bot's login bare and the ball-possession checks
-# below already exclude non-User actors by __typename.
+# suffix; GraphQL renders a Bot's login bare — graphql_login() restores the
+# suffix from `__typename` where a GraphQL author is judged (the companion
+# approvals), and the ball-possession checks exclude non-User actors by
+# __typename outright.
 MACHINE_BOT = "meridian-marvin[bot]"
 # Authors whose comments and issue-body lines this sync believes as-is: the
 # machine account alone, under either login (the loop's hand-backs, counters
@@ -115,6 +117,23 @@ def gql(query: str, **variables):
 
 
 _permission_cache: dict[tuple[str, str], bool] = {}
+
+
+def graphql_login(author) -> str:
+    """A GraphQL `author { login __typename }` object as its REST login.
+
+    GraphQL renders a Bot's login bare (`meridian-marvin`, `dependabot`) where
+    REST — and every TRUSTED_LOGINS entry — carries the `[bot]` suffix, so a
+    Bot author gets the suffix back before it is compared. Only the type
+    decides: a User whose login happens to be an App's slug is not the App.
+    A missing author (deleted account) is "".
+    """
+    if not isinstance(author, dict):
+        return ""
+    login = author.get("login") or ""
+    if login and author.get("__typename") == "Bot" and not login.endswith("[bot]"):
+        return f"{login}[bot]"
+    return login
 
 
 def trusted_author(login: str, repo: str, association: str | None = None) -> bool:
@@ -519,7 +538,7 @@ def companion_pr(issue: int, head_ref: str):
         d = gql(
             """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
                  pullRequest(number:$n){number state merged reviewDecision headRefOid
-                   latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login}}}}}}""",
+                   latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login __typename}}}}}}""",
             o=owner,
             r=repo,
             n=num,
@@ -533,7 +552,7 @@ def companion_pr(issue: int, head_ref: str):
         """query($o:String!,$r:String!,$h:String!){ repository(owner:$o,name:$r){
              pullRequests(headRefName:$h, first:5, orderBy:{field:UPDATED_AT,direction:DESC}){
                nodes{number state merged reviewDecision headRefOid
-                 latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login}}}}}}}""",
+                 latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login __typename}}}}}}}""",
         o=owner,
         r=repo,
         h=head_ref,
@@ -562,7 +581,11 @@ def companion_approved(comp) -> bool:
     substitutes for), and one APPROVED must name the head commit and come
     from a trusted author — anyone can approve a public PR, so an
     outsider's review is not a review (trusted_author, write access on the
-    companion's repo, looked up once per login).
+    companion's repo, looked up once per login). The reviews come from
+    GraphQL, which renders a Bot author's login bare: graphql_login puts the
+    REST suffix back so the machine account's App login matches
+    TRUSTED_LOGINS and another App is looked up under the login the
+    collaborators endpoint knows.
     """
     decision = comp.get("reviewDecision")
     if decision is not None and decision != "APPROVED":
@@ -577,7 +600,7 @@ def companion_approved(comp) -> bool:
     return any(
         r.get("state") == "APPROVED"
         and (r.get("commit") or {}).get("oid") == head
-        and trusted_author((r.get("author") or {}).get("login") or "", repo)
+        and trusted_author(graphql_login(r.get("author")), repo)
         for r in reviews
     )
 

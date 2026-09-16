@@ -84,11 +84,17 @@ inputs:
   trusted-logins:
     description: >-
       Comma-separated logins whose marker comments are the loops' own (the
-      caller's TRUSTED_LOGINS), preferred when a counter is looked up. Empty
-      (default): no comment is the loop's own — `rounds` is then never found
-      by lookup, `attempts` only as a write-access account's.
+      caller's TRUSTED_LOGINS), preferred when a counter is looked up. The
+      default is the machine account under both of its logins — the User
+      (the PAT, today) and its Phase 2 GitHub App login, whose marker the
+      write-access fallback would otherwise refuse as an App's — so a caller
+      that passes nothing still resets the loops' own counters; callers pass
+      their workflow-level TRUSTED_LOGINS so the value lives in one place.
+      An explicit empty string means no comment is the loop's own — `rounds`
+      is then never found by lookup, `attempts` only as a write-access
+      account's.
     required: false
-    default: ""
+    default: i-am-marvin,meridian-marvin[bot]
 
 outputs:
   ok:
