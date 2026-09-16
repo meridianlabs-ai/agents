@@ -155,15 +155,17 @@ sanity-check locally before pushing: `ruff check` + `ruff format --check` on
 touched files, `mypy <touched files>`, and any targeted tests that cover the
 conflicted area. Pure CHANGELOG/docs conflicts can go straight to CI.
 
-- **Run pytest with `PYTHONPATH=$PWD/src`** (from the worktree root). The
-  venv's editable install points at the PRIMARY clone's `src/`, so without
-  it pytest imports the main checkout's code and silently tests the wrong
-  tree (observed: a green run that hadn't exercised the merge at all —
-  caught only when a branch-side import didn't exist in the main clone).
-  Verify once per session:
-  `PYTHONPATH=$PWD/src python -c 'import inspect_ai; print(inspect_ai.__file__)'`
-  must print the worktree path. (`ruff`/`mypy` take file paths, so they
-  check the worktree files regardless.)
+- **Give the worktree its own venv and test from it**: `uv sync --frozen`
+  in the worktree (about three seconds from a warm uv cache; `.venv` is
+  gitignored), then `.venv/bin/pytest`, `.venv/bin/ruff`, `.venv/bin/mypy`.
+  Rerun the sync after the merge when it touched `uv.lock`. Never borrow the
+  primary clone's venv, with or without `PYTHONPATH=$PWD/src`: its editable
+  install points at the PRIMARY clone's `src/`, so pytest silently tests the
+  wrong tree (observed: a green run that hadn't exercised the merge at all,
+  caught only when a branch-side import didn't exist in the main clone), and
+  its dependencies are main's, not the branch's. Verify once per session:
+  `.venv/bin/python -c 'import inspect_ai; print(inspect_ai.__file__)'`
+  must print the worktree path. (decision: Ransom, 2026-09-15)
 - **A merged branch may owe more than textual resolution**: when main has
   established a new cross-cutting contract (e.g. mutation verbs carry
   `--terse` with piped-output default; human output goes through the `_echo`
