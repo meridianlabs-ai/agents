@@ -13,7 +13,7 @@ the auto-review and permission tradeoffs — see [design/architecture.md](design
 | | Dev agent | Reviewer |
 |---|---|---|
 | Workflow | `.github/workflows/claude.yml` | `.github/workflows/claude-review.yml` |
-| Trigger | `@claude` mention, or the `claude` label | auto on PR open, or `@review` |
+| Trigger | `@claude` mention, or the `claude` label | `@review` comment (auto-review on PR open is off, 2026-09-16) |
 | GitHub token | agent job: read-only; a separate land job pushes the commits and opens the PR as the machine account | `contents: read` (cannot push) |
 | Tools | file edits + verify loop (tests/lint) + `gh` | verify loop + `gh` + inline comments; **denies** edits/git writes |
 
@@ -113,16 +113,20 @@ Notes:
 
 The reviewer posts a top-level summary plus inline comments on a PR. It runs:
 
-- **Automatically** when a PR is opened, reopened, or marked ready for review.
-  (This relies on the workflow being present on the PR's base branch — see the
-  fork caveat below, where it isn't and auto-review is driven differently.)
-- **On demand** when someone comments `@review` on a PR.
+- **On demand** when someone comments `@review` on a PR (or on an
+  `External`-labeled issue).
+- **Never on its own.** Auto-review on PR open / reopen / ready-for-review is
+  off in every Meridian repo (decision: Ransom, 2026-09-16, after inspect_ai#501
+  was reviewed unasked; actions went first on 2026-09-14 after actions#110).
+  Reviews are driven from Orca workspaces instead. The example stub keeps the
+  `pull_request` trigger as a commented-out block for a repo that wants it
+  back.
 
 It is read-only: it can run tests to verify a finding but cannot modify code or
 push. Its findings are confidence-filtered (few high-signal items over many
 speculative ones).
 
-Fork PRs get no automatic review, but a collaborator's `@review` comment
+A collaborator's `@review` comment
 reviews one — treated as untrusted code: nothing from the fork's tree is
 executed on the runner itself, the reviewer installs and tests inside an
 OS-level sandbox, and the fork's `.claude/` / `.mcp.json` are deleted from the
@@ -191,12 +195,15 @@ Branch layout:
 > the **PR's own branches** (`main` / a `main`-cut feature branch), which carry
 > no Claude workflows. So on the fork, **only top-level `@claude`/`@review`
 > comments and the `claude` label trigger the agents.** Inline review-comment
-> replies, review submissions, and auto-review-on-PR-open do **not** fire. The
-> fork's dev stub therefore drops the two PR-review triggers, and auto-review is
-> restored another way: when the dev agent opens a PR it posts a top-level
-> `@review` comment, and the reviewer stub sets `allowed_bots: "claude[bot]"` so
-> that bot-authored comment is honored. Human-opened PRs still need a manual
-> `@review`.
+> replies and review submissions do **not** fire, so the fork's dev stub drops
+> the two PR-review triggers. (PRs against `meridian` itself do resolve
+> `pull_request` from `meridian` — that is how inspect_ai#501 got reviewed
+> unasked on 2026-09-16, and why the reviewer stub no longer carries the
+> trigger.) The dev agent used to post a top-level `@review` when it opened a
+> PR, as the fork's substitute for auto-review-on-open; that is off too
+> (`request_review_after_open: "false"`, 2026-09-16). The reviewer stub keeps
+> `allowed_bots: "claude[bot]"` so a bot-authored `@review` is still honored
+> when one is posted. Every PR needs a human `@review`.
 
 Both branches are kept current by `sync-upstream.yml` (hourly): it
 fast-forwards `main` from upstream and merges upstream into `meridian`. It
@@ -209,8 +216,8 @@ workflow token cannot bypass rulesets.
 1. File an issue on the fork (e.g. from the project board) and add the `claude`
    label, or `@claude` it.
 2. Claude branches from pristine `main` and opens a draft PR **within the fork**
-   (`claude/xyz` → `main`), then posts a top-level `@review` comment to kick off
-   the reviewer (auto-review-on-open can't fire here — see the trigger caveat).
+   (`claude/xyz` → `main`). Nothing reviews it on its own: post a top-level
+   `@review` comment when a review is wanted (see the trigger caveat).
    This PR is the review surface — it is never merged here. Because `main`
    mirrors upstream, its diff is exactly what upstream will see.
 3. Iterate on the fork PR (`@claude` to fix, `@review` to re-review) — always as

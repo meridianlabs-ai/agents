@@ -1473,7 +1473,16 @@ substring collision in trigger gates). Design choices:
   allow-listing `gh` and the inline-comment MCP so it can actually *post* the
   review — an early version produced a good review that went nowhere because no
   posting tool was allowed.
-- **Auto-review triggers on `pull_request`; a `pull_request_target`
+- **Auto-review is OFF everywhere since 2026-09-16** (decision: Ransom;
+  actions first on 2026-09-14 after actions#110 was reviewed unasked, then
+  every repo after inspect_ai#501 was). Reviews are asked for — an `@review`
+  comment, or from an Orca workspace — never posted by CI. The reviewer
+  stubs carry only the `issue_comment` trigger; `examples/claude-review-stub.yml`
+  keeps the `pull_request` trigger and its `if` clause commented out for a
+  repo that wants them back, and the fork's dev stub sets
+  `request_review_after_open: "false"`. The rest of this list describes
+  the `pull_request` path as it was designed, for that day.
+- **Auto-review triggered on `pull_request`; a `pull_request_target`
   switch was attempted 2026-08-26 and REVERTED 2026-08-27**: Anthropic's
   workload-identity token exchange rejects prt-shaped OIDC subjects
   ("Invalid OIDC token", 2/2 on first exercise — the subject shape had
