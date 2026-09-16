@@ -242,11 +242,17 @@ on:
 
 # The loops' trusted identity, in ONE place (the Class B principle: a comment
 # is believed only if its author is a trusted identity or holds write
-# access): the machine account today. Phase 2 (a GitHub App identity; the
-# login becomes `<app-slug>[bot]`) changes this one value. Read here by the
-# re-engagement reset, so it rewrites only the loops' own counter comments.
+# access): the machine account, under both of its logins — the User
+# `i-am-marvin` (the PAT, today) and the GitHub App's `meridian-marvin[bot]`
+# (Phase 2: once the gate and land jobs mint app tokens, every push, comment
+# and label that is marvin's today carries the bot login; the User is
+# retired at the end of Phase 2 and then leaves this list). Read by the trig
+# step (the label kickoff and the actor authorization — the bot's
+# collaborator permission reads `none`, so it is trusted by login, never by
+# lookup), by the agent steps' bot allow-lists, and by the re-engagement
+# reset, so it rewrites only the loops' own counter comments.
 env:
-  TRUSTED_LOGINS: i-am-marvin
+  TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]
 
 jobs:
   # TRUSTED: the trigger check and every write that must happen BEFORE the
@@ -339,46 +345,51 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           ok=false
+          # trusted_login LOGIN: membership in the workflow-level TRUSTED_LOGINS
+          # (the machine account's logins; spaces ignored).
+          trusted_login() { case ",${TRUSTED_LOGINS// /}," in *",$1,"*) return 0 ;; esac; return 1; }
           # The label path is exempt from the machine-account exclusion: the
           # triage pipeline labels issues `auto` AS marvin, and that labeled
           # event is the intended kickoff (fork PR inspect_ai#237) — without
           # this, marvin-labeled kickoffs ran the agent but skipped the ack
           # and both Atlas stage steps, so the board never showed the pickup.
           # Reading the label NAME carries no quoted-token hazard; bots stay
-          # excluded everywhere.
+          # excluded everywhere — except the machine account's own bot login
+          # (TRUSTED_LOGINS), which labels exactly as the User does today.
           # Case-FOLDED, like the action: claude-code-action compiles its
           # trigger regexes with the `i` flag and lower-cases both label names
           # before comparing (src/github/validation/trigger.ts), and the stubs'
           # contains() gate is case-insensitive too. Since `ok` now gates the
           # whole run, a stricter mirror would turn `@Claude fix this` (mobile
           # auto-capitalisation) or a `Claude` label into a silent no-op.
-          lname=${LNAME,,}; label=${LABEL,,}
+          # (`tr`, not `${var,,}`: the step also runs under bash 3 in tests/.)
+          lname=$(printf '%s' "$LNAME" | tr '[:upper:]' '[:lower:]')
+          label=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]')
           if [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] \
              && [ -n "$label" ] && [ "$lname" = "$label" ]; then
-            case "$ACTOR" in *"[bot]") ;; *) ok=true ;; esac
+            if trusted_login "$ACTOR" || [[ "$ACTOR" != *"[bot]" ]]; then ok=true; fi
           fi
-          case "$ACTOR" in
-            *"[bot]"|i-am-marvin) ;; # bot/machine actors never stage (label path above excepted)
-            *)
-              text="$COMMENT$REVIEW"
-              if [ "$EVENT" = "issues" ]; then
-                # Body/title count only on `opened`: the action checks them only
-                # there (src/github/validation/trigger.ts), so matching them on
-                # `labeled` too let ANY later label on an issue whose body carries
-                # the phrase pass this gate — ack, stage move, checkout — before
-                # the action no-op'd (and on the codex path, which never reaches
-                # the action's check, each such label was a REAL run: a fresh
-                # codex branch and PR). A matching label is handled above.
-                text=""
-                if [ "$EVENT_ACTION" = "opened" ]; then
-                  text="$IBODY
+          # Bot and machine actors (TRUSTED_LOGINS, either login) never stage
+          # from text (label path above excepted).
+          if ! trusted_login "$ACTOR" && [[ "$ACTOR" != *"[bot]" ]]; then
+            text="$COMMENT$REVIEW"
+            if [ "$EVENT" = "issues" ]; then
+              # Body/title count only on `opened`: the action checks them only
+              # there (src/github/validation/trigger.ts), so matching them on
+              # `labeled` too let ANY later label on an issue whose body carries
+              # the phrase pass this gate — ack, stage move, checkout — before
+              # the action no-op'd (and on the codex path, which never reaches
+              # the action's check, each such label was a REAL run: a fresh
+              # codex branch and PR). A matching label is handled above.
+              text=""
+              if [ "$EVENT_ACTION" = "opened" ]; then
+                text="$IBODY
           $ITITLE"
-                fi
               fi
-              esc=$(printf '%s' "$PHRASE" | sed 's/[.[\*^$()+?{|]/\\&/g')
-              printf '%s' "$text" | grep -qiE "(^|[[:space:]])$esc([[:space:],.!?;:]|$)" && ok=true
-              ;;
-          esac
+            fi
+            esc=$(printf '%s' "$PHRASE" | sed 's/[.[\*^$()+?{|]/\\&/g')
+            printf '%s' "$text" | grep -qiE "(^|[[:space:]])$esc([[:space:],.!?;:]|$)" && ok=true
+          fi
           # Actor authorization (issue #92): the text matched, now the actor
           # must hold write access, or nothing below runs — no ack, no stage
           # move, no @auto opt-in, no counter reset, no checkout, no agent.
@@ -387,15 +398,21 @@ jobs:
           # is judged: github.actor — the commenter/author, and on the
           # `labeled` path the account that applied the label (the actor of
           # a label event IS the labeler; marvin for triage-applied `auto`
-          # labels, and it holds write, so that kickoff still passes). Fail
-          # closed: a lookup error is `none`. Retried once like the fork-head
+          # labels). A TRUSTED_LOGINS actor is authorized without a lookup:
+          # the User holds write, and the collaborators endpoint answers
+          # `none` for the App's bot login (checked 2026-09-16), so the bot
+          # must be trusted by name — the same rule as the reviewer's trig
+          # step. Everyone else fails closed: a lookup error is `none`.
+          # Retried once like the fork-head
           # lookup, each attempt captured and used only on success (a failed
           # `gh api` prints its error body to STDOUT). Checked BEFORE the
           # fork-head lookup so an outsider's trigger costs one read and
           # produces no refusal comment: `fork_head` stays false for them,
           # and the refusal step is gated on `authorized` as well.
           authorized=false
-          if [ "$ok" = "true" ]; then
+          if [ "$ok" = "true" ] && trusted_login "$ACTOR"; then
+            authorized=true
+          elif [ "$ok" = "true" ]; then
             perm=""
             for i in 1 2; do
               perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission' 2>/dev/null) && break
@@ -1043,6 +1060,15 @@ jobs:
           label_trigger: ${{ inputs.label_trigger }}
           base_branch: ${{ inputs.base_branch }}
           additional_permissions: "actions: read"
+          # The machine account's own bot login only (TRUSTED_LOGINS; the
+          # User entry is inert — the action consults this list for
+          # non-User actors alone), so the one bot-actor kickoff the gate
+          # admits — the `auto` label applied by marvin, under Phase 2's App
+          # identity — is not refused by the action's non-human-actor guard.
+          # Every other bot is still refused: the stubs and the trig step
+          # exclude bot actors from the text paths, so the reviewer's own
+          # comments cannot retrigger the dev agent.
+          allowed_bots: ${{ env.TRUSTED_LOGINS }}
           settings: ${{ steps.agentsettings.outputs.value }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
@@ -1349,8 +1375,10 @@ jobs:
           # independent gate (mirroring the Claude path, where
           # claude-code-action's internal check is the second one). No
           # allow-bot-users: bot actors never pass the gate's trig step, so none reach
-          # this step — matching the Claude path, which sets no allowed_bots
-          # on this verb either.
+          # this step — except the machine account's own bot login
+          # (TRUSTED_LOGINS), whose `auto` label the gate admits under Phase
+          # 2's App identity — matching the Claude path's allowed_bots.
+          allow-bot-users: ${{ env.TRUSTED_LOGINS }}
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
@@ -1831,8 +1859,8 @@ jobs:
                 issue_repo="$ANCHOR_REPO"
               fi
             fi
-            [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-              --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+            [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" 2>/dev/null \
+              | jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl | if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and (.login as $l | any($tl[]; . == $l) | not)) | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or (.user.login as $l | any($tl[]; . == $l))) then "" else .user.login end) end' 2>/dev/null || true)
             [ -n "$mention" ] && cc=$(printf '\n\ncc @%s' "$mention")
           fi
           # Trigger tokens deliberately absent from our own text (the land

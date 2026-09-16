@@ -285,6 +285,20 @@ gate job   (trusted: trigger check + pre-agent marvin writes; job token + MARVIN
   -> land job   (trusted: fresh runner; downloads the artifact; validates; pushes, posts, resolves, stages as marvin)
 ```
 
+The machine account behind those trusted writes has two logins. Today it is
+the User `i-am-marvin`, acting through the `MARVIN_TOKEN` PAT. Phase 2 of the
+credential separation replaces the PAT with the GitHub App `meridian-marvin`
+(App ID 4969131): the gate and land jobs mint one-hour installation tokens,
+and every push, comment, label and board move that is marvin's today then
+carries the bot login `meridian-marvin[bot]`. Every trust decision reads one
+`TRUSTED_LOGINS` value per file, which names both logins during the
+transition; the bot is trusted by login, never by lookup (the collaborators
+endpoint reports `none` for an App, verified 2026-09-16), its comments carry
+no MEMBER/COLLABORATOR association (an App's is NONE or CONTRIBUTOR), and so
+the stub gates and the `[bot]` exclusions name it explicitly and the
+claude-code-action / codex-action steps carry it in their bot allow-lists. At
+the end of Phase 2 the User login is retired and the bot is the only entry.
+
 Three rules define the shape:
 
 - **The agent job references no secret.** Not in `env:`, not as an action

@@ -171,15 +171,18 @@ on:
           only by CI-fix rounds on PRs labeled engine:codex.
         required: false
 
-# The identity every author check in this file trusts: the machine account
-# today. Phase 2 (a GitHub App identity; the login becomes `<app-slug>[bot]`)
-# changes this ONE value — no trust decision below names the login itself.
-# Comma-separated. `github-actions[bot]` never belongs here: any repository's
-# workflow run posts as it. (Handoff: ~/Documents/security/
+# The identity every author check in this file trusts: the machine account,
+# under both of its logins — the User `i-am-marvin` (the PAT, today) and the
+# GitHub App's `meridian-marvin[bot]` (Phase 2: the app's tokens push and
+# post as the bot; its collaborator permission reads `none`, so it is trusted
+# by login only, before the `[bot]` refusal below). The User leaves this ONE
+# value when the PAT is retired; no trust decision below names a login
+# itself. Comma-separated. `github-actions[bot]` never belongs here: any
+# repository's workflow run posts as it. (Handoff: ~/Documents/security/
 # remaining-security-work.md → section 3; the same value, by the same name,
 # is being introduced in the sibling workflows.)
 env:
-  TRUSTED_LOGINS: i-am-marvin
+  TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]
 
 jobs:
   # TRUSTED, first: the PR lookup, the `auto`-label gate, the attempt cap and
@@ -686,8 +689,8 @@ jobs:
           # (Atlas views filter on assignee), and the reporter may be a
           # different person — inspect_ai#473's handoff pinged the issue's
           # author while the assignee had kicked off the run.
-          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-            --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" 2>/dev/null \
+            | jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl | if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and (.login as $l | any($tl[]; . == $l) | not)) | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or (.user.login as $l | any($tl[]; . == $l))) then "" else .user.login end) end' 2>/dev/null || true)
           echo "mention=$mention" >>"$GITHUB_OUTPUT"
           echo "cc target: ${mention:-none}"
 
@@ -990,6 +993,14 @@ jobs:
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           additional_permissions: "actions: read"
           prompt: ${{ steps.prompt.outputs.value }}
+          # workflow_run's actor is the CI run's actor — the account that
+          # pushed the branch: the machine account, a User today and the
+          # App's bot login under Phase 2 (TRUSTED_LOGINS; the User entry is
+          # inert, the action consults this list for non-User actors only).
+          # Without it the action's non-human-actor guard would refuse every
+          # CI-fix round on a bot-pushed branch. The gate did the real
+          # authorization.
+          allowed_bots: ${{ env.TRUSTED_LOGINS }}
           settings: ${{ steps.fixsettings.outputs.value }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
@@ -1148,11 +1159,12 @@ jobs:
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
           # workflow_run's actor is the CI run's actor: normally the machine
-          # account (a User with write — passes the action's built-in check),
-          # but a branch the Claude App pushed (mixed-engine PR relabeled
-          # mid-loop) makes it the claude bot — allow that one, matching the
-          # other codex steps.
-          allow-bot-users: "claude"
+          # account (a User with write today — passes the action's built-in
+          # check; the App's bot login under Phase 2 — TRUSTED_LOGINS, as the
+          # Claude step's allowed_bots), but a branch the Claude App pushed
+          # (mixed-engine PR relabeled mid-loop) makes it the claude bot —
+          # allow that one too, matching the other codex steps.
+          allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 

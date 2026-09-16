@@ -118,7 +118,9 @@ writes the body, and the land job pushes, posts and resolves.
 Codex output is posted **by the machine account** (MARVIN_TOKEN) so the
 marker comments still trigger downstream stubs (github-actions[bot]
 comments trigger nothing — recursion guard). The review-fix loop's gate
-therefore accepts verdict-marked comments from `i-am-marvin` in
+therefore accepts verdict-marked comments from the machine account
+(`TRUSTED_LOGINS`: `i-am-marvin`, and `meridian-marvin[bot]` once Phase 2
+posts as the GitHub App) in
 addition to `reviewer_login`; everything downstream keys on the same
 `<!-- claude-review-summary -->` / `<!-- claude-review-verdict:* -->`
 markers regardless of engine. All codex text posted to GitHub is

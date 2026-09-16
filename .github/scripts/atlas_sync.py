@@ -48,17 +48,25 @@ UPSTREAM = "UKGovernmentBEIS/inspect_ai"
 FORK = "meridianlabs-ai/inspect_ai"
 TS_MONO = "meridianlabs-ai/ts-mono"
 REVIEWER = os.environ.get("REVIEWER", "ransomr")
-MACHINE_ACCOUNT = "i-am-marvin"  # the login this sync (and the loop) writes as
+MACHINE_ACCOUNT = "i-am-marvin"  # the User login this sync (and the loop) writes as today
+# The machine account's GitHub App login (Phase 2 of the credential
+# separation): once the workflows mint app tokens instead of using the PAT,
+# every write that is MACHINE_ACCOUNT's today carries this login. REST
+# payloads (what this module reads for comments) render it with the `[bot]`
+# suffix; GraphQL renders a Bot's login bare and the ball-possession checks
+# below already exclude non-User actors by __typename.
+MACHINE_BOT = "meridian-marvin[bot]"
 # Authors whose comments and issue-body lines this sync believes as-is: the
-# machine account alone (the loop's hand-backs, counters and stage comments
-# post as it). Every author check reads THIS set, so Phase 2 of the
-# credential separation (marvin becomes a GitHub App identity,
-# `<app-slug>[bot]`) changes this one value. Anyone else — including the
-# reviewer's GitHub App, whose collaborator permission is `none`, so a
-# verdict it posts is not revived (decision: Ransom, 2026-09-15) — is
-# believed only with write access; see trusted_author. `github-actions[bot]`
-# is never trusted: any repository's workflow run posts as it.
-TRUSTED_LOGINS = frozenset({MACHINE_ACCOUNT})
+# machine account alone, under either login (the loop's hand-backs, counters
+# and stage comments post as it). Every author check reads THIS set; the
+# User login leaves it when the PAT is retired at the end of Phase 2. The bot
+# is trusted by name only — the collaborators endpoint answers `none` for an
+# App. Anyone else — including the reviewer's GitHub App, whose collaborator
+# permission is `none`, so a verdict it posts is not revived (decision:
+# Ransom, 2026-09-15) — is believed only with write access; see
+# trusted_author. `github-actions[bot]` is never trusted: any repository's
+# workflow run posts as it.
+TRUSTED_LOGINS = frozenset({MACHINE_ACCOUNT, MACHINE_BOT})
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 TRUSTED_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 NEVER_TRUSTED = frozenset({"github-actions[bot]"})
@@ -656,7 +664,7 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
         return not any(
             (c.get("body") or "").startswith(marker)
             and (c.get("created_at") or "") >= reopened_ts
-            and (c.get("user") or {}).get("login") == MACHINE_ACCOUNT
+            and (c.get("user") or {}).get("login") in TRUSTED_LOGINS
             for c in issue_comments(FORK, issue)
         )
     except Exception as e:  # noqa: BLE001

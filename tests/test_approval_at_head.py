@@ -240,6 +240,31 @@ def test_trusted_logins_skip_the_lookup(monkeypatch):
     assert aah.make_trust_check(REPO, api)("I-Am-Marvin")
 
 
+@pytest.mark.parametrize("login", ["i-am-marvin", "meridian-marvin[bot]", "Meridian-Marvin[bot]"])
+def test_the_machine_accounts_logins_are_trusted_by_name_by_default(login):
+    # The User (the PAT, today) and the Phase 2 GitHub App login: the app
+    # authors the ts-mono companion PRs companion_mergeable.py judges, and the
+    # collaborators endpoint answers `none` for an App, so no lookup runs.
+    assert aah.TRUSTED_LOGINS == frozenset({"i-am-marvin", "meridian-marvin[bot]"})
+
+    def api(path, **kwargs):
+        raise AssertionError("no lookup expected for a trusted login")
+
+    assert aah.make_trust_check(REPO, api)(login)
+
+
+@pytest.mark.parametrize("login", ["github-actions[bot]", "foo[bot]"])
+def test_other_apps_are_looked_up_and_refused_when_the_endpoint_says_none(login):
+    calls = []
+
+    def api(path, **kwargs):
+        calls.append(path)
+        return {"permission": "none", "role_name": "none"}
+
+    assert not aah.make_trust_check(REPO, api)(login)
+    assert calls == [f"repos/{REPO}/collaborators/{login}/permission"]
+
+
 # --- parsing ----------------------------------------------------------------
 
 

@@ -26,6 +26,7 @@ spec.loader.exec_module(atlas)
 FORK = atlas.FORK
 TS_MONO = atlas.TS_MONO
 MARVIN = atlas.MACHINE_ACCOUNT
+MARVIN_BOT = atlas.MACHINE_BOT  # the machine account's Phase 2 GitHub App login
 REVIEWER_BOT = "claude[bot]"
 OLD = "2020-01-01T00:00:00Z"  # far older than STALE_MINUTES
 VERDICT = "🔎 Review complete. <!-- claude-review-summary --><!-- claude-review-verdict:suggestions -->"
@@ -93,6 +94,8 @@ def permission(gh, login, perm, role=None):
     "login, association, expected",
     [
         (MARVIN, None, True),
+        (MARVIN_BOT, None, True),  # by name: an App's permission reads `none`
+        (MARVIN_BOT, "NONE", True),
         ("colleague", "OWNER", True),
         ("colleague", "MEMBER", True),
         ("colleague", "COLLABORATOR", True),
@@ -165,8 +168,23 @@ def revivals(gh):
     return gh.matching(is_revival)
 
 
-def test_revives_a_stale_machine_account_handback(gh):
-    auto_pr(gh, [comment("@review")])
+def test_the_trusted_set_is_the_machine_account_under_both_logins():
+    assert atlas.TRUSTED_LOGINS == frozenset({"i-am-marvin", "meridian-marvin[bot]"})
+    assert atlas.NEVER_TRUSTED == frozenset({"github-actions[bot]"})
+
+
+@pytest.mark.parametrize("login", ["foo[bot]", REVIEWER_BOT])
+def test_other_apps_fall_through_to_the_lookup_and_are_refused_on_none(gh, login):
+    permission(gh, login, "none")
+    assert not atlas.trusted_author(login, FORK, "NONE")
+    assert len(gh.matching(is_permission_lookup)) == 1
+
+
+@pytest.mark.parametrize("login, association", [(MARVIN, "MEMBER"), (MARVIN_BOT, "NONE")])
+def test_revives_a_stale_machine_account_handback(gh, login, association):
+    # Under either login: the App's comments carry no MEMBER association and
+    # its permission cannot be looked up, so the revival is by name.
+    auto_pr(gh, [comment("@review", login=login, association=association)])
     atlas.retrigger_stale_handbacks()
     (post,) = revivals(gh)
     assert post[3].startswith("body=@review — re-triggered by the Atlas sync")
@@ -184,6 +202,13 @@ def test_does_not_revive_a_reviewer_bot_verdict(gh):
     atlas.retrigger_stale_handbacks()
     assert revivals(gh) == []
     assert any(f"by {REVIEWER_BOT} ignored" in a for a in atlas.actions)
+
+
+def test_does_not_revive_another_apps_handback(gh):
+    permission(gh, "foo[bot]", "none")
+    auto_pr(gh, [comment("@review", login="foo[bot]", association="NONE")])
+    atlas.retrigger_stale_handbacks()
+    assert revivals(gh) == []
 
 
 def test_revives_for_a_write_access_author_found_by_lookup(gh):
@@ -493,3 +518,33 @@ def test_an_importers_own_directive_above_the_rule_is_honoured(gh):
     )
     assert atlas.companion_pr(ISSUE, HEAD) is None
     assert gh.matching(is_discovery_query) == []
+
+
+# ------------------------------------------------------------ field_is_stale
+
+
+REOPEN_URL = "https://github.com/UKGovernmentBEIS/inspect_ai/pull/1"
+
+
+def reopened_issue(gh, marker_login):
+    """Issue #9 reopened after its PR merged, with a reopen-marker comment by
+    `marker_login` right after the reopen (None: no marker)."""
+    gh.route(has("timelineItems"), {"data": {"repository": {"issue": {"timelineItems": {
+        "nodes": [{"createdAt": "2026-09-02T00:00:00Z"}]}}}}})
+    comments = []
+    if marker_login:
+        comments.append({"body": atlas.reopen_marker(REOPEN_URL) + "parked", "created_at": "2026-09-02T00:00:01Z",
+                         "user": {"login": marker_login}})
+    gh.route(has(f"repos/{FORK}/issues/9/comments?per_page=100"), [comments])
+
+
+@pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT])
+def test_the_syncs_own_reopen_marker_under_either_login_keeps_the_field(gh, login):
+    reopened_issue(gh, login)
+    assert atlas.field_is_stale(9, {"mergedAt": "2026-09-01T00:00:00Z"}, REOPEN_URL) is False
+
+
+@pytest.mark.parametrize("login", ["drive-by", "foo[bot]", None])
+def test_a_reopen_without_the_syncs_own_marker_makes_the_field_stale(gh, login):
+    reopened_issue(gh, login)
+    assert atlas.field_is_stale(9, {"mergedAt": "2026-09-01T00:00:00Z"}, REOPEN_URL) is True

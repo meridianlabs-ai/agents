@@ -63,10 +63,16 @@ from datetime import datetime
 from typing import Any, NamedTuple
 
 # Logins believed without a permission lookup — the one place to change when
-# the trusted identity changes (handoff section 3). Empty on purpose: the
-# approvals the merge queue acts on come from upstream maintainers, whom the
-# collaborator-permission lookup identifies; no login is trusted by name.
-TRUSTED_LOGINS: frozenset[str] = frozenset()
+# the trusted identity changes (handoff section 3): the machine account,
+# under its User login `i-am-marvin` (the PAT, today; it holds write, so the
+# lookup says the same) and its GitHub App login `meridian-marvin[bot]`
+# (Phase 2: the app opens the ts-mono companion PRs whose author
+# companion_mergeable.py judges with this check, and the collaborators
+# endpoint answers `none` for an App, so the bot is trusted by name). The
+# approvals the merge queue acts on still come from upstream maintainers,
+# whom the lookup identifies; the machine account never approves. The User
+# leaves this set when the PAT is retired.
+TRUSTED_LOGINS: frozenset[str] = frozenset({"i-am-marvin", "meridian-marvin[bot]"})
 
 # `permission` collapses maintain→write and triage→read; `role_name` is the
 # finer value. Either field naming one of these grants trust.

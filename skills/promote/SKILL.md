@@ -27,9 +27,10 @@ nothing is written.
 
 **Trust rule, applied before any PR text is read.** A fork PR qualifies only
 when its head repository is `meridianlabs-ai/inspect_ai` itself AND its
-author is in the script's `TRUSTED_LOGINS` (`i-am-marvin`; one variable at
-the top of the script — Phase 2's GitHub App identity changes that one
-value) or holds write access on the fork (admin/maintain/write via the
+author is in the script's `TRUSTED_LOGINS` (`i-am-marvin`, and its Phase 2
+GitHub App login `meridian-marvin[bot]`; one variable at the top of the
+script, compared after normalising GraphQL's bare Bot logins and `gh`'s
+`app/` prefix to the REST form) or holds write access on the fork (admin/maintain/write via the
 collaborator permission API; a failed lookup is untrusted). Anyone can open
 a `Fixes #N` PR from a personal fork into the fork's default branch and
 GitHub links it to the issue natively, so a chip alone proves nothing; a

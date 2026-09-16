@@ -31,7 +31,8 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `type`.
 - `test_atlas_sync.py` — the hourly Atlas sync's author checks
   (`.github/scripts/atlas_sync.py`, against a fake `gh`): `trusted_author`
-  (trusted logins, `author_association`, the cached write-permission lookup,
+  (trusted logins — the machine account under both its User and GitHub App
+  logins — `author_association`, the cached write-permission lookup,
   fail-closed), the stale hand-back revival honouring only trusted authors
   (an outsider's `@review` or forged verdict is never re-issued as the
   machine account and ends the search), the `Companion PR:` issue-body
@@ -47,8 +48,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `gh`: the PR is resolved from `pr_number` and refused when closed, a fork
   head or on another branch (never listed by branch name); the attempt
   counter is read only from a trusted author's marker comment (the loop's
-  own first, else a write-access account's; permission lookups cached and
-  fail-closed; `[bot]` logins never looked up) and parsed strictly; the
+  own first — the machine account under either of its logins — else a
+  write-access account's; permission lookups cached and fail-closed; other
+  `[bot]` logins never looked up) and parsed strictly; the
   reset and the refund PATCH only that comment, and re-engagement's no-id
   reset follows the gate's rule (a maintainer's counter the gate counts
   from is reset; outsiders' and Apps' never). Also `verify-auto-labeler`'s
@@ -117,9 +119,17 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   marker or nothing) and is covered too.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
-  whatever the head repo — write access, `TRUSTED_LOGINS`, or a bot the
-  caller's `allowed_bots` names (same-repo heads only) — with the fork head
-  admitted sandboxed and a failed lookup refused (Claude Security 4085111).
+  whatever the head repo — write access, `TRUSTED_LOGINS` (the machine
+  account's User and GitHub App logins, admitted without a lookup), or a bot
+  the caller's `allowed_bots` names (same-repo heads only) — with the fork
+  head admitted sandboxed and a failed lookup refused (Claude Security
+  4085111). Also that the review step's `allowed_bots` is the caller's list
+  plus `TRUSTED_LOGINS`.
+- `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
+  same way: the machine account's `auto` label kicks the dev agent off under
+  either login with no lookup, other Apps' labels and every bot's text
+  trigger are refused, a human is authorized by the permission lookup; and
+  the dev stubs name the App login on the label path only.
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc
