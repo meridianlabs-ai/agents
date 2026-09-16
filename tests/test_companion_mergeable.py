@@ -34,7 +34,10 @@ SHA2 = "b" * 40
 T_COMMIT = "2026-09-10T09:00:00Z"
 T_REVIEW = "2026-09-10T12:00:00Z"
 T_LATER = "2026-09-11T08:00:00Z"
-TRUSTED = {"i-am-marvin", "meridian-marvin[bot]", "epatey", "ransomr"}
+# Write access on ts-mono, as the permission lookup would answer it. The
+# machine account is NOT here: it is trusted as an author by name
+# (cm.TRUSTED_AUTHORS), never as an approver.
+WRITERS = {"epatey", "ransomr"}
 
 _ids = iter(range(1000, 10_000))
 
@@ -62,7 +65,7 @@ def file(name, status="modified", previous=None):
 
 
 def trust(login):
-    return login in TRUSTED
+    return login in WRITERS
 
 
 def check(p, reviews=(), files=None, commits=None):
@@ -143,6 +146,28 @@ def test_regenerate_only_by_the_machine_accounts_bot_login_passes():
     # Phase 2: the app opens the companion PR, so its author is the bot login.
     v = check(pr(SHA1, author="meridian-marvin[bot]"))
     assert v.ok and v.message == f"regenerate-only {SHA1}: {GENERATED} by meridian-marvin[bot]"
+
+
+def test_trusted_authors_are_the_machine_accounts_logins_and_approvals_stay_lookup_only():
+    # The author set is the companion rule's own; approval_at_head trusts no
+    # login by name, so the machine account cannot approve (Ransom, 2026-09-16).
+    assert cm.TRUSTED_AUTHORS == frozenset({"i-am-marvin", "meridian-marvin[bot]"})
+    assert cm.aah.TRUSTED_LOGINS == frozenset()
+    is_author = cm.make_author_check(trust)
+    assert is_author("i-am-marvin") and is_author("Meridian-Marvin[bot]") and is_author("epatey")
+    assert not is_author("outsider") and not is_author("foo[bot]")
+
+
+@pytest.mark.parametrize("login", ["i-am-marvin", "meridian-marvin[bot]"])
+def test_the_machine_accounts_own_approval_does_not_carry_a_hand_written_change(login):
+    # Trusted as the author of a regeneration, not as a reviewer: its at-head
+    # approval is judged by write access like anyone's (none here).
+    v = check(pr(SHA1, author=login), [review(login, "APPROVED", SHA1, T_REVIEW)], [file(GENERATED), file(INDEX)])
+    assert not v.ok
+    assert v.message == (
+        f"no approval for head {SHA1}: approval by {login} does not count (no write access on {REPO}); "
+        f"not regenerate-only: diff touches {INDEX}, outside the generated set"
+    )
 
 
 def test_regenerate_only_needs_a_trusted_author():
@@ -252,8 +277,8 @@ WRITE = {"permission": "write", "role_name": "write"}
 
 @pytest.mark.parametrize("author", ["i-am-marvin", "meridian-marvin[bot]"])
 def test_cli_regenerate_only_passes_with_reads_only(tmp_path, author):
-    # The machine account's logins are trusted by name (approval_at_head's
-    # TRUSTED_LOGINS), so no permission lookup runs for either.
+    # The machine account's logins are trusted as authors by name
+    # (TRUSTED_AUTHORS), so no permission lookup runs for either.
     r, calls = run_cli(tmp_path, [f"https://github.com/{REPO}/pull/7"], fixtures_for(pr(SHA1, author=author)))
     assert r.returncode == 0, r.stderr
     assert r.stdout == f"regenerate-only {SHA1}: {GENERATED} by {author}\n"
@@ -285,6 +310,26 @@ def test_cli_another_apps_regenerate_only_is_exit_1_after_a_failed_lookup(tmp_pa
     assert r.returncode == 1, r.stdout + r.stderr
     assert f"not regenerate-only: author foo[bot] is not trusted (no write access on {REPO})" in r.stdout
     assert [c[1] for c in calls][-1] == f"repos/{REPO}/collaborators/foo[bot]/permission"
+
+
+@pytest.mark.parametrize("login", ["i-am-marvin", "meridian-marvin[bot]"])
+def test_cli_the_machine_accounts_approval_is_looked_up_and_refused_on_none(tmp_path, login):
+    # The App's permission is `none`; the User's on ts-mono is whatever the
+    # endpoint says — here `none` too, so neither approval counts, and the
+    # author check by name adds no second lookup.
+    fx = fixtures_for(
+        pr(SHA1, author=login),
+        [review(login, "APPROVED", SHA1, T_REVIEW)],
+        [file(GENERATED), file(INDEX)],
+        {login: {"permission": "none", "role_name": "none"}},
+    )
+    r, calls = run_cli(tmp_path, [REPO, "7"], fx)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert r.stdout == (
+        f"no approval for head {SHA1}: approval by {login} does not count (no write access on {REPO}); "
+        f"not regenerate-only: diff touches {INDEX}, outside the generated set\n"
+    )
+    assert [c[1] for c in calls if "/collaborators/" in c[1]] == [f"repos/{REPO}/collaborators/{login}/permission"]
 
 
 def test_cli_approved_at_head_passes(tmp_path):

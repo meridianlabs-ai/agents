@@ -95,8 +95,12 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   only `generated.ts`) passes; a hand-written change without approval, an
   approval on an older head, a diff outside the generated set, an untrusted
   or fork author, a removed/added/renamed generated file and a closed PR all
-  skip with both reasons; the generated set is pinned; the command line
-  against a stub `gh` (GETs only, the head re-read, cached lookups).
+  skip with both reasons; the generated set is pinned; the machine account
+  (User and App logins, `TRUSTED_AUTHORS`) is trusted as an author by name
+  but its own approval is looked up and refused like anyone's without write
+  access (`approval_at_head.TRUSTED_LOGINS` stays empty: it may not approve,
+  Ransom 2026-09-16); the command line against a stub `gh` (GETs only, the
+  head re-read, cached lookups).
 - `test_skill_resolution.py` — the trust rule in `skills/checkout/checkout.sh`
   and `skills/promote/promote.sh`, run against a stub `gh` that answers from
   fixtures and logs every call: a chip from a personal fork or an untrusted

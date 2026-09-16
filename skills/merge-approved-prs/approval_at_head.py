@@ -63,20 +63,15 @@ from datetime import datetime
 from typing import Any, NamedTuple
 
 # Logins believed without a permission lookup — the one place to change when
-# the trusted identity changes (handoff section 3): the machine account,
-# under its User login `i-am-marvin` (the PAT, today) and its GitHub App
-# login `meridian-marvin[bot]` (Phase 2: the app opens the ts-mono companion
-# PRs whose author companion_mergeable.py judges with this check, and the
-# collaborators endpoint answers `none` for an App, so the bot is trusted by
-# name). Note what the set also does: this module's own callers judge
-# APPROVALS on the upstream PR with the same check, and there the machine
-# account holds only `read` (UKGovernmentBEIS/inspect_ai, checked
-# 2026-09-16) — an at-head approval by it would now count where the lookup
-# would have refused it. No workflow approves as the machine account, and
-# the approvals the merge queue acts on come from upstream maintainers,
-# whom the lookup identifies (decision: Ransom, agents#110). The User leaves
-# this set when the PAT is retired.
-TRUSTED_LOGINS: frozenset[str] = frozenset({"i-am-marvin", "meridian-marvin[bot]"})
+# the trusted identity changes (handoff section 3). Empty on purpose: the
+# approvals the merge queue acts on come from upstream maintainers, whom the
+# collaborator-permission lookup identifies; no login is trusted by name.
+# The machine account (`i-am-marvin`, and `meridian-marvin[bot]` in Phase 2)
+# stays out: it holds only `read` on UKGovernmentBEIS/inspect_ai (checked
+# 2026-09-16) and may not supply an upstream approval (decision: Ransom,
+# 2026-09-16, agents#110). The companion rule that must trust the machine
+# account as a PR AUTHOR has its own set: companion_mergeable.TRUSTED_AUTHORS.
+TRUSTED_LOGINS: frozenset[str] = frozenset()
 
 # `permission` collapses maintain→write and triage→read; `role_name` is the
 # finer value. Either field naming one of these grants trust.
