@@ -65,7 +65,7 @@ gh project item-list 1 --owner meridianlabs-ai --format json --limit 1000 \
   maintainerCanModify` must be `true` — if not, SKIP it (leave it queued),
   and report it with the remedy: ask the contributor to enable "Allow edits
   by maintainers", or merge manually. Process externals per the "External
-  PRs" section below.
+  PRs" section below — nothing from an External tree runs in this session.
 - Confirm each upstream PR: `state=OPEN`, `reviewDecision=APPROVED`, note
   `mergeable` (usually `CONFLICTING`).
 - **Bind the approval to the head commit** — every PR, promotions and
@@ -150,12 +150,16 @@ the failure (run them bare; inspect output separately).
   and its successor identically; deleting `run_multiple` was safe). Then grep
   the whole tree for stale references to anything deleted (docstrings too).
 
-Commit the merge (Co-Authored-By trailer). If a code conflict was involved,
-sanity-check locally before pushing: `ruff check` + `ruff format --check` on
-touched files, `mypy <touched files>`, and any targeted tests that cover the
-conflicted area. Pure CHANGELOG/docs conflicts can go straight to CI.
+Commit the merge (Co-Authored-By trailer). **Promotions only**: if a code
+conflict was involved, sanity-check locally before pushing: `ruff check` +
+`ruff format --check` on touched files, `mypy <touched files>`, and any
+targeted tests that cover the conflicted area. Pure CHANGELOG/docs conflicts
+can go straight to CI. For an External PR run NOTHING from the tree here,
+conflict or not: its checks ran in upstream CI on the approved commit
+(verified before the checkout) and run again on the merge commit you push —
+see "External PRs".
 
-- **Give the worktree its own venv and test from it**: `uv sync --frozen`
+- **Give the worktree its own venv and test from it** (promotions): `uv sync --frozen`
   in the worktree (about three seconds from a warm uv cache; `.venv` is
   gitignored), then `.venv/bin/pytest`, `.venv/bin/ruff`, `.venv/bin/mypy`.
   Rerun the sync after the merge when it touched `uv.lock`. Never borrow the
@@ -240,6 +244,42 @@ what just landed.
 Same flow as above with these substitutions — the branch lives on the
 *contributor's* fork, not meridianlabs-ai:
 
+- **Nothing from the tree runs in this session.** Every step of the flow
+  above that executes code from the checked-out tree is skipped for an
+  External PR: `uv sync --frozen` in the worktree (an editable install runs
+  the tree's build backend) and the `.venv/bin/python -c 'import inspect_ai…'`
+  probe, `ruff check` / `ruff format --check`, `mypy` (it imports whatever
+  plugins the tree's `pyproject.toml` names), the targeted `pytest`, and for
+  viewer-schema PRs `python src/inspect_ai/_view/schema.py`
+  (which also runs `types:generate` in the submodule) and `python
+  .github/scripts/check_openapi_drift.py`. The tree is a contributor's: the
+  review approved its content, not its execution next to your `gh` login and
+  home directory (finding 4122327; the CI external-review path runs the same
+  class of code only inside a sandbox). Upstream CI is the substitute.
+  Immediately after the approval-at-head re-check of section 2 and BEFORE
+  the checkout below, require it to have run and passed on the approved
+  commit:
+  ```bash
+  OUT=$(python3 <skill-base-dir>/checks_at_head.py https://github.com/UKGovernmentBEIS/inspect_ai/pull/<n> --sha "$APPROVED"); RC=$?; echo "$OUT"
+  ```
+  Exit 0 prints `checks passed at <sha>: N check runs, M statuses; required
+  (K): <names>`: every check run on `$APPROVED` completed with `success`,
+  `skipped` or `neutral` (GitHub's own passing conclusions for a required
+  check), every commit status is `success`, and each status check upstream's
+  `main` ruleset requires has reported. Any other exit prints the reason
+  (`checks at <sha> not green: missing required: …; pending: …; failed: …`,
+  `head is <sha>, not the approved <sha2>`, or a `gh` error) and means
+  **SKIP**: leave the item queued and report that line verbatim. One remedy
+  is yours: when the missing or pending checks are workflow runs awaiting
+  "Approve and run" for `$APPROVED` (`gh api
+  "repos/UKGovernmentBEIS/inspect_ai/actions/runs?head_sha=$APPROVED"`,
+  `status: action_required` — the first-time-contributor gate), approve
+  them — that commit is the reviewed one and CI is upstream's sandbox — wait,
+  and re-run the check; never approve a run for any other SHA. After the
+  push of your `origin/main` merge commit, watch CI on the pushed head as
+  usual — the only content it adds is main's. A red check there is fixed by
+  editing what your conflict resolution broke and letting CI verify, or it
+  goes back to the contributor (below); never reproduce it locally.
 - **Checkout/push**: instead of the fetch/checkout lines of section 2,
   fetch the PR head WITHOUT checking it out, refuse it unless it is the
   approved commit, and only then check that commit out — wiring the branch
@@ -291,14 +331,26 @@ Same flow as above with these substitutions — the branch lives on the
   check them even more mechanically. A violation that needs real rework goes
   back to the contributor: comment on the upstream PR, move the proxy to
   Contributor, and skip — don't rewrite their PR beyond conflict resolution.
-- **ts-mono companions**: an external contributor can't author one in
-  meridianlabs-ai/ts-mono — if the PR needs a schema/pointer bump, you author
-  the companion yourself and follow the same sequence below.
+- **Viewer schema / ts-mono**: an External PR that needs the "PRs that need
+  a ts-mono change" sequence — `checks_at_head.py` names
+  `check-schema-and-types` (or `dist-validation`, `submodule-on-main`), or
+  the check goes red after your push — is **skip-and-report**, not done
+  here: step 1 of that sequence is `schema.py`, which imports and runs the
+  contributor's Python. Report `<PR> needs a schema regeneration and ts-mono
+  companion; do it by hand or in a sandbox, not in the queue session`. (An
+  in-session container was considered and rejected: it needs the Python
+  deps, pnpm, the submodule and a copy-back step — not a short reviewable
+  block; decision recorded in the PR that added this bullet.) An external
+  contributor can't author a companion in meridianlabs-ai/ts-mono anyway,
+  so that hand-done regeneration is also where you author it.
 - **Cleanup**: there is no fork review PR to close; the hourly sync closes
   the proxy on merge as usual (external proxies always carry the
   `Upstream PR` field, its join key).
 
 ## PRs that need a ts-mono change
+
+**Promotions only** — for an External PR this whole section is skip-and-report
+(see "External PRs" → Viewer schema / ts-mono).
 
 **Recognize it**: the PR touches `src/inspect_ai/_view/inspect-openapi.json`
 (or the Pydantic models feeding it) and its `check-schema-and-types` check is
@@ -332,15 +384,52 @@ workflow (`.github/workflows/log_viewer.yml`):
    `Literal` had been extended — so don't assume the branch's schema is
    current just because its CI once passed the drift step.) Push; other CI
    starts churning while the viewer checks stay red — expected.
-2. **Update the companion ts-mono PR**: `schema.py` also regenerated
-   `generated.ts` in the submodule working tree — **copy it aside before any
-   git operations in the submodule**. Then in the submodule: check out the
-   companion branch, `git merge origin/main`, restore the regenerated
-   `generated.ts`, commit, push, wait for its CI.
-3. **Merge the companion**:
-   `gh pr merge <n> --repo meridianlabs-ai/ts-mono --squash` — ts-mono main is
-   squash-only, and regenerate-style companions merge without human review
-   (precedent: #427, #439).
+2. **Verify the companion, then update it.** The companion's own review
+   state, not the board stage that queued the item, is what lets it merge
+   (finding 4121986) — check it BEFORE any git operation in the submodule
+   (the script lives next to this skill):
+   ```bash
+   OUT=$(python3 <skill-base-dir>/companion_mergeable.py https://github.com/meridianlabs-ai/ts-mono/pull/<n>); RC=$?; echo "$OUT"
+   COMPANION_HEAD=$(printf '%s\n' "$OUT" | awk '$1 == "approved" || $1 == "regenerate-only" { sub(":$", "", $2); print $2 }')   # the verified SHA; empty unless RC is 0
+   ```
+   Exit 0 prints `approved <sha> by <login> at <time>` (a reviewer with write
+   access on ts-mono approved the companion's CURRENT head and has not since
+   changed their verdict — approval_at_head.py's rule) or `regenerate-only
+   <sha>: <files> by <author>` (a trusted author's same-repo PR against
+   `main` whose diff modifies nothing but
+   `packages/inspect-common/src/types/generated.ts` — exactly what
+   `types:generate` writes; precedent #427). Any other exit prints why both
+   rules failed and means **SKIP the whole item**: the inspect_ai PR cannot
+   land without its companion, and the skill never approves a companion to
+   get past this. A hand-written companion — the barrel re-exports in
+   `index.ts` count as hand-written — needs a ts-mono approval at its head
+   first: ask for one, report, move on.
+   Then: `schema.py` also regenerated `generated.ts` in the submodule
+   working tree — **copy it aside before any git operations in the
+   submodule**. In the submodule: `git fetch origin`, refuse a moved head
+   (`test "$(git rev-parse origin/<branch>)" = "$COMPANION_HEAD"` — SKIP on
+   mismatch), `git checkout -B <branch> "$COMPANION_HEAD"`, `git merge
+   origin/main`, restore the regenerated `generated.ts`, commit and push
+   ONLY if there is something to commit (ts-mono's required checks are not
+   strict, so an unchanged companion need not have main merged in), and wait
+   for its CI. A push moves the head: a regenerate-only companion passes
+   step 3 again on its own, but a hand-written one now needs a ts-mono
+   approval of the pushed head — the skill never supplies it. Ask for one,
+   report, and skip the item if it does not come.
+3. **Merge the companion**, re-verified on the head as it is NOW — a push
+   in step 2, or an approval withdrawn while CI ran, must be seen here, so
+   the helper runs again and the merge is pinned to the SHA it returns.
+   ts-mono main is squash-only:
+   ```bash
+   OUT=$(python3 <skill-base-dir>/companion_mergeable.py https://github.com/meridianlabs-ai/ts-mono/pull/<n>); RC=$?; echo "$OUT"
+   COMPANION_HEAD=$(printf '%s\n' "$OUT" | awk '$1 == "approved" || $1 == "regenerate-only" { sub(":$", "", $2); print $2 }')   # empty unless RC is 0
+   [ "$RC" -eq 0 ] && [ -n "$COMPANION_HEAD" ] && gh pr merge <n> --repo meridianlabs-ai/ts-mono --squash --match-head-commit "$COMPANION_HEAD"   # a non-zero RC: SKIP the whole item, report the line
+   ```
+   `--match-head-commit` makes GitHub refuse the merge if the head is no
+   longer the commit the helper verified. (The old rule "regenerate-style
+   companions merge without human review,
+   precedent #427, #439" is now the helper's regenerate-only rule, checked
+   against the diff; #439's `index.ts` edit would need an approval today.)
    **Then immediately re-check the tracking issue** — companions are
    Development-panel-linked to it (that link IS the board's PR pill), and
    GitHub treats every panel-linked PR as a closer, so the companion's merge
@@ -371,7 +460,9 @@ If ts-mono review comments come in (an automated reviewer runs there), apply
 actionable ones in the companion PR before merging it — barrel re-exports in
 `packages/inspect-common/src/types/index.ts` are the recurring one: new
 public types plucked from `generated.ts` should be re-exported like their
-neighbors (`LogUpdate`, `ProvenanceData`).
+neighbors (`LogUpdate`, `ProvenanceData`). Such an edit makes the companion
+hand-written: re-run `companion_mergeable.py`, which now needs a ts-mono
+approval at the new head before step 3.
 
 ## 3. Clean up
 

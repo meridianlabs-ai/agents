@@ -310,7 +310,14 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   auto-merge request carries `--match-head-commit` for the commit the queue
   pushed, and a re-approval names it — so a head pushed after the check is
   refused at every later step, and a head pushed after its approval is
-  skipped and reported, never re-approved. APPROVED is sticky, so a queued
+  skipped and reported, never re-approved. For External items the queue
+  also runs nothing from the contributor's tree (2026-09-16, finding
+  4122327 criterion 2): the local ruff / mypy / pytest / `schema.py` steps
+  are promotions-only, `checks_at_head.py` (next to the skill) requires
+  upstream CI on the approved commit to be complete and green — the base
+  branch's required checks plus every other check run and commit status —
+  before the checkout, and a viewer-schema regeneration is skip-and-report
+  rather than run in the session. APPROVED is sticky, so a queued
   card that gets moved re-queues hourly — dismissing the approval or
   requesting changes upstream is the way to pull one back, and a proxy in
   Merge without a standing approval drops to **Review** (the ball is the
@@ -508,13 +515,23 @@ stage, resolved by the hourly sync:
   author forever (security finding 4121986, fixed 2026-09-15). Like `Upstream PR`, the recorded
   line is the durable form; chips are cosmetic.
 - **Merge gate**: `upstream approved -> Merge` additionally requires the
-  companion (when one exists) to be merged or approved. An open
-  unreviewed companion holds the item at Sign-off with a
-  "waiting on companion" summary line — the merge queue can merge an
+  companion (when one exists) to be merged or approved *at its current
+  head*: an APPROVED review among the per-reviewer latest opinionated
+  reviews whose commit is `headRefOid`, by a write-access reviewer, with no
+  standing CHANGES_REQUESTED (`companion_approved`, 2026-09-16).
+  `reviewDecision` alone never clears it — it is null on ts-mono, which has
+  no required-review rule, and PR-level everywhere, so it survives a push.
+  An open companion without such an approval holds the item at Sign-off
+  with a "waiting on companion" summary line — the merge queue can merge an
   open companion (it sequences ts-mono first), but a substantive viewer
   change should pass ts-mono's own review before the queue slams it in;
   regenerate-style companions authored *during* a queue run never have a
-  board item in flight and are unaffected.
+  board item in flight and are unaffected. The queue does not trust the
+  stage for this: immediately before merging a companion it re-verifies it
+  with `companion_mergeable.py` (approved at head by the same rule, or
+  regenerate-only — a trusted author's same-repo PR modifying nothing but
+  `packages/inspect-common/src/types/generated.ts`) and pins the merge to
+  the SHA that check returned (finding 4121986 criterion 2, 2026-09-16).
 - **Done sanity check**: upstream CI (`submodule-on-main`) forces the
   companion onto ts-mono main before the upstream PR can merge, so
   `upstream merged` implies the companion landed. If the companion PR is

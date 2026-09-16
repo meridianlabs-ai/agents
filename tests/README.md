@@ -34,8 +34,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   (trusted logins, `author_association`, the cached write-permission lookup,
   fail-closed), the stale hand-back revival honouring only trusted authors
   (an outsider's `@review` or forged verdict is never re-issued as the
-  machine account and ends the search), and the `Companion PR:` issue-body
-  line counting only from a trusted author and only for a ts-mono URL.
+  machine account and ends the search), the `Companion PR:` issue-body
+  line counting only from a trusted author and only for a ts-mono URL, and
+  the companion merge gate clearing only on a write-access reviewer's
+  APPROVED review naming the companion's current head (never on
+  `reviewDecision` alone).
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
   the auto label`, `Gate and count`), the escalation's reset (the
   `reset-auto-counters` composite's step, given the gate's `cid`) and the
@@ -65,7 +68,32 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   carrying a `post-checkout` hook is refused without the hook running; on
   the approved head the fork wiring makes a plain push land on the
   contributor's branch) — and checks that every upstream merge request and
-  re-approval in the skill names the pushed commit.
+  re-approval in the skill names the pushed commit, that the External path
+  runs `checks_at_head.py` before its checkout, and — lifting the ts-mono
+  step 3 block with the helper and `gh` stubbed — that the companion merge
+  happens only after `companion_mergeable.py` passes on the head as it is
+  then, pinned to the SHA it returned, and never after a failed recheck.
+- `test_checks_at_head.py` — the merge queue's deferral of External PR
+  trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
+  Claude Security 4122327 criterion 2): the decision on canned payloads
+  (the base branch's required checks from its rules; a required check that
+  never reported, is pending or failed; a failed or pending non-required
+  check; `skipped`/`neutral` pass as on GitHub; app-id matching; a
+  non-success commit status; no required checks configured fails closed;
+  the head must be the approved SHA) and the command line end to end
+  against a stub `gh` (GETs only, the rules `--paginate`d with a required
+  check on a later page enforced, explicit check-run paging by
+  `total_count`, exit codes).
+- `test_companion_mergeable.py` — the merge queue's check of a ts-mono
+  companion's own review state before merging it
+  (`skills/merge-approved-prs/companion_mergeable.py`, Claude Security
+  4121986 criterion 2): approved at head passes whatever the diff;
+  regenerate-only (a trusted author's same-repo PR against `main` modifying
+  only `generated.ts`) passes; a hand-written change without approval, an
+  approval on an older head, a diff outside the generated set, an untrusted
+  or fork author, a removed/added/renamed generated file and a closed PR all
+  skip with both reasons; the generated set is pinned; the command line
+  against a stub `gh` (GETs only, the head re-read, cached lookups).
 - `test_skill_resolution.py` — the trust rule in `skills/checkout/checkout.sh`
   and `skills/promote/promote.sh`, run against a stub `gh` that answers from
   fixtures and logs every call: a chip from a personal fork or an untrusted

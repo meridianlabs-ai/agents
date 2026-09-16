@@ -265,16 +265,25 @@ def is_discovery_query(args):
     return args[:2] == ("api", "graphql") and "pullRequests(headRefName:" in args[3]
 
 
+COMP_HEAD = "c" * 40
+COMP_OLD = "b" * 40
+
+
 def companion(number, **fields):
     d = {
         "number": number,
         "state": "OPEN",
         "merged": False,
         "reviewDecision": None,
+        "headRefOid": COMP_HEAD,
         "latestOpinionatedReviews": {"nodes": []},
     }
     d.update(fields)
     return d
+
+
+def opinion(login, state, sha=COMP_HEAD):
+    return {"state": state, "commit": {"oid": sha}, "author": {"login": login}}
 
 
 def anchor(gh, body, login=MARVIN, association="MEMBER"):
@@ -348,6 +357,106 @@ def test_merge_gate_still_holds_on_the_real_companion_despite_an_outsiders_opt_o
 def test_merge_gate_honours_a_trusted_opt_out(gh):
     anchor(gh, "Companion PR: none")
     assert atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD}) is False
+
+
+# ---------------------------------------------------------- companion_approved
+# The companion gate binds the approval to the companion's current head by a
+# trusted reviewer (finding 4121986, criterion 2), as approval_at_head.py does
+# for the upstream PR and companion_mergeable.py does again in the queue.
+
+
+def gate_with(gh, comp):
+    """Anchor #42 with no directive; the branch-name convention finds `comp`."""
+    gh.route(
+        is_issue_fetch,
+        {"body": "Fix the viewer.", "login": MARVIN, "association": "MEMBER"},
+    )
+    gh.route(
+        is_discovery_query,
+        {"data": {"repository": {"pullRequests": {"nodes": [comp]}}}},
+    )
+    return atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD})
+
+
+def test_companion_approved_at_head_by_a_write_access_reviewer_clears_the_hold(gh):
+    permission(gh, "epatey", "write", "maintain")
+    comp = companion(
+        9, latestOpinionatedReviews={"nodes": [opinion("epatey", "APPROVED")]}
+    )
+    assert gate_with(gh, comp) is False
+    (lookup,) = gh.matching(is_permission_lookup)
+    assert lookup[1] == f"repos/{TS_MONO}/collaborators/epatey/permission"
+
+
+def test_companion_approval_on_an_older_head_holds(gh):
+    permission(gh, "epatey", "write")
+    comp = companion(
+        9, latestOpinionatedReviews={"nodes": [opinion("epatey", "APPROVED", COMP_OLD)]}
+    )
+    assert gate_with(gh, comp) is True
+    assert any("no trusted approval of its head" in a for a in atlas.actions)
+
+
+def test_companion_review_decision_approved_alone_holds(gh):
+    # PR-level and sticky: without a review naming the head it proves nothing.
+    comp = companion(
+        9,
+        reviewDecision="APPROVED",
+        latestOpinionatedReviews={"nodes": [opinion("epatey", "APPROVED", COMP_OLD)]},
+    )
+    permission(gh, "epatey", "write")
+    assert gate_with(gh, comp) is True
+
+
+def test_companion_approved_at_head_by_an_outsider_holds(gh):
+    permission(gh, "drive-by", "read")
+    comp = companion(
+        9, latestOpinionatedReviews={"nodes": [opinion("drive-by", "APPROVED")]}
+    )
+    assert gate_with(gh, comp) is True
+
+
+def test_companion_with_a_standing_changes_request_holds_despite_an_approval_at_head(
+    gh,
+):
+    permission(gh, "epatey", "write")
+    nodes = [opinion("epatey", "APPROVED"), opinion("ransomr", "CHANGES_REQUESTED")]
+    assert (
+        gate_with(gh, companion(9, latestOpinionatedReviews={"nodes": nodes})) is True
+    )
+
+
+def test_companion_with_a_non_approved_decision_holds_without_a_lookup(gh):
+    comp = companion(
+        9,
+        reviewDecision="REVIEW_REQUIRED",
+        latestOpinionatedReviews={"nodes": [opinion("epatey", "APPROVED")]},
+    )
+    assert gate_with(gh, comp) is True
+    assert gh.matching(is_permission_lookup) == []
+
+
+def test_companion_without_a_head_holds(gh):
+    comp = companion(
+        9,
+        headRefOid=None,
+        latestOpinionatedReviews={"nodes": [opinion("epatey", "APPROVED")]},
+    )
+    assert gate_with(gh, comp) is True
+    assert gh.matching(is_permission_lookup) == []
+
+
+def test_companion_queries_ask_for_the_head_and_each_reviews_commit_and_author(gh):
+    anchor(gh, f"Companion PR: {TS_MONO_URL}")
+    atlas.companion_pr(ISSUE, HEAD)
+    anchor(gh, "Fix the viewer.")
+    atlas.companion_pr(ISSUE, HEAD)
+    for query in (*gh.matching(is_url_query), *gh.matching(is_discovery_query)):
+        assert (
+            "headRefOid" in query[3]
+            and "commit{oid}" in query[3]
+            and "author{login}" in query[3]
+        )
 
 
 def imported(snapshot, header_extra=""):

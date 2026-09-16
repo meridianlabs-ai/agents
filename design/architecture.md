@@ -1065,6 +1065,15 @@ whoever's code, and both workflows used to execute it unsandboxed:
   the verdict marker still post to the PR), and the Claude engine only — a
   codex label on a fork head logs a notice and falls through to Claude,
   because codex's `:workspace` profile is not the bubblewrap sandbox.
+- **The merge queue on the maintainer's workstation** was the third place
+  the same class of code ran next to credentials: `skills/merge-approved-prs`
+  checked out an approved External PR and ran ruff, mypy, pytest and, for
+  viewer-schema PRs, `schema.py` from it inside the maintainer's
+  `gh`-credentialed Claude Code session (finding 4122327). Since 2026-09-16
+  the External path runs nothing from the tree: `checks_at_head.py` defers
+  to upstream CI on the approved commit, the local checks are
+  promotions-only, and schema regeneration is skip-and-report — see
+  design/atlas-tracking.md → "Approval queues at Merge".
 
 **Project configuration is stripped from every untrusted checkout** (external
 and fork-head alike), at every depth and whatever the entry's type. `.claude/`
