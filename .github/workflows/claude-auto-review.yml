@@ -303,7 +303,11 @@ jobs:
       # note (issues), the `auto` label's removal on escalation or an
       # outsider's label (pull requests), the stage moves (the org's Atlas
       # project); the PR, review and timeline reads are covered by the same
-      # permissions. The responsible-human derivation also READS the anchor
+      # permissions, and the closed-PR continuation's live-branch-tip read
+      # (`repos/<repo>/branches/<head>`, below) needs contents: read — on a
+      # private caller a token without it gets a 404 there, which the gate
+      # reads as "branch gone" and skips the round (review round 1, PR #111).
+      # The responsible-human derivation also READS the anchor
       # repo (a public one — the inspect_ai fork — in every deployment;
       # best-effort, empty on failure). Revoked when the job ends. Every
       # later step reads ONE expression,
@@ -320,6 +324,7 @@ jobs:
           private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
           owner: meridianlabs-ai
           repositories: ${{ github.event.repository.name }}
+          permission-contents: read
           permission-issues: write
           permission-pull-requests: write
           permission-organization-projects: write

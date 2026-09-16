@@ -57,8 +57,10 @@ WRITE_SETS = {
                                                 "organization-projects": "write"}),
     ("claude-auto.yml", "land"): (CALLER_REPO, {"contents": "write", "issues": "write",
                                                 "pull-requests": "write", "organization-projects": "write"}),
-    ("claude-auto-review.yml", "gate"): (CALLER_REPO, {"issues": "write", "pull-requests": "write",
-                                                       "organization-projects": "write"}),
+    # contents: read is the closed-PR continuation's live-branch-tip read
+    # (`repos/<repo>/branches/<head>`), a 404 on a private caller without it.
+    ("claude-auto-review.yml", "gate"): (CALLER_REPO, {"contents": "read", "issues": "write",
+                                                       "pull-requests": "write", "organization-projects": "write"}),
     ("claude-auto-review.yml", "land"): (CALLER_REPO, {"contents": "write", "issues": "write",
                                                        "pull-requests": "write", "organization-projects": "write"}),
     ("atlas-sync.yml", "sync"): ("inspect_ai", {"issues": "write", "pull-requests": "write",
