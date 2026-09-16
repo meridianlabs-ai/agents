@@ -34,8 +34,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   (trusted logins, `author_association`, the cached write-permission lookup,
   fail-closed), the stale hand-back revival honouring only trusted authors
   (an outsider's `@review` or forged verdict is never re-issued as the
-  machine account and ends the search), and the `Companion PR:` issue-body
-  line counting only from a trusted author and only for a ts-mono URL.
+  machine account and ends the search), the `Companion PR:` issue-body
+  line counting only from a trusted author and only for a ts-mono URL, and
+  the companion merge gate clearing only on a write-access reviewer's
+  APPROVED review naming the companion's current head (never on
+  `reviewDecision` alone).
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
   the auto label`, `Gate and count`), the escalation's reset (the
   `reset-auto-counters` composite's step, given the gate's `cid`) and the

@@ -510,8 +510,8 @@ def companion_pr(issue: int, head_ref: str):
         num = int(m.group(1))
         d = gql(
             """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
-                 pullRequest(number:$n){number state merged reviewDecision
-                   latestOpinionatedReviews(first:10){nodes{state}}}}}""",
+                 pullRequest(number:$n){number state merged reviewDecision headRefOid
+                   latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login}}}}}}""",
             o=owner,
             r=repo,
             n=num,
@@ -524,8 +524,8 @@ def companion_pr(issue: int, head_ref: str):
     nodes = gql(
         """query($o:String!,$r:String!,$h:String!){ repository(owner:$o,name:$r){
              pullRequests(headRefName:$h, first:5, orderBy:{field:UPDATED_AT,direction:DESC}){
-               nodes{number state merged reviewDecision
-                 latestOpinionatedReviews(first:10){nodes{state}}}}}}""",
+               nodes{number state merged reviewDecision headRefOid
+                 latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login}}}}}}}""",
         o=owner,
         r=repo,
         h=head_ref,
@@ -538,35 +538,50 @@ def companion_pr(issue: int, head_ref: str):
 
 
 def companion_approved(comp) -> bool:
-    """Approval that works without required-review branch protection.
+    """A standing, trusted approval of the companion's CURRENT head.
 
-    `reviewDecision` is null on repos without a required-review rule
-    (ts-mono), even with APPROVED reviews standing — so fall back to the
-    per-reviewer latest opinionated reviews. A standing
-    CHANGES_REQUESTED (either surface) blocks: the fallback must not be
-    LOOSER than the decision it substitutes for.
+    `reviewDecision` is PR-level (it survives a push unless the repo
+    dismisses stale approvals) and null on repos without a required-review
+    rule (ts-mono), so on its own it says nothing about the head the merge
+    queue would merge — the same gap approval_at_head.py closes for the
+    upstream PR (finding 4121986, criterion 2; the queue re-checks the
+    companion with companion_mergeable.py immediately before merging it,
+    so this gate is the board's early hold, not the last line). A non-null
+    decision other than APPROVED is authoritative and blocks: REVIEW_REQUIRED
+    means the repo's rule is UNMET whatever approvals stand. Otherwise the
+    per-reviewer latest opinionated reviews decide: none may stand at
+    CHANGES_REQUESTED (this must not be LOOSER than the decision it
+    substitutes for), and one APPROVED must name the head commit and come
+    from a trusted author — anyone can approve a public PR, so an
+    outsider's review is not a review (trusted_author, write access on the
+    companion's repo, looked up once per login).
     """
     decision = comp.get("reviewDecision")
-    if decision is not None:
-        # any non-null decision is authoritative: REVIEW_REQUIRED means the
-        # repo's rule (approval count, CODEOWNERS, writer-only) is UNMET even
-        # if some approval stands — the fallback is only for repos with no
-        # rule at all, where the decision is null.
-        return decision == "APPROVED"
-    states = [
-        r.get("state")
-        for r in (comp.get("latestOpinionatedReviews") or {}).get("nodes") or []
-    ]
-    return "APPROVED" in states and "CHANGES_REQUESTED" not in states
+    if decision is not None and decision != "APPROVED":
+        return False
+    head = comp.get("headRefOid")
+    if not head:
+        return False  # unknown head: nothing to bind to, fail closed
+    reviews = (comp.get("latestOpinionatedReviews") or {}).get("nodes") or []
+    if any(r.get("state") == "CHANGES_REQUESTED" for r in reviews):
+        return False
+    repo = comp.get("_repo") or TS_MONO
+    return any(
+        r.get("state") == "APPROVED"
+        and (r.get("commit") or {}).get("oid") == head
+        and trusted_author((r.get("author") or {}).get("login") or "", repo)
+        for r in reviews
+    )
 
 
 def companion_blocks_merge(issue: int, pr) -> bool:
-    """True when an existing companion is open and unreviewed.
+    """True when an existing companion is open without a trusted approval of its head.
 
     The merge queue can merge an OPEN companion (it sequences ts-mono
     first), but a substantive viewer change should pass ts-mono's own
-    review before queueing — merged or APPROVED companions pass. No
-    companion at all passes trivially.
+    review before queueing — merged companions and those approved at their
+    current head (companion_approved) pass. No companion at all passes
+    trivially.
     """
     comp = companion_pr(issue, pr.get("headRefName") or "")
     if comp is None or comp["merged"] or companion_approved(comp):
@@ -578,7 +593,7 @@ def companion_blocks_merge(issue: int, pr) -> bool:
         return False
     actions.append(
         f"#{issue}: upstream approved but waiting on companion "
-        f"{comp['_repo']}#{comp['number']} (open, unreviewed) — holding stage"
+        f"{comp['_repo']}#{comp['number']} (open, no trusted approval of its head) — holding stage"
     )
     return True
 
