@@ -21,11 +21,17 @@
 # `meridian-marvin` scoped to the inspect_ai fork — the only repository the
 # script writes (issue comments, state changes and reactions on the fork's
 # proxy issues; it reads the fork's Actions runs and the upstream PRs, which
-# are public) — plus the org's projects (the Atlas board). Falls back to the
-# MARVIN_TOKEN PAT while that secret still exists; the preflight is the one
-# check an app token can answer, a read of the Atlas project (the OAuth-scope
-# header check is gone: installation tokens report no scopes). Deterministic
-# — no agent invocation.
+# are public) — plus the org's projects (the Atlas board), and a SECOND,
+# read-only token for ts-mono: the companion-PR reads and the reviewer's
+# collaborator-permission lookup behind the companion merge gate are
+# authenticated reads of another repository, which a fork-only token cannot
+# make (review round 1 of agents#111). The script routes every ts-mono call
+# through that token (GH_TOKEN_TS_MONO) and fails closed without it; neither
+# token can write outside its one repository. Falls back to the MARVIN_TOKEN
+# PAT under both names while that secret still exists; the preflight is what
+# an app token can answer — a read of the Atlas project and of ts-mono (the
+# OAuth-scope header check is gone: installation tokens report no scopes).
+# Deterministic — no agent invocation.
 
 name: Atlas sync
 
@@ -73,23 +79,52 @@ jobs:
           permission-actions: read
           permission-organization-projects: write
 
+      # The ts-mono read token: the companion PRs (GraphQL and `gh pr list`),
+      # their comments, and `repos/ts-mono/collaborators/<login>/permission`
+      # for the reviewer who approved a companion — an authenticated read the
+      # fork token above cannot make. Read-only by construction: metadata
+      # (the permission endpoint) and pull requests (the PR and comment
+      # reads), no write permission of any kind. Same identity, second
+      # scope; revoked when the job ends.
+      - name: Mint the ts-mono read token
+        id: mint_ts_mono
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: ts-mono
+          permission-metadata: read
+          permission-pull-requests: read
+
       - uses: actions/checkout@v4
 
-      # An installation token reports no OAuth scopes, so the one check that
-      # works for both identities is a real project read. Fail loudly —
-      # without project access every board write silently 403s.
-      - name: Preflight - token can read the org project
+      # An installation token reports no OAuth scopes, so the checks that
+      # work for both identities are real reads: the Atlas project with the
+      # fork token, the ts-mono repository with the ts-mono token. Fail
+      # loudly — without project access every board write silently 403s,
+      # and without ts-mono access every companion lookup fails closed and
+      # holds its promotion at Sign-off.
+      - name: Preflight - tokens can read the org project and ts-mono
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          GH_TOKEN_TS_MONO: ${{ steps.mint_ts_mono.outputs.token || secrets.MARVIN_TOKEN }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::no machine-account token: neither the MARVIN_APP_* secrets nor MARVIN_TOKEN is set"; exit 1; }
+          [ -n "$GH_TOKEN_TS_MONO" ] || { echo "::error::no ts-mono read token (GH_TOKEN_TS_MONO is empty)"; exit 1; }
           gh api graphql -f query='{node(id:"PVT_kwDOC7YMCM4BU68p"){... on ProjectV2{title}}}' \
             --jq '.data.node.title' >/dev/null \
             || { echo "::error::token cannot read the Atlas project"; exit 1; }
+          GH_TOKEN="$GH_TOKEN_TS_MONO" gh api repos/meridianlabs-ai/ts-mono --jq '.full_name' >/dev/null \
+            || { echo "::error::the ts-mono read token cannot read meridianlabs-ai/ts-mono"; exit 1; }
 
       - name: Sync
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          # The ts-mono read token (atlas_sync.py -> gh_env): the PAT during
+          # the transition, so the script's fail-closed rule never fires there.
+          GH_TOKEN_TS_MONO: ${{ steps.mint_ts_mono.outputs.token || secrets.MARVIN_TOKEN }}
           REVIEWER: ransomr
         run: python3 .github/scripts/atlas_sync.py

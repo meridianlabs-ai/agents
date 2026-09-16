@@ -323,13 +323,23 @@ mints (2026-09-16):
 | `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`; empty makes the gate skip |
 | `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | `MARVIN_TOKEN`; empty makes the gate skip |
 | `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN` (the gate already required one) |
-| `atlas-sync.yml` | `inspect_ai` | issues, pull requests, org projects: write; actions: read | `MARVIN_TOKEN` |
+| `atlas-sync.yml` (fork token, `GH_TOKEN`) | `inspect_ai` | issues, pull requests, org projects: write; actions: read | `MARVIN_TOKEN` |
+| `atlas-sync.yml` (ts-mono read token, `GH_TOKEN_TS_MONO`) | `ts-mono` | metadata, pull requests: read | `MARVIN_TOKEN` |
 
 No job writes to two repositories: the land jobs of the three agent workflows
 refuse follow-up issues (`allowed-issue-repos: ""`), the reviewer's may file
 them in the caller repo only, and the anchor-repo lookups the loops' gates
 make for the error-cc mention are reads of a public repo (the inspect_ai
-fork), best-effort and empty on failure.
+fork), best-effort and empty on failure. One job *reads* a second
+repository: the Atlas sync's companion merge gate reads the ts-mono
+companion PR and, for the reviewer who approved it,
+`repos/meridianlabs-ai/ts-mono/collaborators/<login>/permission` — an
+authenticated read a fork-only installation token cannot make (review round
+1 of agents#111). Rather than widen the fork token to ts-mono, the sync mints
+a second, read-only token for ts-mono and `atlas_sync.py` runs every ts-mono
+call under it (`gh(..., repo=TS_MONO)` → `gh_env`), failing closed when it is
+absent; the fork token keeps every write, so neither token can write outside
+its one repository (decision: Ransom, 2026-09-16).
 
 **Commit identity follows the token.** The runner-side commits an agent job
 makes — the `sync-branch` base merge and the codex commit — are authored by
