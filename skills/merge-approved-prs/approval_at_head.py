@@ -66,6 +66,11 @@ from typing import Any, NamedTuple
 # the trusted identity changes (handoff section 3). Empty on purpose: the
 # approvals the merge queue acts on come from upstream maintainers, whom the
 # collaborator-permission lookup identifies; no login is trusted by name.
+# The machine account (`i-am-marvin`, and `meridian-marvin[bot]` in Phase 2)
+# stays out: it holds only `read` on UKGovernmentBEIS/inspect_ai (checked
+# 2026-09-16) and may not supply an upstream approval (decision: Ransom,
+# 2026-09-16, agents#110). The companion rule that must trust the machine
+# account as a PR AUTHOR has its own set: companion_mergeable.TRUSTED_AUTHORS.
 TRUSTED_LOGINS: frozenset[str] = frozenset()
 
 # `permission` collapses maintain→write and triage→read; `role_name` is the

@@ -90,7 +90,10 @@ Notes:
 - **One push per run, at the end.** The agent itself never pushes, opens PRs
   or comments: it commits, and the workflow's land job pushes the commits as
   the machine account (so CI runs), opens the PR on an issue run, and posts
-  any comment the agent left for the thread. Commits do not appear mid-run;
+  any comment the agent left for the thread. The machine account is the
+  User `i-am-marvin` today; Phase 2 of the credential separation moves it to
+  the GitHub App login `meridian-marvin[bot]`, which the workflows already
+  trust alongside it, and the User login is retired at the end of Phase 2. Commits do not appear mid-run;
   to iterate on CI failures use `@auto`, whose loop re-runs the agent on each
   red CI run.
 - PR follow-ups first merge the base branch into the PR branch on the runner,
@@ -133,7 +136,8 @@ land on the PR. Codex-engine reviews are not sandboxed, so a fork PR labeled
 Acting on a review is **human-mediated by design** — there is no automatic
 handoff from reviewer to dev agent (the reviewer's comments don't contain
 `@claude`, and the dev agent ignores bot-authored comments anyway — its
-`allowed_bots` is empty). The loop:
+`allowed_bots` names only the machine account's own bot login, and the stubs
+exclude every bot actor from the text triggers). The loop:
 
 1. Reviewer posts findings.
 2. You decide which to act on.

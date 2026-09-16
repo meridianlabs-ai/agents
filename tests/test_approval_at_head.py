@@ -240,6 +240,45 @@ def test_trusted_logins_skip_the_lookup(monkeypatch):
     assert aah.make_trust_check(REPO, api)("I-Am-Marvin")
 
 
+@pytest.mark.parametrize("login", ["i-am-marvin", "meridian-marvin[bot]", "Meridian-Marvin[bot]"])
+def test_no_login_is_trusted_by_name_by_default_so_the_machine_account_cannot_approve(login):
+    # Approvals are lookup-only: the machine account (User and Phase 2 App
+    # login alike) holds `read` upstream and may not supply an approval
+    # (Ransom, 2026-09-16, agents#110). companion_mergeable.TRUSTED_AUTHORS is
+    # the separate set that trusts it as a companion PR's AUTHOR.
+    assert aah.TRUSTED_LOGINS == frozenset()
+    calls = []
+
+    def api(path, **kwargs):
+        calls.append(path)
+        return {"permission": "read", "role_name": "read"}
+
+    assert not aah.make_trust_check(REPO, api)(login)
+    assert calls == [f"repos/{REPO}/collaborators/{login}/permission"]
+
+
+def test_the_machine_accounts_approval_at_head_does_not_count_upstream():
+    def api(path, **kwargs):
+        return {"permission": "read", "role_name": "read"}
+
+    for login in ("i-am-marvin", "meridian-marvin[bot]"):
+        v = run_check(SHA1, [review(login, "APPROVED", SHA1, T_REVIEW)], is_trusted=aah.make_trust_check(REPO, api))
+        assert not v.ok
+        assert v.message == f"no approval for head {SHA1}: approval by {login} does not count (no write access on {REPO})"
+
+
+@pytest.mark.parametrize("login", ["github-actions[bot]", "foo[bot]"])
+def test_other_apps_are_looked_up_and_refused_when_the_endpoint_says_none(login):
+    calls = []
+
+    def api(path, **kwargs):
+        calls.append(path)
+        return {"permission": "none", "role_name": "none"}
+
+    assert not aah.make_trust_check(REPO, api)(login)
+    assert calls == [f"repos/{REPO}/collaborators/{login}/permission"]
+
+
 # --- parsing ----------------------------------------------------------------
 
 

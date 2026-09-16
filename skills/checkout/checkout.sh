@@ -28,9 +28,18 @@
 # refused; fall back to the slow path); 4 repo unresolvable.
 set -euo pipefail
 
-# Trusted identities (comma-separated). Phase 2 (GitHub App identity) changes
-# this ONE value: marvin's login becomes `<app-slug>[bot]`.
-TRUSTED_LOGINS="i-am-marvin"
+# Trusted identities (comma-separated), in REST form: the machine account's
+# User login (the PAT, today) and its GitHub App login (Phase 2; trusted by
+# name — the collaborators endpoint answers `none` for an App). The User
+# leaves this ONE value when the PAT is retired. Author logins are normalised
+# to this form by NORM_LOGIN before comparison.
+TRUSTED_LOGINS="i-am-marvin,meridian-marvin[bot]"
+# NORM_LOGIN: jq filter over an author object → its login in REST form. A
+# GraphQL Bot author (`__typename: Bot`) arrives bare (`meridian-marvin`) and
+# gets the `[bot]` suffix; `gh pr list/view --json author` renders an App as
+# `app/<slug>`. A deleted author (null) is "". A User's login is never
+# rewritten, so a User who registers an App's slug is not the App.
+NORM_LOGIN='if . == null then "" elif (.__typename // "") == "Bot" then "\(.login // "")[bot]" elif ((.login // "") | startswith("app/")) then "\(.login[4:])[bot]" else (.login // "") end'
 # The only repo an External proxy's upstream PR may live in.
 UPSTREAM=UKGovernmentBEIS/inspect_ai
 
@@ -81,7 +90,7 @@ trusted_login() {
 check_pr() {
   local head login
   head=$(jq -r '.headRepository.nameWithOwner // ""' <<<"$1")
-  login=$(jq -r '.author.login // ""' <<<"$1")
+  login=$(jq -r ".author | $NORM_LOGIN" <<<"$1")
   REASON=""
   if [ "$head" != "$REPO" ]; then
     REASON="head repository is '${head:-unknown}', not $REPO"
@@ -95,11 +104,11 @@ check_pr() {
 # head/base refs, author and head repository, so no separate `gh pr view`
 # or `gh issue view` is needed.
 JSON=$(gh api graphql \
-  -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){title body author{login} labels(first:20){nodes{name}} closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state headRefName baseRefName author{login} repository{nameWithOwner} headRepository{nameWithOwner}}}}}}' \
+  -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){title body author{login __typename} labels(first:20){nodes{name}} closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state headRefName baseRefName author{login __typename} repository{nameWithOwner} headRepository{nameWithOwner}}}}}}' \
   -F o="${REPO%%/*}" -F r="${REPO##*/}" -F n="$N")
 
 TITLE=$(jq -r '.data.repository.issue.title' <<<"$JSON")
-ISSUE_AUTHOR=$(jq -r '.data.repository.issue.author.login // ""' <<<"$JSON")
+ISSUE_AUTHOR=$(jq -r ".data.repository.issue.author | $NORM_LOGIN" <<<"$JSON")
 ISSUE_LABELS=$(jq -r '[.data.repository.issue.labels.nodes[].name] | join(",")' <<<"$JSON")
 # A genuine External proxy: written by a trusted login (the sync, as marvin)
 # AND labelled External. Membership in TRUSTED_LOGINS only — write access
@@ -254,7 +263,7 @@ if [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then
   # names are arbitrary, and an unrelated ts-mono PR sharing a generic name
   # must not be treated as a companion.
   if [ -n "$TSMONO" ]; then
-    COMP=$(gh pr list --repo meridianlabs-ai/ts-mono --head "$BRANCH" --state open              --json number,author,headRefName --jq '[.[] | select((.author.login == "i-am-marvin") or (.author.login == "app/claude") or (.headRefName | startswith("claude/issue-")))][0].number // empty' 2>/dev/null || true)
+    COMP=$(gh pr list --repo meridianlabs-ai/ts-mono --head "$BRANCH" --state open              --json number,author,headRefName --jq '[.[] | select((.author.login == "i-am-marvin") or (.author.login == "app/meridian-marvin") or (.author.login == "app/claude") or (.headRefName | startswith("claude/issue-")))][0].number // empty' 2>/dev/null || true)
     if [ -n "$COMP" ]; then
       if [ -z "$(git -C "$TSMONO" status --porcelain 2>/dev/null)" ]; then
         git -C "$TSMONO" fetch -q origin "$BRANCH"           && git -C "$TSMONO" checkout -q -B "$BRANCH" "origin/$BRANCH"           && NOTE_TSMONO=" [ts-mono companion: PR meridianlabs-ai/ts-mono#$COMP — submodule on branch $BRANCH; parent gitlink intentionally differs until the merge-time bump]"           || NOTE_TSMONO=" [ts-mono companion PR #$COMP exists but submodule checkout failed — handle manually]"

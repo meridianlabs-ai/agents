@@ -70,6 +70,17 @@ esac
 """
 
 
+# The machine account's Phase 2 GitHub App login as GraphQL renders it: a Bot's
+# login comes bare (`meridian-marvin`, not `meridian-marvin[bot]`), with the
+# type alongside; `gh --json author` renders the same App as `app/meridian-marvin`.
+BOT_AUTHOR = {"login": "meridian-marvin", "__typename": "Bot"}
+
+
+def _author(a):
+    """An author field: a login string, a ready-made author object, or None (deleted)."""
+    return None if a is None else ({"login": a} if isinstance(a, str) else a)
+
+
 def chip(number, *, state="OPEN", author=MARVIN, head_repo=FORK, repo=FORK, branch=None,
          base="main", title=None, body="", head_sha=None):
     return {
@@ -77,7 +88,7 @@ def chip(number, *, state="OPEN", author=MARVIN, head_repo=FORK, repo=FORK, bran
         "title": title or f"PR {number}", "body": body,
         "headRefName": branch or f"claude/issue-{N}-2026-{number}", "baseRefName": base,
         "headRefOid": head_sha or f"sha-{branch or f'claude/issue-{N}-2026-{number}'}",
-        "author": {"login": author} if author else None,
+        "author": _author(author),
         "repository": {"nameWithOwner": repo},
         "headRepository": {"nameWithOwner": head_repo} if head_repo else None,
     }
@@ -86,7 +97,7 @@ def chip(number, *, state="OPEN", author=MARVIN, head_repo=FORK, repo=FORK, bran
 def issue(chips=(), *, author="someone", labels=(), body="", title="an issue"):
     return {"data": {"repository": {"issue": {
         "id": "I_x", "title": title, "state": "OPEN", "body": body,
-        "author": {"login": author},
+        "author": _author(author),
         "labels": {"nodes": [{"name": l} for l in labels]},
         "closedByPullRequestsReferences": {"nodes": list(chips)},
         "projectItems": {"nodes": []},
@@ -99,7 +110,7 @@ def open_pr(number, *, author=MARVIN, head_repo=FORK, branch, body="", title=Non
     return {
         "number": number, "state": "OPEN", "isDraft": False, "title": title or f"PR {number}",
         "body": body, "headRefName": branch, "headRefOid": head_sha or f"sha-{branch}",
-        "author": {"login": author},
+        "author": _author(author),
         "headRepository": {"id": "R_1", "name": name},
         "headRepositoryOwner": {"id": "O_1", "login": owner},
     }
@@ -218,6 +229,43 @@ def test_checkout_trusted_login_needs_no_lookup_and_deleted_author_is_refused(tm
     assert f"check out {FORK}#400" in r.stdout
     assert "#401 OPEN" in r.stdout and "author 'unknown' is not in TRUSTED_LOGINS" in r.stdout
     assert not any("/permission" in c for c in s.calls())
+
+
+def test_checkout_trusts_the_apps_login_by_name_from_graphqls_bare_bot_login(tmp_path):
+    # Phase 2: the dev agent's PRs are authored by the machine account's App
+    # login. GraphQL renders it bare with `__typename: Bot`; the script
+    # normalises it to the REST form TRUSTED_LOGINS names, so no lookup runs
+    # (the collaborators endpoint answers `none` for an App).
+    s = Stub(tmp_path, issue([chip(400, author=BOT_AUTHOR)]))
+    r = s.run(CHECKOUT, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert f"check out {FORK}#400" in r.stdout
+    assert not any("/permission" in c for c in s.calls())
+
+
+def test_checkout_refuses_another_app_and_a_user_who_took_the_apps_slug(tmp_path):
+    # Another App is looked up under its REST login and refused (the stub
+    # answers `read`); a User's login is never rewritten, so a User named
+    # after the App's slug is not the App and gets an ordinary lookup.
+    s = Stub(tmp_path, issue([chip(400, author={"login": "foo", "__typename": "Bot"}),
+                              chip(401, author={"login": "meridian-marvin", "__typename": "User"})]))
+    r = s.run(CHECKOUT, str(N), "--dry-run")
+    assert r.returncode == 3, r.stdout
+    assert "author 'foo[bot]' is not in TRUSTED_LOGINS" in r.stderr
+    assert "author 'meridian-marvin' is not in TRUSTED_LOGINS" in r.stderr
+    assert sum("collaborators/foo[bot]/permission" in c for c in s.calls()) == 1
+    assert sum("collaborators/meridian-marvin/permission" in c for c in s.calls()) == 1
+
+
+def test_checkout_external_proxy_written_by_the_apps_login_is_genuine(tmp_path):
+    # The sync files External proxies as the machine account: under Phase 2
+    # that is the App login, bare in GraphQL.
+    theirs = chip(5001, repo=UPSTREAM, head_repo="outsider/inspect_ai", author="outsider", branch="fix")
+    s = Stub(tmp_path, issue([theirs], author=BOT_AUTHOR, labels=["External"]))
+    r = s.run(CHECKOUT, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert f"check out {UPSTREAM}#5001 via open cross-repo chip" in r.stdout
+    assert "qualifies (External proxy" in r.stdout
 
 
 def test_checkout_cross_repo_chip_qualifies_as_a_promotion_only_with_fork_head(tmp_path):
@@ -393,6 +441,27 @@ def test_promote_no_chip_falls_back_to_branch_convention(tmp_path):
     assert "RESOLVED: fork PR #401 (OPEN) via open fork PR matched by closing ref or branch convention" in r.stdout
     assert "#402 OPEN" in r.stdout and "no reference to issue #42" in r.stdout
     assert "#403 OPEN" in r.stdout
+
+
+def test_promote_trusts_the_apps_login_in_graphql_chips_and_in_the_gh_json_fallback(tmp_path):
+    # A chip (GraphQL: bare Bot login) and a fallback-listed PR (`gh --json
+    # author`: `app/<slug>`) authored by the machine account's App login both
+    # qualify by name, with no lookup; another App's fallback PR is refused.
+    s = Stub(tmp_path, issue([chip(400, author=BOT_AUTHOR, branch=f"claude/issue-{N}-a")]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "RESOLVED: fork PR #400 (OPEN)" in r.stdout
+    assert not any("/permission" in c for c in s.calls())
+    s2 = Stub(tmp_path / "b", issue([]), open_prs=[
+        open_pr(401, author="app/meridian-marvin", branch=f"claude/issue-{N}-x", body="")])
+    r2 = s2.run(PROMOTE, str(N), "--dry-run")
+    assert r2.returncode == 0, r2.stderr
+    assert "RESOLVED: fork PR #401 (OPEN) via open fork PR matched by closing ref or branch convention" in r2.stdout
+    assert not any("/permission" in c for c in s2.calls())
+    s3 = Stub(tmp_path / "c", issue([]), open_prs=[open_pr(401, author="app/foo", branch=f"claude/issue-{N}-x", body="")])
+    r3 = s3.run(PROMOTE, str(N), "--dry-run")
+    assert r3.returncode == 3, r3.stdout + r3.stderr
+    assert "author 'foo[bot]' is not in TRUSTED_LOGINS" in r3.stderr
 
 
 def test_promote_no_chip_accepts_the_bare_issue_branch_convention_and_qualified_ref(tmp_path):

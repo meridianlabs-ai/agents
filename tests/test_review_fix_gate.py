@@ -38,6 +38,23 @@ COMPOSITE_BASH = ("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c")
 HEAD = "a" * 40
 OLD = "b" * 40
 MARKER = "<!-- auto-review-rounds -->"
+
+
+def workflow_env(workflow: Path, name: str) -> str:
+    """A workflow-level `env:` value, read from the file — the value the
+    runner hands every step, so the lifted steps run against the real one."""
+    m = re.search(rf"\nenv:\n(?:  .*\n)*?  {name}: (.*)\n", workflow.read_text())
+    assert m, name
+    return m.group(1).strip()
+
+
+# The machine account's two logins: the User (the PAT, today) and the GitHub
+# App's bot login (Phase 2). Both are in every TRUSTED_LOGINS value until the
+# PAT is retired.
+MARVIN = "i-am-marvin"
+MARVIN_BOT = "meridian-marvin[bot]"
+TRUSTED_LOGINS = workflow_env(WORKFLOW, "TRUSTED_LOGINS")
+REVIEWER_LOGINS = workflow_env(WORKFLOW, "REVIEWER_LOGINS")
 T0, T1, T2, T3 = ("2026-09-15T10:00:00Z", "2026-09-15T11:00:00Z",
                   "2026-09-15T12:00:00Z", "2026-09-15T13:00:00Z")
 
@@ -135,7 +152,7 @@ def run_gate(tmp_path, comments, perms=None, *, env_extra=None):
         "PR_JSON": json.dumps(pr_json), "RESOLVED": "verify", "LABELER_VERDICT": "ok",
         "CAP": "10", "REVIEWER": "claude[bot]", "HANDOFF_MENTION": "someone",
         "ANCHOR_REPO": "", "MARKER": MARKER,
-        "TRUSTED_LOGINS": "i-am-marvin", "REVIEWER_LOGINS": "i-am-marvin,claude[bot]",
+        "TRUSTED_LOGINS": TRUSTED_LOGINS, "REVIEWER_LOGINS": REVIEWER_LOGINS,
         "ALLOWED_BOTS": "",
     }
     env.update(env_extra or {})
@@ -349,7 +366,7 @@ def run_handoff(tmp_path, comments):
     (state / "comments.json").write_text(json.dumps(comments))
     env = {"STATE": str(state), "REPO": "o/r", "PR": "42", "MENTION": "someone",
            "CONTINUATION": "false", "CLOSED_AT": "", "MARKER": "<!-- auto-converged -->",
-           "TRUSTED_LOGINS": "i-am-marvin"}
+           "TRUSTED_LOGINS": TRUSTED_LOGINS}
     r = sh(*STEP_BASH, HANDOFF_STUB + lift_step(WORKFLOW, "      - name: Converged handoff"),
            check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -389,7 +406,7 @@ def run_refund(tmp_path, comments, *, body_fail=False):
     if body_fail:
         (state / "body-fail").write_text("")
     env = {"STATE": str(state), "REPO": "o/r", "PR": "42", "ROUND": "3", "CAP": "10",
-           "MARKER": MARKER, "TRUSTED_LOGINS": "i-am-marvin"}
+           "MARKER": MARKER, "TRUSTED_LOGINS": TRUSTED_LOGINS}
     r = sh(*STEP_BASH, REFUND_STUB + lift_step(WORKFLOW, "      - name: Refund infra-crashed round"),
            check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -482,6 +499,32 @@ def run_reset(state: Path, *, comment_id="", trusted_logins="", counters="rounds
     return outputs(out), patched
 
 
+def reset_trusted_logins_default() -> str:
+    """The reset composite's `trusted-logins` default, read from the action."""
+    text = RESET.read_text()
+    block = text[text.index("  trusted-logins:"):]
+    block = block[:re.search(r"\n {2}\S", block[1:]).start() + 1]  # up to the next input key
+    return re.search(r"default: (.*)", block).group(1).strip()
+
+
+def test_reset_default_trusts_the_machine_account_under_both_logins(tmp_path):
+    # A caller that passes no trusted-logins still resets the loops' own
+    # counters — under Phase 2 the App's, which the attempts fallback would
+    # otherwise refuse as an App's marker. An explicit empty string is the
+    # opt-out: nothing is the loop's own, so nothing is reset.
+    assert reset_trusted_logins_default() == f"{MARVIN},{MARVIN_BOT}"
+    comments = [counter(MARVIN_BOT, 10, T0, cid=100),
+                comment(101, MARVIN_BOT, "<!-- auto-fix-attempts -->\nattempts: 3 (cap 3).", T0)]
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps(comments))
+    reset, patched = run_reset(state, trusted_logins=reset_trusted_logins_default(), counters="rounds attempts")
+    assert reset["ok"] == "1" and sorted(patched) == ["100", "101"] and lookups(state) == []
+    state = fresh_state(tmp_path)
+    (state / "comments.json").write_text(json.dumps(comments))
+    reset, patched = run_reset(state, trusted_logins="", counters="rounds attempts")
+    assert reset["ok"] == "1" and patched == [] and lookups(state) == []
+
+
 def test_escalation_reset_targets_the_counter_the_gate_selected(tmp_path):
     at_cap = [verdict("i-am-marvin", "suggestions", T1, cid=1),
               counter("i-am-marvin", 10, T0, cid=100, head=OLD),
@@ -544,15 +587,88 @@ def test_reset_ignores_a_comment_id_when_several_counters_are_requested(tmp_path
 
 
 def test_workflow_declares_trusted_logins_once_and_passes_it_to_every_composite():
-    # Phase 2 flips the env value; every composite that decides trust reads
-    # it from there (the labeler check and the escalation reset), and no
-    # trust decision names the login itself. (The gate's one remaining
-    # literal is the @-mention derivation's exclusion of the machine account
-    # as a ping target — not a trust decision; a follow-up.)
+    # The env names the machine account under both logins (Phase 2 adds the
+    # GitHub App's; retiring the PAT removes the User's); every composite
+    # that decides trust reads it from there (the labeler check and the
+    # escalation reset), and no step — the gate's @-mention derivation
+    # included — names a login itself. The reviewer bot is a verdict author
+    # next to both.
     text = WORKFLOW.read_text()
-    assert text.count("\nenv:\n") == 1 and "\n  TRUSTED_LOGINS: i-am-marvin\n" in text
+    assert text.count("\nenv:\n") == 1
+    assert TRUSTED_LOGINS == f"{MARVIN},{MARVIN_BOT}"
+    assert REVIEWER_LOGINS == f"{MARVIN},{MARVIN_BOT},claude[bot]"
     assert text.count("trusted-logins: ${{ env.TRUSTED_LOGINS }}") == 2
-    for anchor in ("      - name: Converged handoff", "      - name: Refund infra-crashed round"):
+    for anchor in ("        id: resolve", "        id: gate", "      - name: Converged handoff",
+                   "      - name: Refund infra-crashed round"):
         assert "i-am-marvin" not in lift_step(WORKFLOW, anchor), anchor
-    gate = lift_step(WORKFLOW, "        id: gate")
-    assert gate.count("i-am-marvin") == 2 and "trusted_author" in gate  # the mention jq only
+    assert "trusted_author" in lift_step(WORKFLOW, "        id: gate")
+    # The fix agent's bot allow-lists carry the same value (the codex verdict
+    # is posted by the machine account, a bot actor under Phase 2).
+    assert "allowed_bots: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
+    assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
+
+
+@pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT])
+def test_machine_account_is_verdict_author_counter_owner_and_requester_under_either_login(tmp_path, login):
+    # Phase 2: the land job posts the codex verdict, the round counter and the
+    # hand-back as the App's bot login. No lookup anywhere — the collaborators
+    # endpoint answers `none` for an App, so trust is by name.
+    _, o, state = run_gate(tmp_path, [verdict(login, "clean", T1)])
+    assert o["act"] == "converged" and lookups(state) == []
+    _, o, state = run_gate(tmp_path, [verdict(login, "suggestions", T1, cid=1),
+                                      counter(login, 2, T0, cid=100, head=OLD)])
+    assert o["act"] == "fix" and o["round"] == "3" and o["cid"] == "100" and lookups(state) == []
+    _, o, state = run_gate(tmp_path, [verdict(MARVIN, "suggestions", T1, cid=1), comment(2, login, "@review", T2)])
+    assert o["act"] == "skip" and lookups(state) == []
+
+
+@pytest.mark.parametrize("bot", ["github-actions[bot]", "foo[bot]"])
+def test_other_bots_are_neither_verdict_authors_nor_counters_nor_requesters(tmp_path, bot):
+    _, o, _ = run_gate(tmp_path, [verdict(MARVIN, "suggestions", T1, cid=1), verdict(bot, "clean", T2, cid=2)])
+    assert o["verdict"] == "suggestions" and o["act"] == "fix"
+    _, o, _ = run_gate(tmp_path, [verdict(MARVIN, "suggestions", T1, cid=1),
+                                  counter(bot, 999, T2, cid=200, head=HEAD)])
+    assert o["act"] == "fix" and o["round"] == "1" and o["cid"] == ""
+    _, o, state = run_gate(tmp_path, [verdict(MARVIN, "suggestions", T1, cid=1), comment(2, bot, "@review", T2)])
+    assert o["act"] == "fix" and lookups(state) == []
+
+
+# --- the resolve step's author check ------------------------------------------
+
+
+RESOLVE_STUB = r"""
+sleep() { :; }
+gh() {
+  case "$*" in
+    "pr view 42 --repo o/r --json "*) cat "$STATE/pr.json" ;;
+    *) echo "unexpected gh call: $*" >&2; return 1 ;;
+  esac
+}
+"""
+
+
+def run_resolve(tmp_path, author, *, has_token="true"):
+    state = fresh_state(tmp_path)
+    (state / "pr.json").write_text(json.dumps({
+        "state": "OPEN", "closedAt": None, "headRefName": "claude/issue-9-x", "headRefOid": HEAD,
+        "isCrossRepository": False, "labels": [{"name": "auto"}]}))
+    out = tmp_path / "out"
+    out.write_text("")
+    env = {"GITHUB_OUTPUT": str(out), "STATE": str(state), "REPO": "o/r", "PR": "42", "AUTHOR": author,
+           "REVIEWER": "claude[bot]", "AUTO_LABEL": "auto", "HAS_TOKEN": has_token,
+           "TRUSTED_LOGINS": TRUSTED_LOGINS}
+    r = sh(*STEP_BASH, RESOLVE_STUB + lift_step(WORKFLOW, "        id: resolve"), check=False, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r, outputs(out)
+
+
+@pytest.mark.parametrize("author", ["claude[bot]", MARVIN, MARVIN_BOT])
+def test_resolve_proceeds_on_the_reviewers_and_the_machine_accounts_verdict_comments(tmp_path, author):
+    _, o = run_resolve(tmp_path, author)
+    assert o["act"] == "verify", author
+
+
+@pytest.mark.parametrize("author", ["github-actions[bot]", "foo[bot]", "nobody"])
+def test_resolve_skips_a_marker_comment_from_anyone_else(tmp_path, author):
+    r, o = run_resolve(tmp_path, author)
+    assert o["act"] == "skip" and "not the automated reviewer" in r.stdout, author

@@ -529,8 +529,9 @@ The simple case ships first and is independently useful:
   workflow's `TRUSTED_LOGINS` (the loop's own comment, preferred) or holds
   write access — an outsider's marker comment is ignored and never edited,
   and a count that is not exactly one `attempts: N` reads as 0. The
-  `TRUSTED_LOGINS` workflow-level env (`i-am-marvin`) is the one value every
-  author check in `claude-auto.yml` reads, and `verify-auto-labeler` takes it
+  `TRUSTED_LOGINS` workflow-level env (`i-am-marvin,meridian-marvin[bot]` —
+  the machine account's User and Phase 2 GitHub App logins) is the one value
+  every author check in `claude-auto.yml` reads, and `verify-auto-labeler` takes it
   as its `trusted-logins` input, so the Phase 2 identity change flips one
   value per file.
 - **Phase 2 — review→fix loop. _Verified on inspect_flow via the unified
@@ -558,7 +559,9 @@ The simple case ships first and is independently useful:
   comment so @auto keys on it, then reads the real review/inline findings via the
   API; cross-repo (fork-of-our-repo) PRs are skipped in the gate (the agent runs
   PR head code under MARVIN_TOKEN). **`allowed_bots` gotcha:** the trigger actor
-  is the reviewer bot, so the workflow sets `allowed_bots: "claude"` (never `*`)
+  is the reviewer bot (or, for a codex verdict, the machine account's Phase 2
+  bot login), so the workflow sets `allowed_bots` to the reviewer bot plus
+  `TRUSTED_LOGINS` (never `*`)
   to lift claude-code-action's non-human-actor guard; the gate authorizes first.
   **Atomic-marker gotcha (load-bearing):** `issue_comment:[created]` delivers the
   comment body *as it was at creation*. `@review` builds its summary comment and

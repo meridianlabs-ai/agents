@@ -18,11 +18,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
-from test_review_fix_gate import STEP_BASH, fresh_state, lift_step, lookups, outputs  # noqa: E402
+from test_review_fix_gate import STEP_BASH, fresh_state, lift_step, lookups, outputs, workflow_env  # noqa: E402
 from test_review_fix_gate import run_gate, verdict, comment, review_allowed_bots_default, T1, T2  # noqa: E402
+from test_review_fix_gate import MARVIN, MARVIN_BOT  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-review.yml"
+TRUSTED_LOGINS = workflow_env(WORKFLOW, "TRUSTED_LOGINS")
 HEAD = "c" * 40
 UPSTREAM = "https://github.com/up/stream/pull/12"
 
@@ -60,7 +62,7 @@ def run_trig(tmp_path, *, actor, perms=None, allowed_bots="", head_repo="o/r",
         "GITHUB_OUTPUT": str(out), "STATE": str(state), "EVENT": "issue_comment",
         "ACTOR": actor, "GH_REPO": "o/r", "COMMENT": "@review", "IS_PR": "true" if is_pr else "false",
         "PR_NUM": "7", "EXTERNAL": "true" if external else "false", "IBODY": ibody,
-        "HEAD_REPO": "", "HEAD_REF": "", "TRUSTED_LOGINS": "i-am-marvin", "ALLOWED_BOTS": allowed_bots,
+        "HEAD_REPO": "", "HEAD_REF": "", "TRUSTED_LOGINS": TRUSTED_LOGINS, "ALLOWED_BOTS": allowed_bots,
         "ACTOR_TYPE": actor_type,
     }
     r = sh(*STEP_BASH, GH_STUB + lift_step(WORKFLOW, "        id: trig"), check=False, env=env)
@@ -112,6 +114,39 @@ def test_bot_not_in_allowed_bots_is_refused(tmp_path, allowed):
     _, o, state = run_trig(tmp_path, actor="claude[bot]", allowed_bots=allowed)
     assert o["ok"] == "false", allowed
     assert lookups(state) == []
+    _, o, state = run_trig(tmp_path, actor="foo[bot]", allowed_bots=allowed or "claude[bot]")
+    assert o["ok"] == "false" and lookups(state) == []
+
+
+def test_machine_account_bot_login_is_admitted_like_the_user_without_a_lookup(tmp_path):
+    # Phase 2: the land jobs post the `@review` hand-back as the App's bot
+    # login. TRUSTED_LOGINS names it, so it is decided before the [bot] case
+    # (no allow-list needed, no lookup — which would answer `none` for an
+    # App) and keeps the ack; a fork head takes the sandboxed path, and an
+    # External proxy's @review is honoured, exactly as for the User.
+    for head_repo, fork in (("o/r", "false"), ("someone/r", "true")):
+        _, o, state = run_trig(tmp_path, actor=MARVIN_BOT, head_repo=head_repo)
+        assert o["ok"] == "true" and o["ack"] == "true" and o["fork_head"] == fork, head_repo
+        assert lookups(state) == []
+    _, o, state = run_trig(tmp_path, actor=MARVIN_BOT, is_pr=False, external=True, ibody=f"Upstream PR: {UPSTREAM}")
+    assert o["ok"] == "true" and o["mode"] == "external" and lookups(state) == []
+
+
+def test_workflow_trusts_both_machine_account_logins_and_appends_them_to_the_bot_allow_lists():
+    # One env value names the User (the PAT) and the App's bot login; the
+    # review step's allowed_bots is the caller's list plus that value (the
+    # bare "*" kept as is — claude-code-action recognises only the exact
+    # string), and the codex step's allow-bot-users carries it too, so the
+    # hand-back posted under Phase 2's identity is not refused by either
+    # action's own actor guard after trig admitted it.
+    assert TRUSTED_LOGINS == f"{MARVIN},{MARVIN_BOT}"
+    text = WORKFLOW.read_text()
+    assert text.count("\nenv:\n") == 1
+    assert ("allowed_bots: ${{ inputs.allowed_bots == '*' && '*' || (inputs.allowed_bots != '' "
+            "&& format('{0},{1}', inputs.allowed_bots, env.TRUSTED_LOGINS) || env.TRUSTED_LOGINS) }}") in text
+    assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
+    assert "i-am-marvin" not in lift_step(WORKFLOW, "        id: trig")
+    assert "i-am-marvin" not in lift_step(WORKFLOW, "      - name: Verify the review was posted")
 
 
 @pytest.mark.parametrize("allowed", ["*", "github-actions", "github-actions[bot]"])

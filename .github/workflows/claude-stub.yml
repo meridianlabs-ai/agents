@@ -49,7 +49,9 @@ jobs:
     # Machine-account guard: github.actor != 'i-am-marvin' over the whole gate,
     # so a comment/review/issue authored by the machine account can't self-
     # trigger the dev agent and loop (its own output — and the fork guidance —
-    # can contain @claude/@i-am-marvin). Hoisted rather than per-source: the
+    # can contain @claude/@i-am-marvin). Its Phase 2 GitHub App login,
+    # meridian-marvin[bot], is covered by the `[bot]` clause and stays
+    # excluded here on purpose. Hoisted rather than per-source: the
     # sources are OR'd, so guarding only the comment branch is bypassable by a
     # phrase left in the enclosing issue body/title.
     #
@@ -162,7 +164,12 @@ jobs:
     # that trigger (observed: inspect_ai#236). Labeling is safe to exempt:
     # the gate reads the label NAME (no quoted-token hazard), labeling needs
     # triage access, and the reusable workflow's trigger check verifies the
-    # labeler has write access before running. Comment/body paths keep the
+    # labeler has write access before running. Under Phase 2 the machine
+    # account labels as its GitHub App login, meridian-marvin[bot], which the
+    # `[bot]` exclusion would drop, so that one login is named on the label
+    # path (a stub has no `env:` to read the reusable's TRUSTED_LOGINS from;
+    # the reusable admits it by that value); every other bot stays excluded,
+    # github-actions[bot] included. Comment/body paths keep the
     # full guard.
     # author_association filter (OWNER/MEMBER/COLLABORATOR) on the text
     # paths: a COST filter, not the gate. On a public repo anyone can comment
@@ -185,7 +192,7 @@ jobs:
     if: |
       ( github.event_name == 'issues' && github.event.action == 'labeled'
         && github.event.label.name == 'auto'
-        && !endsWith(github.actor, '[bot]') ) ||
+        && ( !endsWith(github.actor, '[bot]') || github.actor == 'meridian-marvin[bot]' ) ) ||
       ( github.actor != 'i-am-marvin' && !endsWith(github.actor, '[bot]') && (
         ( github.event.action == 'edited'
           && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)

@@ -38,7 +38,7 @@ reviewer's latest verdict is still APPROVED, by a reviewer with write access
 on the companion's repository. **Regenerate-only** is the precedent the skill
 cites for merging without a human review (ts-mono #427, #439): the PR is
 open against the repository's default branch, its head branch lives in that
-repository (not a fork), its author is trusted (TRUSTED_LOGINS or write
+repository (not a fork), its author is trusted (TRUSTED_AUTHORS or write
 access), and its diff modifies nothing but GENERATED_FILES — exactly what the
 skill's own regeneration sequence writes: `pnpm --filter
 @tsmono/inspect-common types:generate` is `node scripts/generate-types.js`,
@@ -66,6 +66,17 @@ from approval_at_head import GhError, Verdict, gh_api, parse_target
 # a companion's diff is generated; everything else needs a review.
 GENERATED_FILES: frozenset[str] = frozenset({"packages/inspect-common/src/types/generated.ts"})
 
+# Authors believed without a permission lookup, for the regenerate-only rule
+# ONLY: the machine account, under its User login `i-am-marvin` (the PAT,
+# today) and its GitHub App login `meridian-marvin[bot]` (Phase 2: the app
+# opens the companion PRs; the collaborators endpoint answers `none` for an
+# App, so the bot is trusted by name). Approvals are never trusted by name —
+# approval_at_head.TRUSTED_LOGINS is empty and the machine account may not
+# approve (decision: Ransom, 2026-09-16, agents#110) — so this set is
+# separate from the approver check and is consulted for the author alone.
+# The User leaves this set when the PAT is retired.
+TRUSTED_AUTHORS: frozenset[str] = frozenset({"i-am-marvin", "meridian-marvin[bot]"})
+
 USAGE = "usage: companion_mergeable.py <https://github.com/OWNER/REPO/pull/N | OWNER/REPO N>"
 
 
@@ -75,8 +86,22 @@ def pr_login(pr: dict[str, Any]) -> str | None:
     return login if isinstance(login, str) and login else None
 
 
+def make_author_check(is_trusted: Callable[[str], bool]) -> Callable[[str], bool]:
+    """Return `is_trusted_author(login)`: TRUSTED_AUTHORS by name, else the approver check.
+
+    Built on the approver check so the two share its permission cache: a
+    login that is both the approver and the author is looked up once.
+    """
+    trusted_by_name = {login.lower() for login in TRUSTED_AUTHORS}
+
+    def is_trusted_author(login: str) -> bool:
+        return login.lower() in trusted_by_name or is_trusted(login)
+
+    return is_trusted_author
+
+
 def regenerate_only(
-    pr: dict[str, Any], files: list[dict[str, Any]], is_trusted: Callable[[str], bool], repo: str
+    pr: dict[str, Any], files: list[dict[str, Any]], is_trusted_author: Callable[[str], bool], repo: str
 ) -> Verdict:
     """The regenerate-only rule: a trusted author's same-repo PR modifying only GENERATED_FILES."""
     head = pr["head"]["sha"]
@@ -88,7 +113,7 @@ def regenerate_only(
     if head_repo != repo:
         return Verdict(False, f"head branch lives in {head_repo}, not {repo}")
     author = pr_login(pr)
-    if author is None or not is_trusted(author):
+    if author is None or not is_trusted_author(author):
         return Verdict(False, f"author {author} is not trusted (no write access on {repo})")
     if not files:
         return Verdict(False, "empty diff")
@@ -115,14 +140,19 @@ def check(
     is_trusted: Callable[[str], bool],
     repo: str,
 ) -> Verdict:
-    """Approved at head, else regenerate-only, else the two reasons."""
+    """Approved at head, else regenerate-only, else the two reasons.
+
+    `is_trusted` is the approver check (approval_at_head.make_trust_check:
+    write access, no login by name); the author check is derived from it
+    with TRUSTED_AUTHORS added.
+    """
     state = pr.get("state")
     if state != "open":
         return Verdict(False, f"PR is {state}, not open")
     approved = aah.check(pr, reviews, commits, is_trusted, repo)
     if approved.ok:
         return approved
-    regenerated = regenerate_only(pr, files, is_trusted, repo)
+    regenerated = regenerate_only(pr, files, make_author_check(is_trusted), repo)
     if regenerated.ok:
         return regenerated
     return Verdict(False, f"{approved.message}; not regenerate-only: {regenerated.message}")

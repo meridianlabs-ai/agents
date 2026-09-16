@@ -78,13 +78,15 @@ inputs:
   trusted-logins:
     description: >-
       Comma-separated logins trusted as the labeler without a permission
-      lookup: the loops' own identity (the machine account today; Phase 2's
-      GitHub App login later). Callers pass their workflow-level
-      `TRUSTED_LOGINS` so the value lives in one place per workflow; the
-      default keeps a caller that does not pass it working. Never list
-      `github-actions[bot]` here (see the description).
+      lookup, checked before the App case below: the loops' own identity —
+      the machine account's User login (the PAT, today) and its GitHub App
+      login (Phase 2; an App's permission cannot be looked up, so the bot
+      passes by name). Callers pass their workflow-level `TRUSTED_LOGINS` so
+      the value lives in one place per workflow; the default keeps a caller
+      that does not pass it working. Never list `github-actions[bot]` here
+      (see the description).
     required: false
-    default: i-am-marvin
+    default: i-am-marvin,meridian-marvin[bot]
 
 outputs:
   verdict:

@@ -198,6 +198,12 @@ on:
           admitted only when named here (same-repo heads only; the fork
           escape hatch stays a write-access human's decision) — except
           github-actions[bot], which no list and not even "*" admits.
+          The loops' own identity (the workflow-level TRUSTED_LOGINS, which
+          names the machine account's GitHub App login) is appended to this
+          list for the review step whatever the caller passes, so the
+          hand-back the land jobs post under Phase 2's App identity is
+          honoured without a caller change; the trig step admits it by
+          TRUSTED_LOGINS before this list is consulted.
         required: false
         type: string
         default: ""
@@ -228,11 +234,14 @@ on:
 # The loops' trusted identity, in ONE place (Claude Security 4085111; the
 # Class B principle: a comment is believed only if its author is a trusted
 # identity or holds write access). The trig step admits a comment-triggered
-# review from this login without a permission lookup: it is what the loops'
-# land jobs post the `@review` hand-back as. Phase 2 (the GitHub App
-# identity) changes this value to the app's `<slug>[bot]`.
+# review from these logins without a permission lookup: they are what the
+# loops' land jobs post the `@review` hand-back as — the machine account's
+# User login `i-am-marvin` (the PAT, today) and its GitHub App login
+# `meridian-marvin[bot]` (Phase 2: the app's tokens post as the bot; its
+# collaborator permission reads `none`, so it is trusted by login only). The
+# User leaves this list when the PAT is retired at the end of Phase 2.
 env:
-  TRUSTED_LOGINS: i-am-marvin
+  TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]
 
 jobs:
   # TRUSTED, first: the trigger check, the pre-agent marvin writes, and the
@@ -1063,7 +1072,12 @@ jobs:
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           prompt: ${{ steps.reviewprompt.outputs.value }}
           settings: ${{ steps.reviewsettings.outputs.value || inputs.settings }}
-          allowed_bots: ${{ inputs.allowed_bots }}
+          # The caller's list plus the loops' own identity (TRUSTED_LOGINS —
+          # the User entry is inert, the action consults the list for
+          # non-User actors only), so the land jobs' `@review` hand-back is
+          # honoured once it posts as the App's bot login. "*" is kept as
+          # the bare wildcard: the action recognises only the exact string.
+          allowed_bots: ${{ inputs.allowed_bots == '*' && '*' || (inputs.allowed_bots != '' && format('{0},{1}', inputs.allowed_bots, env.TRUSTED_LOGINS) || env.TRUSTED_LOGINS) }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
@@ -1286,7 +1300,11 @@ jobs:
 
       # Our trig gate did the real authorization; allow-bot-users lifts the
       # action's own actor guard for the reviewer-bot trigger the Claude
-      # path already accepts (the dev agent's @review hand-back).
+      # path already accepts (the dev agent's @review hand-back) and for the
+      # loops' own identity (TRUSTED_LOGINS: the land jobs' hand-back under
+      # Phase 2's App login; the User entry is inert — the action normalises
+      # every entry to a `[bot]` login and consults the list for bot actors
+      # only).
       - name: Run Codex review
         id: codex
         if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.engine == 'codex'
@@ -1298,7 +1316,7 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          allow-bot-users: "claude"
+          allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           output-file: ${{ runner.temp }}/codex/codex-review.json
           # Written runner-owned by the setup step above; NOT the inline
           # output-schema input, which is broken with unprivileged-user
@@ -1423,8 +1441,8 @@ jobs:
           else
             inum="$NUM"
           fi
-          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" \
-            --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" 2>/dev/null \
+            | jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl | if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and (.login as $l | any($tl[]; . == $l) | not)) | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or (.user.login as $l | any($tl[]; . == $l))) then "" else .user.login end) end' 2>/dev/null || true)
           echo "mention=$mention" >> "$GITHUB_OUTPUT"
           echo "cc target: ${mention:-none}"
 
@@ -1830,12 +1848,14 @@ jobs:
           # machine account too, stamped with a first-line marker; exclude
           # it, or a fallback note on a stalled run would count as the
           # review and silence the nudge.
-          bots='select(.user.login=="claude[bot]" or .user.login=="i-am-marvin")'
-          n=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" \
-                --jq "[.[] | $bots | select((.body // \"\") | startswith(\"<!-- model-provenance -->\") | not)] | length" 2>/dev/null || echo 0)
+          # The reviewer bot, or the machine account (TRUSTED_LOGINS — the
+          # land job posts the codex verdict as it, under either login).
+          bots=$(jq -cn --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) + ["claude[bot]"]')
+          n=$(gh api "repos/$REPO/issues/$NUM/comments?since=$SINCE" 2>/dev/null \
+                | jq --argjson b "$bots" '[.[] | select(.user.login as $l | any($b[]; . == $l)) | select((.body // "") | startswith("<!-- model-provenance -->") | not)] | length' 2>/dev/null || echo 0)
           if [ "$MODE" != "external" ]; then
-            r=$(gh api "repos/$REPO/pulls/$NUM/reviews" \
-                  --jq "[.[] | $bots | select(.submitted_at >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
+            r=$(gh api "repos/$REPO/pulls/$NUM/reviews" 2>/dev/null \
+                  | jq --argjson b "$bots" --arg s "$SINCE" '[.[] | select(.user.login as $l | any($b[]; . == $l)) | select(.submitted_at >= $s)] | length' 2>/dev/null || echo 0)
             n=$((n + r))
           fi
           [ "${n:-0}" -gt 0 ] && { echo "review output detected ($n items)."; exit 0; }

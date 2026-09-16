@@ -69,9 +69,18 @@ write() {  # guard every mutation; --dry-run prints instead
   if [ "$DRY" = "--dry-run" ]; then echo "DRY-RUN: $*"; else "$@"; fi
 }
 
-# Trusted identities (comma-separated). Phase 2 (GitHub App identity) changes
-# this ONE value: marvin's login becomes `<app-slug>[bot]`.
-TRUSTED_LOGINS="i-am-marvin"
+# Trusted identities (comma-separated), in REST form: the machine account's
+# User login (the PAT, today) and its GitHub App login (Phase 2; trusted by
+# name — the collaborators endpoint answers `none` for an App). The User
+# leaves this ONE value when the PAT is retired. Author logins are normalised
+# to this form by NORM_LOGIN before comparison.
+TRUSTED_LOGINS="i-am-marvin,meridian-marvin[bot]"
+# NORM_LOGIN: jq filter over an author object → its login in REST form. A
+# GraphQL Bot author (`__typename: Bot`) arrives bare (`meridian-marvin`) and
+# gets the `[bot]` suffix; `gh pr list/view --json author` renders an App as
+# `app/<slug>`. A deleted author (null) is "". A User's login is never
+# rewritten, so a User who registers an App's slug is not the App.
+NORM_LOGIN='if . == null then "" elif (.__typename // "") == "Bot" then "\(.login // "")[bot]" elif ((.login // "") | startswith("app/")) then "\(.login[4:])[bot]" else (.login // "") end'
 # The reviewer app's own login, trusted ONLY where its review verdicts are
 # read back (the ADVISORY line): the app posts on this repo only through
 # this repo's own workflows. Never trusted for PR authorship.
@@ -104,7 +113,7 @@ trusted_login() {
 check_pr() {
   local head login
   head=$(jq -r '.headRepository.nameWithOwner // ""' <<<"$1")
-  login=$(jq -r '.author.login // ""' <<<"$1")
+  login=$(jq -r ".author | $NORM_LOGIN" <<<"$1")
   REASON=""
   if [ "$head" != "$FORK" ]; then
     REASON="head repository is '${head:-unknown}', not $FORK"
@@ -125,7 +134,7 @@ NORM='{number, state, isDraft, title, body, headRefName, headRefOid, author:{log
 
 # ---- one GraphQL round trip: chips (with PR bodies) + board item + fields
 JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state body
-  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName headRefOid author{login} repository{nameWithOwner} headRepository{nameWithOwner}}}
+  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName headRefOid author{login __typename} repository{nameWithOwner} headRepository{nameWithOwner}}}
   projectItems(first:5){nodes{id project{number}
     stage: fieldValueByName(name:"Stage"){... on ProjectV2ItemFieldSingleSelectValue{name}}
     up: fieldValueByName(name:"Upstream PR"){... on ProjectV2ItemFieldTextValue{text}}}}}}}' -F n="$N")

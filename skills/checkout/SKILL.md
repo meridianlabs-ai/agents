@@ -38,9 +38,10 @@ merge-time pointer bump.
 
 **Trust rule, applied before any PR text is read.** A linked PR (chip)
 qualifies only when its head repository is the org repo itself AND its
-author is in the script's `TRUSTED_LOGINS` (`i-am-marvin`; one variable at
-the top of the script — Phase 2's GitHub App identity changes that one
-value) or holds write access there (admin/maintain/write via the
+author is in the script's `TRUSTED_LOGINS` (`i-am-marvin`, and its Phase 2
+GitHub App login `meridian-marvin[bot]`; one variable at the top of the
+script, compared after normalising GraphQL's bare Bot logins and `gh`'s
+`app/` prefix to the REST form) or holds write access there (admin/maintain/write via the
 collaborator permission API; a failed lookup is untrusted). GitHub creates a
 chip natively for any `Fixes #N` PR into the default branch, from anyone's
 personal fork, so the chip alone proves nothing; a branch inside the org
@@ -89,7 +90,8 @@ repo and its author is trusted or a write-access collaborator (the script's
 listing already shows both for chips; for other candidates read them with
 `gh pr view <M> -R "$REPO" --json author,headRepositoryOwner,headRepository`).
 
-b. **Agent comments** — scan ALL `i-am-marvin` comments on the issue for
+b. **Agent comments** — scan ALL machine-account comments (`i-am-marvin`, or
+   `meridian-marvin[bot]` under Phase 2) on the issue for
    `/pull/<M>` refs (not just the last comment; superseded PRs sit next to
    live ones). Keep the open one, newest if several.
 

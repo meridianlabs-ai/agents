@@ -204,20 +204,23 @@ on:
 # Trusted identities, in ONE place (Claude Security 4121983; the Class B
 # principle: a comment drives the loop only if its author is a trusted
 # identity or holds write access). Every author check in this file reads
-# these lists; no check names a login inline. Phase 2 (the GitHub App
-# identity) changes TRUSTED_LOGINS' one value to the app's `<slug>[bot]`.
+# these lists; no check names a login inline. The machine account appears
+# under both of its logins: the User `i-am-marvin` (the PAT, today) and the
+# GitHub App's `meridian-marvin[bot]` (Phase 2: the app's tokens post as the
+# bot; its collaborator permission reads `none`, so it is trusted by login
+# only). The User leaves both lists when the PAT is retired.
 env:
   # The loop's own identity: the land job posts the hand-back and the
   # hand-off as it, the gate records the round counter as it. Only its
   # counter and hand-off comments are loop state, and only they are PATCHed.
-  TRUSTED_LOGINS: i-am-marvin
-  # Who posts the reviewer's marked summary (the verdict). Both are active
+  TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]
+  # Who posts the reviewer's marked summary (the verdict). All are active
   # authors: the Claude engine posts its marked verdict directly, as
   # claude[bot] (claude-review.yml's review prompt; also `reviewer_login`'s
   # default); the Codex engine's verdict travels in the landing manifest and
-  # claude-review.yml's land job posts it as i-am-marvin. Any other login's
-  # verdict is ignored.
-  REVIEWER_LOGINS: i-am-marvin,claude[bot]
+  # claude-review.yml's land job posts it as the machine account (either
+  # login). Any other login's verdict is ignored.
+  REVIEWER_LOGINS: i-am-marvin,meridian-marvin[bot],claude[bot]
 
 jobs:
   # TRUSTED, first: the PR lookup, the `auto`-label gate, the stale-verdict
@@ -313,9 +316,10 @@ jobs:
           fi
           # Codex-engine reviews post their verdict via the machine account
           # (design/codex-engine.md — github-actions[bot] comments trigger no
-          # stubs), so marker comments from it carry the same authority as
-          # the reviewer bot's.
-          if [ "$AUTHOR" != "$REVIEWER" ] && [ "$AUTHOR" != "i-am-marvin" ]; then
+          # stubs), so marker comments from it (TRUSTED_LOGINS, either login)
+          # carry the same authority as the reviewer bot's.
+          in_trusted() { case ",${TRUSTED_LOGINS// /}," in *",$1,"*) return 0 ;; esac; return 1; }
+          if [ "$AUTHOR" != "$REVIEWER" ] && ! in_trusted "$AUTHOR"; then
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
@@ -506,8 +510,8 @@ jobs:
               # unrelated PR author). `.assignees // []` is belt and braces:
               # the endpoint always returns an array, but a null would make
               # jq exit non-zero and the `|| true` would hide it as no mention.
-              mention=$(ghr gh api "repos/$issue_repo/issues/$inum" \
-                          --jq 'if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and .login != "i-am-marvin") | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or .user.login=="i-am-marvin") then "" else .user.login end) end' 2>/dev/null || true)
+              mention=$(ghr gh api "repos/$issue_repo/issues/$inum" 2>/dev/null \
+                          | jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl | if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and (.login as $l | any($tl[]; . == $l) | not)) | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or (.user.login as $l | any($tl[]; . == $l))) then "" else .user.login end) end' 2>/dev/null || true)
             fi
           fi
           echo "mention=$mention" >>"$GITHUB_OUTPUT"
@@ -1287,10 +1291,12 @@ jobs:
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           prompt: ${{ steps.prompt.outputs.value }}
-          # The trigger actor is the reviewer bot, so lift claude-code-action's
-          # default non-human-actor guard for that one bot (never '*'). The gate
-          # above did the real authorization.
-          allowed_bots: "claude"
+          # The trigger actor is the reviewer bot — or, for a codex-engine
+          # verdict, the machine account, whose Phase 2 App login is a bot too
+          # (TRUSTED_LOGINS; the User entry is inert) — so lift
+          # claude-code-action's default non-human-actor guard for exactly
+          # those (never '*'). The gate above did the real authorization.
+          allowed_bots: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           settings: ${{ steps.fixsettings.outputs.value }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
@@ -1497,7 +1503,9 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          allow-bot-users: "claude"
+          # As the Claude fix step's allowed_bots: the reviewer bot, or the
+          # machine account's App login posting a codex verdict.
+          allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 

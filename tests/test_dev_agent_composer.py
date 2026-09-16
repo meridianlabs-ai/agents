@@ -523,5 +523,5 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_reset():
     # The re-engagement reset rewrites only the loops' own counter comments;
     # Phase 2 flips the one env value.
     text = WORKFLOW.read_text()
-    assert text.count("\nenv:\n") == 1 and "\n  TRUSTED_LOGINS: i-am-marvin\n" in text
+    assert text.count("\nenv:\n") == 1 and "\n  TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]\n" in text
     assert "trusted-logins: ${{ env.TRUSTED_LOGINS }}" in text

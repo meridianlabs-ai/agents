@@ -33,6 +33,9 @@ RESET_ACTION = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.ym
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
+from test_review_fix_gate import MARVIN, MARVIN_BOT, workflow_env  # noqa: E402
+
+TRUSTED_LOGINS = workflow_env(WORKFLOW, "TRUSTED_LOGINS")
 
 MARKER = "<!-- auto-fix-attempts -->"
 
@@ -113,7 +116,7 @@ def run_step(script: str, tmp_path: Path, env: dict, fixtures: dict, *, composit
     out = tmp_path / "output"
     out.write_text("")
     e = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
-         "REPO": "o/r", "GH_TOKEN": "x", "TRUSTED_LOGINS": "i-am-marvin", **env}
+         "REPO": "o/r", "GH_TOKEN": "x", "TRUSTED_LOGINS": TRUSTED_LOGINS, **env}
     opts = ["-e", "-o", "pipefail"] if composite else ["-e"]
     res = sh("bash", "--noprofile", "--norc", *opts, "-c", script, check=False, env=e)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
@@ -561,9 +564,24 @@ def test_labeler_reads_the_input_not_a_hardcoded_login(tmp_path):
 
 
 def test_labeler_default_input_is_the_machine_account():
+    # Both of its logins: the User (the PAT) and the Phase 2 GitHub App's.
     text = LABELER.read_text()
-    assert "  trusted-logins:\n" in text and "    default: i-am-marvin\n" in text
+    assert "  trusted-logins:\n" in text and f"    default: {MARVIN},{MARVIN_BOT}\n" in text
     assert 'elif [ "$labeler" = "i-am-marvin" ]' not in text
+
+
+def test_labeler_passes_the_machine_accounts_bot_login_by_name_and_refuses_other_apps(tmp_path):
+    # Under the workflow's own TRUSTED_LOGINS: the App login the marvin app
+    # labels with under Phase 2 passes before the App case (no lookup — the
+    # endpoint cannot report an App's permission); any other App, including
+    # github-actions[bot], is still `unverified` and never looked up.
+    res, out, calls, _ = verify(tmp_path, MARVIN_BOT, trusted=TRUSTED_LOGINS)
+    assert res.returncode == 0, res.stderr
+    assert out["verdict"] == "ok" and out["labeler"] == MARVIN_BOT and lookups(calls) == []
+    for app in ("github-actions[bot]", "foo[bot]"):
+        res, out, calls, _ = verify(tmp_path, app, trusted=TRUSTED_LOGINS)
+        assert res.returncode == 0, res.stderr
+        assert out["verdict"] == "unverified" and lookups(calls) == [], app
 
 
 # --- the one trusted value ----------------------------------------------------
@@ -571,9 +589,25 @@ def test_labeler_default_input_is_the_machine_account():
 
 def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_composite():
     text = WORKFLOW.read_text()
-    assert text.count("\nenv:\n  TRUSTED_LOGINS: i-am-marvin\n") == 1
+    assert text.count("\nenv:\n") == 1 and TRUSTED_LOGINS == f"{MARVIN},{MARVIN_BOT}"
     assert "trusted-logins: ${{ env.TRUSTED_LOGINS }}" in text
     # No trust decision names the login itself: the remaining literals are
-    # the env value, the cc-target exclusion and the commit identity.
+    # the env value and the commit identity (the cc-target exclusion reads
+    # the env too).
     for script in (RESOLVE, GATE, RESET, REFUND):
         assert "i-am-marvin" not in script
+    # The fix agents' bot allow-lists carry the value: workflow_run's actor
+    # is the pusher, the App's bot login under Phase 2.
+    assert "allowed_bots: ${{ env.TRUSTED_LOGINS }}" in text
+    assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
+
+
+def test_gate_counts_the_machine_accounts_bot_login_under_the_workflow_value_and_not_other_apps(tmp_path):
+    # Phase 2: the gate records the counter as the App's bot login. Its newest
+    # marker is the counter (before the `[bot]` refusal, no lookup); another
+    # App's marker, even newer, is ignored and never looked up.
+    res, out, calls, _ = gate(tmp_path, [counter(10, MARVIN, 1), counter(11, MARVIN_BOT, 2, type_="Bot"),
+                                         counter(12, "foo[bot]", 99, type_="Bot")], trusted=TRUSTED_LOGINS)
+    assert res.returncode == 0, res.stderr
+    assert out["act"] == "fix" and out["attempt"] == "3" and out["cid"] == "11"
+    assert lookups(calls) == []
