@@ -159,15 +159,17 @@ conflict or not: its checks ran in upstream CI on the approved commit
 (verified before the checkout) and run again on the merge commit you push —
 see "External PRs".
 
-- **Run pytest with `PYTHONPATH=$PWD/src`** (promotions; from the worktree root). The
-  venv's editable install points at the PRIMARY clone's `src/`, so without
-  it pytest imports the main checkout's code and silently tests the wrong
-  tree (observed: a green run that hadn't exercised the merge at all —
-  caught only when a branch-side import didn't exist in the main clone).
-  Verify once per session:
-  `PYTHONPATH=$PWD/src python -c 'import inspect_ai; print(inspect_ai.__file__)'`
-  must print the worktree path. (`ruff`/`mypy` take file paths, so they
-  check the worktree files regardless.)
+- **Give the worktree its own venv and test from it** (promotions): `uv sync --frozen`
+  in the worktree (about three seconds from a warm uv cache; `.venv` is
+  gitignored), then `.venv/bin/pytest`, `.venv/bin/ruff`, `.venv/bin/mypy`.
+  Rerun the sync after the merge when it touched `uv.lock`. Never borrow the
+  primary clone's venv, with or without `PYTHONPATH=$PWD/src`: its editable
+  install points at the PRIMARY clone's `src/`, so pytest silently tests the
+  wrong tree (observed: a green run that hadn't exercised the merge at all,
+  caught only when a branch-side import didn't exist in the main clone), and
+  its dependencies are main's, not the branch's. Verify once per session:
+  `.venv/bin/python -c 'import inspect_ai; print(inspect_ai.__file__)'`
+  must print the worktree path. (decision: Ransom, 2026-09-15)
 - **A merged branch may owe more than textual resolution**: when main has
   established a new cross-cutting contract (e.g. mutation verbs carry
   `--terse` with piped-output default; human output goes through the `_echo`
@@ -244,10 +246,11 @@ Same flow as above with these substitutions — the branch lives on the
 
 - **Nothing from the tree runs in this session.** Every step of the flow
   above that executes code from the checked-out tree is skipped for an
-  External PR: the once-per-session `PYTHONPATH=$PWD/src python -c 'import
-  inspect_ai…'` probe, `ruff check` / `ruff format --check`, `mypy` (it
-  imports whatever plugins the tree's `pyproject.toml` names), the targeted
-  `pytest`, and for viewer-schema PRs `python src/inspect_ai/_view/schema.py`
+  External PR: `uv sync --frozen` in the worktree (an editable install runs
+  the tree's build backend) and the `.venv/bin/python -c 'import inspect_ai…'`
+  probe, `ruff check` / `ruff format --check`, `mypy` (it imports whatever
+  plugins the tree's `pyproject.toml` names), the targeted `pytest`, and for
+  viewer-schema PRs `python src/inspect_ai/_view/schema.py`
   (which also runs `types:generate` in the submodule) and `python
   .github/scripts/check_openapi_drift.py`. The tree is a contributor's: the
   review approved its content, not its execution next to your `gh` login and
