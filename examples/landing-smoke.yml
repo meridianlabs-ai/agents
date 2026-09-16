@@ -8,7 +8,8 @@
 #   land  (trusted)   -> fresh runner, no checkout: land pushes and comments
 #
 # Confirms: the pushed tip equals the manifest's head_sha; the push
-# authenticates as marvin (check the branch's commit pusher / the run log);
+# authenticates as marvin — `meridian-marvin[bot]` on the app path,
+# `i-am-marvin` on the PAT (check the branch's commit pusher / the run log);
 # a second run against a branch someone pushed to in between refuses with
 # "moved during the run"; and `tamper: main` shows a manifest naming `main`
 # as branch is rejected by the validator before any network call — on every
@@ -119,13 +120,35 @@ jobs:
     needs: agent
     if: always()
     runs-on: ubuntu-latest
+    env:
+      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
+      # read the `secrets` context, so the mint step gates on this job-level
+      # boolean instead. Not a secret (the client id is an identifier).
+      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     # Fresh runner, NO checkout: the land composite is the only code that
     # runs, fetched from this repo @main by the runner.
     steps:
+      # The machine account's token, as the real land jobs mint it (Phase 2):
+      # the app's, scoped to this repo's contents / issues / pull requests,
+      # when the app secrets are present; the PAT otherwise.
+      - name: Mint the machine account's token
+        id: mint
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
       - id: land
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
-          token: ${{ secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           allowed-issue-repos: ${{ github.repository }}
           # From the (trusted) dispatch input, not the manifest — the same
           # expression emit-landing got above: the validator pins the

@@ -29,7 +29,8 @@ name: Claude (reusable)
 # Three jobs since issue #84 (design/architecture.md → Landing job): `gate`
 # (trusted: the trigger check and every write that must happen before the
 # agent runs — 👀, stage → Agent, the @auto opt-in and counter reset — with
-# MARVIN_TOKEN), `agent` (untrusted: checkout, provisioning, the agent; the
+# the machine account's token, which it mints from the caller's GitHub App
+# secrets or takes from MARVIN_TOKEN), `agent` (untrusted: checkout, provisioning, the agent; the
 # job token only; commits locally and never pushes) and `land` (trusted: a
 # fresh runner that pushes the commits, opens the PR on issue runs, posts
 # the comments, the hand-back and the error report, and moves the stage —
@@ -231,6 +232,30 @@ on:
           Actions-PR-creation is disallowed), the documented degradation.
           This is the identity layer for @auto; model auth stays Workload
           Identity Federation regardless. See design/auto-agent.md.
+          TRANSITION: superseded by the two MARVIN_APP_* secrets below; still
+          accepted, and used only when they are absent.
+        required: false
+      MARVIN_APP_CLIENT_ID:
+        description: >-
+          Client ID of the machine account's GitHub App (`meridian-marvin`,
+          bot login `meridian-marvin[bot]`). With MARVIN_APP_PRIVATE_KEY it
+          REPLACES MARVIN_TOKEN (Phase 2 of the credential separation,
+          design/architecture.md → Landing job): the `gate` and `land` jobs
+          each mint a one-hour installation token scoped to this repository
+          and to the permissions that job's writes need, revoked when the
+          job ends, and every write those jobs make runs as the bot. The
+          job that runs the agent never sees either secret or a minted
+          token. Optional during the transition: when this is empty the
+          jobs fall back to MARVIN_TOKEN (the PAT), and then to the job
+          token where they already did. Pass it explicitly by name in the
+          stub's `secrets:` map, next to (or instead of) MARVIN_TOKEN.
+        required: false
+      MARVIN_APP_PRIVATE_KEY:
+        description: >-
+          Private key (PEM) of the GitHub App named by MARVIN_APP_CLIENT_ID;
+          the two are used together and mean nothing apart. Read ONLY by the
+          mint steps of the `gate` and `land` jobs. Optional during the
+          transition (see MARVIN_APP_CLIENT_ID).
         required: false
       OPENAI_API_KEY:
         description: >-
@@ -257,15 +282,28 @@ env:
 jobs:
   # TRUSTED: the trigger check and every write that must happen BEFORE the
   # agent runs — the 👀 ack, the stage move to Agent, the @auto opt-in and
-  # counter reset. Names MARVIN_TOKEN; checks out nothing.
+  # counter reset. Mints the machine account's token (or names
+  # MARVIN_TOKEN); checks out nothing.
   gate:
     runs-on: ubuntu-latest
+    env:
+      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
+      # read the `secrets` context, so the mint step gates on this job-level
+      # boolean instead. Not a secret (the client id is an identifier).
+      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     permissions:
       contents: read          # trig's permission and PR lookups
       pull-requests: write    # the refusal comment (job token); the ack, opt-in label and counter reset fall back to it
       issues: write
     outputs:
       ok: ${{ steps.trig.outputs.ok }}
+      # The identity the agent job's runner-side commits carry (the base
+      # merge, the codex commit): the bot's when this job minted an app
+      # token — so the commit author and the land job's pusher agree — and
+      # the User's when it fell back to the PAT. Decided here, where the
+      # minting happened; the agent job only reads these two strings.
+      git_user_name: ${{ steps.mint.outcome == 'success' && 'meridian-marvin[bot]' || 'i-am-marvin' }}
+      git_user_email: ${{ steps.mint.outcome == 'success' && '330132053+meridian-marvin[bot]@users.noreply.github.com' || 'i-am-marvin@users.noreply.github.com' }}
       fork_head: ${{ steps.trig.outputs.fork_head }}
       engine: ${{ steps.engine.outputs.engine }}
       is_pr: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
@@ -322,6 +360,34 @@ jobs:
       # on a same-repo PR armed the autonomous loops and reset their caps
       # before the action declined it. The lookup happens here, before any
       # write, and emits `authorized` so the refusal step can reuse it.
+      #
+      # The machine account's token for this job (Phase 2, design/
+      # architecture.md → Landing job): a one-hour installation token of the
+      # GitHub App, minted only when the caller passed the app secrets,
+      # scoped to THIS repository and to what the steps below write — the
+      # 👀 reaction and the counter comments (issues), the @auto opt-in
+      # label (pull requests), the stage move (the org's Atlas project).
+      # `set-stage` reads the PR and its closing issues too (pull requests
+      # and issues, covered), and the mention derivation in the agent job
+      # runs on the job token. Revoked by the action's post step when the
+      # job ends. Every later step reads ONE expression —
+      # `steps.mint.outputs.token || secrets.MARVIN_TOKEN` (`|| github.token`
+      # where the marvin-less degradation applied) — so a caller still on
+      # the PAT, or on neither, behaves as before.
+      - name: Mint the machine account's token
+        id: mint
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: write
+          permission-pull-requests: write
+          permission-organization-projects: write
+
       - name: Check trigger (stage gating)
         id: trig
         env:
@@ -614,7 +680,7 @@ jobs:
       - name: Acknowledge trigger (eyes)
         if: steps.trig.outputs.ok == 'true'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           COMMENT_ID: ${{ github.event.comment.id }}
@@ -638,7 +704,7 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Agent
-          token: ${{ secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}
 
@@ -673,7 +739,7 @@ jobs:
           github.event.issue.pull_request != '' &&
           inputs.trigger_phrase == '@auto'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.issue.number }}
           AUTO_LABEL: "auto"
@@ -704,7 +770,7 @@ jobs:
           inputs.trigger_phrase == '@auto'
         uses: meridianlabs-ai/agents/.github/actions/reset-auto-counters@main
         with:
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
           repo: ${{ github.repository }}
           pr: ${{ github.event.issue.number }}
           trusted-logins: ${{ env.TRUSTED_LOGINS }}
@@ -808,6 +874,10 @@ jobs:
           engine: ${{ needs.gate.outputs.engine }}
           token: ${{ github.token }}
           checkout: "true"
+          # The merge commit's author: the gate decided it from which token
+          # it minted (bot on the app path, User on the PAT).
+          user-name: ${{ needs.gate.outputs.git_user_name }}
+          user-email: ${{ needs.gate.outputs.git_user_email }}
 
       # Provision the project environment so the agent's allow-listed
       # pytest/ruff/mypy can actually run (a bare runner has neither the deps
@@ -1105,6 +1175,10 @@ jobs:
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           BASE: ${{ inputs.base_branch }}
           SYNC_START_SHA: ${{ steps.sync.outputs.start_sha }}
+          # The codex commit's author (the gate's outputs: bot on the app
+          # path, User on the PAT — see the gate job).
+          GIT_USER_NAME: ${{ needs.gate.outputs.git_user_name }}
+          GIT_USER_EMAIL: ${{ needs.gate.outputs.git_user_email }}
           # Step-scoped credential for the fetch below (nothing is persisted
           # by checkout; design/architecture.md → "No persisted git
           # credentials"). A read, so the job token.
@@ -1116,8 +1190,8 @@ jobs:
           GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -euo pipefail
-          git config user.name "i-am-marvin"
-          git config user.email "i-am-marvin@users.noreply.github.com"
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
           if [ "$IS_PR" = "true" ]; then
             prj=$(gh pr view "$NUM" --repo "$REPO" --json headRefName,isCrossRepository)
             # Fork PRs are out: the head branch is not on origin (this fetch
@@ -2273,21 +2347,48 @@ jobs:
   # agent job to land.
   #
   # This workflow keeps the marvin-less fallback the loops dropped: callers
-  # without MARVIN_TOKEN still get a github-actions[bot] push and PR — no CI,
-  # and blocked entirely where Actions-PR-creation is disallowed — today's
-  # documented degradation (secrets.MARVIN_TOKEN above). So the job token
-  # holds contents: write HERE, in the job that never ran the agent; the
-  # agent job's is read-only.
+  # without the app secrets or MARVIN_TOKEN still get a github-actions[bot]
+  # push and PR — no CI, and blocked entirely where Actions-PR-creation is
+  # disallowed — today's documented degradation (secrets.MARVIN_TOKEN
+  # above). So the job token holds contents: write HERE, in the job that
+  # never ran the agent; the agent job's is read-only.
   land:
     needs: [gate, agent]
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.ok == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
+      # read the `secrets` context, so the mint step gates on this job-level
+      # boolean instead. Not a secret (the client id is an identifier).
+      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     permissions:
       contents: write         # the job-token fallback push
       pull-requests: write    # the fallback PR, labels and comments
       issues: write
       actions: read           # artifact download
     steps:
+      # The machine account's token for this job (see the gate job's mint
+      # step): scoped to THIS repository and to the landing's writes — the
+      # push (contents), the PR, its labels and the review request (pull
+      # requests), the comments and the "opened a PR" note on the issue
+      # (issues), the stage move (the org's Atlas project). Follow-up
+      # issues are refused here (`allowed-issue-repos: ""`), so no other
+      # repository is in scope. Revoked when the job ends.
+      - name: Mint the machine account's token
+        id: mint
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-organization-projects: write
+
       # Skipped when the agent job was cancelled (as the loops' land jobs
       # skip): its partial commits are not pushed and no PR is opened on the
       # strength of an always(); the two steps below say so instead.
@@ -2298,9 +2399,10 @@ jobs:
         if: needs.agent.result != 'cancelled' && needs.agent.result != 'skipped'
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
-          # The machine account where the caller has it; the job token
-          # elsewhere (the degradation above).
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          # The machine account where the caller has it (the minted app
+          # token, else the PAT); the job token elsewhere (the degradation
+          # above).
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
           # The event payload's numbers — the SAME expressions emit-landing
           # got: the validator pins the manifest's pr_number / issue_number
           # to them, and they are where the final report goes when the
@@ -2327,7 +2429,7 @@ jobs:
       - name: Report a cancelled agent job
         if: needs.agent.result == 'cancelled'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -2342,6 +2444,6 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Review
-          token: ${{ secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}

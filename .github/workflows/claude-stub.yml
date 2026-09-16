@@ -3,7 +3,9 @@
 # filename (claude.yml) is taken here by the REUSABLE workflow definition, so
 # the stubs carry a -stub suffix. Keep the jobs in sync with the example.
 # Uses the @main reusable workflows like every other caller; requires the
-# MARVIN_TOKEN org secret to be scoped to this repo.
+# MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY org secrets to be scoped to
+# this repo (the machine account's GitHub App; this repo is the first caller
+# on the app path and passes no MARVIN_TOKEN).
 
 name: Claude
 
@@ -96,17 +98,19 @@ jobs:
           && github.event.label.name == 'claude' )
       )
     uses: meridianlabs-ai/agents/.github/workflows/claude.yml@main
-    # Pass the machine-account PAT (MARVIN_TOKEN, an org secret) through to the
-    # reusable workflow so agent-opened PRs trigger CI and @review. Passed
+    # Pass the machine account's GitHub App secrets (org secrets) through to
+    # the reusable workflow, whose gate and land jobs mint per-job tokens
+    # from them so agent-opened PRs trigger CI and @review. Passed
     # explicitly — NOT via `secrets: inherit` — so this repo's other secrets
     # aren't exposed to an external workflow pinned to a mutable @main ref
     # (least privilege; the reusable workflow consumes only the secrets named
-    # here).
-    # An absent MARVIN_TOKEN resolves to empty: the agent still runs, just with
+    # here). No MARVIN_TOKEN: this repo exercises the app path end to end.
+    # Absent app secrets resolve to empty: the agent still runs, just with
     # issue-triggered PR creation degraded (see the reusable workflow's
-    # secrets.MARVIN_TOKEN and design/auto-agent.md).
+    # secrets.MARVIN_APP_CLIENT_ID and design/auto-agent.md).
     secrets:
-      MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+      MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
       # codex engine (design/codex-engine.md in the agents repo):
       # consumed only on items labeled engine:codex; optional.
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -150,7 +154,8 @@ jobs:
   # PR inherits the `auto` label (so the loop in claude-auto.yml engages), and it
   # runs to a human handoff. Same reusable dev workflow, different trigger — the
   # action's trigger_phrase/label_trigger are single-valued, so `auto` needs its
-  # own invocation. Needs MARVIN_TOKEN (the PR must trigger CI/@review).
+  # own invocation. Needs the machine account's secrets (the PR must trigger
+  # CI/@review).
   claude-auto:
     # See the `claude` job's `if:` — same edited-comment guard, so adding @auto
     # to an existing comment kicks off the autonomous loop but re-editing a
@@ -211,7 +216,8 @@ jobs:
       ) )
     uses: meridianlabs-ai/agents/.github/workflows/claude.yml@main
     secrets:
-      MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+      MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
       # codex engine (design/codex-engine.md in the agents repo):
       # consumed only on items labeled engine:codex; optional.
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

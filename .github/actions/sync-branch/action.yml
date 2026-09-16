@@ -58,6 +58,19 @@ inputs:
       and only fetches the base before merging.
     required: false
     default: "false"
+  user-name:
+    description: >-
+      Author of the merge commit this action may create. The machine
+      account's identity, chosen by the caller's gate job from the token it
+      minted: the GitHub App's bot login on the app path (Phase 2), so the
+      commit's author and the land job's pusher agree; the User's on the
+      PAT (the default, unchanged from before Phase 2).
+    required: false
+    default: i-am-marvin
+  user-email:
+    description: The matching noreply address (see user-name).
+    required: false
+    default: i-am-marvin@users.noreply.github.com
 
 outputs:
   base:
@@ -115,6 +128,8 @@ runs:
         NUM: ${{ inputs.pr }}
         ENGINE: ${{ inputs.engine }}
         CHECKOUT: ${{ inputs.checkout }}
+        USER_NAME: ${{ inputs.user-name }}
+        USER_EMAIL: ${{ inputs.user-email }}
         # Step-scoped git credential for the fetches below (design/
         # architecture.md → "No persisted git credentials"): git reads
         # GIT_CONFIG_* from the environment with command-line precedence, so
@@ -132,8 +147,8 @@ runs:
         GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
       run: |
         set -euo pipefail
-        git config user.name "i-am-marvin"
-        git config user.email "i-am-marvin@users.noreply.github.com"
+        git config user.name "$USER_NAME"
+        git config user.email "$USER_EMAIL"
         # Run-start stamp for claude.yml's hand-back double-post check
         # (the loops take theirs from "Record base SHA"; claude.yml has no
         # such step, and this action runs before either agent).

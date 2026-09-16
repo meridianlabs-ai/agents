@@ -28,8 +28,9 @@ name: Claude review (reusable)
 # packaging what the land job should post into the landing manifest
 # (emit-landing), and `land` — a fresh runner, no checkout — posts it as
 # marvin (codex review + verdict, provenance note, stage move, error report)
-# and runs the posted-review check. MARVIN_TOKEN is named in `gate` and
-# `land` and nowhere else: a process the agent left running, or a PATH/ENV
+# and runs the posted-review check. The machine account's token (the app
+# token `gate` and `land` mint, or MARVIN_TOKEN) is named in those two jobs
+# and nowhere else: a process the agent left running, or a PATH/ENV
 # edit it made through $GITHUB_PATH / $GITHUB_ENV, can observe later steps of
 # its own job but not another job (Claude Security finding 4122321).
 
@@ -221,6 +222,27 @@ on:
           steps no-op and the land job posts with the job token instead
           (as github-actions[bot], whose comments trigger no workflow — so
           codex verdicts then do not drive the @auto loop, as before).
+          TRANSITION: superseded by the two MARVIN_APP_* secrets below; still
+          accepted, and used only when they are absent.
+        required: false
+      MARVIN_APP_CLIENT_ID:
+        description: >-
+          Client ID of the machine account's GitHub App (`meridian-marvin`,
+          bot login `meridian-marvin[bot]`). With MARVIN_APP_PRIVATE_KEY it
+          REPLACES MARVIN_TOKEN (Phase 2 of the credential separation,
+          design/architecture.md → Landing job): the `gate` and `land` jobs
+          each mint a one-hour installation token scoped to this repository
+          and to the permissions that job's writes need, revoked when the
+          job ends. The review job never sees either secret or a minted
+          token. Optional during the transition: when this is empty the
+          jobs fall back to MARVIN_TOKEN (the PAT), and then to the job
+          token where they already did.
+        required: false
+      MARVIN_APP_PRIVATE_KEY:
+        description: >-
+          Private key (PEM) of the GitHub App named by MARVIN_APP_CLIENT_ID;
+          read ONLY by the mint steps of the `gate` and `land` jobs.
+          Optional during the transition (see MARVIN_APP_CLIENT_ID).
         required: false
       OPENAI_API_KEY:
         description: >-
@@ -252,6 +274,11 @@ jobs:
   # event payload directly, `head_ref` from trig's API lookup).
   gate:
     runs-on: ubuntu-latest
+    env:
+      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
+      # read the `secrets` context, so the mint step gates on this job-level
+      # boolean instead. Not a secret (the client id is an identifier).
+      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     # Skip auto-review of release-please PRs: they are generated
     # changelog/version bumps with nothing to review, and the run would only
     # fail fast anyway (bot author, rejected by checkHumanActor), leaving a
@@ -279,6 +306,30 @@ jobs:
       started: ${{ steps.trig.outputs.started }}
       engine: ${{ steps.engine.outputs.engine }}
     steps:
+      # The machine account's token for this job (Phase 2, design/
+      # architecture.md → Landing job): a one-hour installation token of the
+      # GitHub App, minted only when the caller passed the app secrets and
+      # scoped to THIS repository and to what this job writes — the 👀
+      # reaction on the triggering comment (issues) and the stage move (the
+      # org's Atlas project; `set-stage` reads the PR and its closing issues
+      # to find the card, hence pull requests: read). Revoked when the job
+      # ends. The ack and stage steps read ONE expression,
+      # `steps.mint.outputs.token || secrets.MARVIN_TOKEN`, so a caller
+      # still on the PAT behaves as before and one with neither skips them.
+      - name: Mint the machine account's token
+        id: mint
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: write
+          permission-pull-requests: read
+          permission-organization-projects: write
+
       # Ack + stage run BEFORE the checkout (no workspace needed; the clone
       # costs ~1 min on large repos and the 👀 should land in seconds).
       # Word-boundary gate for comment events so a summary that merely quotes
@@ -331,10 +382,10 @@ jobs:
       - name: Check trigger (run + ack/stage gating)
         id: trig
         env:
-          # The JOB token, not MARVIN_TOKEN: trig's lookups gate admission
+          # The JOB token, not the machine account's: trig's lookups gate admission
           # fail-closed, and the job token reads both endpoints and cannot
           # expire — an expired PAT must not disable every comment-triggered
-          # review. Ack/stage below keep MARVIN_TOKEN (they act as marvin).
+          # review. Ack/stage below take the machine account's token (they act as marvin).
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           ACTOR: ${{ github.actor }}
@@ -527,11 +578,11 @@ jobs:
       - name: Acknowledge trigger (eyes)
         if: steps.trig.outputs.ack == 'true' && github.event_name == 'issue_comment'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           REPO: ${{ github.repository }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
-          [ -n "$GH_TOKEN" ] || { echo "no MARVIN_TOKEN; skipping ack"; exit 0; }
+          [ -n "$GH_TOKEN" ] || { echo "no machine-account token (app secrets or MARVIN_TOKEN); skipping ack"; exit 0; }
           gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes --silent || true
 
       # The @review loop is part of Agent (design/atlas-tracking.md):
@@ -544,7 +595,7 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Agent
-          token: ${{ secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           repo: ${{ github.repository }}
           issue: ${{ github.event.issue.number || github.event.pull_request.number }}
 
@@ -1709,28 +1760,57 @@ jobs:
     needs: [gate, review]
     if: always() && needs.gate.outputs.ok == 'true' && needs.review.result != 'cancelled'
     runs-on: ubuntu-latest
+    env:
+      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
+      # read the `secrets` context, so the mint step gates on this job-level
+      # boolean instead. Not a secret (the client id is an identifier).
+      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     permissions:
       contents: read
       pull-requests: write    # the posted-review check's job-token fallback
       # NOT write: a reusable workflow cannot request more than its caller
       # grants, and every stub grants issues: read (examples/). In external
       # mode the posted-review nudge targets the proxy ISSUE, so it posts as
-      # marvin (MARVIN_TOKEN, as before this job split); a marvin-less
-      # caller's fallback nudge 403s there — the pre-existing gap.
+      # marvin (the minted app token or MARVIN_TOKEN, as before this job
+      # split); a marvin-less caller's fallback nudge 403s there — the
+      # pre-existing gap.
       issues: read
       actions: read           # artifact download
     steps:
+      # The machine account's token for this job (see the gate job's mint
+      # step): scoped to THIS repository and to the landing's writes — the
+      # codex review, its verdict comment and the thread resolutions (pull
+      # requests), the comments on an External proxy issue, the follow-up
+      # issues the reviewer's manifest may file here (this repository is
+      # the default `allowed-issue-repos`) and the posted-review nudge
+      # (issues), the stage move (the org's Atlas project). No contents:
+      # this land job refuses bundles and pushes nothing. Revoked when the
+      # job ends.
+      - name: Mint the machine account's token
+        id: mint
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: write
+          permission-pull-requests: write
+          permission-organization-projects: write
+
       - name: Land
         id: land
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
-          # The machine account, so the codex verdict triggers the review-fix
-          # stub and the stage move has project scope. Marvin-less callers
-          # fall back to the job token: the posts then come from
-          # github-actions[bot] (which triggers nothing — as before, when the
-          # codex posting step had the same fallback) and set-stage warns and
-          # skips.
-          token: ${{ secrets.MARVIN_TOKEN || github.token }}
+          # The machine account (the minted app token, else the PAT), so the
+          # codex verdict triggers the review-fix stub and the stage move has
+          # project scope. Marvin-less callers fall back to the job token:
+          # the posts then come from github-actions[bot] (which triggers
+          # nothing — as before, when the codex posting step had the same
+          # fallback) and set-stage warns and skips.
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
           refuse-bundle: "true"
           # The same expressions emit-landing got above: the validator pins
           # the manifest's pr_number / issue_number to them, and they are
@@ -1764,7 +1844,7 @@ jobs:
       - name: Verify the review was posted
         if: always() && needs.review.outputs.claude_outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           MODE: ${{ needs.gate.outputs.mode }}
           EVENT: ${{ github.event_name }}

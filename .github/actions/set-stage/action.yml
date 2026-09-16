@@ -16,9 +16,11 @@ inputs:
     required: true
   token:
     description: >-
-      Token with org-project write (MARVIN_TOKEN — fine-grained PAT with
-      organization Projects read/write). Empty skips silently, so callers can
-      pass the secret unconditionally.
+      Token with org-project write: the machine account's — an installation
+      token minted with `permission-organization-projects: write` (Phase 2),
+      or the MARVIN_TOKEN fine-grained PAT with organization Projects
+      read/write. Empty skips silently, so callers can pass the value
+      unconditionally.
     required: true
   repo:
     description: owner/name the issue lives in.

@@ -60,6 +60,21 @@ Merge the PR to activate.
 Prerequisite: the Claude GitHub App must have access to the repo (org-wide
 install covers this).
 
+**The machine account's secrets.** The stubs pass two org secrets by name to
+the reusable workflows: `MARVIN_APP_CLIENT_ID` and `MARVIN_APP_PRIVATE_KEY`,
+the GitHub App `meridian-marvin` through which the workflows' trusted `gate`
+and `land` jobs act (pushes that run CI, the `@review` hand-back, comments,
+labels, the Atlas board). Grant both secrets to the repo in the org's
+**Secrets and variables → Actions** page and add the repo to the app's
+installation; each job then mints a one-hour token scoped to that repo and
+to what the job writes. During the transition the older `MARVIN_TOKEN` PAT
+is still accepted: a stub may pass it alongside the app secrets (the
+workflows read it only when the app secrets are absent) and delete that line
+once the repo has both app secrets. Never `secrets: inherit`. A repo with
+none of the three still runs the dev agent and the reviewer, with the
+documented degradation: pushes and PRs come from `github-actions[bot]` and
+trigger nothing, and the `@auto` loops do not engage.
+
 **Optional — let the agents run your tests.** By default the agents review and
 build against a bare runner (no deps installed), so they verify with static
 checks only. To give them a real environment, add a
@@ -91,9 +106,10 @@ Notes:
   or comments: it commits, and the workflow's land job pushes the commits as
   the machine account (so CI runs), opens the PR on an issue run, and posts
   any comment the agent left for the thread. The machine account is the
-  User `i-am-marvin` today; Phase 2 of the credential separation moves it to
-  the GitHub App login `meridian-marvin[bot]`, which the workflows already
-  trust alongside it, and the User login is retired at the end of Phase 2. Commits do not appear mid-run;
+  GitHub App login `meridian-marvin[bot]` where the caller passes the app
+  secrets (Phase 2 of the credential separation) and the User `i-am-marvin`
+  where it still passes only the PAT; the workflows trust both, and the
+  User login is retired at the end of Phase 2. Commits do not appear mid-run;
   to iterate on CI failures use `@auto`, whose loop re-runs the agent on each
   red CI run.
 - PR follow-ups first merge the base branch into the PR branch on the runner,

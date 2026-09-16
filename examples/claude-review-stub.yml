@@ -107,10 +107,16 @@ jobs:
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->'))
     uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
-    # Machine-account PAT for the deterministic ack/stage steps only (eyes
-    # reaction + board stage); never handed to the review agent, which stays
-    # read-only. Absent -> those steps no-op.
+    # The machine account's secrets, for the gate's deterministic ack/stage
+    # steps (eyes reaction + board stage) and the land job's posts; never
+    # handed to the review agent, which stays read-only. Absent -> the gate
+    # steps no-op and the land job posts with the job token.
     secrets:
+      MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+      MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+      # TRANSITION: the machine account's PAT. Delete this line once this
+      # repo has the two app secrets above (the workflow prefers them and
+      # reads the PAT only when they are absent).
       MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
       # codex engine (design/codex-engine.md in the agents repo):
       # consumed only on items labeled engine:codex; optional.

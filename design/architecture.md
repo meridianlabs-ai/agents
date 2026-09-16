@@ -210,7 +210,7 @@ changes who pushes. Per step:
 | hand-back, unlanded-work, open-PR and verify fetches | gone with the landing-job split (#82, #83, #84): the land job opens the PR and posts the hand-back from the manifest, and knows what it pushed |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
 | the claude-code-action step | no `github_token` in any of the four workflows (since #81 / #82 / #83 / #84): the action's own App token, and a job-token credential helper for its fetches — load-bearing in `claude.yml`, see below |
-| the `land` composite (all four workflows) | `MARVIN_TOKEN` for every write (`\|\| github.token` in `claude.yml` and `claude-review.yml`, the marvin-less degradation), the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
+| the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted, else `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml` and `claude-review.yml`, the marvin-less degradation) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
 | `reset-origin-url` (right after the action step, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
@@ -280,24 +280,76 @@ the Claude path can use it too, and so the landing can move to a **separate
 job on a fresh runner**, where nothing the agent job did can reach it:
 
 ```
-gate job   (trusted: trigger check + pre-agent marvin writes; job token + MARVIN_TOKEN; no checkout of PR code)
+gate job   (trusted: trigger check + pre-agent marvin writes; job token + the machine account's token, minted here; no checkout of PR code)
   -> agent job  (untrusted: checkout, provision, agent; job token ONLY; commits locally; emit-landing)
-  -> land job   (trusted: fresh runner; downloads the artifact; validates; pushes, posts, resolves, stages as marvin)
+  -> land job   (trusted: fresh runner; mints its own token; downloads the artifact; validates; pushes, posts, resolves, stages as marvin)
 ```
 
-The machine account behind those trusted writes has two logins. Today it is
-the User `i-am-marvin`, acting through the `MARVIN_TOKEN` PAT. Phase 2 of the
-credential separation replaces the PAT with the GitHub App `meridian-marvin`
-(App ID 4969131): the gate and land jobs mint one-hour installation tokens,
-and every push, comment, label and board move that is marvin's today then
-carries the bot login `meridian-marvin[bot]`. Every trust decision reads one
-`TRUSTED_LOGINS` value per file, which names both logins during the
-transition; the bot is trusted by login, never by lookup (the collaborators
-endpoint reports `none` for an App, verified 2026-09-16), its comments carry
-no MEMBER/COLLABORATOR association (an App's is NONE or CONTRIBUTOR), and so
-the stub gates and the `[bot]` exclusions name it explicitly and the
-claude-code-action / codex-action steps carry it in their bot allow-lists. At
-the end of Phase 2 the User login is retired and the bot is the only entry.
+The machine account behind those trusted writes has two logins. Phase 1 used
+the User `i-am-marvin`, acting through the `MARVIN_TOKEN` PAT — one
+long-lived token with write on every repo the stubs are deployed to. Phase 2
+of the credential separation replaces it with the GitHub App
+`meridian-marvin` (App ID 4969131, bot login `meridian-marvin[bot]`): the
+caller passes the app's client id and private key (org secrets
+`MARVIN_APP_CLIENT_ID` / `MARVIN_APP_PRIVATE_KEY`, declared optional on
+every reusable workflow), and each trusted job mints its own one-hour
+installation token with `actions/create-github-app-token@v2` as its first
+step (its `app-id` input takes the Client ID; v2 has no `client-id`), scoped
+by `repositories` to the caller repo (`github.event.repository.name`;
+the hourly Atlas sync names the inspect_ai fork) and by `permission-*` to
+what that job writes; the action's post step revokes it when the job ends.
+A confused-deputy write is thereby bounded to one repo, one job's permission
+set and one hour, and the private key is read by nothing but the mint step of
+a job that runs no agent. The job that runs the agent never sees either
+secret or a minted token.
+
+**One expression per job decides the token.** The mint step runs only when
+the caller passed the client id (`if: env.HAS_APP_SECRETS == 'true'`, a
+job-level boolean, because a step `if:` cannot read `secrets`), and every
+later step in the job reads `steps.mint.outputs.token || secrets.MARVIN_TOKEN`
+(`|| github.token` where the workflow already degraded to the job token) —
+including the composites' `token` inputs and the loops' `HAS_TOKEN` presence
+check. Composites do not mint. A caller still passing only the PAT therefore
+behaves exactly as in Phase 1, and callers switch one repo at a time; the PAT
+input is removed by the retirement step at the end of Phase 2. What each job
+mints (2026-09-16):
+
+| job | `repositories` | permissions | fallback |
+| --- | --- | --- | --- |
+| `claude.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
+| `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
+| `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | `MARVIN_TOKEN`; empty skips the ack and stage |
+| `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | `MARVIN_TOKEN`, then job token |
+| `claude-auto.yml` / `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`; empty makes the gate skip |
+| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN` (the gate already required one) |
+| `atlas-sync.yml` | `inspect_ai` | issues, pull requests, org projects: write; actions: read | `MARVIN_TOKEN` |
+
+No job writes to two repositories: the land jobs of the three agent workflows
+refuse follow-up issues (`allowed-issue-repos: ""`), the reviewer's may file
+them in the caller repo only, and the anchor-repo lookups the loops' gates
+make for the error-cc mention are reads of a public repo (the inspect_ai
+fork), best-effort and empty on failure.
+
+**Commit identity follows the token.** The runner-side commits an agent job
+makes — the `sync-branch` base merge and the codex commit — are authored by
+whatever `git config user.*` says, and the pusher is the land job's token.
+The gate job publishes `git_user_name` / `git_user_email` outputs from its
+mint step's outcome (`meridian-marvin[bot]` /
+`330132053+meridian-marvin[bot]@users.noreply.github.com` when it minted,
+the User's identity on the PAT), and the agent job passes them to
+`sync-branch` (`user-name` / `user-email` inputs, defaulting to the User) and
+to its codex prep step, so author and pusher agree on either path.
+
+Every trust decision reads one `TRUSTED_LOGINS` value per file, which names
+both logins during the transition; the bot is trusted by login, never by
+lookup (the collaborators endpoint reports `none` for an App, verified
+2026-09-16), its comments carry no MEMBER/COLLABORATOR association (an App's
+is NONE or CONTRIBUTOR), and so the stub gates and the `[bot]` exclusions
+name it explicitly and the claude-code-action / codex-action steps carry it
+in their bot allow-lists. App-token pushes and comments trigger workflows as
+a User's do (only `github.token` events are suppressed), so the `@review`
+hand-back and the CI re-run work unchanged. At the end of Phase 2 the User
+login is retired and the bot is the only entry.
 
 Three rules define the shape:
 
