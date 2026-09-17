@@ -913,9 +913,11 @@ jobs:
 
       # The review is FILES, not posts (issue #114): the OUTPUT block appended
       # here names the directory ($OUT_DIR, created by this step — outside
-      # the workspace, so nothing sandboxed contributor code runs can write
-      # a "review" there; the Write tool is not sandboxed and the compose-
-      # settings step allows exactly this directory) and the three files —
+      # the workspace, and on the sandboxed paths on the sandbox's
+      # `filesystem.denyWrite` list, so nothing sandboxed contributor code
+      # runs can write a "review" there while the agent's own Write tool,
+      # which the sandbox does not govern, can; see the compose-settings
+      # step) and the three files —
       # summary.md, verdict.txt, inline.json — that the "Prepare Claude
       # review for landing" step turns into the manifest's comments,
       # review_verdict and review_comments. It lives here, not in the
@@ -1013,6 +1015,21 @@ jobs:
       # cannot re-enable posting. Guard rails, not the boundary (the job
       # token is read-only; the action's App token is what they fence — see
       # design/architecture.md → Landing job on the fix job).
+      #
+      # On the sandboxed paths the review output directory is ALSO put on the
+      # sandbox's `filesystem.denyWrite` (below, spliced ahead of any caller
+      # entries): an `Edit` allow rule and `--add-dir` both widen the set of
+      # paths sandboxed COMMANDS may write, exactly like
+      # `sandbox.filesystem.allowWrite` (code.claude.com/docs/en/sandboxing →
+      # Permission rules), so without the deny a contributor's build hook or
+      # a test could write summary.md / verdict.txt / inline.json itself and
+      # the landing would post a forged review — a clean verdict included —
+      # as the machine account, with no prompt injection and no credential
+      # (review round 1 of #116). A deny holds inside a wider allow, and the
+      # sandbox governs Bash and its children only: the agent's built-in
+      # Write tool goes through the permission rules, not the sandbox, so
+      # the review files are still written. The workspace itself stays
+      # writable for the scratch tests the sandbox note allows.
       # Untrusted checkouts (external mode, and fork heads — issue #59) merge a
       # sandbox overlay into the result as well (the
       # allow/deny permission rules are otherwise unchanged). failIfUnavailable makes a
@@ -1102,10 +1119,11 @@ jobs:
       # belt-and-braces.
       #
       # Merge shape: jq's `*` recurses into objects but replaces arrays
-      # wholesale, so the two credentials arrays are re-spliced as CALLER
-      # entries + overlay entries — a caller's own `files`/`envVars`
-      # protections in `inputs.settings` compose with these instead of being
-      # silently dropped (overlay entries last). Deliberately NOT done for
+      # wholesale, so the two credentials arrays and `filesystem.denyWrite`
+      # are re-spliced as CALLER entries + overlay entries — a caller's own
+      # `files`/`envVars`/`denyWrite` protections in `inputs.settings` compose
+      # with these instead of being silently dropped (overlay entries last).
+      # Deliberately NOT done for
       # allowedDomains / excludedCommands: those are restrictions, and a
       # caller list concatenated onto them would widen the sandbox. The two
       # `del`s at the end strip network.tlsTerminate and
@@ -1134,12 +1152,13 @@ jobs:
             exit 0
           fi
           SETTINGS="$merged"
-          overlay=$(jq -cn --arg gitcfg "$GITHUB_WORKSPACE/.git/config" '{"disableAllHooks":true,"sandbox":{
+          overlay=$(jq -cn --arg gitcfg "$GITHUB_WORKSPACE/.git/config" --arg out "$OUT_DIR" '{"disableAllHooks":true,"sandbox":{
             "enabled":true,
             "failIfUnavailable":true,
             "allowUnsandboxedCommands":false,
             "excludedCommands":["gh *"],
             "network":{"allowedDomains":["pypi.org","files.pythonhosted.org"]},
+            "filesystem":{"denyWrite":[$out]},
             "credentials":{
               "files":[
                 {"path":$gitcfg,"mode":"mask","extract":"x-access-token:([^@]+)@","onExtractNoMatch":"deny"},
@@ -1158,9 +1177,11 @@ jobs:
           merged=$(printf '%s' "$SETTINGS" | jq -c --argjson o "$overlay" '
             (.sandbox.credentials.files // []) as $cf
             | (.sandbox.credentials.envVars // []) as $ce
+            | (.sandbox.filesystem.denyWrite // []) as $dw
             | . * $o
             | .sandbox.credentials.files = $cf + $o.sandbox.credentials.files
             | .sandbox.credentials.envVars = $ce + $o.sandbox.credentials.envVars
+            | .sandbox.filesystem.denyWrite = $dw + $o.sandbox.filesystem.denyWrite
             | del(.sandbox.network.tlsTerminate)
             | del(.sandbox.credentials.allowPlaintextInject)')
           {

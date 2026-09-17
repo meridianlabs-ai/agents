@@ -544,9 +544,15 @@ runs:
         #    ref). One that cannot anchor (422: the line is outside the PR's
         #    diff — a live-branch continuation reviewed past the frozen diff,
         #    or a mis-numbered line), or that still fails after its retries,
-        #    is folded into ONE follow-up comment on the PR: no finding is
-        #    lost, and the verdict is not withheld over an anchor (a failed
-        #    anchor is not a lost review; the follow-up comment failing is).
+        #    is folded into follow-up comments on the PR — BOUNDED chunks, a
+        #    chunk posted before it would pass 56,000 bytes with the next
+        #    finding, so defang's 60,000 cap (header included) never cuts a
+        #    finding that fit in its own comment (review round 1 of #116
+        #    lost a whole finding to one aggregate comment); only a single
+        #    finding over the cap is cut, by the cap every comment has. No
+        #    finding is lost, and the verdict is not withheld over an anchor
+        #    (a failed anchor is not a lost review; a follow-up comment
+        #    failing is, and each chunk that fails is recorded).
         n=$(jq -r '.review_comments // [] | length' "$m")
         if [ "$n" -gt 0 ]; then
           head_sha=""
@@ -557,7 +563,28 @@ runs:
             head_sha=""
             echo "::warning::land: could not read #$PR_NUMBER's head SHA; the inline review comments go into one follow-up comment instead."
           fi
-          : >"$RUNNER_TEMP/unanchored.md"
+          chunk=0
+          : >"$RUNNER_TEMP/unanchored-0.md"
+          # flush_unanchored — post the current chunk as one comment and
+          # start the next; a no-op on an empty chunk.
+          flush_unanchored() {
+            local f="$RUNNER_TEMP/unanchored-$chunk.md" cont=""
+            [ -s "$f" ] || return 0
+            [ "$chunk" -eq 0 ] || cont=" (continued)"
+            {
+              printf 'Inline review comments that could not be anchored to the diff (the line is outside the PR'"'"'s diff hunks, or the post failed)%s:\n' "$cont"
+              cat "$f"
+            } >"$RUNNER_TEMP/unanchored-$chunk-all.md"
+            # The bodies are de-fanged already; this pass is for the cap.
+            defang "$RUNNER_TEMP/unanchored-$chunk-all.md" "$RUNNER_TEMP/unanchored-$chunk-post.md"
+            if retry 5 "unanchored inline comments on #$PR_NUMBER (part $((chunk + 1)))" post_comment_file "$REPO" "$PR_NUMBER" "$RUNNER_TEMP/unanchored-$chunk-post.md"; then
+              echo "land: posted unanchored inline review comment(s) as a comment on #$PR_NUMBER (part $((chunk + 1)))."
+            else
+              note "follow-up comment (part $((chunk + 1))) with unanchored inline review comment(s) on #$PR_NUMBER failed after 5 attempts"
+            fi
+            chunk=$((chunk + 1))
+            : >"$RUNNER_TEMP/unanchored-$chunk.md"
+          }
           posted=0
           for ((k = 0; k < n; k++)); do
             rc=$(jq -c ".review_comments[$k]" "$m")
@@ -568,25 +595,19 @@ runs:
             if [ -n "$head_sha" ] && post_review_comment_file "$REPO" "$PR_NUMBER" "$head_sha" "$path" "$line" "$side" "$RUNNER_TEMP/inline-$k.md"; then
               posted=$((posted + 1))
             else
-              echo "::warning::land: inline review comment on $path:$line ($side) did not post; folding it into the follow-up comment."
-              printf '\n---\n\n**%s** line %s (%s)\n\n' "$path" "$line" "$side" >>"$RUNNER_TEMP/unanchored.md"
-              cat "$RUNNER_TEMP/inline-$k.md" >>"$RUNNER_TEMP/unanchored.md"
+              echo "::warning::land: inline review comment on $path:$line ($side) did not post; folding it into a follow-up comment."
+              {
+                printf '\n---\n\n**%s** line %s (%s)\n\n' "$path" "$line" "$side"
+                cat "$RUNNER_TEMP/inline-$k.md"
+              } >"$RUNNER_TEMP/unanchored-entry.md"
+              cur=$(wc -c <"$RUNNER_TEMP/unanchored-$chunk.md")
+              add=$(wc -c <"$RUNNER_TEMP/unanchored-entry.md")
+              if [ "$cur" -gt 0 ] && [ $((cur + add)) -gt 56000 ]; then flush_unanchored; fi
+              cat "$RUNNER_TEMP/unanchored-entry.md" >>"$RUNNER_TEMP/unanchored-$chunk.md"
             fi
           done
           echo "land: posted $posted of $n inline review comment(s) on #$PR_NUMBER."
-          if [ -s "$RUNNER_TEMP/unanchored.md" ]; then
-            {
-              printf 'Inline review comments that could not be anchored to the diff (the line is outside the PR'"'"'s diff hunks, or the post failed):\n'
-              cat "$RUNNER_TEMP/unanchored.md"
-            } >"$RUNNER_TEMP/unanchored-all.md"
-            # The bodies are de-fanged already; this pass is for the cap.
-            defang "$RUNNER_TEMP/unanchored-all.md" "$RUNNER_TEMP/unanchored-post.md"
-            if retry 5 "unanchored inline comments on #$PR_NUMBER" post_comment_file "$REPO" "$PR_NUMBER" "$RUNNER_TEMP/unanchored-post.md"; then
-              echo "land: posted the unanchored inline review comments as one comment on #$PR_NUMBER."
-            else
-              note "follow-up comment with $((n - posted)) unanchored inline review comment(s) on #$PR_NUMBER failed after 5 attempts"
-            fi
-          fi
+          flush_unanchored
         fi
         # -- review-comment replies (need the PR)
         i=0

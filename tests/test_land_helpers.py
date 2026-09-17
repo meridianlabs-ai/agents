@@ -731,7 +731,55 @@ def test_post_records_a_lost_follow_up_comment(tmp_path):
                                         scenario="inline-422-comment-fails")
     assert r.returncode == 0, r.stderr
     assert "comment on #5 failed after 5 attempts" in failed
-    assert "follow-up comment with 2 unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+    assert "follow-up comment (part 1) with unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+
+
+def big_finding(i: int) -> str:
+    return f"FINDING_{i}_BEGIN\n" + "x" * 30000 + f"\nFINDING_{i}_END\n"
+
+
+def test_post_splits_unanchored_findings_into_bounded_comments(tmp_path):
+    # Review round 1 of #116: three findings that each fit a comment were
+    # concatenated into one and defang's 60,000 cap dropped the end of the
+    # second and all of the third while `failed` stayed empty. Now a chunk is
+    # posted before it would pass 56,000 bytes, so every finding arrives
+    # whole, in as many comments as it takes, and nothing is recorded as lost.
+    comments = [{"path": f"src/{i}.py", "line": 3, "body_file": f"rc{i}.md"} for i in range(3)]
+    files = {"review.md": "Findings are inline.\n", **{f"rc{i}.md": big_finding(i) for i in range(3)}}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    bodies = posted_bodies(tmp_path)
+    follow_ups = [b for b in bodies if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 3  # ~30 KB each: one per chunk
+    assert follow_ups[1].startswith("Inline review comments that could not be anchored to the diff (the line is outside the PR's diff hunks, or the post failed) (continued):")
+    joined = "".join(follow_ups)
+    for i in range(3):
+        assert f"FINDING_{i}_BEGIN" in joined and f"FINDING_{i}_END" in joined, i
+    assert all(len(b.encode()) < 60000 and "truncated:" not in b for b in follow_ups)
+    # The bodies are ordered: summary, three 422 attempts, three chunks.
+    assert sum(c.startswith("api repos/o/r/issues/5/comments ") for c in calls) == 4
+
+
+def test_post_packs_small_unanchored_findings_into_one_comment(tmp_path):
+    # Two findings under the chunk bound share one comment (the round-1
+    # shape); a third that would pass the bound opens a second.
+    comments = [{"path": f"src/{i}.py", "line": 3, "body_file": f"rc{i}.md"} for i in range(3)]
+    files = {"review.md": "s\n", "rc0.md": "a" * 20000, "rc1.md": "b" * 20000, "rc2.md": "c" * 20000}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5", scenario="inline-422")
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    assert "src/0.py" in follow_ups[0] and "src/1.py" in follow_ups[0] and "src/2.py" in follow_ups[1]
+
+
+def test_post_records_every_lost_follow_up_chunk(tmp_path):
+    comments = [{"path": f"src/{i}.py", "line": 3, "body_file": f"rc{i}.md"} for i in range(2)]
+    files = {"review.md": "s\n", "rc0.md": big_finding(0), "rc1.md": big_finding(1)}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5",
+                                        scenario="inline-422-comment-fails")
+    assert "follow-up comment (part 1) with unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+    assert "follow-up comment (part 2) with unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
 
 
 # post_review_comment_file on its own: retry policy per status.

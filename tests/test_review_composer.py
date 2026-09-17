@@ -34,7 +34,9 @@ spec.loader.exec_module(vm)
 
 PREP = lift_step(WORKFLOW, "        id: claudepost")
 COMPOSE = lift_step(WORKFLOW, "        id: landing")
+SETTINGS_STEP = lift_step(WORKFLOW, "        id: reviewsettings")
 SHA = "a" * 40
+OUT_DIR = "/home/runner/work/_temp/review"
 
 
 def outputs(path: Path) -> dict:
@@ -91,6 +93,62 @@ INLINE = [
     {"path": "src/a.py", "line": 3, "side": "LEFT", "body": "Off by one; cc @auto."},
     {"path": "docs/x.md", "line": 10, "body": "Typo."},
 ]
+
+
+# --- Compose settings ---------------------------------------------------------
+
+
+def compose_settings(tmp_path, settings: dict, *, sandboxed: bool) -> dict:
+    out = tmp_path / "settings-out.txt"
+    out.write_text("")
+    r = sh("bash", "-c", SETTINGS_STEP, check=False, env={
+        "SETTINGS": json.dumps(settings), "OUT_DIR": OUT_DIR, "SANDBOXED": "true" if sandboxed else "false",
+        "GITHUB_WORKSPACE": "/home/runner/work/repo/repo", "GITHUB_OUTPUT": str(out)})
+    assert r.returncode == 0, r.stderr
+    lines = out.read_text().splitlines()
+    assert lines[0] == "value<<SETTINGS_EOF" and lines[-1] == "SETTINGS_EOF"
+    return json.loads(lines[1])
+
+
+# The default `settings` input plus what an older caller may still pass
+# (the tool-level denies and the inline-comment MCP tool).
+CALLER_SETTINGS = {"permissions": {"allow": ["Read", "Bash(pytest:*)", "Bash(gh:*)", "mcp__github_inline_comment"],
+                                   "deny": ["Edit", "Write", "Bash(git push:*)", "Bash(git commit:*)"]}}
+
+
+def test_settings_allow_the_review_dir_only_and_deny_posting(tmp_path):
+    s = compose_settings(tmp_path, CALLER_SETTINGS, sandboxed=False)
+    allow, deny = s["permissions"]["allow"], s["permissions"]["deny"]
+    # The Write tool is checked against Edit rules; `//` is the absolute anchor.
+    assert f"Edit(//{OUT_DIR.lstrip('/')}/**)" in allow
+    assert "mcp__github_inline_comment" not in allow and "Bash(gh:*)" in allow
+    assert "Edit" not in deny and "Write" not in deny
+    for d in ("Bash(gh pr comment:*)", "Bash(gh issue comment:*)", "Bash(gh pr review:*)", "Bash(gh pr create:*)",
+              "Bash(gh pr merge:*)", "Bash(gh issue create:*)", "Bash(git push:*)", "Bash(git commit:*)", "mcp__github_inline_comment"):
+        assert d in deny, d
+    assert "sandbox" not in s  # no overlay on a same-repo head
+
+
+def test_sandboxed_settings_deny_subprocess_writes_to_the_review_dir(tmp_path):
+    # Review round 1 of #116: the Edit allow rule and --add-dir both widen
+    # what sandboxed COMMANDS may write, like allowWrite — so on a fork head
+    # or an External proxy a build hook could write the review files. The
+    # sandbox's denyWrite closes that; the deny holds inside the wider allow
+    # and does not govern the in-process Write tool. Caller entries survive.
+    caller = json.loads(json.dumps(CALLER_SETTINGS))
+    caller["sandbox"] = {"filesystem": {"denyWrite": ["~/.ssh"]},
+                         "credentials": {"files": [{"path": "~/.npmrc", "mode": "deny"}]},
+                         "network": {"tlsTerminate": {"enabled": True}}}
+    s = compose_settings(tmp_path, caller, sandboxed=True)
+    assert s["sandbox"]["filesystem"]["denyWrite"] == ["~/.ssh", OUT_DIR]
+    assert s["sandbox"]["enabled"] is True and s["sandbox"]["allowUnsandboxedCommands"] is False
+    assert s["sandbox"]["excludedCommands"] == ["gh *"]
+    assert s["sandbox"]["credentials"]["files"][0] == {"path": "~/.npmrc", "mode": "deny"}
+    assert "tlsTerminate" not in s["sandbox"]["network"]
+    assert f"Edit(//{OUT_DIR.lstrip('/')}/**)" in s["permissions"]["allow"]
+    # Without caller sandbox settings the deny list is the output dir alone.
+    s = compose_settings(tmp_path, CALLER_SETTINGS, sandboxed=True)
+    assert s["sandbox"]["filesystem"]["denyWrite"] == [OUT_DIR]
 
 
 # --- Prepare Claude review for landing --------------------------------------

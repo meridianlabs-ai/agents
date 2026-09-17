@@ -859,10 +859,16 @@ the dev-agent shape did not:
   token is `pull-requests: read` (the diff and the thread), the prompt's
   posting instructions are writing instructions — `summary.md`,
   `verdict.txt` and an optional `inline.json` under `$RUNNER_TEMP/review`, a
-  directory outside the workspace (so nothing sandboxed contributor code runs
-  can write a "review" there) that the compose-settings step allows for the
-  file tools with an `Edit(//…/**)` absolute-path rule (the Write tool is
-  checked against Edit rules) and nothing else is allowed — and a `Prepare
+  directory outside the workspace that the compose-settings step allows for
+  the file tools with an `Edit(//…/**)` absolute-path rule (the Write tool is
+  checked against Edit rules) and nothing else. On the sandboxed paths that
+  directory is also on the sandbox's `filesystem.denyWrite`: an `Edit` allow
+  rule and `--add-dir` widen what sandboxed *commands* may write exactly as
+  `allowWrite` does, so without the deny a contributor's build hook or test
+  could write the review files itself and land a forged verdict as the
+  machine account (review round 1 of #116); the deny holds inside the wider
+  allow, and the sandbox governs Bash and its children only, so the agent's
+  built-in Write tool still writes them — and a `Prepare
   Claude review for landing` step turns the files into the manifest: the
   summary as `comments[]` flagged `review` (so `land` appends the
   `claude-review-comment` marker after its de-fang — pr-feedback-context's
@@ -870,8 +876,11 @@ the dev-agent shape did not:
   line-level findings as `review_comments[]` (`path`, `line`, `side`,
   `body_file`; `land` posts each through the pull-request review-comments API
   anchored to the PR's current head, and folds one that cannot anchor — a
-  422, the line outside the diff — into one follow-up comment rather than
-  losing it or withholding the verdict), the verdict as `review_verdict`
+  422, the line outside the diff — into bounded follow-up comments, a new
+  one before a chunk would pass 56,000 bytes, so the 60,000 de-fang cap
+  never cuts a finding that fit in its own comment, rather than losing it or
+  withholding the verdict; a chunk that fails to post is a recorded
+  failure), the verdict as `review_verdict`
   exactly as the codex path. External mode lands the summary alone, as one
   comment on the proxy issue. The land job's job token is read-only too
   (`pull-requests: read`, for the composite's lookups): its writes — the
