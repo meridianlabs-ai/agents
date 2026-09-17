@@ -717,11 +717,11 @@ the agent push mid-run:
   branch instead of duplicating it, labels on both paths, and `handback:
   true` rides on that manifest whenever those labels carry `auto` — the
   dev agent is the third hand-back writer, next to the two fix loops, and
-  the `@auto` loop's first review comes from it now that
-  auto-review-on-open is off everywhere (2026-09-16; keyed on the label
-  array `land` applies, so hand-back and label cannot disagree; not owed
-  with an error in the manifest, which hands back to a human instead) — or
-  when the caller's `request_review_after_open` asks for one, so the
+  the `@auto` loop's first review comes from it now that the reviewer
+  stubs' auto-review-on-open is off (2026-09-16; keyed on the label array
+  `land` applies, so hand-back and label cannot disagree; not owed with an
+  error in the manifest, which hands back to a human instead) — or when
+  the caller's `request_review_after_open` asks for one, so the
   `@review` posts after the PR step has labelled — the ordering the input
   existed for. The start SHA of an issue run is the base branch's tip
   recorded after checkout (`origin/<base_branch or default branch>` — the
@@ -759,10 +759,14 @@ the agent push mid-run:
   where the old `Ensure hand-back after agent push` step fired on the
   `@auto` trigger alone. A plain `@claude fix` on a PR the loop owns now
   re-engages the loop (issue #84's fourth verification item). Merge-only
-  runs owe it too, as the old backstop's post did, and the outcome of the
-  agent step does not matter (the loops' rule). The stage rule is
-  unchanged from `Stage - Review (hand-back)`: Review, except a successful
-  `@auto` run with no Surface error that left a PR in the loop.
+  runs owe it too, as the old backstop's post did. An errored run owes it
+  on neither path — the PR it ran on, or the PR it opens — since the dev
+  agent took over the loop's first review: its commits still land and the
+  ⚠️ posts, but the stage hands the PR to a human rather than the loop
+  (before that, a PR run owed the `@review` whatever the step's outcome).
+  The stage rule is unchanged from `Stage - Review (hand-back)`: Review,
+  except a successful `@auto` run with no Surface error that left a PR in
+  the loop.
 - **The agent's one manifest key is `comments`.** The prompt says: commit,
   never push or post, and to say something on the issue/PR write a body
   file under the landing directory and add `{number, body_file}` to
@@ -1549,11 +1553,7 @@ substring collision in trigger gates). Design choices:
   stubs carry only the `issue_comment` trigger; `examples/claude-review-stub.yml`
   keeps the `pull_request` trigger and its `if` clause commented out for a
   repo that wants them back, and the fork's dev stub sets
-  `request_review_after_open: "false"`. The one review that is not unasked
-  is the `@auto` loop's first: the dev agent's landing manifest requests it
-  (`handback`, keyed on the `auto` label) for the PR it opens, since the
-  loop's fix rounds start from the reviewer's verdict (design/auto-agent.md
-  → Kickoff). The rest of this list describes
+  `request_review_after_open: "false"`. The rest of this list describes
   the `pull_request` path as it was designed, for that day.
 - **Auto-review triggered on `pull_request`; a `pull_request_target`
   switch was attempted 2026-08-26 and REVERTED 2026-08-27**: Anthropic's

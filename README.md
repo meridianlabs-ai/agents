@@ -219,9 +219,7 @@ Branch layout:
 > PR, as the fork's substitute for auto-review-on-open; that is off too
 > (`request_review_after_open: "false"`, 2026-09-16). The reviewer stub keeps
 > `allowed_bots: "claude[bot]"` so a bot-authored `@review` is still honored
-> when one is posted. Every PR needs a human `@review` — except a PR the dev
-> agent opens with the `auto` label, whose landing posts the loop's first
-> `@review` as the machine account (design/auto-agent.md → Kickoff).
+> when one is posted. Every PR needs a human `@review`.
 
 Both branches are kept current by `sync-upstream.yml` (hourly): it
 fast-forwards `main` from upstream and merges upstream into `meridian`. It

@@ -148,10 +148,10 @@ on:
           race this input was created to close: the agent used to post
           `@review` mid-run, before the label). A PR opened with the `auto`
           label owes that hand-back on its own — the @auto loop's first
-          review comes from it now that auto-review-on-open is off everywhere
-          (2026-09-16) — so this input only adds the hand-back for PRs
-          outside the loop. Leave "false" where reviews are on demand (every
-          Meridian repo today).
+          review comes from it now that the reviewer stubs' auto-review-on-
+          open is off (2026-09-16) — so this input only adds the hand-back
+          for PRs outside the loop. Leave "false" where reviews are on
+          demand (every Meridian repo today).
         required: false
         type: string
         default: "false"
@@ -1978,24 +1978,29 @@ jobs:
       #     for the branch instead of duplicating it. When those labels carry
       #     `auto` — the same array `land` applies, so the hand-back and the
       #     label cannot disagree — `handback` rides along: the PR enters the
-      #     @auto loop, whose first review is this hand-back now that
-      #     auto-review-on-open is off everywhere (2026-09-16; the review-fix
-      #     loop starts from the reviewer's verdict, so without it an `auto`
-      #     issue produced a PR nobody reviewed — inspect_ai#497 → PR #507),
-      #     and `land` posts the `@review` after the PR step, which labels
-      #     first. Not owed when the manifest carries an error: an errored
-      #     run hands back to a human (`stage`, below), and a `@review` would
-      #     hand the same PR to the loop. request_review_after_open adds the
-      #     hand-back for a PR without the label (off everywhere today).
+      #     @auto loop, whose first review is this hand-back now that the
+      #     reviewer stubs' auto-review-on-open is off (2026-09-16; the
+      #     review-fix loop starts from the reviewer's verdict, so without it
+      #     an `auto` issue produced a PR nobody reviewed — inspect_ai#497 →
+      #     PR #507), and `land` posts the `@review` after the PR step, which
+      #     labels first. Not owed when the manifest carries an error (below,
+      #     with the PR run's). request_review_after_open adds the hand-back
+      #     for a PR without the label, error or not (its behaviour is
+      #     unchanged; off in every Meridian stub today).
       #   handback (was "Ensure hand-back after agent push" and the codex
       #     summary's `@review`) — a PR run whose HEAD moved, on an @auto
       #     run or an `auto`-labelled PR (the gate's `auto`): the landed
-      #     commit owes exactly one `@review`, whatever the agent step's
-      #     outcome (the loops' rule — dropping committed work is worse, the
-      #     push is what re-runs CI, and the ⚠️ says the run failed). A
-      #     merge-only run owes it too, as the old backstop's post did: the
-      #     merge moves the head, and a Q&A @auto run on a behind branch
-      #     would otherwise move it with nobody requesting re-review.
+      #     commit owes exactly one `@review`. A merge-only run owes it too,
+      #     as the old backstop's post did: the merge moves the head, and a
+      #     Q&A @auto run on a behind branch would otherwise move it with
+      #     nobody requesting re-review. On neither path (the PR this run
+      #     opens, or the PR it ran on) is it owed when the manifest carries
+      #     an error: the commits still land (dropping committed work is
+      #     worse, and the push is what re-runs CI) and the ⚠️ posts, but the
+      #     stage hands the PR to a human (below), who re-engages the loop if
+      #     the work is worth it — a `@review` would hand the loop a PR whose
+      #     run failed. (Until the dev agent owed the first review, an
+      #     errored PR run owed the `@review` whatever the step's outcome.)
       #   comments — codex: the summary the step above wrote. Claude: the
       #     agent's own `comments` from its manifest-extra.json — the ONE key
       #     it may write; each entry pinned to THIS issue/PR (a number of the
@@ -2180,17 +2185,19 @@ jobs:
             # -- hand-back on the PR this run opens: an `auto`-labelled PR is
             # the loop's. Keyed on the label array `land` applies, not the
             # gate's `auto` flag alone, so a label list that failed the shape
-            # check above owes nothing either; the caller's
-            # request_review_after_open asks for one regardless of the label.
-            # An errored run owes none: it hands back to a human (the stage
-            # rule below), not to the loop.
-            auto_pr=$(jq -r 'any(.[]; . == "auto")' <<<"$labels")
-            if { [ "$auto_pr" = "true" ] && [ ! -s "$ERROR_FILE" ]; } || [ "${REQ_REVIEW:-false}" = "true" ]; then
+            # check above owes nothing either. An errored run owes none: it
+            # hands back to a human (the stage rule below), not to the loop.
+            # Without the label, the caller's request_review_after_open asks
+            # for one as it always has (error or not).
+            if [ "$(jq -r 'any(.[]; . == "auto")' <<<"$labels")" = "true" ]; then
+              [ -s "$ERROR_FILE" ] || extra=$(jq -c '.handback = true' <<<"$extra")
+            elif [ "${REQ_REVIEW:-false}" = "true" ]; then
               extra=$(jq -c '.handback = true' <<<"$extra")
             fi
           fi
-          # -- hand-back: a landed commit on a PR in the loop's hands
-          if [ "$IS_PR" = "true" ] && [ "$moved" = "true" ] && [ "${AUTO:-}" = "true" ]; then
+          # -- hand-back: a landed commit on a PR in the loop's hands, unless
+          # the run errored (then a human gets it — the stage rule below)
+          if [ "$IS_PR" = "true" ] && [ "$moved" = "true" ] && [ "${AUTO:-}" = "true" ] && [ ! -s "$ERROR_FILE" ]; then
             extra=$(jq -c '.handback = true' <<<"$extra")
           fi
           # -- comments (and the codex thread ids)

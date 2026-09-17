@@ -223,11 +223,25 @@ def test_handback_follows_the_label_array_not_the_auto_flag(repo):
 
 
 def test_request_review_after_open_still_requests_without_the_label(repo):
-    # The input's remaining role: a hand-back for a PR outside the loop.
+    # The input's remaining role: a hand-back for a PR outside the loop —
+    # unchanged, so an errored run still gets it as before.
     on(repo, ISSUE_BRANCH)
     commit(repo)
     m, _, _, _ = compose(repo, is_pr=False, req_review="true")
     assert m["pr"]["labels"] == [] and m["handback"] is True
+    m, _, _, _ = compose(repo, is_pr=False, req_review="true", claude_outcome="failure", error="⚠️ it broke\n")
+    assert m["pr"]["labels"] == [] and m["handback"] is True and m["stage"] == "Review"
+
+
+def test_request_review_after_open_does_not_bypass_the_auto_error_rule(repo):
+    # An `auto`-labelled PR is the loop's whatever the caller's input says:
+    # an errored run owes it no `@review` (review round 1 caught the input
+    # slipping past the error check).
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, _, _, _ = compose(repo, is_pr=False, trigger="@auto", auto="true", req_review="true",
+                         claude_outcome="failure", error="⚠️ it broke\n")
+    assert m["pr"]["labels"] == ["auto"] and "handback" not in m and m["stage"] == "Review"
 
 
 def test_auto_kickoff_read_only_landing_owes_no_handback(repo):
@@ -542,11 +556,22 @@ def test_error_is_carried_and_no_relay_posts_over_it(repo):
     assert "comments" not in m and m["stage"] == "Review"
 
 
-def test_error_at_auto_still_hands_back_to_a_human(repo):
+def test_error_at_auto_lands_but_owes_no_handback(repo):
+    # A PR run in the loop whose agent step errored after committing: the
+    # commits land and the ⚠️ posts, but the PR goes to a human (stage
+    # Review), not back to the loop — the same rule as the PR this workflow
+    # opens (it used to owe the `@review` whatever the step's outcome). Both
+    # engines, and the merge-only shape.
     on(repo, PR_BRANCH)
     commit(repo)
     m, _, _, _ = compose(repo, is_pr=True, trigger="@auto", auto="true", error="⚠️ it broke")
-    assert m["handback"] is True and m["stage"] == "Review"
+    assert "handback" not in m and m["stage"] == "Review" and m["error"]["fail_run"] is True
+    m, _, _, _ = compose(repo, is_pr=True, engine="codex", auto="true", codex_commit="success",
+                         codex_summary="s\n", error="⚠️ it broke")
+    assert "handback" not in m and m["stage"] == "Review" and m["comments"][0]["body_file"] == "codex-comment.md"
+    head = git("rev-parse", "HEAD", cwd=repo["work"]).stdout.strip()
+    m, _, _, _ = compose(repo, is_pr=True, trigger="@auto", auto="true", merge_sha=head, error="⚠️ it broke")
+    assert "handback" not in m and m["stage"] == "Review"
 
 
 def test_codex_pr_run_carries_summary_ids_and_handback(repo):
