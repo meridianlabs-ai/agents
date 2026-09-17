@@ -317,12 +317,12 @@ mints (2026-09-16):
 | job | `repositories` | permissions | fallback |
 | --- | --- | --- | --- |
 | `claude.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
-| `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
+| `claude.yml` land | caller repo | contents, issues, pull requests, org projects, workflows: write (the pushed commits may touch `.github/workflows/`, which a GitHub App push is refused for without Workflows — agents #114, 2026-09-17) | `MARVIN_TOKEN`, then job token |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | `MARVIN_TOKEN`; empty skips the ack and stage |
 | `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | `MARVIN_TOKEN`, then job token |
 | `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`; empty makes the gate skip |
 | `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | `MARVIN_TOKEN`; empty makes the gate skip |
-| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN` (the gate already required one) |
+| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects, workflows: write (same reason) | `MARVIN_TOKEN` (the gate already required one) |
 | `atlas-sync.yml` (fork token, `GH_TOKEN`) | `inspect_ai` | issues, pull requests, org projects: write; actions: read | `MARVIN_TOKEN` |
 | `atlas-sync.yml` (ts-mono read token, `GH_TOKEN_TS_MONO`) | `ts-mono` | metadata, pull requests: read | `MARVIN_TOKEN` |
 

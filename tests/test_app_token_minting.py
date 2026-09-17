@@ -51,8 +51,12 @@ CALLER_REPO = "${{ github.event.repository.name }}"
 WRITE_SETS = {
     ("claude.yml", "gate"): (CALLER_REPO, {"issues": "write", "pull-requests": "write",
                                            "organization-projects": "write"}),
+    # workflows: write on the three land jobs that push the agent's commits:
+    # a GitHub App push touching `.github/workflows/` is refused without it
+    # (agents #114, 2026-09-17); a fine-grained PAT pushes those under Contents.
     ("claude.yml", "land"): (CALLER_REPO, {"contents": "write", "issues": "write",
-                                           "pull-requests": "write", "organization-projects": "write"}),
+                                           "pull-requests": "write", "organization-projects": "write",
+                                           "workflows": "write"}),
     ("claude-review.yml", "gate"): (CALLER_REPO, {"issues": "write", "pull-requests": "read",
                                                   "organization-projects": "write"}),
     ("claude-review.yml", "land"): (CALLER_REPO, {"issues": "write", "pull-requests": "write",
@@ -60,13 +64,15 @@ WRITE_SETS = {
     ("claude-auto.yml", "gate"): (CALLER_REPO, {"issues": "write", "pull-requests": "write",
                                                 "organization-projects": "write"}),
     ("claude-auto.yml", "land"): (CALLER_REPO, {"contents": "write", "issues": "write",
-                                                "pull-requests": "write", "organization-projects": "write"}),
+                                                "pull-requests": "write", "organization-projects": "write",
+                                                "workflows": "write"}),
     # contents: read is the closed-PR continuation's live-branch-tip read
     # (`repos/<repo>/branches/<head>`), a 404 on a private caller without it.
     ("claude-auto-review.yml", "gate"): (CALLER_REPO, {"contents": "read", "issues": "write",
                                                        "pull-requests": "write", "organization-projects": "write"}),
     ("claude-auto-review.yml", "land"): (CALLER_REPO, {"contents": "write", "issues": "write",
-                                                       "pull-requests": "write", "organization-projects": "write"}),
+                                                       "pull-requests": "write", "organization-projects": "write",
+                                                       "workflows": "write"}),
     ("atlas-sync.yml", "sync"): ("inspect_ai", {"issues": "write", "pull-requests": "write",
                                                 "actions": "read", "organization-projects": "write"}),
 }
@@ -154,6 +160,23 @@ def test_trusted_job_mints_first_for_exactly_its_write_set(name, job):
     assert got == perms
     # The action revokes the token in its post step; nothing here keeps it.
     assert "skip-token-revoke" not in mint
+
+
+def test_only_the_land_jobs_that_push_commits_request_workflows_write():
+    """The agent's commits may include workflow files (the dev agent edits
+    stubs; the fix loops edit whatever the PR touches), and a GitHub App push
+    is refused for those without the Workflows permission — so the three
+    pushing land jobs request it, and no gate, the reviewer's land job (no
+    push) or the Atlas sync does."""
+    requesting = set()
+    for (name, job) in WRITE_SETS:
+        mint = mint_step(jobs(workflow(name))[job])
+        got = dict(re.findall(r"^          permission-([a-z-]+): (\w+)$", mint, re.M))
+        if "workflows" in got:
+            assert got["workflows"] == "write", (name, job)
+            assert got.get("contents") == "write", (name, job)
+            requesting.add((name, job))
+    assert requesting == {(name, "land") for name in COMMITTING}
 
 
 @pytest.mark.parametrize("name,job", sorted(WRITE_SETS))

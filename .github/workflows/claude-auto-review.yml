@@ -2416,6 +2416,14 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-organization-projects: write
+          # Workflows too: the pushed commits may touch `.github/workflows/`
+          # (the fix loop edits whatever the PR touches), and a GitHub App push
+          # is refused for those without it — "refusing to allow a GitHub App
+          # to create or update workflow `.github/workflows/claude-review-stub.yml`
+          # without `workflows` permission" (agents #114, 2026-09-17); a
+          # fine-grained PAT pushes them under Contents. The app must hold
+          # Workflows read/write, or this mint step fails and the landing with it.
+          permission-workflows: write
 
       # Skipped when the fix job was cancelled (claude-auto.yml's land job
       # skips the same way): its usual cause is the concurrency group's
