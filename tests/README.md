@@ -21,7 +21,8 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   validator.
 - `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
   step, lifted the same way: the PR open for an issue run (title, body,
-  labels, base, the fork's review request), the `@review` hand-back on an
+  labels, base, the hand-back an `auto`-labelled PR owes and the
+  `request_review_after_open` one), the `@review` hand-back on an
   autonomous PR run, the stage rule, the agent's `comments` (pinned,
   shape-checked, capped), the no-change relay, the codex summary and
   thread ids, the branch-evidence rule (nothing bundled while HEAD is off

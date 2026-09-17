@@ -433,9 +433,30 @@ the dev agent authenticated as `AUTO_TOKEN`:
    step runs *before* the agent (the PR already exists, so it can be labeled up
    front, and the land job's later `@review` is safe). For the **issue→PR-open**
    path the PR doesn't exist until the land job opens it, and that job labels
-   it *before* posting the `@review` (the manifest's `handback`, set by the
-   `request_review_after_open` input, which the fork sets — elsewhere PR-open
-   auto-review already covers it). The agent never posts `@review` itself.
+   it *before* posting the `@review` (the manifest's `handback`, which the
+   dev agent's composer sets whenever the PR's labels carry `auto`). The
+   agent never posts `@review` itself.
+
+   **Where the first review of an `auto` PR comes from.** Until 2026-09-16
+   it came from the reviewer stub's `pull_request` trigger (auto-review on
+   open / ready_for_review; on the fork, where that trigger never fires, the
+   dev stub's `request_review_after_open` stood in for it). Both are off
+   (decision: Ransom, 2026-09-16 — no unasked CI reviews; reviews are driven
+   from Orca). Inside the loop the review is not unasked: the dev agent's
+   landing manifest sets `handback: true` whenever the PR it opens carries
+   the `auto` label — keyed on the very label array `land` applies, so the
+   hand-back and the label cannot disagree — and `land` posts exactly
+   `@review` as the machine account (`meridian-marvin[bot]` under the App)
+   right after the PR step has labelled. The reviewer admits that login by
+   name (`TRUSTED_LOGINS`; the stubs' cost filters let a Bot comment
+   through), posts its verdict, and the review-fix gate owns the loop from
+   there. Without this hand-back an `auto` issue produced a PR nothing
+   reviewed and neither fix loop ever engaged (inspect_ai#497 → PR #507,
+   2026-09-17). No hand-back is owed when the agent committed nothing, when
+   the landing is read-only or when the manifest carries an error — an
+   errored run hands back to a human (stage Review), not to the loop. A
+   plain `@claude` issue or PR without the label gets no hand-back; its
+   review stays on demand.
 2. **CI completed** — `check_suite`/`workflow_run` completed=failure on the PR's
    head → if failing, fix and commit; the land job pushes as marvin (CI re-runs
    because PAT).

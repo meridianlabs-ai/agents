@@ -714,10 +714,16 @@ the agent push mid-run:
   (`auto` on an `@auto` run or an `auto`-labelled issue, plus the issue's
   `engine:*` labels — read in the trusted job, not after the agent ran)
   and `pr.issue` for the link comment. `land` adopts an open PR for the
-  branch instead of duplicating it, labels on both paths, and the fork's
-  `request_review_after_open` becomes `handback: true` on that manifest,
-  so the `@review` posts after the PR step has labelled — the ordering the
-  input existed for. The start SHA of an issue run is the base branch's tip
+  branch instead of duplicating it, labels on both paths, and `handback:
+  true` rides on that manifest whenever those labels carry `auto` — the
+  dev agent is the third hand-back writer, next to the two fix loops, and
+  the `@auto` loop's first review comes from it now that
+  auto-review-on-open is off everywhere (2026-09-16; keyed on the label
+  array `land` applies, so hand-back and label cannot disagree; not owed
+  with an error in the manifest, which hands back to a human instead) — or
+  when the caller's `request_review_after_open` asks for one, so the
+  `@review` posts after the PR step has labelled — the ordering the input
+  existed for. The start SHA of an issue run is the base branch's tip
   recorded after checkout (`origin/<base_branch or default branch>` — the
   fetch-depth-0 clone holds every remote branch); a PR run's is
   sync-branch's pre-merge tip, or on a closed PR (which the sync skips) the
@@ -1543,7 +1549,11 @@ substring collision in trigger gates). Design choices:
   stubs carry only the `issue_comment` trigger; `examples/claude-review-stub.yml`
   keeps the `pull_request` trigger and its `if` clause commented out for a
   repo that wants them back, and the fork's dev stub sets
-  `request_review_after_open: "false"`. The rest of this list describes
+  `request_review_after_open: "false"`. The one review that is not unasked
+  is the `@auto` loop's first: the dev agent's landing manifest requests it
+  (`handback`, keyed on the `auto` label) for the PR it opens, since the
+  loop's fix rounds start from the reviewer's verdict (design/auto-agent.md
+  → Kickoff). The rest of this list describes
   the `pull_request` path as it was designed, for that day.
 - **Auto-review triggered on `pull_request`; a `pull_request_target`
   switch was attempted 2026-08-26 and REVERTED 2026-08-27**: Anthropic's

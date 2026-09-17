@@ -140,16 +140,18 @@ on:
       request_review_after_open:
         description: >-
           After the land job opens/adopts an issue-triggered PR and applies
-          the `auto` label, post an `@review` comment to start the reviewer.
-          Set "true" only where auto-review-on-open does not fire — i.e. the
-          inspect_ai fork, whose `pull_request` events never reach the
-          workflow. Since #84 this is the landing manifest's `handback`: the
-          land composite posts exactly `@review` after its PR step, which
-          labels first, so the review-fix loop always sees a labeled PR when
-          the reviewer's summary lands (the race this input was created to
-          close: the agent used to post `@review` mid-run, before the label).
-          Leave "false" on repos where PR-open auto-review already fires
-          (posting @review here would double-review).
+          its labels, post an `@review` comment to start the reviewer even
+          when the PR carries no `auto` label. Since #84 this is the landing
+          manifest's `handback`: the land composite posts exactly `@review`
+          after its PR step, which labels first, so the review-fix loop
+          always sees a labeled PR when the reviewer's summary lands (the
+          race this input was created to close: the agent used to post
+          `@review` mid-run, before the label). A PR opened with the `auto`
+          label owes that hand-back on its own — the @auto loop's first
+          review comes from it now that auto-review-on-open is off everywhere
+          (2026-09-16) — so this input only adds the hand-back for PRs
+          outside the loop. Leave "false" where reviews are on demand (every
+          Meridian repo today).
         required: false
         type: string
         default: "false"
@@ -1973,10 +1975,18 @@ jobs:
       #     #N` + the commit body + the run link, base from base_branch,
       #     labels from the gate (`auto`, engine:*), the originating issue
       #     for the "✅ Opened a pull request" link. `land` adopts an open PR
-      #     for the branch instead of duplicating it. With
-      #     request_review_after_open (the fork), `handback` rides along:
-      #     `land` posts the `@review` after the PR step, which labels first
-      #     — the ordering the input exists for.
+      #     for the branch instead of duplicating it. When those labels carry
+      #     `auto` — the same array `land` applies, so the hand-back and the
+      #     label cannot disagree — `handback` rides along: the PR enters the
+      #     @auto loop, whose first review is this hand-back now that
+      #     auto-review-on-open is off everywhere (2026-09-16; the review-fix
+      #     loop starts from the reviewer's verdict, so without it an `auto`
+      #     issue produced a PR nobody reviewed — inspect_ai#497 → PR #507),
+      #     and `land` posts the `@review` after the PR step, which labels
+      #     first. Not owed when the manifest carries an error: an errored
+      #     run hands back to a human (`stage`, below), and a `@review` would
+      #     hand the same PR to the loop. request_review_after_open adds the
+      #     hand-back for a PR without the label (off everywhere today).
       #   handback (was "Ensure hand-back after agent push" and the codex
       #     summary's `@review`) — a PR run whose HEAD moved, on an @auto
       #     run or an `auto`-labelled PR (the gate's `auto`): the landed
@@ -2167,7 +2177,15 @@ jobs:
                    '{open: true, title: $t[:256], body_file: "pr-body.md", labels: $labels, issue: $issue}
                     + (if $base != "" then {base: $base} else {} end)')
             extra=$(jq -c --argjson pr "$pr" '.pr = $pr' <<<"$extra")
-            if [ "${REQ_REVIEW:-false}" = "true" ]; then
+            # -- hand-back on the PR this run opens: an `auto`-labelled PR is
+            # the loop's. Keyed on the label array `land` applies, not the
+            # gate's `auto` flag alone, so a label list that failed the shape
+            # check above owes nothing either; the caller's
+            # request_review_after_open asks for one regardless of the label.
+            # An errored run owes none: it hands back to a human (the stage
+            # rule below), not to the loop.
+            auto_pr=$(jq -r 'any(.[]; . == "auto")' <<<"$labels")
+            if { [ "$auto_pr" = "true" ] && [ ! -s "$ERROR_FILE" ]; } || [ "${REQ_REVIEW:-false}" = "true" ]; then
               extra=$(jq -c '.handback = true' <<<"$extra")
             fi
           fi
