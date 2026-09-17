@@ -115,17 +115,33 @@ KNOWN_TOP_LEVEL = {
     "error",
     "provenance_comment_file",
     "review_verdict",
+    "review_comments",
     "slack",
 }
-# The reviewer's verdict marker comment (claude-review.yml's codex path): the
+# The reviewer's verdict marker comment (claude-review.yml, both engines): the
 # land job posts one of two FIXED bodies chosen by this value, so the loop's
 # markers stay live without any agent text passing the de-fang un-broken.
 VERDICTS = ("clean", "suggestions")
 KNOWN_PR = {"open", "title", "body_file", "base", "labels", "issue"}
 # No `target`: the issues endpoint serves PRs and issues alike, so `number`
 # is all the land job needs; a field it never reads would only mislead.
-KNOWN_COMMENT = {"number", "body_file"}
+# `review` marks the reviewer's top-level review comment: the land job
+# appends the `claude-review-comment` marker to it AFTER the de-fang (the
+# anchor pr-feedback-context keys the next fix round on, and the marker the
+# caller stubs skip), so the flag is accepted only on a manifest that also
+# carries a `review_verdict` — a reviewer's — and no other agent's comment
+# can pose as a review.
+KNOWN_COMMENT = {"number", "body_file", "review"}
 KNOWN_REPLY = {"review_comment_id", "body_file"}
+# The reviewer's inline (line-level) review comments, posted on `pr_number`
+# through the pull-request review-comments API, anchored to the PR's head
+# by the land job. `path` is the file path as the diff names it: never a
+# shell argument (jq/gh -f data), so the only shape rules are what keeps it
+# a repository path — no control characters, no leading `/`, no `..`
+# component — and a length bound.
+KNOWN_REVIEW_COMMENT = {"path", "line", "side", "body_file"}
+REVIEW_SIDES = ("LEFT", "RIGHT")
+REVIEW_PATH_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,1000}$")
 KNOWN_ISSUE = {"repo", "title", "body_file", "labels", "comment_on", "assignees", "reopen"}
 # The Slack message a caller's land job posts (triage-test-failures in the
 # actions repo): only the TEXT comes from the manifest — the channel and
@@ -457,6 +473,9 @@ class Validator:
                     self._unknown_keys(c, KNOWN_COMMENT, where)
                     self._positive_int(c, "number", where, required=True)
                     self._file_ref(c, "body_file", where, required=True)
+                    review = self._bool(c, "review", where, required=False)
+                    if review is True and m.get("review_verdict") is None:
+                        self.err(f"{where}: review needs review_verdict (only a reviewer's manifest marks its review comment)")
 
         replies = m.get("replies")
         if replies is not None:
@@ -473,6 +492,31 @@ class Validator:
                     self._file_ref(r, "body_file", where, required=True)
                 if replies and pr_number is None:
                     self.err("manifest: replies need pr_number (the PR whose review comments they answer)")
+
+        review_comments = m.get("review_comments")
+        if review_comments is not None:
+            if not isinstance(review_comments, list):
+                self.err("manifest: review_comments must be a list")
+            else:
+                for i, rc in enumerate(review_comments):
+                    where = f"review_comments[{i}]"
+                    if not isinstance(rc, dict):
+                        self.err(f"{where}: must be an object")
+                        continue
+                    self._unknown_keys(rc, KNOWN_REVIEW_COMMENT, where)
+                    path = self._str(rc, "path", where, required=True)
+                    if path is not None:
+                        if not REVIEW_PATH_RE.fullmatch(path):
+                            self.err(f"{where}: path has control characters or is longer than 1000")
+                        elif path.startswith("/") or ".." in path.split("/"):
+                            self.err(f"{where}: path must be a repository-relative path without '..' components")
+                    self._positive_int(rc, "line", where, required=True)
+                    side = self._str(rc, "side", where, required=False)
+                    if side is not None and side not in REVIEW_SIDES:
+                        self.err(f"{where}: side must be one of {', '.join(REVIEW_SIDES)}")
+                    self._file_ref(rc, "body_file", where, required=True)
+                if review_comments and pr_number is None:
+                    self.err("manifest: review_comments need pr_number (the PR whose diff they annotate)")
 
         threads = m.get("resolve_threads")
         if threads is not None:

@@ -30,7 +30,9 @@ write anything into the artifact; the land job acts only on what the validator
 accepts, and every body it posts passes through the de-fang sed (triggers lose
 their `@`, loop markers are split) except two fixed bodies no agent text
 reaches: the hand-back, posted verbatim as exactly `@review`, and the
-reviewer's verdict comment, chosen by `review_verdict`.
+reviewer's verdict comment, chosen by `review_verdict`. One marker is `land`'s
+own: the `<!-- claude-review-comment -->` it appends, after the de-fang, to a
+`comments[]` body flagged `review` (the reviewer's top-level review).
 
 ## Manifest schema (version 1)
 
@@ -52,7 +54,8 @@ to this document together.
   "pr_number": 456,
   "issue_number": 123,
   "pr": { "open": true, "title": "…", "body_file": "pr-body.md", "base": "main", "labels": ["auto"], "issue": 123 },
-  "comments": [ { "number": 456, "body_file": "c1.md" } ],
+  "comments": [ { "number": 456, "body_file": "c1.md", "review": true } ],
+  "review_comments": [ { "path": "src/app.py", "line": 42, "side": "RIGHT", "body_file": "rc1.md" } ],
   "replies":  [ { "review_comment_id": 789, "body_file": "r1.md" } ],
   "resolve_threads": [ "PRRT_…" ],
   "issues":   [ { "repo": "owner/name", "title": "…", "body_file": "i1.md", "labels": ["auto"], "assignees": ["ransomr"], "comment_on": null } ],
@@ -77,7 +80,8 @@ to this document together.
 | `pr_number` | emit-landing (`pr-number` input) | positive integer or null; **must equal the land job's `pr-number` input** (null when that is empty) — the PR the run's trusted context names, so on a PR run an agent job cannot steer the push, replies, thread resolutions and hand-back at a PR of its choosing, nor drop the number to skip the head-ref rule and let `pr.open` adopt another PR (on a run that names no PR, `branch-prefix` is what keeps the push off the branches of PRs opened for other issues; a still-open PR from an earlier run on the same issue carries the prefix and is adopted). Required by `replies` and `resolve_threads` |
 | `issue_number` | emit-landing (`issue-number` input) | positive integer or null; **must equal the land job's `issue-number` input** the same way; where `land` posts the error report / hand-off / provenance when there is no PR |
 | `pr` | workflow | `open` (bool), `title` (≤ 256 chars), `body_file`; optional `base` (branch name; absent or empty means the land job's default branch, as `gh pr create` would default), `labels` (strings, applied whether `land` opened the PR or adopted an agent-opened one — the `auto` and `engine:*` labels must reach both) and `issue` (the originating issue, gets a "✅ Opened a pull request" comment only when `land` opened the PR). Skipped when `pr_number` is already set; an existing open PR whose head is `branch` **in the target repository** (not cross-repository, head owner = the repo's owner) is adopted, and the adopt check runs inside the create retry so a create whose response was lost is adopted on the next attempt, not duplicated. A fork PR whose head branch merely shares the name is never adopted: `land` names it in the job log and opens a PR for the pushed branch |
-| `comments[]` | workflow | `number` (positive integer — an issue or a PR; the issues endpoint serves both), `body_file` |
+| `comments[]` | workflow | `number` (positive integer — an issue or a PR; the issues endpoint serves both), `body_file`; optional `review` (boolean): the reviewer's top-level review comment — `land` appends `<!-- claude-review-comment -->` to it after the de-fang (the anchor pr-feedback-context keys the next fix round on, and the marker the caller stubs skip), so the flag needs `review_verdict` (a reviewer's manifest; no other agent's comment can pose as a review) |
+| `review_comments[]` | workflow (claude-review.yml's Claude path) | the reviewer's inline (line-level) review comments: `path` (the file as the diff names it: no control characters, ≤ 1000 chars, no leading `/`, no `..` component), `line` (positive integer), optional `side` (`LEFT` \| `RIGHT`, default `RIGHT`), `body_file`; need `pr_number`. `land` posts each through the pull-request review-comments API, de-fanged and anchored to the PR's current head (looked up by `land`; the manifest names no commit). One that cannot anchor (422: the line is outside the PR's diff) or still fails after its retries is folded into ONE follow-up comment on the PR — no finding is lost and the verdict is not withheld over an anchor; only that follow-up comment failing counts as a lost post |
 | `replies[]` | workflow | `review_comment_id` positive integer, `body_file`; posted on `pr_number` |
 | `resolve_threads[]` | workflow | `^PRRT_[A-Za-z0-9_-]+$`; `land` resolves only IDs that belong to `pr_number`. Dropped by `emit-landing` with the bundle (see `stage`): a thread is settled by the code that lands |
 | `issues[]` | workflow | `repo` in the land job's `allowed-issue-repos`, `title` (≤ 256), `body_file`, optional `labels`, optional `assignees` (≤ 10 GitHub logins, no repeats), optional `comment_on` (positive integer: comment on that issue instead of creating one), optional `reopen` (boolean; needs `comment_on`). A create passes `labels` and `assignees` to `gh issue create`. On `comment_on`, `reopen` reopens the issue and `assignees` are added only when it has none (never over a human's ownership). Every issue `land` creates, reopens or assigns goes on Atlas by node ID with Status set to Todo when unset or Done (the board's own "item added → Todo" flow is unreliable; `atlas_todo` in lib.sh) |
@@ -87,10 +91,14 @@ to this document together.
 | `handoff_body_file` | workflow | posted on the PR (or issue) with `<!-- auto-handoff -->` as its first line. Dropped by `emit-landing` with the bundle (see `stage`) when HEAD moved: the hand-off concludes a round whose work must have landed; a no-change round's hand-off (HEAD never moved) is untouched |
 | `error` | workflow (or emit-landing on a packaging failure) | `message` (string), `fail_run` (bool); posted de-fanged on the PR/issue, and the land job exits non-zero after every other step when `fail_run` is true. The same final report names any landing step that failed after the push (a lost comment, reply or follow-up issue is recorded rather than allowed to block the hand-back, hand-off and stage move, and a failed hand-back does not withhold the hand-off or the stage move either) and every planned hand-back, hand-off or stage move that never ran because the PR step failed after the push (a failed fetch or push owes nothing — the work never landed), and posts that on the PR/issue too. When the manifest never validated, the report's target is the land job's `pr-number` / `issue-number` inputs (from the event payload — see below), so a refusal reaches the requester |
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
-| `review_verdict` | workflow (claude-review.yml's codex path) | `clean` or `suggestions`; needs `pr_number`. `land` posts one of two FIXED bodies — the reviewer's `🔎 Review complete …` marker comment with the `claude-review-summary` / `claude-review-verdict:<value>` markers live — after `comments[]` (which carries the de-fanged review body) and only when the Post step lost nothing, so the @auto loop never sees a verdict over a review that did not land. The second body posted verbatim besides the hand-back; no agent text reaches it |
+| `review_verdict` | workflow (claude-review.yml, both engines) | `clean` or `suggestions`; needs `pr_number`. `land` posts one of two FIXED bodies — the reviewer's `🔎 Review complete …` marker comment with the `claude-review-summary` / `claude-review-verdict:<value>` markers live — after `comments[]` (which carries the de-fanged review body) and `review_comments[]`, and only when the Post step lost nothing, so the @auto loop never sees a verdict over a review that did not land. The second body posted verbatim besides the hand-back; no agent text reaches it |
 
 `emit-landing`'s `read-only` input and `land`'s `refuse-bundle` input are the
-pair for a caller whose agent never commits (claude-review.yml): the former
+pair for a caller whose agent never commits (claude-review.yml, whose Claude
+reviewer writes its summary, inline comments and verdict to files the review
+job turns into `comments[]` + `review`, `review_comments[]` and
+`review_verdict`, and whose codex reviewer's structured output becomes
+`comments[]` and `review_verdict`): the former
 runs no git at all and writes `head_sha` = `start_sha`, `has_bundle` false;
 the latter makes the validator refuse any manifest that carries commits,
 claims HEAD moved or ships a `commits.bundle` — whatever the agent job

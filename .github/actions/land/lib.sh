@@ -82,6 +82,29 @@ post_comment_file() {
   gh api "repos/$repo/issues/$number/comments" -F body=@"$file" --silent
 }
 
+# post_review_comment_file REPO PR COMMIT PATH LINE SIDE FILE — one inline
+# (line-level) review comment on PR, anchored to COMMIT at PATH:LINE on SIDE
+# (LEFT|RIGHT), body from FILE (already de-fanged by the caller). Everything
+# travels as gh form data, never as a shell-interpolated command, so PATH is
+# data whatever it holds. Its own retry, not `retry`: a 422 means the line is
+# not in the PR's diff (the reviewer read a tip the PR page does not show, or
+# mis-numbered a line) and no retry will change that, so it is final at once;
+# any other failure gets three attempts. Returns 0 posted, 1 not — the
+# caller folds a comment that did not post into its follow-up comment.
+post_review_comment_file() {
+  local repo="$1" pr="$2" commit="$3" path="$4" line="$5" side="$6" file="$7" i err
+  for ((i = 1; i <= 3; i++)); do
+    if err=$(gh api "repos/$repo/pulls/$pr/comments" -F body=@"$file" -f commit_id="$commit" \
+               -f path="$path" -F line="$line" -f side="$side" --silent 2>&1); then
+      return 0
+    fi
+    printf '%s\n' "$err" >&2
+    case "$err" in *"(HTTP 422)"*) return 1 ;; esac
+    if [ "$i" -lt 3 ]; then sleep $((i * 15)); fi
+  done
+  return 1
+}
+
 # remote_branch_exists REPO BRANCH — prints `yes` or `no` and returns 0 when
 # the API gave a definite answer (200, or 404 = no such branch); returns 1 on
 # anything else (5xx, rate limit, network) so that, under `retry`, a

@@ -433,6 +433,10 @@ Three rules define the shape:
   the de-fang sed (triggers lose their `@`, loop markers are split,
   case-insensitively, capped under the comment limit) before posting; the
   one exception is the hand-back, posted verbatim as exactly `@review`.
+  One marker is `land`'s own: the `<!-- claude-review-comment -->` it
+  appends, after the de-fang, to a `comments[]` body flagged `review` (the
+  reviewer's top-level review — the flag is admitted only next to a
+  `review_verdict`, so no other agent's comment can pose as a review).
   The codex reviewer's `engine: codex` anchor footer is deliberately NOT
   on `land`'s list: the reviewer posts its real footer through this same
   composite, so workflows whose bodies must not pose as a review (the
@@ -818,11 +822,11 @@ the agent push mid-run:
 is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`
 (checkout, provisioning, the agent; names no GitHub-write secret — the codex
 engine's `OPENAI_API_KEY` is the one secret it holds, unavoidably) → `land`
-(the `land` composite, then the posted-review check as marvin with the job
+(the `land` composite, then the landed-review check as marvin with the job
 token as fallback — in external mode the nudge's target is the proxy issue,
 and the job token has `issues: read` only: a reusable workflow cannot request
-more than the callers' stubs grant). Two things the reviewer needed that the
-dev-agent shape did not:
+more than the callers' stubs grant). Three things the reviewer needed that
+the dev-agent shape did not:
 
 - **It never commits, so its land job must never be a push channel.**
   `emit-landing`'s `read-only` input skips git entirely (`head_sha` =
@@ -845,6 +849,41 @@ dev-agent shape did not:
   hand-back; no agent text reaches it — after `comments[]` and only when the
   Post step lost nothing, so a verdict never posts over a review body that
   did not land (Report names it as withheld instead).
+- **The Claude reviewer's review is files, not posts (#114, 2026-09-17).**
+  Phase 1 converted the codex path only; the Claude reviewer kept
+  `pull-requests: write` on the review job's token and posted its summary,
+  inline comments and verdict marker itself with `gh` and the action's
+  inline-comment MCP tool — a reviewer steered by hostile PR content could
+  post arbitrary comments and a forged verdict as the job's identity (the
+  residual five of the seven Phase 2 stub reviews raised). Now the review job
+  token is `pull-requests: read` (the diff and the thread), the prompt's
+  posting instructions are writing instructions — `summary.md`,
+  `verdict.txt` and an optional `inline.json` under `$RUNNER_TEMP/review`, a
+  directory outside the workspace (so nothing sandboxed contributor code runs
+  can write a "review" there) that the compose-settings step allows for the
+  file tools with an `Edit(//…/**)` absolute-path rule (the Write tool is
+  checked against Edit rules) and nothing else is allowed — and a `Prepare
+  Claude review for landing` step turns the files into the manifest: the
+  summary as `comments[]` flagged `review` (so `land` appends the
+  `claude-review-comment` marker after its de-fang — pr-feedback-context's
+  anchor for the next fix round, which the de-fang would otherwise split), the
+  line-level findings as `review_comments[]` (`path`, `line`, `side`,
+  `body_file`; `land` posts each through the pull-request review-comments API
+  anchored to the PR's current head, and folds one that cannot anchor — a
+  422, the line outside the diff — into one follow-up comment rather than
+  losing it or withholding the verdict), the verdict as `review_verdict`
+  exactly as the codex path. External mode lands the summary alone, as one
+  comment on the proxy issue. The land job's `pull-requests: write` is
+  unchanged (its writes are the same set, plus the inline comments — the
+  `land` row in the table above). The posted-review check that counted the
+  agent's comments through the API is now a landed-review check on `land`'s
+  outputs (`posted_verdict` in pr mode, `posted_comments` in external mode),
+  gated on the land step having succeeded (a failed landing is already
+  reported). The settings deny list follows the fix job's model above: the
+  gh posting verbs and the inline-comment MCP tool are denied at runtime
+  whatever the caller's `settings` say — guard rails around the action's
+  App token, which the job's permissions do not scope, while the job token
+  itself can no longer post.
 
 The review job's `Surface agent errors` no longer posts: its message is the
 manifest's `error` (fail_run true) and the land job posts it, de-fanged, and
@@ -1532,10 +1571,14 @@ substring collision in trigger gates). Design choices:
 
 - **Read-only by token scope** (`contents: read`), not just by prompt — the
   hard boundary. A `deny` overlay on edits/git is belt-and-suspenders.
-- **Can run tests** to verify findings, but no write tools. This required
-  allow-listing `gh` and the inline-comment MCP so it can actually *post* the
-  review — an early version produced a good review that went nowhere because no
-  posting tool was allowed.
+- **Can run tests** to verify findings, but no write tools outside the
+  review output directory (`$RUNNER_TEMP/review`, where it writes the
+  summary, inline comments and verdict the land job posts — Landing job
+  above, #114). It posts nothing itself: `gh` is allow-listed for the reads
+  (the diff, the thread) and its posting verbs are denied. History: an early
+  version produced a good review that went nowhere because no posting tool
+  was allowed, which is why `gh` and the inline-comment MCP were
+  allow-listed until the landing manifest carried the review instead.
 - **Auto-review is OFF everywhere since 2026-09-16** (decision: Ransom;
   actions first on 2026-09-14 after actions#110 was reviewed unasked, then
   every repo after inspect_ai#501 was). Reviews are asked for — an `@review`

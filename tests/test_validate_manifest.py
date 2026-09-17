@@ -714,11 +714,100 @@ def test_review_verdict_needs_pr_number(tmp_path):
     assert any("review_verdict needs pr_number" in e for e in errs)
 
 
+# --- comments[].review and review_comments (claude-review.yml's Claude path,
+# issue #114: the reviewer's summary, marker and inline comments land through
+# the manifest instead of being posted by the agent) -------------------------
+
+
+def test_comment_review_flag_needs_a_verdict(tmp_path):
+    # The flag makes `land` append the review-comment marker (the anchor the
+    # fix loop keys on), so only a reviewer's manifest — one that carries a
+    # review_verdict — may set it; no other agent's comment can pose as a review.
+    m = base_manifest(tmp_path)
+    m["comments"][0]["review"] = True
+    errs = run(tmp_path, m)
+    assert any("comments[0]: review needs review_verdict" in e for e in errs)
+    m["review_verdict"] = "clean"
+    assert run(tmp_path, m) == []
+    m["comments"][0]["review"] = False
+    del m["review_verdict"]
+    assert run(tmp_path, m) == []
+
+
+@pytest.mark.parametrize("value", ["true", 1])
+def test_comment_review_flag_must_be_boolean(tmp_path, value):
+    m = base_manifest(tmp_path, review_verdict="clean")
+    m["comments"][0]["review"] = value
+    assert any("comments[0]: review must be a boolean" in e for e in run(tmp_path, m))
+
+
+def review_comment(d: Path, **overrides) -> dict:
+    rc = {"path": "src/app.py", "line": 42, "side": "RIGHT", "body_file": write(d, "rc1.md")}
+    rc.update(overrides)
+    return rc
+
+
+def test_review_comments_valid_shapes(tmp_path):
+    rcs = [
+        review_comment(tmp_path),
+        review_comment(tmp_path, side="LEFT", path="docs/a b (c).md"),
+        review_comment(tmp_path, side=None),  # optional: RIGHT by default in land
+        {"path": "x", "line": 1, "body_file": write(tmp_path, "rc2.md")},
+    ]
+    assert run(tmp_path, base_manifest(tmp_path, review_comments=rcs)) == []
+    assert run(tmp_path, base_manifest(tmp_path, review_comments=[])) == []
+
+
+@pytest.mark.parametrize(
+    "override,needle",
+    [
+        ({"path": ""}, "path must not be empty"),
+        ({"path": "/abs/file.py"}, "repository-relative path without '..' components"),
+        ({"path": "a/../b.py"}, "repository-relative path without '..' components"),
+        ({"path": "a\nb.py"}, "control characters"),
+        ({"path": "x" * 1001}, "longer than 1000"),
+        ({"path": 3}, "path must be a string"),
+        ({"line": 0}, "line must be a positive integer"),
+        ({"line": "3"}, "line must be a positive integer"),
+        ({"line": True}, "line must be a positive integer"),
+        ({"side": "right"}, "side must be one of LEFT, RIGHT"),
+        ({"side": "BOTH"}, "side must be one of LEFT, RIGHT"),
+        ({"start_line": 40}, "unknown key 'start_line'"),
+        ({"body_file": None}, "body_file is required"),
+        ({"body_file": "missing.md"}, "does not exist"),
+    ],
+)
+def test_review_comment_shape(tmp_path, override, needle):
+    rc = review_comment(tmp_path)
+    for k, v in override.items():
+        if v is None:
+            del rc[k]
+        else:
+            rc[k] = v
+    errs = run(tmp_path, base_manifest(tmp_path, review_comments=[rc]))
+    assert any(needle in e and "review_comments[0]" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("value", [{"path": "x"}, "src/a.py", [1]])
+def test_review_comments_must_be_a_list_of_objects(tmp_path, value):
+    errs = run(tmp_path, base_manifest(tmp_path, review_comments=value))
+    assert any("review_comments must be a list" in e or "review_comments[0]: must be an object" in e for e in errs), errs
+
+
+def test_review_comments_need_pr_number(tmp_path):
+    # An issue run has no diff to annotate.
+    m = base_manifest(tmp_path, pr_number=None, replies=[], resolve_threads=[], handback=False,
+                      review_comments=[review_comment(tmp_path)])
+    errs = run(tmp_path, m, event_pr="")
+    assert any("review_comments need pr_number" in e for e in errs)
+
+
 # --- refuse_bundle (a land job whose agent never commits) --------------------
 
 
 def review_manifest(d: Path, **overrides) -> dict:
-    """What claude-review.yml's read-only emit-landing produces on a PR run."""
+    """What claude-review.yml's read-only emit-landing produces on a PR run
+    (the Claude path: the summary flagged `review`, inline comments, verdict)."""
     m = {
         "schema": 1,
         "repo": REPO,
@@ -729,7 +818,8 @@ def review_manifest(d: Path, **overrides) -> dict:
         "has_bundle": False,
         "pr_number": 456,
         "issue_number": None,
-        "comments": [{"number": 456, "body_file": write(d, "codex-review.md")}],
+        "comments": [{"number": 456, "body_file": write(d, "claude-review.md"), "review": True}],
+        "review_comments": [{"path": "src/app.py", "line": 42, "side": "RIGHT", "body_file": write(d, "claude-inline-0.md")}],
         "review_verdict": "suggestions",
         "stage": "Review",
         "provenance_comment_file": write(d, "prov.md"),
@@ -741,6 +831,19 @@ def review_manifest(d: Path, **overrides) -> dict:
 
 def test_refuse_bundle_accepts_the_reviewers_manifest(tmp_path):
     assert run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True) == []
+
+
+def test_refuse_bundle_accepts_a_review_without_inline_comments(tmp_path):
+    # The codex shape, and a Claude review with nothing line-level to say.
+    m = review_manifest(tmp_path, review_comments=None, comments=[{"number": 456, "body_file": write(tmp_path, "codex-review.md")}])
+    assert run(tmp_path, m, event_issue="", refuse_bundle=True) == []
+
+
+def test_refuse_bundle_refuses_a_review_of_another_pr(tmp_path):
+    # A review job cannot steer its summary, inline comments and verdict at a
+    # PR other than the one the run's event names.
+    errs = run(tmp_path, review_manifest(tmp_path, pr_number=457), event_issue="", refuse_bundle=True)
+    assert any("pr_number 457 is not the PR this run's event names (#456)" in e for e in errs)
 
 
 def test_refuse_bundle_refuses_commits(tmp_path):
@@ -848,7 +951,8 @@ def test_refuse_bundle_external_mode_keeps_the_branch_prefix(tmp_path):
     # External mode names no PR of ours: the review job emits a fixed
     # `review/external-<issue>` name and the land job pins the prefix. Under
     # refuse_bundle that pin is the only branch rule left besides shape.
-    m = review_manifest(tmp_path, branch="review/external-12", pr_number=None, issue_number=12, comments=[], review_verdict=None)
+    m = review_manifest(tmp_path, branch="review/external-12", pr_number=None, issue_number=12, comments=[],
+                        review_comments=None, review_verdict=None)
     common = {"pr_head_ref": "", "event_pr": "", "event_issue": "12", "branch_prefix": "review/external-12", "refuse_bundle": True}
     assert run(tmp_path, m, **common) == []
     m["branch"] = "review/external-13"

@@ -447,15 +447,37 @@ def post_script() -> str:
 
 
 # `gh` answers from $SCENARIO: the issue's assignee count (`0`, `1`, or a
-# failed lookup), whether `issue edit` / `issue reopen` succeed. `curl`
-# records the Slack request. Every call is logged; the Atlas status write is
-# logged separately so a test can assert the board was not touched.
+# failed lookup), whether `issue edit` / `issue reopen` succeed, the PR's
+# head SHA (or a failed lookup: `head-fails`) and whether an inline review
+# comment anchors (`inline-422`: never; `inline-flaky`: after one 500;
+# `inline-500`: never, no 422) or a top-level comment posts
+# (`comment-fails`, alone or as `inline-422-comment-fails`). `curl` records the Slack request. Every call is logged;
+# the Atlas status write is logged separately so a test can assert the board
+# was not touched, and every body file handed to `-F body=@…` is appended to
+# $STATE/bodies (separated by `===` lines) so a test can read what posted.
 POST_STUB = r"""
 sleep() { :; }
+record_body() { for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >>"$STATE/bodies"; printf '\n===\n' >>"$STATE/bodies" ;; esac; done; }
 gh() {
   echo "$*" >>"$STATE/calls"
   case "$*" in
-    "api repos/"*"/comments "*) return 0 ;;
+    "pr view "*"--json headRefOid"*)
+      case "$SCENARIO" in
+        head-fails) echo '{"message": "Server Error"}'; return 1 ;;
+        *) echo "cccccccccccccccccccccccccccccccccccccccc" ;;
+      esac ;;
+    "api repos/"*"/pulls/"*"/comments "*)
+      record_body "$@"
+      case "$SCENARIO" in
+        inline-422*) echo '{"message": "Validation Failed"}'; echo "gh: Validation Failed (HTTP 422)" >&2; return 1 ;;
+        inline-500) echo "gh: Server Error (HTTP 500)" >&2; return 1 ;;
+        inline-flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo "gh: Server Error (HTTP 500)" >&2; return 1; fi ;;
+      esac
+      return 0 ;;
+    "api repos/"*"/issues/"*"/comments "*)
+      record_body "$@"
+      case "$SCENARIO" in *comment-fails) return 1 ;; esac
+      return 0 ;;
     "api repos/"*"--jq .node_id") echo "I_kwDONODE" ;;
     "api repos/"*"--jq .assignees | length")
       case "$SCENARIO" in
@@ -480,7 +502,7 @@ curl() {
 """
 
 
-def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None):
+def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None, pr_number=""):
     state = tmp_path / "state"
     state.mkdir()
     landing = tmp_path / "landing"
@@ -492,15 +514,26 @@ def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=No
     out.write_text("")
     env = {
         "STATE": str(state), "SCENARIO": scenario, "LIB": str(LIB), "DIR": str(landing),
-        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR_NUMBER": "",
+        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR_NUMBER": pr_number,
         "SLACK_TOKEN": "", "SLACK_CHANNEL": "", "SLACK_THREAD_TS": "",
         **(slack_env or {}),
     }
     r = sh("bash", "-c", POST_STUB + post_script(), check=False, env=env)
     calls = (state / "calls").read_text().splitlines() if (state / "calls").exists() else []
     writes = (state / "writes").read_text().splitlines() if (state / "writes").exists() else []
-    failed = out.read_text().strip().removeprefix("failed=")
+    failed = post_outputs(tmp_path).get("failed", "")
     return r, calls, writes, failed
+
+
+def post_outputs(tmp_path) -> dict:
+    """The Post step's $GITHUB_OUTPUT lines (`failed=…`, `posted_comments=…`)."""
+    return dict(line.split("=", 1) for line in (tmp_path / "out.txt").read_text().splitlines() if "=" in line)
+
+
+def posted_bodies(tmp_path) -> list:
+    """Every body the stub `gh` was handed, in posting order."""
+    f = tmp_path / "state" / "bodies"
+    return [b for b in f.read_text().split("\n===\n") if b] if f.exists() else []
 
 
 def comment_on_manifest(**issue):
@@ -593,6 +626,150 @@ def test_post_slack_tracking_links_survive_the_cap(tmp_path):
     assert req["channel"] == "C0123456789" and req["thread_ts"] == "1726000000.123456"
     assert len(req["text"]) <= 39000
     assert req["text"].endswith("\nTracking issue: https://github.com/o/r/issues/7\n")
+
+
+# --- the reviewer's landing (issue #114): the review marker and the inline
+# review comments. The Claude reviewer posts nothing itself any more; its
+# summary lands through comments[] flagged `review`, its line-level findings
+# through review_comments[], its verdict through review_verdict.
+
+
+def review_landing(**overrides):
+    m = {"schema": 1, "repo": "o/r", "run_id": 123, "branch": "b", "start_sha": "a" * 40, "head_sha": "a" * 40,
+         "has_bundle": False, "pr_number": 5,
+         "comments": [{"number": 5, "body_file": "review.md", "review": True}],
+         "review_comments": [
+             {"path": "src/a.py", "line": 3, "side": "RIGHT", "body_file": "rc0.md"},
+             {"path": "docs/x.md", "line": 10, "body_file": "rc1.md"},
+         ],
+         "review_verdict": "suggestions"}
+    m.update(overrides)
+    return m
+
+
+REVIEW_FILES = {"review.md": "Summary; please @review again. <!-- claude-review-comment -->\n",
+                "rc0.md": "Off by one; see @auto.\n", "rc1.md": "Typo.\n"}
+
+
+def test_post_appends_the_review_marker_after_the_defang(tmp_path):
+    # The marker is land's own text: the copy in the agent's body is split by
+    # the de-fang like any loop marker, and exactly one live marker follows,
+    # so pr-feedback-context anchors on the landed review and the stubs skip
+    # it — and a comments[] entry without the flag gets none.
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[]), REVIEW_FILES, pr_number="5")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    (body,) = posted_bodies(tmp_path)
+    assert body.count("<!-- claude-review-comment -->") == 1
+    assert body.endswith("\n<!-- claude-review-comment -->\n")
+    assert "`review`" in body and "claude-review comment" in body
+    assert post_outputs(tmp_path)["posted_comments"] == "1"
+    (tmp_path / "plain").mkdir()
+    r, calls, writes, failed = run_post(tmp_path / "plain", review_landing(
+        review_comments=[], comments=[{"number": 5, "body_file": "review.md"}]), REVIEW_FILES, pr_number="5")
+    (body,) = posted_bodies(tmp_path / "plain")
+    assert "<!-- claude-review-comment -->" not in body
+
+
+def test_post_anchors_inline_review_comments_to_the_prs_head(tmp_path):
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    inline = [c for c in calls if c.startswith("api repos/o/r/pulls/5/comments ")]
+    assert len(inline) == 2
+    assert "-f commit_id=" + "c" * 40 + " -f path=src/a.py -F line=3 -f side=RIGHT --silent" in inline[0]
+    # `side` defaults to RIGHT; every body is de-fanged.
+    assert "-f path=docs/x.md -F line=10 -f side=RIGHT" in inline[1]
+    bodies = posted_bodies(tmp_path)
+    assert bodies[1] == "Off by one; see `auto`.\n" and bodies[2] == "Typo.\n"
+    # No follow-up comment: everything anchored. Summary + 2 inline = 3 posts.
+    assert len(bodies) == 3
+    assert "posted 2 of 2 inline review comment(s)" in r.stdout
+
+
+def test_post_folds_unanchorable_inline_comments_into_one_follow_up(tmp_path):
+    # 422 is final (no retry — one attempt each), the findings go into ONE
+    # top-level comment, and nothing is recorded as failed: the verdict must
+    # not be withheld over an anchor.
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 2
+    bodies = posted_bodies(tmp_path)
+    follow_up = bodies[-1]
+    assert follow_up.startswith("Inline review comments that could not be anchored")
+    assert "**src/a.py** line 3 (RIGHT)" in follow_up and "Off by one; see `auto`." in follow_up
+    assert "**docs/x.md** line 10 (RIGHT)" in follow_up and "Typo." in follow_up
+    assert calls[-1].startswith("api repos/o/r/issues/5/comments ")
+
+
+def test_post_retries_a_transient_inline_comment_failure(tmp_path):
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5", scenario="inline-flaky")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 3
+    assert not any(c.startswith("api repos/o/r/issues/5/comments ") and "unanchored" in c for c in calls)
+    assert len(posted_bodies(tmp_path)) == 4  # summary, failed attempt, retry, second inline
+
+
+def test_post_folds_every_inline_comment_when_the_head_lookup_fails(tmp_path):
+    # No commit to anchor to: nothing is tried inline, all go to the follow-up.
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5", scenario="head-fails")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert not any(c.startswith("api repos/o/r/pulls/") for c in calls)
+    assert sum(c.startswith("pr view 5 ") for c in calls) == 3  # retried, then given up
+    assert "could not read #5's head SHA" in r.stdout
+    assert posted_bodies(tmp_path)[-1].startswith("Inline review comments that could not be anchored")
+
+
+def test_post_records_a_lost_follow_up_comment(tmp_path):
+    # The one inline-comment failure that IS a lost post: the follow-up
+    # comment itself failing after the 422s. (The summary shares the
+    # endpoint and fails too; both are named, and the verdict is withheld.)
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5",
+                                        scenario="inline-422-comment-fails")
+    assert r.returncode == 0, r.stderr
+    assert "comment on #5 failed after 5 attempts" in failed
+    assert "follow-up comment with 2 unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+
+
+# post_review_comment_file on its own: retry policy per status.
+RC_STUB = r"""
+sleep() { :; }
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$SCENARIO" in
+    422) echo '{"message": "Validation Failed"}'; echo "gh: Validation Failed (HTTP 422)" >&2; return 1 ;;
+    500) echo "gh: Server Error (HTTP 500)" >&2; return 1 ;;
+    flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo "gh: Server Error (HTTP 500)" >&2; return 1; fi ;;
+  esac
+  return 0
+}
+"""
+
+
+@pytest.mark.parametrize("scenario,rc,attempts", [("", 0, 1), ("422", 1, 1), ("flaky", 0, 2), ("500", 1, 3)])
+def test_post_review_comment_file_retry_policy(tmp_path, scenario, rc, attempts):
+    state = tmp_path / "state"
+    state.mkdir()
+    body = tmp_path / "b.md"
+    body.write_text("finding\n")
+    r = sh("bash", "-c", RC_STUB + f". '{LIB}'\npost_review_comment_file o/r 5 {'c' * 40} 'src/a b.py' 7 LEFT '{body}'; echo rc=$?",
+           check=False, env={"STATE": str(state), "SCENARIO": scenario})
+    assert r.stdout.strip().endswith(f"rc={rc}"), r.stdout + r.stderr
+    calls = (state / "calls").read_text().splitlines()
+    assert len(calls) == attempts
+    assert calls[0] == f"api repos/o/r/pulls/5/comments -F body=@{body} -f commit_id={'c' * 40} -f path=src/a b.py -F line=7 -f side=LEFT --silent"
+
+
+def test_land_outputs_what_the_reviewer_landed():
+    # claude-review.yml's landed-review check reads these instead of counting
+    # the agent's comments (it posts none): the verdict comment is the review
+    # in pr mode, the proxy-issue comment in external mode.
+    text = LAND.read_text()
+    assert "posted_comments:\n" in text and "value: ${{ steps.post.outputs.posted_comments }}" in text
+    assert "value: ${{ steps.verdict.outcome == 'success' && steps.plan.outputs.verdict != '' && '1' || '' }}" in text
 
 
 

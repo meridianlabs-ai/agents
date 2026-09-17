@@ -7,12 +7,13 @@ description: >-
   every field is data until it passes), and only then act on it with the
   privileged token: push the bundled commits (never --force, and never over
   a branch that moved during the run), open or adopt the PR, post the
-  de-fanged comments and review replies, resolve review threads that belong
-  to that PR, file follow-up issues in allow-listed repos (or comment on,
-  reopen and assign existing ones) and put them on Atlas at Todo, post the
-  manifest's Slack text to the channel and thread the CALLER's inputs name,
-  post the reviewer's verdict comment (a fixed marker body chosen by
-  `review_verdict`), the `@review` hand-back or the escalation hand-off,
+  de-fanged comments, inline review comments and review replies, resolve
+  review threads that belong to that PR, file follow-up issues in
+  allow-listed repos (or comment on, reopen and assign existing ones) and
+  put them on Atlas at Todo, post the manifest's Slack text to the channel
+  and thread the CALLER's inputs name, post the reviewer's verdict comment
+  (a fixed marker body chosen by `review_verdict`), the `@review` hand-back
+  or the escalation hand-off,
   move the board stage, post the model-provenance note, and finally report the
   manifest's error (failing the run when it says so — after everything else
   ran). Steps run in this order and stop at the first failure, with two
@@ -201,6 +202,18 @@ outputs:
   landed_head:
     description: The SHA now at the tip of `branch` after the push (the manifest's head_sha).
     value: ${{ steps.push.outputs.landed_head }}
+  posted_comments:
+    description: >-
+      How many `comments[]` bodies were posted (claude-review.yml's
+      landed-review check reads it in external mode, where the review is
+      one comment on the proxy issue and there is no verdict).
+    value: ${{ steps.post.outputs.posted_comments }}
+  posted_verdict:
+    description: >-
+      "`1` when the reviewer's verdict comment was posted; empty otherwise
+      (claude-review.yml's landed-review check: a review run whose manifest
+      carried no verdict landed no review)."
+    value: ${{ steps.verdict.outcome == 'success' && steps.plan.outputs.verdict != '' && '1' || '' }}
 
 runs:
   using: composite
@@ -471,9 +484,16 @@ runs:
         fi
         echo "number=$number" >>"$GITHUB_OUTPUT"
 
-    # Comments, review replies, thread resolutions, follow-up issues, the
-    # Slack text. Every body passes through defang (lib.sh) first — agent
-    # text posts from a write-access account. Thread IDs are checked against
+    # Comments, inline review comments, review replies, thread resolutions,
+    # follow-up issues, the Slack text. Every body passes through defang
+    # (lib.sh) first — agent text posts from a write-access account. A
+    # `comments[]` entry flagged `review` (the reviewer's top-level review;
+    # the validator admits the flag only next to a `review_verdict`) gets the
+    # `claude-review-comment` marker appended AFTER the de-fang — our fixed
+    # text, like the hand-off's and the provenance note's first-line markers
+    # — so pr-feedback-context can anchor the next fix round on the landed
+    # review and the caller stubs skip it, while the same substring in agent
+    # text is still split. Thread IDs are checked against
     # the PR's own threads before any resolve, so a manifest cannot resolve a
     # thread on another PR. The Slack destination is this action's own
     # inputs; the manifest supplies the text and nothing else.
@@ -504,15 +524,70 @@ runs:
         note() { failed="${failed:+$failed; }$1"; echo "::error::land: $1"; }
         # -- comments
         i=0
-        while IFS= read -r number && IFS= read -r file; do
+        posted_comments=0
+        while IFS= read -r number && IFS= read -r file && IFS= read -r review; do
           defang "$DIR/$file" "$RUNNER_TEMP/comment-$i.md"
+          # The marker after the de-fang and after its cap (60,000 < 65,536).
+          [ "$review" != "true" ] || printf '\n<!-- claude-review-comment -->\n' >>"$RUNNER_TEMP/comment-$i.md"
           if retry 5 "comment on #$number" post_comment_file "$REPO" "$number" "$RUNNER_TEMP/comment-$i.md"; then
             echo "land: commented on #$number."
+            posted_comments=$((posted_comments + 1))
           else
             note "comment on #$number failed after 5 attempts"
           fi
           i=$((i + 1))
-        done < <(jq -r '.comments // [] | .[] | (.number|tostring), .body_file' "$m")
+        done < <(jq -r '.comments // [] | .[] | (.number|tostring), .body_file, (.review // false | tostring)' "$m")
+        echo "posted_comments=$posted_comments" >>"$GITHUB_OUTPUT"
+        # -- inline review comments (need the PR), anchored to the PR's
+        #    CURRENT head (looked up here — the manifest names no commit, and
+        #    on a pull_request run the review job's checkout was the merge
+        #    ref). One that cannot anchor (422: the line is outside the PR's
+        #    diff — a live-branch continuation reviewed past the frozen diff,
+        #    or a mis-numbered line), or that still fails after its retries,
+        #    is folded into ONE follow-up comment on the PR: no finding is
+        #    lost, and the verdict is not withheld over an anchor (a failed
+        #    anchor is not a lost review; the follow-up comment failing is).
+        n=$(jq -r '.review_comments // [] | length' "$m")
+        if [ "$n" -gt 0 ]; then
+          head_sha=""
+          if [ -n "$PR_NUMBER" ]; then
+            head_sha=$(retry_read 3 "head lookup for #$PR_NUMBER" gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid') || head_sha=""
+          fi
+          if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            head_sha=""
+            echo "::warning::land: could not read #$PR_NUMBER's head SHA; the inline review comments go into one follow-up comment instead."
+          fi
+          : >"$RUNNER_TEMP/unanchored.md"
+          posted=0
+          for ((k = 0; k < n; k++)); do
+            rc=$(jq -c ".review_comments[$k]" "$m")
+            path=$(jq -r '.path' <<<"$rc")
+            line=$(jq -r '.line' <<<"$rc")
+            side=$(jq -r '.side // "RIGHT"' <<<"$rc")
+            defang "$DIR/$(jq -r '.body_file' <<<"$rc")" "$RUNNER_TEMP/inline-$k.md"
+            if [ -n "$head_sha" ] && post_review_comment_file "$REPO" "$PR_NUMBER" "$head_sha" "$path" "$line" "$side" "$RUNNER_TEMP/inline-$k.md"; then
+              posted=$((posted + 1))
+            else
+              echo "::warning::land: inline review comment on $path:$line ($side) did not post; folding it into the follow-up comment."
+              printf '\n---\n\n**%s** line %s (%s)\n\n' "$path" "$line" "$side" >>"$RUNNER_TEMP/unanchored.md"
+              cat "$RUNNER_TEMP/inline-$k.md" >>"$RUNNER_TEMP/unanchored.md"
+            fi
+          done
+          echo "land: posted $posted of $n inline review comment(s) on #$PR_NUMBER."
+          if [ -s "$RUNNER_TEMP/unanchored.md" ]; then
+            {
+              printf 'Inline review comments that could not be anchored to the diff (the line is outside the PR'"'"'s diff hunks, or the post failed):\n'
+              cat "$RUNNER_TEMP/unanchored.md"
+            } >"$RUNNER_TEMP/unanchored-all.md"
+            # The bodies are de-fanged already; this pass is for the cap.
+            defang "$RUNNER_TEMP/unanchored-all.md" "$RUNNER_TEMP/unanchored-post.md"
+            if retry 5 "unanchored inline comments on #$PR_NUMBER" post_comment_file "$REPO" "$PR_NUMBER" "$RUNNER_TEMP/unanchored-post.md"; then
+              echo "land: posted the unanchored inline review comments as one comment on #$PR_NUMBER."
+            else
+              note "follow-up comment with $((n - posted)) unanchored inline review comment(s) on #$PR_NUMBER failed after 5 attempts"
+            fi
+          fi
+        fi
         # -- review-comment replies (need the PR)
         i=0
         while IFS= read -r id && IFS= read -r file; do
@@ -646,16 +721,16 @@ runs:
         echo "failed=$failed" >>"$GITHUB_OUTPUT"
         exit 0
 
-    # Review verdict (claude-review.yml's codex path): the loop's marker
+    # Review verdict (claude-review.yml, both engines): the loop's marker
     # comment, one of two FIXED bodies chosen by the manifest's
     # `review_verdict` — the only body besides the hand-back that carries
     # live markers, and no agent text reaches it, so there is nothing for
     # the de-fang to break (the review body itself went through `comments`
-    # above, de-fanged, so the verdict is the only marker-bearing comment).
-    # Gated on the Post step having lost nothing: the review body precedes
-    # the verdict in `comments`, and a verdict over a review that never
-    # landed would spend an @auto fix round on nothing — Report names it as
-    # withheld instead.
+    # above, de-fanged, so the verdict is the only verdict-marker-bearing
+    # comment). Gated on the Post step having lost nothing: the review body
+    # and its inline comments precede the verdict, and a verdict over a
+    # review that never landed would spend an @auto fix round on nothing —
+    # Report names it as withheld instead.
     - id: verdict
       if: steps.plan.outputs.verdict != '' && steps.post.outputs.failed == ''
       shell: bash
@@ -738,8 +813,8 @@ runs:
 
     # Informational, so it posts even when a landing step failed (the note
     # explains the run regardless). First-line marker as model-provenance's
-    # own post: claude-review.yml's "Verify the review was posted" filters
-    # it out of the machine-account comments it counts as review output.
+    # own post, so readers (and pr-feedback-context's filter) can tell it
+    # from review output.
     - id: provenance
       if: always() && steps.plan.outcome == 'success' && steps.plan.outputs.provenance == 'true'
       shell: bash
