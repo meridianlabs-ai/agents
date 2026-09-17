@@ -761,6 +761,44 @@ def test_post_splits_unanchored_findings_into_bounded_comments(tmp_path):
     assert sum(c.startswith("api repos/o/r/issues/5/comments ") for c in calls) == 4
 
 
+def test_post_splits_a_single_oversized_unanchored_finding(tmp_path):
+    # Review round 2 of #116: a 999-byte path plus a body just under the
+    # Claude prep cap is one entry over the chunk budget; measured whole it
+    # was posted whole and defang's cap cut its tail with `failed` empty.
+    # Now the entry is split at line boundaries into pieces that each fill
+    # a chunk, and every byte arrives.
+    path = "/".join(["a" * 199] * 5)
+    body = "x" * 58950 + "\nTAIL_FINDING\n"
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": path, "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    joined = "".join(follow_ups)
+    assert "TAIL_FINDING" in joined and "truncated:" not in joined
+    assert joined.count("x") == 58950 and f"**{path}** line 3 (RIGHT)" in joined
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def test_post_measures_unanchored_entries_after_the_defang(tmp_path):
+    # Review round 2 of #116: paths carrying a trigger token grow when the
+    # chunk is de-fanged (`@auto` → `` `auto` ``), so a chunk measured on
+    # raw bytes overflowed the cap and the last finding was cut. Entries
+    # are de-fanged before they are measured, so all fifty arrive.
+    path = "/".join(["@auto" * 39] * 5)
+    comments = [{"path": path, "line": 3, "body_file": f"rc{i}.md"} for i in range(50)]
+    files = {"review.md": "Review\n", **{f"rc{i}.md": f"FINDING_{i}\n" for i in range(50)}}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    joined = "".join(follow_ups)
+    assert sum(f"FINDING_{i}\n" in joined for i in range(50)) == 50
+    assert "truncated:" not in joined and "@auto" not in joined and "`auto`" in joined
+    assert len(follow_ups) >= 2 and all(len(b.encode()) < 60000 for b in follow_ups)
+
+
 def test_post_packs_small_unanchored_findings_into_one_comment(tmp_path):
     # Two findings under the chunk bound share one comment (the round-1
     # shape); a third that would pass the bound opens a second.

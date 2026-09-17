@@ -544,15 +544,18 @@ runs:
         #    ref). One that cannot anchor (422: the line is outside the PR's
         #    diff — a live-branch continuation reviewed past the frozen diff,
         #    or a mis-numbered line), or that still fails after its retries,
-        #    is folded into follow-up comments on the PR — BOUNDED chunks, a
-        #    chunk posted before it would pass 56,000 bytes with the next
-        #    finding, so defang's 60,000 cap (header included) never cuts a
-        #    finding that fit in its own comment (review round 1 of #116
-        #    lost a whole finding to one aggregate comment); only a single
-        #    finding over the cap is cut, by the cap every comment has. No
-        #    finding is lost, and the verdict is not withheld over an anchor
-        #    (a failed anchor is not a lost review; a follow-up comment
-        #    failing is, and each chunk that fails is recorded).
+        #    is folded into follow-up comments on the PR — BOUNDED chunks of
+        #    FINAL bytes: every entry is de-fanged (body and path) before it
+        #    is measured, the chunk budget leaves room for the fixed header,
+        #    a chunk is posted before the next entry would overflow it, and
+        #    an entry that is over the budget on its own is split at line
+        #    (then byte) boundaries into pieces that each fill a chunk — so
+        #    defang's 60,000 cap never has anything to cut (review rounds 1
+        #    and 2 of #116 lost findings to one aggregate comment, then to a
+        #    pre-de-fang measure and an unsplit single entry). No finding is
+        #    lost, and the verdict is not withheld over an anchor (a failed
+        #    anchor is not a lost review; a follow-up comment failing is, and
+        #    each chunk that fails is recorded).
         n=$(jq -r '.review_comments // [] | length' "$m")
         if [ "$n" -gt 0 ]; then
           head_sha=""
@@ -564,6 +567,12 @@ runs:
             echo "::warning::land: could not read #$PR_NUMBER's head SHA; the inline review comments go into one follow-up comment instead."
           fi
           chunk=0
+          # defang caps a body at 60,000 bytes; the header line below is
+          # under 200. Chunks hold at most this many bytes of entries, so
+          # header + chunk is always under the cap and the de-fang in
+          # flush_unanchored (idempotent on already de-fanged text) never
+          # truncates.
+          budget=59800
           : >"$RUNNER_TEMP/unanchored-0.md"
           # flush_unanchored — post the current chunk as one comment and
           # start the next; a no-op on an empty chunk.
@@ -585,6 +594,36 @@ runs:
             chunk=$((chunk + 1))
             : >"$RUNNER_TEMP/unanchored-$chunk.md"
           }
+          # add_unanchored FILE — append one de-fanged entry to the current
+          # chunk, posting the chunk first when the entry would not fit. An
+          # entry over the budget on its own (a body near defang's own cap,
+          # plus its header line) is split into pieces of at most the budget
+          # — at line boundaries, after folding any single line longer than
+          # the budget at byte boundaries (LC_ALL=C: bytes, not characters;
+          # a multi-byte character cut in two makes that piece's post fail,
+          # which is then a recorded failure, never a silent loss) — and
+          # each piece is added in turn. Piece names are zero-padded so the
+          # glob keeps their order.
+          add_unanchored() {
+            local f="$1" cur add piece
+            add=$(wc -c <"$f")
+            if [ "$add" -gt "$budget" ]; then
+              rm -f "$RUNNER_TEMP"/unanchored-piece.*
+              LC_ALL=C fold -b -w "$budget" "$f" \
+                | LC_ALL=C awk -v max="$budget" -v prefix="$RUNNER_TEMP/unanchored-piece." \
+                    'BEGIN { n = 0; size = 0; out = prefix sprintf("%04d", n) }
+                     { l = length($0) + 1
+                       if (size > 0 && size + l > max) { close(out); n++; out = prefix sprintf("%04d", n); size = 0 }
+                       print > out; size += l }'
+              for piece in "$RUNNER_TEMP"/unanchored-piece.*; do
+                add_unanchored "$piece"
+              done
+              return 0
+            fi
+            cur=$(wc -c <"$RUNNER_TEMP/unanchored-$chunk.md")
+            if [ "$cur" -gt 0 ] && [ $((cur + add)) -gt "$budget" ]; then flush_unanchored; fi
+            cat "$f" >>"$RUNNER_TEMP/unanchored-$chunk.md"
+          }
           posted=0
           for ((k = 0; k < n; k++)); do
             rc=$(jq -c ".review_comments[$k]" "$m")
@@ -596,14 +635,13 @@ runs:
               posted=$((posted + 1))
             else
               echo "::warning::land: inline review comment on $path:$line ($side) did not post; folding it into a follow-up comment."
+              # FINAL bytes: the path de-fanged like a title (it may carry a
+              # trigger token), the body de-fanged above.
               {
-                printf '\n---\n\n**%s** line %s (%s)\n\n' "$path" "$line" "$side"
+                printf '\n---\n\n**%s** line %s (%s)\n\n' "$(defang_str "$path")" "$line" "$side"
                 cat "$RUNNER_TEMP/inline-$k.md"
               } >"$RUNNER_TEMP/unanchored-entry.md"
-              cur=$(wc -c <"$RUNNER_TEMP/unanchored-$chunk.md")
-              add=$(wc -c <"$RUNNER_TEMP/unanchored-entry.md")
-              if [ "$cur" -gt 0 ] && [ $((cur + add)) -gt 56000 ]; then flush_unanchored; fi
-              cat "$RUNNER_TEMP/unanchored-entry.md" >>"$RUNNER_TEMP/unanchored-$chunk.md"
+              add_unanchored "$RUNNER_TEMP/unanchored-entry.md"
             fi
           done
           echo "land: posted $posted of $n inline review comment(s) on #$PR_NUMBER."
