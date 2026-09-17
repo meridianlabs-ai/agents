@@ -220,10 +220,16 @@ on:
           landing manifest) — it is NEVER
           present in the `review` job, so the review agent itself stays
           read-only (app token + contents:read) and nothing it runs or
-          leaves running can observe the token. Optional: absent, the gate
-          steps no-op and the land job posts with the job token instead
-          (as github-actions[bot], whose comments trigger no workflow — so
-          codex verdicts then do not drive the @auto loop, as before).
+          leaves running can observe the token. Optional only in the sense
+          that the run does not fail at startup: with neither this nor the
+          app secrets the gate steps no-op and the land job REFUSES its
+          writes (the review, the verdict, the stage move) — the reviewer
+          requires the machine account, as the two loops already do
+          (decision: Ransom, 2026-09-17, issue #114; the job-token posting
+          fallback is retired, and the reviewer's jobs hold no write
+          permission on the job token at all, so callers grant only reads).
+          The refusal is loud: the land job fails and its report names the
+          empty token in the run log.
           TRANSITION: superseded by the two MARVIN_APP_* secrets below; still
           accepted, and used only when they are absent.
         required: false
@@ -237,8 +243,9 @@ on:
           and to the permissions that job's writes need, revoked when the
           job ends. The review job never sees either secret or a minted
           token. Optional during the transition: when this is empty the
-          jobs fall back to MARVIN_TOKEN (the PAT), and then to the job
-          token where they already did.
+          jobs fall back to MARVIN_TOKEN (the PAT); with neither, the gate
+          steps no-op and the land job refuses its writes (see
+          MARVIN_TOKEN).
         required: false
       MARVIN_APP_PRIVATE_KEY:
         description: >-
@@ -1927,7 +1934,12 @@ jobs:
   # never a push channel), post the review (summary, inline comments,
   # verdict — either engine), move the stage, post the provenance note,
   # report the agent error and fail the run when it says so — then the
-  # landed-review check, as marvin (job-token fallback). Skipped when the review job was cancelled (newest-wins
+  # landed-review check, as marvin. Holds NO write permission on the job
+  # token (issue #114): every write is the machine account's, and the
+  # callers' stubs grant the reviewer reads only — a caller may grant more
+  # than a reusable workflow requests, never less, so the job-token posting
+  # fallback that kept `pull-requests: write` here is retired with the
+  # stubs' grant. Skipped when the review job was cancelled (newest-wins
   # concurrency): there is no artifact, and a "landing failed" note about
   # a superseded run would be noise.
   land:
@@ -1941,13 +1953,14 @@ jobs:
       HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     permissions:
       contents: read
-      pull-requests: write    # the posted-review check's job-token fallback
-      # NOT write: a reusable workflow cannot request more than its caller
-      # grants, and every stub grants issues: read (examples/). In external
-      # mode the posted-review nudge targets the proxy ISSUE, so it posts as
-      # marvin (the minted app token or MARVIN_TOKEN, as before this job
-      # split); a marvin-less caller's fallback nudge 403s there — the
-      # pre-existing gap.
+      # Reads only (issue #114): the `land` composite's PR head-ref /
+      # default-branch lookups. Every write — the review, its inline
+      # comments, the verdict, the nudge, the stage move — runs as the
+      # machine account (the minted app token, else MARVIN_TOKEN); a caller
+      # with neither gets a loud refusal, not a github-actions[bot] post. A
+      # reusable workflow cannot request more than its caller grants, and
+      # the stubs (examples/) now grant the reviewer `pull-requests: read`.
+      pull-requests: read
       issues: read
       actions: read           # artifact download
     steps:
@@ -1980,11 +1993,12 @@ jobs:
         with:
           # The machine account (the minted app token, else the PAT), so the
           # verdict triggers the review-fix stub and the stage move has
-          # project scope. Marvin-less callers fall back to the job token:
-          # the posts then come from github-actions[bot] (which triggers
-          # nothing — as before, when the codex posting step had the same
-          # fallback) and set-stage warns and skips.
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          # project scope. No job-token fallback (issue #114): a caller with
+          # neither secret hands the composite an empty token, and it refuses
+          # every write ("token is empty") rather than post as
+          # github-actions[bot] — the job token has no write permission here
+          # anyway. The run fails with the refusal in its log.
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           refuse-bundle: "true"
           # The same expressions emit-landing got above: the validator pins
           # the manifest's pr_number / issue_number to them, and they are
@@ -2015,13 +2029,13 @@ jobs:
       # succeeded: when it failed, the Report step already named what was
       # lost on the PR and failed the run, and a nudge on top would be noise.
       # Marvin's token, as before the job split: the nudge is inert from any
-      # account (backticked trigger), but in external mode it posts on the
-      # proxy ISSUE and this job's token has issues: read only (the callers'
-      # stubs grant no more) — the job token is the marvin-less fallback.
+      # account (backticked trigger), and this job's token can post nowhere
+      # (pull requests and issues: read). A caller with neither secret never
+      # reaches this step: the land step refused its writes and failed.
       - name: Verify a review landed
         if: always() && needs.review.outputs.claude_outcome == 'success' && steps.land.outcome == 'success'
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           REPO: ${{ github.repository }}
           MODE: ${{ needs.gate.outputs.mode }}
           EVENT: ${{ github.event_name }}

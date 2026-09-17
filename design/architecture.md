@@ -210,7 +210,7 @@ changes who pushes. Per step:
 | hand-back, unlanded-work, open-PR and verify fetches | gone with the landing-job split (#82, #83, #84): the land job opens the PR and posts the hand-back from the manifest, and knows what it pushed |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
 | the claude-code-action step | no `github_token` in any of the four workflows (since #81 / #82 / #83 / #84): the action's own App token, and a job-token credential helper for its fetches — load-bearing in `claude.yml`, see below |
-| the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted, else `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml` and `claude-review.yml`, the marvin-less degradation) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
+| the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted, else `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml` only, the marvin-less degradation; the reviewer's was retired by #114) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
 | `reset-origin-url` (right after the action step, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
@@ -319,7 +319,7 @@ mints (2026-09-16):
 | `claude.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
 | `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | `MARVIN_TOKEN`; empty skips the ack and stage |
-| `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | `MARVIN_TOKEN`, then job token |
+| `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | `MARVIN_TOKEN`; empty refuses every write — the job token holds no write permission (#114) |
 | `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`; empty makes the gate skip |
 | `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | `MARVIN_TOKEN`; empty makes the gate skip |
 | `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN` (the gate already required one) |
@@ -873,9 +873,18 @@ the dev-agent shape did not:
   422, the line outside the diff — into one follow-up comment rather than
   losing it or withholding the verdict), the verdict as `review_verdict`
   exactly as the codex path. External mode lands the summary alone, as one
-  comment on the proxy issue. The land job's `pull-requests: write` is
-  unchanged (its writes are the same set, plus the inline comments — the
-  `land` row in the table above). The posted-review check that counted the
+  comment on the proxy issue. The land job's job token is read-only too
+  (`pull-requests: read`, for the composite's lookups): its writes — the
+  same set as before plus the inline comments, the `land` row in the table
+  above — are the machine account's only, and the job-token posting
+  fallback (`|| github.token`, posts from `github-actions[bot]` on a
+  marvin-less caller) is retired (decision: Ransom, 2026-09-17): the
+  reviewer requires the app secrets, as the two loops already do, and a
+  caller without them gets a loud refusal in the run log. That is what lets
+  the caller stubs grant the reviewer `pull-requests: read` — a caller may
+  grant more than the reusable requests, never less — so the caller's grant
+  now bounds the reusable's token and no regression here could hand the
+  review job write again. The posted-review check that counted the
   agent's comments through the API is now a landed-review check on `land`'s
   outputs (`posted_verdict` in pr mode, `posted_comments` in external mode),
   gated on the land step having succeeded (a failed landing is already
@@ -893,9 +902,10 @@ the PR head ref from the gate job's API lookup (`head_ref`, a gate output
 computed before any untrusted code ran), and external mode — which names no
 PR of ours — uses a fixed `review/external-<issue>` branch name that the
 land job's `branch-prefix` pins. MARVIN_TOKEN is absent from the `review`
-job; a marvin-less caller's land job falls back to the job token (posts from
-`github-actions[bot]`, which trigger nothing — as the codex posting step's
-fallback already did).
+job; a marvin-less caller's land job used to fall back to the job token
+(posts from `github-actions[bot]`, which trigger nothing — as the codex
+posting step's fallback already did) until #114 retired that fallback with
+the stubs' write grant.
 
 ## Model selection: prefer Fable, fall back gracefully
 
