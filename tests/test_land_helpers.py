@@ -106,18 +106,37 @@ def test_retry_read_prints_only_the_successful_attempts_stdout(tmp_path):
     assert r.stdout.strip() == "rc=3 out=[]"
 
 
-# A stub `gh` for open_or_adopt_pr: `pr list` reports the PR once it exists;
-# `pr create` performs the write, and when LOSE_FIRST is set its FIRST call
-# exits 1 after writing (a timeout / 5xx after the server accepted the PR).
-# Calls are logged to $STATE/calls. `sleep` is neutralised so the retry
-# backoff does not slow the suite.
+# A stub `gh` for open_or_adopt_pr: `pr list` answers with the JSON the real
+# command would (`--json` fields), listing the same-repo PR once it exists
+# ($STATE/pr, head owner `o` — the owner of the `o/r` the tests pass) and,
+# when $STATE/fork names one, a FORK PR whose head branch merely shares the
+# name (listed FIRST, as the API may order it). It refuses a `pr list` that
+# does not request the ownership fields, since the helper's filter is only
+# as good as what it asked for. `pr create` performs the write, and when
+# LOSE_FIRST is set its FIRST call exits 1 after writing (a timeout / 5xx
+# after the server accepted the PR). Calls are logged to $STATE/calls.
+# `sleep` is neutralised so the retry backoff does not slow the suite.
 GH_STUB = r"""
 sleep() { :; }
 gh() {
   echo "$1 $2" >>"$STATE/calls"
   case "$1 $2" in
     "pr list")
-      if [ -f "$STATE/pr" ]; then n=$(cat "$STATE/pr"); echo "$n https://x/pull/$n"; fi ;;
+      for f in isCrossRepository headRepositoryOwner headRefName; do
+        case " $* " in *"$f"*) ;; *) echo "stub: pr list did not request $f" >&2; return 2 ;; esac
+      done
+      sep=""
+      echo "["
+      if [ -f "$STATE/fork" ]; then
+        n=$(cat "$STATE/fork")
+        printf '{"number":%s,"url":"https://x/pull/%s","isCrossRepository":true,"headRepositoryOwner":{"login":"someone"},"headRefName":"feat"}' "$n" "$n"
+        sep=","
+      fi
+      if [ -f "$STATE/pr" ]; then
+        n=$(cat "$STATE/pr")
+        printf '%s{"number":%s,"url":"https://x/pull/%s","isCrossRepository":false,"headRepositoryOwner":{"login":"o"},"headRefName":"feat"}' "$sep" "$n" "$n"
+      fi
+      echo "]" ;;
     "pr create")
       [ -f "$STATE/pr" ] || echo 42 >"$STATE/pr"
       if [ -n "${LOSE_FIRST:-}" ] && [ ! -f "$STATE/lost" ]; then touch "$STATE/lost"; echo "gh: timeout" >&2; return 1; fi
@@ -128,11 +147,13 @@ gh() {
 """
 
 
-def open_or_adopt(tmp_path, *, lose_first=False, existing=None):
+def open_or_adopt(tmp_path, *, lose_first=False, existing=None, fork=None):
     state = tmp_path / "state"
     state.mkdir()
     if existing is not None:
         (state / "pr").write_text(str(existing))
+    if fork is not None:
+        (state / "fork").write_text(str(fork))
     body = tmp_path / "body.md"
     body.write_text("body\n")
     env = {"STATE": str(state), "LOSE_FIRST": "1" if lose_first else ""}
@@ -168,6 +189,27 @@ def test_open_or_adopt_pr_adopts_after_a_lost_create_response(tmp_path):
     assert r.stdout.strip() == "adopted|42|https://x/pull/42"
     assert calls.count("pr create") == 1
     assert "retrying" in r.stderr
+
+
+def test_open_or_adopt_pr_skips_a_fork_pr_with_the_same_head_name(tmp_path):
+    # `gh pr list --head` matches on the branch NAME alone, so a fork PR whose
+    # head is also called `feat` is listed. It is not ours to adopt: the
+    # landing must say so and open a PR for the branch it just pushed.
+    r, calls = open_or_adopt(tmp_path, fork=5)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "opened|42|https://x/pull/42"
+    assert calls == ["pr list", "pr create"]
+    assert "not adopting PR #5" in r.stderr and "someone:feat" in r.stderr, r.stderr
+
+
+def test_open_or_adopt_pr_adopts_the_same_repo_pr_not_the_fork_listed_first(tmp_path):
+    # Both exist; the fork PR comes first in the listing. Ownership, not
+    # position, decides.
+    r, calls = open_or_adopt(tmp_path, existing=7, fork=5)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "adopted|7|https://x/pull/7"
+    assert "pr create" not in calls
+    assert r.stderr == ""
 
 
 # A stub `gh api repos/o/r/branches/<b>` for remote_branch_exists: `exists`
