@@ -42,12 +42,14 @@ class FakeGH:
     def __init__(self):
         self.calls = []
         self.routes = []
+        self.repos = []  # the `repo=` each call named (gh_env's token key)
 
     def route(self, pred, response):
         self.routes.append((pred, response))
 
-    def __call__(self, *args):
+    def __call__(self, *args, repo=None):
         self.calls.append(args)
+        self.repos.append(repo)
         for pred, resp in self.routes:
             if pred(args):
                 if isinstance(resp, Exception):
@@ -57,6 +59,10 @@ class FakeGH:
 
     def matching(self, pred):
         return [c for c in self.calls if pred(c)]
+
+    def repos_of(self, pred):
+        """The `repo=` named by every call matching pred, in order."""
+        return [r for c, r in zip(self.calls, self.repos) if pred(c)]
 
 
 def has(sub):
@@ -136,6 +142,86 @@ def test_trusted_author_caches_the_lookup_per_login_and_repo(gh):
     assert len(gh.matching(is_permission_lookup)) == 1
     assert atlas.trusted_author("someone", TS_MONO) is True
     assert len(gh.matching(is_permission_lookup)) == 2
+
+
+# --- the ts-mono token (Phase 2: one read-only token per repository read) ---
+#
+# The sync's GH_TOKEN is minted for the fork alone; every ts-mono call names
+# `repo=TS_MONO` so gh() substitutes GH_TOKEN_TS_MONO, and a call for the
+# fork leaves the environment alone. These run the REAL gh() against a
+# recorded subprocess.run, since the FakeGH fixture replaces gh() whole.
+
+
+class Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, **kw):
+        self.calls.append((argv, kw.get("env")))
+        import subprocess
+
+        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+
+@pytest.fixture
+def run(monkeypatch):
+    rec = Recorder()
+    monkeypatch.setattr(atlas.subprocess, "run", rec)
+    monkeypatch.setattr(atlas, "actions", [])
+    monkeypatch.setattr(atlas, "_permission_cache", {}, raising=False)
+    monkeypatch.setenv("GH_TOKEN", "fork-token")
+    return rec
+
+
+def test_a_ts_mono_call_runs_under_the_ts_mono_token(run, monkeypatch):
+    monkeypatch.setenv(atlas.TS_MONO_TOKEN_VAR, "ts-mono-token")
+    atlas.gh_json("api", f"repos/{TS_MONO}/collaborators/epatey/permission", repo=TS_MONO)
+    ((argv, env),) = run.calls
+    assert argv[:2] == ["gh", "api"]
+    assert env["GH_TOKEN"] == "ts-mono-token"
+    assert env[atlas.TS_MONO_TOKEN_VAR] == "ts-mono-token"  # the rest of the environment is kept
+
+
+@pytest.mark.parametrize("repo", [FORK, atlas.UPSTREAM, None])
+def test_every_other_call_keeps_the_fork_token(run, monkeypatch, repo):
+    monkeypatch.setenv(atlas.TS_MONO_TOKEN_VAR, "ts-mono-token")
+    atlas.gh_json("api", f"repos/{repo or FORK}/issues/1", repo=repo)
+    ((_, env),) = run.calls
+    assert env is None  # the process environment: GH_TOKEN is the fork token
+
+
+def test_the_permission_lookup_names_the_repo_it_reads(run, monkeypatch):
+    monkeypatch.setenv(atlas.TS_MONO_TOKEN_VAR, "ts-mono-token")
+    run_impl = run
+
+    def answer(argv, **kw):
+        run_impl.calls.append((argv, kw.get("env")))
+        import subprocess
+
+        return subprocess.CompletedProcess(argv, 0, stdout='{"permission": "write"}', stderr="")
+
+    monkeypatch.setattr(atlas.subprocess, "run", answer)
+    assert atlas.trusted_author("epatey", TS_MONO) is True
+    assert atlas.trusted_author("epatey", FORK) is True
+    (ts_mono, fork) = run.calls
+    assert f"repos/{TS_MONO}/collaborators/epatey/permission" in ts_mono[0]
+    assert ts_mono[1]["GH_TOKEN"] == "ts-mono-token"
+    assert f"repos/{FORK}/collaborators/epatey/permission" in fork[0]
+    assert fork[1] is None
+
+
+def test_a_ts_mono_call_fails_closed_without_the_ts_mono_token(run, monkeypatch):
+    monkeypatch.delenv(atlas.TS_MONO_TOKEN_VAR, raising=False)
+    with pytest.raises(RuntimeError, match=atlas.TS_MONO_TOKEN_VAR):
+        atlas.gh("api", f"repos/{TS_MONO}/pulls/9", repo=TS_MONO)
+    # trusted_author's lookup fails closed: not trusted, and gh never ran.
+    assert atlas.trusted_author("epatey", TS_MONO) is False
+    assert run.calls == []
+    # An empty value is "absent" too — never a fall-through to the fork token.
+    monkeypatch.setenv(atlas.TS_MONO_TOKEN_VAR, "")
+    with pytest.raises(RuntimeError):
+        atlas.gh("pr", "list", "--repo", TS_MONO, repo=TS_MONO)
+    assert run.calls == []
 
 
 # ------------------------------------------------- retrigger_stale_handbacks
@@ -334,6 +420,7 @@ def test_a_trusted_authors_url_line_is_honoured(gh):
     # author fields ride the body fetch: one issue read, asking for them
     (fetch,) = gh.matching(is_issue_fetch)
     assert ".user.login" in fetch[3] and ".author_association" in fetch[3]
+    assert gh.repos_of(is_url_query) == [TS_MONO]  # the URL's PR is read under the ts-mono token
 
 
 def test_a_trusted_associations_opt_out_is_honoured(gh):
@@ -412,6 +499,12 @@ def test_companion_approved_at_head_by_a_write_access_reviewer_clears_the_hold(g
     assert gate_with(gh, comp) is False
     (lookup,) = gh.matching(is_permission_lookup)
     assert lookup[1] == f"repos/{TS_MONO}/collaborators/epatey/permission"
+    # Every ts-mono read — the companion discovery and the reviewer's
+    # permission — names ts-mono (gh() then runs it under the ts-mono
+    # token); the anchor issue fetch on the fork names nothing.
+    assert gh.repos_of(is_permission_lookup) == [TS_MONO]
+    assert gh.repos_of(is_discovery_query) == [TS_MONO]
+    assert gh.repos_of(is_issue_fetch) == [None]
 
 
 def test_companion_approval_on_an_older_head_holds(gh):

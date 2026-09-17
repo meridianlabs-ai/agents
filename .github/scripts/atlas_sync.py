@@ -32,7 +32,9 @@ proxies keep their Upstream PR field, so this sync still drives their
 lifecycle; a new proxy is seeded by hand (or by the Orca side) when one is
 wanted, and @review on a proxy remains the manual re-run path.
 
-Deterministic; runs as the machine account (GH_TOKEN=MARVIN_TOKEN). Per-item
+Deterministic; runs as the machine account (GH_TOKEN: the fork-scoped app
+token atlas-sync.yml mints, or MARVIN_TOKEN during the transition; every
+ts-mono call runs under GH_TOKEN_TS_MONO instead, see gh_env). Per-item
 failures warn and continue. Every write is idempotent (skip when already at
 the target).
 """
@@ -92,23 +94,57 @@ TAIL_STAGES = ("Sign-off", "Merge")
 
 actions: list = []  # human-readable log for the job summary
 
+# The token every ts-mono call runs under (Phase 2 of the credential
+# separation, design/architecture.md -> Landing job). The sync's own token
+# (GH_TOKEN) is an installation token minted for the inspect_ai fork alone:
+# it writes the fork's issues and the Atlas board, and it cannot make an
+# authenticated read of another repository — in particular the
+# collaborators-permission lookup behind companion_approved(), which is
+# what turns a human's ts-mono approval into a cleared Merge hold (review
+# round 1 of agents#111). atlas-sync.yml therefore mints a SECOND token,
+# scoped to ts-mono with metadata and pull-requests READ only, and hands it
+# over under this name; the fork token keeps every write, so neither token
+# can write outside its one repository. During the transition the workflow
+# passes the PAT under both names. Absent, every ts-mono call fails closed
+# (a RuntimeError, which trusted_author turns into "not trusted") rather than
+# falling back to the fork token — a misrouted read must not look like a
+# denied one.
+TS_MONO_TOKEN_VAR = "GH_TOKEN_TS_MONO"
 
-def gh(*args: str) -> str:
-    res = subprocess.run(["gh", *args], capture_output=True, text=True)
+
+def gh_env(repo: str | None):
+    """The environment a `gh` call for `repo` runs with: None (the process
+    environment, GH_TOKEN = the fork token) for the fork, upstream, the
+    board and anything else; the ts-mono token substituted for TS_MONO."""
+    if repo != TS_MONO:
+        return None
+    token = os.environ.get(TS_MONO_TOKEN_VAR)
+    if not token:
+        raise RuntimeError(
+            f"{TS_MONO_TOKEN_VAR} is not set: refusing to read {TS_MONO} with the fork token"
+        )
+    return {**os.environ, "GH_TOKEN": token}
+
+
+def gh(*args: str, repo: str | None = None) -> str:
+    """Run `gh`; `repo` names the repository the call reads so gh_env can
+    pick its token (only TS_MONO changes anything)."""
+    env = gh_env(repo)
+    res = subprocess.run(["gh", *args], capture_output=True, text=True, env=env)
     if res.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args[:3])}...: {res.stderr.strip()[:400]}")
     return res.stdout
 
 
-def gh_json(*args: str):
-    return json.loads(gh(*args))
+def gh_json(*args: str, repo: str | None = None):
+    return json.loads(gh(*args, repo=repo))
 
 
-def gql(query: str, **variables):
+def gql(query: str, *, repo: str | None = None, **variables):
     args = ["api", "graphql", "-f", f"query={query}"]
     for k, v in variables.items():
         args += ["-F", f"{k}={v}"] if isinstance(v, (int, bool)) else ["-f", f"{k}={v}"]
-    out = gh_json(*args)
+    out = gh_json(*args, repo=repo)
     if out.get("errors"):
         raise RuntimeError(
             f"graphql: {out['errors'][0].get('message', out['errors'])[:300]}"
@@ -157,7 +193,7 @@ def trusted_author(login: str, repo: str, association: str | None = None) -> boo
     key = (repo, login)
     if key not in _permission_cache:
         try:
-            d = gh_json("api", f"repos/{repo}/collaborators/{login}/permission")
+            d = gh_json("api", f"repos/{repo}/collaborators/{login}/permission", repo=repo)
             perms = {d.get("permission"), d.get("role_name")}
         except (RuntimeError, ValueError, AttributeError):
             perms = set()  # unreadable: fail closed
@@ -539,6 +575,7 @@ def companion_pr(issue: int, head_ref: str):
             """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
                  pullRequest(number:$n){number state merged reviewDecision headRefOid
                    latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login __typename}}}}}}""",
+            repo=TS_MONO,
             o=owner,
             r=repo,
             n=num,
@@ -553,6 +590,7 @@ def companion_pr(issue: int, head_ref: str):
              pullRequests(headRefName:$h, first:5, orderBy:{field:UPDATED_AT,direction:DESC}){
                nodes{number state merged reviewDecision headRefOid
                  latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login __typename}}}}}}}""",
+        repo=TS_MONO,
         o=owner,
         r=repo,
         h=head_ref,
@@ -1066,6 +1104,7 @@ def reflect_companion_loops() -> None:
             "200",
             "--json",
             "number,headRefName,labels",
+            repo=TS_MONO,
         )
     except RuntimeError as e:
         print(f"::warning::companion reflection: pr list failed: {e}")
@@ -1134,6 +1173,7 @@ def issue_comments(repo: str, num: int) -> list:
         "--paginate",
         "--slurp",
         f"repos/{repo}/issues/{num}/comments?per_page=100",
+        repo=repo,
     )
     return [c for page in pages for c in page]
 
