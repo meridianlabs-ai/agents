@@ -100,21 +100,41 @@ remote_branch_exists() {
   return 1
 }
 
-# open_or_adopt_pr REPO BRANCH BASE TITLE BODY_FILE — adopt the open PR for
-# BRANCH if there is one (the agent may have opened it itself — the fork's
-# prompt mandates it), else create one; prints `adopted|opened <number> <url>`.
+# open_or_adopt_pr REPO BRANCH BASE TITLE BODY_FILE — adopt the open PR
+# whose head is REPO's own BRANCH if there is one (the agent may have opened
+# it itself — the fork's prompt mandates it), else create one; prints
+# `adopted|opened <number> <url>`. Only a SAME-REPO head is adopted:
+# `gh pr list --head` matches on the head branch NAME alone, so a fork PR
+# whose head happens to share the name (predictable names like
+# `dependabot-fix/<date>`) would otherwise be adopted and the branch just
+# pushed would never get its PR (ts-mono#670, finding B4). Each candidate
+# must report `isCrossRepository: false` and a `headRepositoryOwner` equal
+# to REPO's owner (a missing field fails closed); anything else is named
+# on stderr and ignored, and the create runs. The filter is real `jq` over
+# the listed JSON, not gh's `--jq`, so the tests' stub `gh` exercises it.
 # Meant to run under `retry`: the adopt check is INSIDE the unit, so a create
 # whose response was lost (timeout / 5xx after the write) is found by the
 # next attempt's list and adopted, not re-created into "a pull request
 # already exists". Same two paths as claude.yml's "Open or adopt PR".
 open_or_adopt_pr() {
-  local repo="$1" branch="$2" base="$3" title="$4" body_file="$5" found url
-  found=$(gh pr list --repo "$repo" --head "$branch" --state open --json number,url \
-            --jq 'if length > 0 then "\(.[0].number) \(.[0].url)" else empty end') || return 1
+  local repo="$1" branch="$2" base="$3" title="$4" body_file="$5" owner="${1%%/*}" list found skipped url
+  list=$(gh pr list --repo "$repo" --head "$branch" --state open \
+           --json number,url,isCrossRepository,headRepositoryOwner,headRefName) || return 1
+  # Logins are case-insensitive on GitHub; the repo input may not carry the
+  # canonical case.
+  found=$(jq -r --arg owner "$owner" --arg branch "$branch" '
+    [.[] | select(.isCrossRepository == false
+                  and .headRefName == $branch
+                  and ((.headRepositoryOwner.login // "") | ascii_downcase) == ($owner | ascii_downcase))]
+    | if length > 0 then "\(.[0].number) \(.[0].url)" else empty end' <<<"$list") || return 1
   if [ -n "$found" ]; then
     echo "adopted $found"
     return 0
   fi
+  skipped=$(jq -r --arg repo "$repo" --arg branch "$branch" '.[] |
+    "land: not adopting PR #\(.number) (\(.url)): its head \(.headRepositoryOwner.login // "?"):\(.headRefName // "?") is not \($repo) \($branch) (cross-repository: \(.isCrossRepository | tostring)); opening a PR for the pushed branch instead."' \
+            <<<"$list") || return 1
+  [ -z "$skipped" ] || printf '%s\n' "$skipped" >&2
   url=$(gh pr create --repo "$repo" --head "$branch" --base "$base" \
           --title "$title" --body-file "$body_file") || return 1
   echo "opened ${url##*/} $url"
