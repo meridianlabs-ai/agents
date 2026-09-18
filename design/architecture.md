@@ -210,7 +210,7 @@ changes who pushes. Per step:
 | hand-back, unlanded-work, open-PR and verify fetches | gone with the landing-job split (#82, #83, #84): the land job opens the PR and posts the hand-back from the manifest, and knows what it pushed |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
 | the claude-code-action step | no `github_token` in any of the four workflows (since #81 / #82 / #83 / #84): the action's own App token, and a job-token credential helper for its fetches — load-bearing in `claude.yml`, see below |
-| the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted, else `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml` and `claude-review.yml`, the marvin-less degradation) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
+| the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted, else `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml` only, the marvin-less degradation; the reviewer's was retired by #114) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
 | `reset-origin-url` (right after the action step, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
@@ -319,7 +319,7 @@ mints (2026-09-16):
 | `claude.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
 | `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | `MARVIN_TOKEN`; empty skips the ack and stage |
-| `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | `MARVIN_TOKEN`, then job token |
+| `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | `MARVIN_TOKEN`; empty refuses every write — the job token holds no write permission (#114) |
 | `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`; empty makes the gate skip |
 | `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | `MARVIN_TOKEN`; empty makes the gate skip |
 | `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN` (the gate already required one) |
@@ -433,6 +433,10 @@ Three rules define the shape:
   the de-fang sed (triggers lose their `@`, loop markers are split,
   case-insensitively, capped under the comment limit) before posting; the
   one exception is the hand-back, posted verbatim as exactly `@review`.
+  One marker is `land`'s own: the `<!-- claude-review-comment -->` it
+  appends, after the de-fang, to a `comments[]` body flagged `review` (the
+  reviewer's top-level review — the flag is admitted only next to a
+  `review_verdict`, so no other agent's comment can pose as a review).
   The codex reviewer's `engine: codex` anchor footer is deliberately NOT
   on `land`'s list: the reviewer posts its real footer through this same
   composite, so workflows whose bodies must not pose as a review (the
@@ -836,11 +840,11 @@ the agent push mid-run:
 is `gate` (trigger check, 👀, stage → Agent, engine label read) → `review`
 (checkout, provisioning, the agent; names no GitHub-write secret — the codex
 engine's `OPENAI_API_KEY` is the one secret it holds, unavoidably) → `land`
-(the `land` composite, then the posted-review check as marvin with the job
+(the `land` composite, then the landed-review check as marvin with the job
 token as fallback — in external mode the nudge's target is the proxy issue,
 and the job token has `issues: read` only: a reusable workflow cannot request
-more than the callers' stubs grant). Two things the reviewer needed that the
-dev-agent shape did not:
+more than the callers' stubs grant). Three things the reviewer needed that
+the dev-agent shape did not:
 
 - **It never commits, so its land job must never be a push channel.**
   `emit-landing`'s `read-only` input skips git entirely (`head_sha` =
@@ -863,6 +867,63 @@ dev-agent shape did not:
   hand-back; no agent text reaches it — after `comments[]` and only when the
   Post step lost nothing, so a verdict never posts over a review body that
   did not land (Report names it as withheld instead).
+- **The Claude reviewer's review is files, not posts (#114, 2026-09-17).**
+  Phase 1 converted the codex path only; the Claude reviewer kept
+  `pull-requests: write` on the review job's token and posted its summary,
+  inline comments and verdict marker itself with `gh` and the action's
+  inline-comment MCP tool — a reviewer steered by hostile PR content could
+  post arbitrary comments and a forged verdict as the job's identity (the
+  residual five of the seven Phase 2 stub reviews raised). Now the review job
+  token is `pull-requests: read` (the diff and the thread), the prompt's
+  posting instructions are writing instructions — `summary.md`,
+  `verdict.txt` and an optional `inline.json` under `$RUNNER_TEMP/review`, a
+  directory outside the workspace that the compose-settings step allows for
+  the file tools with an `Edit(//…/**)` absolute-path rule (the Write tool is
+  checked against Edit rules) and nothing else. On the sandboxed paths that
+  directory is also on the sandbox's `filesystem.denyWrite`: an `Edit` allow
+  rule and `--add-dir` widen what sandboxed *commands* may write exactly as
+  `allowWrite` does, so without the deny a contributor's build hook or test
+  could write the review files itself and land a forged verdict as the
+  machine account (review round 1 of #116); the deny holds inside the wider
+  allow, and the sandbox governs Bash and its children only, so the agent's
+  built-in Write tool still writes them — and a `Prepare
+  Claude review for landing` step turns the files into the manifest: the
+  summary as `comments[]` flagged `review` (so `land` appends the
+  `claude-review-comment` marker after its de-fang — pr-feedback-context's
+  anchor for the next fix round, which the de-fang would otherwise split), the
+  line-level findings as `review_comments[]` (`path`, `line`, `side`,
+  `body_file`; `land` posts each through the pull-request review-comments API
+  anchored to the PR's current head, and folds one that cannot anchor — a
+  422, the line outside the diff — into bounded follow-up comments of
+  final de-fanged bytes, a new one before the next entry would overflow the
+  budget under the 60,000 de-fang cap and a single over-budget entry packed
+  greedily into pieces that fill the open chunk and then new ones, a line
+  longer than the room left cut at the last UTF-8 character boundary that
+  fills it — never inside a character: gh serialises a stray byte as U+FFFD
+  rather than refusing it — so the cap never has anything to cut, rather
+  than losing it or withholding the verdict; a chunk that fails to post is a
+  recorded failure), the verdict as `review_verdict`
+  exactly as the codex path. External mode lands the summary alone, as one
+  comment on the proxy issue. The land job's job token is read-only too
+  (`pull-requests: read`, for the composite's lookups): its writes — the
+  same set as before plus the inline comments, the `land` row in the table
+  above — are the machine account's only, and the job-token posting
+  fallback (`|| github.token`, posts from `github-actions[bot]` on a
+  marvin-less caller) is retired (decision: Ransom, 2026-09-17): the
+  reviewer requires the app secrets, as the two loops already do, and a
+  caller without them gets a loud refusal in the run log. That is what lets
+  the caller stubs grant the reviewer `pull-requests: read` — a caller may
+  grant more than the reusable requests, never less — so the caller's grant
+  now bounds the reusable's token and no regression here could hand the
+  review job write again. The posted-review check that counted the
+  agent's comments through the API is now a landed-review check on `land`'s
+  outputs (`posted_verdict` in pr mode, `posted_comments` in external mode),
+  gated on the land step having succeeded (a failed landing is already
+  reported). The settings deny list follows the fix job's model above: the
+  gh posting verbs and the inline-comment MCP tool are denied at runtime
+  whatever the caller's `settings` say — guard rails around the action's
+  App token, which the job's permissions do not scope, while the job token
+  itself can no longer post.
 
 The review job's `Surface agent errors` no longer posts: its message is the
 manifest's `error` (fail_run true) and the land job posts it, de-fanged, and
@@ -872,9 +933,10 @@ the PR head ref from the gate job's API lookup (`head_ref`, a gate output
 computed before any untrusted code ran), and external mode — which names no
 PR of ours — uses a fixed `review/external-<issue>` branch name that the
 land job's `branch-prefix` pins. MARVIN_TOKEN is absent from the `review`
-job; a marvin-less caller's land job falls back to the job token (posts from
-`github-actions[bot]`, which trigger nothing — as the codex posting step's
-fallback already did).
+job; a marvin-less caller's land job used to fall back to the job token
+(posts from `github-actions[bot]`, which trigger nothing — as the codex
+posting step's fallback already did) until #114 retired that fallback with
+the stubs' write grant.
 
 ## Model selection: prefer Fable, fall back gracefully
 
@@ -1550,10 +1612,14 @@ substring collision in trigger gates). Design choices:
 
 - **Read-only by token scope** (`contents: read`), not just by prompt — the
   hard boundary. A `deny` overlay on edits/git is belt-and-suspenders.
-- **Can run tests** to verify findings, but no write tools. This required
-  allow-listing `gh` and the inline-comment MCP so it can actually *post* the
-  review — an early version produced a good review that went nowhere because no
-  posting tool was allowed.
+- **Can run tests** to verify findings, but no write tools outside the
+  review output directory (`$RUNNER_TEMP/review`, where it writes the
+  summary, inline comments and verdict the land job posts — Landing job
+  above, #114). It posts nothing itself: `gh` is allow-listed for the reads
+  (the diff, the thread) and its posting verbs are denied. History: an early
+  version produced a good review that went nowhere because no posting tool
+  was allowed, which is why `gh` and the inline-comment MCP were
+  allow-listed until the landing manifest carried the review instead.
 - **Auto-review is OFF everywhere since 2026-09-16** (decision: Ransom;
   actions first on 2026-09-14 after actions#110 was reviewed unasked, then
   every repo after inspect_ai#501 was). Reviews are asked for — an `@review`

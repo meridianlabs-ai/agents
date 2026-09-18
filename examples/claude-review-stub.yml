@@ -119,9 +119,11 @@ jobs:
     #    github.event.pull_request.head.repo.full_name == github.repository) ||
     uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
     # The machine account's secrets, for the gate's deterministic ack/stage
-    # steps (eyes reaction + board stage) and the land job's posts; never
-    # handed to the review agent, which stays read-only. Absent -> the gate
-    # steps no-op and the land job posts with the job token.
+    # steps (eyes reaction + board stage) and the land job's posts (the
+    # review itself lands there — agents#114); never handed to the review
+    # agent, which stays read-only. REQUIRED for the review to reach the PR:
+    # absent, the gate steps no-op and the land job refuses its writes (the
+    # job token below holds no write permission).
     secrets:
       MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
       MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
@@ -134,7 +136,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read     # the review is posted by the land job as the machine account (agents#114)
       issues: read
       id-token: write
       actions: read

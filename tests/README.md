@@ -23,6 +23,14 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   normalization, and the codex path's hand-back / hand-off decision — with
   the codex no-thread-ids case run on through `emit-landing` and the
   validator.
+- `test_review_composer.py` — `claude-review.yml`'s `Prepare Claude review
+  for landing` and `Compose landing manifest` steps, lifted the same way
+  (issue #114): the reviewer's summary / verdict / inline.json files become
+  the manifest's `comments` (flagged `review`), `review_verdict` and
+  `review_comments` — the lenient verdict read, the malformed-inline
+  fallbacks, external mode's single comment, the codex branch untouched —
+  with the pr-mode and external results run on through `emit-landing` and
+  the validator under the land job's `refuse-bundle`.
 - `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
   step, lifted the same way: the PR open for an issue run (title, body,
   labels, base, the hand-back an `auto`-labelled PR owes and the

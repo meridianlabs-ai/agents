@@ -146,7 +146,7 @@ def test_workflow_trusts_both_machine_account_logins_and_appends_them_to_the_bot
             "&& format('{0},{1}', inputs.allowed_bots, env.TRUSTED_LOGINS) || env.TRUSTED_LOGINS) }}") in text
     assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
     assert "i-am-marvin" not in lift_step(WORKFLOW, "        id: trig")
-    assert "i-am-marvin" not in lift_step(WORKFLOW, "      - name: Verify the review was posted")
+    assert "i-am-marvin" not in lift_step(WORKFLOW, "      - name: Verify a review landed")
 
 
 @pytest.mark.parametrize("allowed", ["*", "github-actions", "github-actions[bot]"])

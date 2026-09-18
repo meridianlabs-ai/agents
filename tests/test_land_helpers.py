@@ -447,15 +447,37 @@ def post_script() -> str:
 
 
 # `gh` answers from $SCENARIO: the issue's assignee count (`0`, `1`, or a
-# failed lookup), whether `issue edit` / `issue reopen` succeed. `curl`
-# records the Slack request. Every call is logged; the Atlas status write is
-# logged separately so a test can assert the board was not touched.
+# failed lookup), whether `issue edit` / `issue reopen` succeed, the PR's
+# head SHA (or a failed lookup: `head-fails`) and whether an inline review
+# comment anchors (`inline-422`: never; `inline-flaky`: after one 500;
+# `inline-500`: never, no 422) or a top-level comment posts
+# (`comment-fails`, alone or as `inline-422-comment-fails`). `curl` records the Slack request. Every call is logged;
+# the Atlas status write is logged separately so a test can assert the board
+# was not touched, and every body file handed to `-F body=@…` is appended to
+# $STATE/bodies (separated by `===` lines) so a test can read what posted.
 POST_STUB = r"""
 sleep() { :; }
+record_body() { for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >>"$STATE/bodies"; printf '\n===\n' >>"$STATE/bodies" ;; esac; done; }
 gh() {
   echo "$*" >>"$STATE/calls"
   case "$*" in
-    "api repos/"*"/comments "*) return 0 ;;
+    "pr view "*"--json headRefOid"*)
+      case "$SCENARIO" in
+        head-fails) echo '{"message": "Server Error"}'; return 1 ;;
+        *) echo "cccccccccccccccccccccccccccccccccccccccc" ;;
+      esac ;;
+    "api repos/"*"/pulls/"*"/comments "*)
+      record_body "$@"
+      case "$SCENARIO" in
+        inline-422*) echo '{"message": "Validation Failed"}'; echo "gh: Validation Failed (HTTP 422)" >&2; return 1 ;;
+        inline-500) echo "gh: Server Error (HTTP 500)" >&2; return 1 ;;
+        inline-flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo "gh: Server Error (HTTP 500)" >&2; return 1; fi ;;
+      esac
+      return 0 ;;
+    "api repos/"*"/issues/"*"/comments "*)
+      record_body "$@"
+      case "$SCENARIO" in *comment-fails) return 1 ;; esac
+      return 0 ;;
     "api repos/"*"--jq .node_id") echo "I_kwDONODE" ;;
     "api repos/"*"--jq .assignees | length")
       case "$SCENARIO" in
@@ -480,7 +502,7 @@ curl() {
 """
 
 
-def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None):
+def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None, pr_number=""):
     state = tmp_path / "state"
     state.mkdir()
     landing = tmp_path / "landing"
@@ -492,15 +514,29 @@ def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=No
     out.write_text("")
     env = {
         "STATE": str(state), "SCENARIO": scenario, "LIB": str(LIB), "DIR": str(landing),
-        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR_NUMBER": "",
+        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR_NUMBER": pr_number,
         "SLACK_TOKEN": "", "SLACK_CHANNEL": "", "SLACK_THREAD_TS": "",
         **(slack_env or {}),
     }
-    r = sh("bash", "-c", POST_STUB + post_script(), check=False, env=env)
+    # `-eo pipefail`, as GitHub invokes `shell: bash` (`bash --noprofile
+    # --norc -eo pipefail`): the step's own `set -uo pipefail` adds -u and
+    # leaves -e on, so a failing bare command aborts the real step too.
+    r = sh("bash", "-eo", "pipefail", "-c", POST_STUB + post_script(), check=False, env=env)
     calls = (state / "calls").read_text().splitlines() if (state / "calls").exists() else []
     writes = (state / "writes").read_text().splitlines() if (state / "writes").exists() else []
-    failed = out.read_text().strip().removeprefix("failed=")
+    failed = post_outputs(tmp_path).get("failed", "")
     return r, calls, writes, failed
+
+
+def post_outputs(tmp_path) -> dict:
+    """The Post step's $GITHUB_OUTPUT lines (`failed=…`, `posted_comments=…`)."""
+    return dict(line.split("=", 1) for line in (tmp_path / "out.txt").read_text().splitlines() if "=" in line)
+
+
+def posted_bodies(tmp_path) -> list:
+    """Every body the stub `gh` was handed, in posting order."""
+    f = tmp_path / "state" / "bodies"
+    return [b for b in f.read_text().split("\n===\n") if b] if f.exists() else []
 
 
 def comment_on_manifest(**issue):
@@ -593,6 +629,326 @@ def test_post_slack_tracking_links_survive_the_cap(tmp_path):
     assert req["channel"] == "C0123456789" and req["thread_ts"] == "1726000000.123456"
     assert len(req["text"]) <= 39000
     assert req["text"].endswith("\nTracking issue: https://github.com/o/r/issues/7\n")
+
+
+# --- the reviewer's landing (issue #114): the review marker and the inline
+# review comments. The Claude reviewer posts nothing itself any more; its
+# summary lands through comments[] flagged `review`, its line-level findings
+# through review_comments[], its verdict through review_verdict.
+
+
+def review_landing(**overrides):
+    m = {"schema": 1, "repo": "o/r", "run_id": 123, "branch": "b", "start_sha": "a" * 40, "head_sha": "a" * 40,
+         "has_bundle": False, "pr_number": 5,
+         "comments": [{"number": 5, "body_file": "review.md", "review": True}],
+         "review_comments": [
+             {"path": "src/a.py", "line": 3, "side": "RIGHT", "body_file": "rc0.md"},
+             {"path": "docs/x.md", "line": 10, "body_file": "rc1.md"},
+         ],
+         "review_verdict": "suggestions"}
+    m.update(overrides)
+    return m
+
+
+REVIEW_FILES = {"review.md": "Summary; please @review again. <!-- claude-review-comment -->\n",
+                "rc0.md": "Off by one; see @auto.\n", "rc1.md": "Typo.\n"}
+
+
+def test_post_appends_the_review_marker_after_the_defang(tmp_path):
+    # The marker is land's own text: the copy in the agent's body is split by
+    # the de-fang like any loop marker, and exactly one live marker follows,
+    # so pr-feedback-context anchors on the landed review and the stubs skip
+    # it — and a comments[] entry without the flag gets none.
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[]), REVIEW_FILES, pr_number="5")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    (body,) = posted_bodies(tmp_path)
+    assert body.count("<!-- claude-review-comment -->") == 1
+    assert body.endswith("\n<!-- claude-review-comment -->\n")
+    assert "`review`" in body and "claude-review comment" in body
+    assert post_outputs(tmp_path)["posted_comments"] == "1"
+    (tmp_path / "plain").mkdir()
+    r, calls, writes, failed = run_post(tmp_path / "plain", review_landing(
+        review_comments=[], comments=[{"number": 5, "body_file": "review.md"}]), REVIEW_FILES, pr_number="5")
+    (body,) = posted_bodies(tmp_path / "plain")
+    assert "<!-- claude-review-comment -->" not in body
+
+
+def test_post_anchors_inline_review_comments_to_the_prs_head(tmp_path):
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    inline = [c for c in calls if c.startswith("api repos/o/r/pulls/5/comments ")]
+    assert len(inline) == 2
+    assert "-f commit_id=" + "c" * 40 + " -f path=src/a.py -F line=3 -f side=RIGHT --silent" in inline[0]
+    # `side` defaults to RIGHT; every body is de-fanged.
+    assert "-f path=docs/x.md -F line=10 -f side=RIGHT" in inline[1]
+    bodies = posted_bodies(tmp_path)
+    assert bodies[1] == "Off by one; see `auto`.\n" and bodies[2] == "Typo.\n"
+    # No follow-up comment: everything anchored. Summary + 2 inline = 3 posts.
+    assert len(bodies) == 3
+    assert "posted 2 of 2 inline review comment(s)" in r.stdout
+
+
+def test_post_folds_unanchorable_inline_comments_into_one_follow_up(tmp_path):
+    # 422 is final (no retry — one attempt each), the findings go into ONE
+    # top-level comment, and nothing is recorded as failed: the verdict must
+    # not be withheld over an anchor.
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 2
+    bodies = posted_bodies(tmp_path)
+    follow_up = bodies[-1]
+    assert follow_up.startswith("Inline review comments that could not be anchored")
+    assert "**src/a.py** line 3 (RIGHT)" in follow_up and "Off by one; see `auto`." in follow_up
+    assert "**docs/x.md** line 10 (RIGHT)" in follow_up and "Typo." in follow_up
+    assert calls[-1].startswith("api repos/o/r/issues/5/comments ")
+
+
+def test_post_retries_a_transient_inline_comment_failure(tmp_path):
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5", scenario="inline-flaky")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 3
+    assert not any(c.startswith("api repos/o/r/issues/5/comments ") and "unanchored" in c for c in calls)
+    assert len(posted_bodies(tmp_path)) == 4  # summary, failed attempt, retry, second inline
+
+
+def test_post_folds_every_inline_comment_when_the_head_lookup_fails(tmp_path):
+    # No commit to anchor to: nothing is tried inline, all go to the follow-up.
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5", scenario="head-fails")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert not any(c.startswith("api repos/o/r/pulls/") for c in calls)
+    assert sum(c.startswith("pr view 5 ") for c in calls) == 3  # retried, then given up
+    assert "could not read #5's head SHA" in r.stdout
+    assert posted_bodies(tmp_path)[-1].startswith("Inline review comments that could not be anchored")
+
+
+def test_post_records_a_lost_follow_up_comment(tmp_path):
+    # The one inline-comment failure that IS a lost post: the follow-up
+    # comment itself failing after the 422s. (The summary shares the
+    # endpoint and fails too; both are named, and the verdict is withheld.)
+    r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5",
+                                        scenario="inline-422-comment-fails")
+    assert r.returncode == 0, r.stderr
+    assert "comment on #5 failed after 5 attempts" in failed
+    assert "follow-up comment (part 1) with unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+
+
+def big_finding(i: int) -> str:
+    return f"FINDING_{i}_BEGIN\n" + "x" * 30000 + f"\nFINDING_{i}_END\n"
+
+
+def test_post_splits_unanchored_findings_into_bounded_comments(tmp_path):
+    # Review round 1 of #116: three findings that each fit a comment were
+    # concatenated into one and defang's 60,000 cap dropped the end of the
+    # second and all of the third while `failed` stayed empty. Now a chunk is
+    # posted before it would pass 56,000 bytes, so every finding arrives
+    # whole, in as many comments as it takes, and nothing is recorded as lost.
+    comments = [{"path": f"src/{i}.py", "line": 3, "body_file": f"rc{i}.md"} for i in range(3)]
+    files = {"review.md": "Findings are inline.\n", **{f"rc{i}.md": big_finding(i) for i in range(3)}}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    bodies = posted_bodies(tmp_path)
+    follow_ups = [b for b in bodies if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 3  # ~30 KB each: one per chunk
+    assert follow_ups[1].startswith("Inline review comments that could not be anchored to the diff (the line is outside the PR's diff hunks, or the post failed) (continued):")
+    joined = "".join(follow_ups)
+    for i in range(3):
+        assert f"FINDING_{i}_BEGIN" in joined and f"FINDING_{i}_END" in joined, i
+    assert all(len(b.encode()) < 60000 and "truncated:" not in b for b in follow_ups)
+    # The bodies are ordered: summary, three 422 attempts, three chunks.
+    assert sum(c.startswith("api repos/o/r/issues/5/comments ") for c in calls) == 4
+
+
+def test_post_splits_a_single_oversized_unanchored_finding(tmp_path):
+    # Review round 2 of #116: a 999-byte path plus a body just under the
+    # Claude prep cap is one entry over the chunk budget; measured whole it
+    # was posted whole and defang's cap cut its tail with `failed` empty.
+    # Now the entry is split at line boundaries into pieces that each fill
+    # a chunk, and every byte arrives.
+    path = "/".join(["a" * 199] * 5)
+    body = "x" * 58950 + "\nTAIL_FINDING\n"
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": path, "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    joined = "".join(follow_ups)
+    assert "TAIL_FINDING" in joined and "truncated:" not in joined
+    assert joined.count("x") == 58950 and f"**{path}** line 3 (RIGHT)" in joined
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def test_post_measures_unanchored_entries_after_the_defang(tmp_path):
+    # Review round 2 of #116: paths carrying a trigger token grow when the
+    # chunk is de-fanged (`@auto` → `` `auto` ``), so a chunk measured on
+    # raw bytes overflowed the cap and the last finding was cut. Entries
+    # are de-fanged before they are measured, so all fifty arrive.
+    path = "/".join(["@auto" * 39] * 5)
+    comments = [{"path": path, "line": 3, "body_file": f"rc{i}.md"} for i in range(50)]
+    files = {"review.md": "Review\n", **{f"rc{i}.md": f"FINDING_{i}\n" for i in range(50)}}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    joined = "".join(follow_ups)
+    assert sum(f"FINDING_{i}\n" in joined for i in range(50)) == 50
+    assert "truncated:" not in joined and "@auto" not in joined and "`auto`" in joined
+    assert len(follow_ups) >= 2 and all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def fallback_content(follow_ups: list) -> str:
+    """The follow-up comments' entries, headers dropped and newlines removed, so a
+    token the byte cut split across two comments counts once."""
+    return "".join(b.split(":\n", 1)[1] for b in follow_ups).replace("\n", "")
+
+
+def test_post_folds_a_single_line_longer_than_the_budget(tmp_path):
+    # Review round 3 of #116: folding at the budget made a budget + 1 piece
+    # (the newline), which re-split and removed its own input — under
+    # Actions' `bash -e` the step died before posting any fallback. A line
+    # longer than the budget is now folded at budget - 1, every piece fits,
+    # and every byte arrives across as many comments as it takes.
+    body = "z" * 59900 + "\nTAIL_FINDING\n"
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": "src/a.py", "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == "" and "No such file" not in r.stderr
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    joined = "".join(follow_ups)
+    assert fallback_content(follow_ups).count("z") == 59900 and "TAIL_FINDING" in joined and "truncated:" not in joined
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def test_post_fallback_carries_everything_the_body_cap_kept(tmp_path):
+    # The reviewer's fixture: `@AUTO` × 11,780 is under the prep cap but
+    # grows past defang's 60,000 cap in land (case-insensitive: `AUTO` →
+    # `` `AUTO` ``), so the body is cut to exactly 10,000 tokens plus the
+    # truncation note BEFORE it reaches the fallback. Everything the cap
+    # kept — 10,000 tokens and the note, one 60,000-byte line — must reach
+    # the PR: two comments, nothing missing, nothing recorded as failed.
+    body = "@AUTO" * 11780 + "\nTAIL_FINDING\n"
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": "src/a.py", "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    joined = "".join(follow_ups)
+    assert fallback_content(follow_ups).count("AUTO") == 10000 and "@AUTO" not in joined
+    assert "_[truncated: the body exceeded the comment size cap]_" in joined  # the per-body cap's own note, carried whole
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+@pytest.mark.parametrize("char,count,lead", [("é", 29450, ""), ("中", 19633, "x"), ("😀", 14725, ""), ("😀", 14725, "xy")])
+def test_post_cuts_a_long_line_at_utf8_character_boundaries(tmp_path, char, count, lead):
+    # Review round 4 of #116: a cut at an arbitrary byte split a multi-byte
+    # character, and gh serialised the stray bytes as U+FFFD instead of
+    # refusing them — silent corruption. The cut now backs off to a
+    # character boundary: every posted chunk is valid UTF-8 and every
+    # character arrives, for two-, three- and four-byte characters, at
+    # offsets that put the cut point at each position inside a character.
+    body = lead + char * count + "\nTAIL_FINDING\n"
+    assert len(body.encode()) < 59000  # under the prep cap: nothing is truncated before the fallback
+    path = "/".join(["a" * 199] * 5)
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": path, "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    # Every posted chunk file is valid UTF-8 (posted_bodies decodes strictly too).
+    for p in sorted(tmp_path.glob("unanchored-*-post.md")):
+        p.read_bytes().decode("utf-8")
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    content = fallback_content(follow_ups)
+    assert content.count(char) == count and "\ufffd" not in content and "TAIL_FINDING" in content
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def test_post_cuts_at_a_character_boundary_in_a_partly_filled_chunk(tmp_path):
+    # The open chunk already holds a finding, so the room left — and the
+    # cut point inside the long line — is offset by that entry's length. The
+    # body is just under land's own 60,000 cap (the validator admits 64 KiB;
+    # only the Claude prep step caps at 59,000), so the entry is over the
+    # chunk budget on its own and is split, its heading completing the open
+    # chunk.
+    body = "é" * 29990 + "\nTAIL_FINDING\n"
+    comments = [{"path": "src/first.py", "line": 1, "body_file": "rc0.md"}, {"path": "src/second.py", "line": 3, "body_file": "rc1.md"}]
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments),
+                                        {"review.md": "Review\n", "rc0.md": "short finding\n", "rc1.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    for p in sorted(tmp_path.glob("unanchored-*-post.md")):
+        p.read_bytes().decode("utf-8")
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2 and "short finding" in follow_ups[0] and "src/second.py" in follow_ups[0]
+    content = fallback_content(follow_ups)
+    assert content.count("é") == 29990 and "\ufffd" not in content and "TAIL_FINDING" in content
+
+
+def test_post_packs_small_unanchored_findings_into_one_comment(tmp_path):
+    # Two findings under the chunk bound share one comment (the round-1
+    # shape); a third that would pass the bound opens a second.
+    comments = [{"path": f"src/{i}.py", "line": 3, "body_file": f"rc{i}.md"} for i in range(3)]
+    files = {"review.md": "s\n", "rc0.md": "a" * 20000, "rc1.md": "b" * 20000, "rc2.md": "c" * 20000}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5", scenario="inline-422")
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    assert "src/0.py" in follow_ups[0] and "src/1.py" in follow_ups[0] and "src/2.py" in follow_ups[1]
+
+
+def test_post_records_every_lost_follow_up_chunk(tmp_path):
+    comments = [{"path": f"src/{i}.py", "line": 3, "body_file": f"rc{i}.md"} for i in range(2)]
+    files = {"review.md": "s\n", "rc0.md": big_finding(0), "rc1.md": big_finding(1)}
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments), files, pr_number="5",
+                                        scenario="inline-422-comment-fails")
+    assert "follow-up comment (part 1) with unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+    assert "follow-up comment (part 2) with unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+
+
+# post_review_comment_file on its own: retry policy per status.
+RC_STUB = r"""
+sleep() { :; }
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$SCENARIO" in
+    422) echo '{"message": "Validation Failed"}'; echo "gh: Validation Failed (HTTP 422)" >&2; return 1 ;;
+    500) echo "gh: Server Error (HTTP 500)" >&2; return 1 ;;
+    flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo "gh: Server Error (HTTP 500)" >&2; return 1; fi ;;
+  esac
+  return 0
+}
+"""
+
+
+@pytest.mark.parametrize("scenario,rc,attempts", [("", 0, 1), ("422", 1, 1), ("flaky", 0, 2), ("500", 1, 3)])
+def test_post_review_comment_file_retry_policy(tmp_path, scenario, rc, attempts):
+    state = tmp_path / "state"
+    state.mkdir()
+    body = tmp_path / "b.md"
+    body.write_text("finding\n")
+    r = sh("bash", "-c", RC_STUB + f". '{LIB}'\npost_review_comment_file o/r 5 {'c' * 40} 'src/a b.py' 7 LEFT '{body}'; echo rc=$?",
+           check=False, env={"STATE": str(state), "SCENARIO": scenario})
+    assert r.stdout.strip().endswith(f"rc={rc}"), r.stdout + r.stderr
+    calls = (state / "calls").read_text().splitlines()
+    assert len(calls) == attempts
+    assert calls[0] == f"api repos/o/r/pulls/5/comments -F body=@{body} -f commit_id={'c' * 40} -f path=src/a b.py -F line=7 -f side=LEFT --silent"
+
+
+def test_land_outputs_what_the_reviewer_landed():
+    # claude-review.yml's landed-review check reads these instead of counting
+    # the agent's comments (it posts none): the verdict comment is the review
+    # in pr mode, the proxy-issue comment in external mode.
+    text = LAND.read_text()
+    assert "posted_comments:\n" in text and "value: ${{ steps.post.outputs.posted_comments }}" in text
+    assert "value: ${{ steps.verdict.outcome == 'success' && steps.plan.outputs.verdict != '' && '1' || '' }}" in text
 
 
 
