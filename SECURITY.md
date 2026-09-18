@@ -90,8 +90,9 @@ text are checked by the tests under `tests/`.
   reviewer and the loops fail at their mint step instead.
 - CI agents cannot edit workflow files. Changes to `.github/workflows/` are
   made from a maintainer's machine, under a maintainer's review. The land
-  job refuses a bundle that touches them before pushing, with a report
-  naming the files.
+  job refuses a bundle in which the agent changed them before pushing, with
+  a report naming the files; changes the runner's base merge brought in
+  pass.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The

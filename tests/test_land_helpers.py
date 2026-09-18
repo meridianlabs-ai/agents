@@ -1151,6 +1151,17 @@ def test_workflows_step_gates_the_push_and_reaches_the_report():
     block = step_block(text, "workflows", indent=4)
     assert block.splitlines()[1].strip() == "if: steps.plan.outputs.has_bundle == 'true' && steps.fetch.outputs.already == ''"
     assert "GIT_TOKEN:" not in block  # local diff only: no token in its env
+    # The base tip it compares against comes from the fetch step (read
+    # token), for the branch trusted context names: the PR's base from the
+    # lookup step (the pinned pr-number), else the default branch — never
+    # the manifest's pr.base.
+    assert "BASE_SHA: ${{ steps.fetch.outputs.base_sha }}" in block
+    fetch = step_block(text, "fetch", indent=4)
+    assert "BASE: ${{ steps.lookup.outputs.base || inputs.default-branch || steps.lookup.outputs.default_branch }}" in fetch
+    assert '"refs/heads/$BASE:refs/land/base"' in fetch and 'echo "base_sha=$base_sha"' in fetch
+    lookup = step_block(text, "lookup", indent=4)
+    assert lookup.splitlines()[1].strip() == "if: inputs.pr-number != '' || inputs.default-branch == ''"
+    assert "--json headRefName,baseRefName" in lookup
     push = step_block(text, "push", indent=4)
     assert push.splitlines()[1].strip() == "if: steps.plan.outputs.has_bundle == 'true'"
     assert "always()" not in push
@@ -1190,7 +1201,7 @@ def repos(tmp_path):
     git("add", "f", cwd=work)
     git("commit", "-qm", "base", cwd=work)
     git("branch", "-M", "feature", cwd=work)
-    git("push", "-q", str(origin), "feature", cwd=work)
+    git("push", "-q", str(origin), "feature", "feature:main", cwd=work)
     start = git("rev-parse", "HEAD", cwd=work).stdout.strip()
     (work / "f").write_text("2\n")
     git("commit", "-qam", "agent change", cwd=work)
@@ -1219,7 +1230,13 @@ def land_fetch(r):
     git("fetch", "--quiet", "--no-tags", str(r["landing"] / "commits.bundle"), "HEAD", cwd=repo)
     assert git("rev-parse", "FETCH_HEAD", cwd=repo).stdout.strip() == r["head"]
     git("merge-base", "--is-ancestor", r["start"], r["head"], cwd=repo)
+    # The base branch's tip, for the workflows step (refs/land/base).
+    git("fetch", "--quiet", "--no-tags", str(r["origin"]), "refs/heads/main:refs/land/base", cwd=repo)
     return repo
+
+
+def base_sha(repo) -> str:
+    return git("rev-parse", "refs/land/base", cwd=repo).stdout.strip()
 
 
 def remote_tip(r):
@@ -1295,13 +1312,15 @@ def commit_path(r, path, text="x\n"):
     r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
 
 
-def run_workflows_step(r, repo, stub=""):
+def run_workflows_step(r, repo, stub="", base=None):
     """The land composite's `workflows` step, lifted and run in the bare repo
     `land_fetch` filled, as GitHub runs it (`bash -eo pipefail`); STUB is
-    shell prepended to it (a failing `git`, say)."""
+    shell prepended to it (a failing `git`, say). BASE is the fetch step's
+    base_sha output: the fetched base tip unless a test says otherwise."""
     out = r["tmp"] / "workflows-out.txt"
     out.write_text("")
-    env = {"WORK": str(repo), "START_SHA": r["start"], "HEAD_SHA": r["head"], "GITHUB_OUTPUT": str(out)}
+    env = {"WORK": str(repo), "START_SHA": r["start"], "HEAD_SHA": r["head"], "GITHUB_OUTPUT": str(out),
+           "RUNNER_TEMP": str(r["tmp"]), "BASE_SHA": base_sha(repo) if base is None else base}
     res = sh("bash", "-eo", "pipefail", "-c", stub + step_script("workflows"), check=False, env=env)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     return res, outputs
@@ -1332,9 +1351,10 @@ def test_bundle_deleting_a_workflow_file_is_refused(repos):
     # as one) is refused like an edit: GitHub refuses that push too.
     r = repos
     commit_path(r, ".github/workflows/old.yml")
-    # Re-base the run on a start that already has the file, then delete it.
+    # Re-base the run on a start that already has the file — on the base
+    # branch too, so the deletion is the agent's — then delete it.
     r["start"] = r["head"]
-    git("push", "-q", str(r["origin"]), "HEAD:feature", cwd=r["work"])
+    git("push", "-q", str(r["origin"]), "HEAD:feature", "HEAD:main", cwd=r["work"])
     git("mv", ".github/workflows/old.yml", "elsewhere.yml", cwd=r["work"])
     git("commit", "-qm", "move the workflow out", cwd=r["work"])
     r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
@@ -1362,6 +1382,132 @@ def test_failed_path_listing_refuses_the_bundle_unchecked(repos):
     assert remote_tip(r) == r["start"]
     hint = bash_lib("landing_failure_hint 'workflows' '' '' ''")
     assert hint.stdout.startswith("The landing could not check whether the agent's commits change workflow files")
+
+
+def advance_base(r, path=".github/workflows/ci.yml", text="on: push\n"):
+    """A maintainer changes a workflow file on the base branch (origin/main)
+    after the agent's start; returns the new base tip."""
+    work = r["work"]
+    git("fetch", "-q", str(r["origin"]), "main", cwd=work)
+    git("checkout", "-q", "-b", f"base-{path.replace('/', '-')}-{text.count(chr(10))}", "FETCH_HEAD", cwd=work)
+    f = work / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text)
+    git("add", str(f), cwd=work)
+    git("commit", "-qm", f"maintainer: {path}", cwd=work)
+    tip = git("rev-parse", "HEAD", cwd=work).stdout.strip()
+    git("push", "-q", str(r["origin"]), "HEAD:main", cwd=work)
+    git("checkout", "-q", "feature", cwd=work)
+    return tip
+
+
+def merge_base_into_feature(r):
+    """What sync-branch does before the agent starts: `git merge origin/main`
+    on the branch, recorded after start_sha, so the merge is in the bundle."""
+    git("fetch", "-q", str(r["origin"]), "main", cwd=r["work"])
+    git("merge", "-q", "--no-edit", "FETCH_HEAD", cwd=r["work"])
+    r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
+
+
+@pytest.mark.parametrize("how", ["merge", "fast-forward"])
+def test_workflow_change_brought_in_by_the_base_merge_lands(repos, how):
+    # The runner merged origin/main — where a maintainer changed a workflow
+    # file — into the branch; the agent touched no workflow file. The
+    # change is on origin already and not the agent's: the bundle lands.
+    r = repos
+    advance_base(r)
+    if how == "merge":
+        merge_base_into_feature(r)
+    else:
+        # The branch had nothing of its own yet, so the sync fast-forwarded
+        # and the agent worked on top: base commits in the bundle, no merge.
+        git("fetch", "-q", str(r["origin"]), "main", cwd=r["work"])
+        git("reset", "-q", "--hard", "FETCH_HEAD", cwd=r["work"])
+        commit_path(r, "src/agent.py")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+    assert f"1 workflow file(s) in {r['start']}..{r['head']} changed only by the base merge (matching origin's base at {base_sha(repo)}); not the agent's." in res.stdout
+    git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/feature", cwd=repo)
+    assert remote_tip(r) == r["head"]
+
+
+def test_agent_workflow_change_on_top_of_a_base_merge_is_refused_and_named_alone(repos):
+    r = repos
+    advance_base(r)
+    merge_base_into_feature(r)
+    commit_path(r, ".github/workflows/agent.yml")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    # Only the agent's file: the base merge's ci.yml is not named.
+    assert outputs["files"] == "`.github/workflows/agent.yml`"
+
+
+def test_agent_edit_of_a_base_merged_workflow_file_is_refused(repos):
+    # The blob at head differs from both start (absent) and the base: the
+    # agent's edit, however small.
+    r = repos
+    advance_base(r)
+    merge_base_into_feature(r)
+    commit_path(r, ".github/workflows/ci.yml", "on: push\n# tweaked by the agent\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    assert outputs["files"] == "`.github/workflows/ci.yml`"
+
+
+def test_base_that_moved_after_the_merge_still_exempts_the_merged_version(repos):
+    # The merge brought ci.yml at version 1; a maintainer then changed it
+    # again on main before the landing. Head's blob is not the base tip's,
+    # but it is the merged parent's — an ancestor of the tip — so it is the
+    # base's, not the agent's.
+    r = repos
+    advance_base(r)
+    merge_base_into_feature(r)
+    advance_base(r, text="on: push\n# v2\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+    git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/feature", cwd=repo)
+
+
+def test_crafted_merge_parent_does_not_exempt_a_workflow_file(repos):
+    # The agent commits a workflow file on a side branch of its own and
+    # merges it in: the file's blob matches the merge's second parent, but
+    # that parent is not on origin's base — the agent made it — so the
+    # bundle is refused.
+    r = repos
+    work = r["work"]
+    git("checkout", "-q", "-b", "side", r["start"], cwd=work)
+    commit_path(r, ".github/workflows/evil.yml", "on: pull_request_target\n")
+    git("checkout", "-q", "feature", cwd=work)
+    git("merge", "-q", "--no-edit", "side", cwd=work)
+    r["head"] = git("rev-parse", "HEAD", cwd=work).stdout.strip()
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    assert outputs["files"] == "`.github/workflows/evil.yml`"
+
+
+def test_without_a_base_tip_nothing_is_exempt(repos):
+    # The fetch step could not fetch the base (a warning there): the check
+    # falls back to refusing every workflow change, the base merge's too.
+    r = repos
+    advance_base(r)
+    merge_base_into_feature(r)
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, base="")
+    assert res.returncode != 0
+    assert outputs["files"] == "`.github/workflows/ci.yml`"
 
 
 def test_workflow_file_list_is_capped(repos):
