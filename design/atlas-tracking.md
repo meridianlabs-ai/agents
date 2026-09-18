@@ -164,7 +164,7 @@ set by a human, not the agent:
 | Transition | Trigger | Driven by |
 |---|---|---|
 | Todo → Agent | kickoff run starts | the `gate` job (`claude.yml`/`@auto`) |
-| Agent → Review | `@auto` hands back (converged *or* escalated), or a fix round's re-review request / hand-off lands, or a one-shot dev run ends | `claude-auto-review.yml`: the `gate` job (converged / escalated), the `land` job (the manifest's `stage`); `claude.yml`: the `land` job (the manifest's `stage`) |
+| Agent → Review | the loop ends: `@auto` converges or escalates, a fix round's hand-off lands, or a one-shot dev run ends (a re-review request is mid-flight and moves nothing) | `claude-auto-review.yml`: the `gate` job (converged / escalated), the `land` job (the manifest's `stage`); `claude.yml`: the `land` job (the manifest's `stage`) |
 | Review → Agent | you re-engage (`@claude`/`@auto`) | agent post-step, next run |
 | Review → Sign-off | you request a second reviewer on the PR | **PR-event hook** (`review_requested`) |
 | Sign-off → Merge | that reviewer approves | **PR-event hook** (`pull_request_review` approved) |
@@ -659,15 +659,24 @@ the opted-in repo: set-stage mints the card but assigns no one, and the
 working views filter `assignee:@me` — so the convention is that authors
 **self-assign standalone PRs**, or the card is invisible where people
 actually look. Wired:
-`claude.yml` sets **Agent** at run start (its `gate` job) and **Review** at
-hand-back (its `land` job, from the manifest's `stage`, since #84) — skipped
-only for a *successful `@auto` run that left a PR in the loop* (the review
-loop owns the stage from there; an errored run always hands back); `claude-auto.yml` sets Agent per CI-fix round, Review on
+one rule for every loop (decision: Ransom, 2026-09-18): a card stays at
+**Agent** while any agent of the loop is still to run, and moves to
+**Review** only when the loop has ended — converged, escalated to a human,
+or stopped. A re-review request (the manifest's `handback: true`, the
+`@review` that asks the reviewer for the next round) is mid-flight and sets
+no stage; until 2026-09-18 the fix loops' hand-backs set Review, and the
+reviewer's gate moved the card back to Agent a minute later. That gate step
+stays as a belt-and-braces reset. So: `claude.yml` sets Agent at run start
+(its `gate` job) and Review when a run ends without handing its PR back to
+the loop — a one-shot run, an errored or refused run, a no-change run that
+requested nothing (its `land` job, from the manifest's `stage`, since #84)
+— and nothing on the `@review` hand-back of an `auto` PR, whatever the
+trigger phrase; `claude-auto.yml` sets Agent per CI-fix round, Review on
 escalation; `claude-auto-review.yml` sets Agent per review-fix round,
 Review on both the converged and escalated handoffs and — from its land
-job — on a fix round's re-review request or hand-off. Known accepted
-noise: the stub's substring gate can start a run the action then declines
-(word-boundary), briefly staging an unengaged issue.
+job — on a fix round's hand-off. Known accepted noise: the stub's substring
+gate can start a run the action then declines (word-boundary), briefly
+staging an unengaged issue.
 
 **PR-event hook** — a small workflow (in the reusable set, or a caller stub)
 triggered on `pull_request` `review_requested` and `pull_request_review`

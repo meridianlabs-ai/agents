@@ -77,8 +77,13 @@ def commit(r, subject="feat: add the thing", body="Because the issue asked for i
 def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent_extra=None,
             claude_outcome="success", codex_commit="skipped", codex_guard=None, codex_ids="",
             codex_summary=None, final_message="Here is the answer.", error=None, req_review="false",
-            base="", pr_labels='["auto"]', claude_branch=ISSUE_BRANCH, head_branch=PR_BRANCH,
+            base="", pr_labels=None, claude_branch=ISSUE_BRANCH, head_branch=PR_BRANCH,
             merge_sha="", prov_note="", checkout_sha=None, sync_branch=None):
+    # PR_LABELS as the gate composes it: `auto` exactly when the run is
+    # autonomous (an @auto trigger or an `auto`-labelled item), unless a test
+    # says otherwise.
+    if pr_labels is None:
+        pr_labels = '["auto"]' if auto == "true" else '[]'
     landing = r["tmp"] / "landing"
     landing.mkdir(exist_ok=True)
     if agent_extra is not None:
@@ -138,11 +143,11 @@ def test_issue_run_with_commit_opens_pr_and_validates(repo):
     m, _, landing, out = compose(repo, is_pr=False, base="main")
     assert out["branch"] == ISSUE_BRANCH and out["read_only"] == "false"
     assert m["pr"] == {"open": True, "title": "feat: add the thing", "body_file": "pr-body.md",
-                       "labels": ["auto"], "issue": 12, "base": "main"}
+                       "labels": [], "issue": 12, "base": "main"}
     body = (landing / "pr-body.md").read_text()
     assert body.startswith("Fixes #12\n\nBecause the issue asked for it.")
     assert "Co-Authored-By: X" in body and "[this run](https://github.com/meridianlabs-ai/agents/actions/runs/123)" in body
-    assert "handback" not in m                      # @claude: no reviewer requested
+    assert "handback" not in m                      # @claude, no `auto` label: reviews stay on demand
     assert m["stage"] == "Review"                   # one-shot: hand back to a human
     assert "comments" not in m and "error" not in m
     # Through emit-landing and the validator, as an issue run (no PR number,
@@ -164,9 +169,113 @@ def test_issue_run_at_auto_stays_at_agent_and_can_request_review(repo):
     m, res, _, _ = compose(repo, is_pr=False, trigger="@auto", auto="true", req_review="true",
                            pr_labels='["auto","engine:codex"]')
     assert m["pr"]["labels"] == ["auto", "engine:codex"]
-    assert m["handback"] is True                    # request_review_after_open (the fork)
+    assert m["handback"] is True                    # the `auto` label (and request_review_after_open)
     assert "stage" not in m                         # the loop owns the stage from here
     assert "stage stays at Agent" in res.stdout
+
+
+def test_auto_kickoff_opens_pr_with_handback_and_validates(repo):
+    # The `auto` label on an issue (or an @auto mention) with the caller's
+    # request_review_after_open off, as every Meridian stub has it: the PR
+    # the land job opens carries `auto`, and that same label array owes the
+    # loop's first `@review` — auto-review-on-open is off everywhere
+    # (2026-09-16), so this hand-back is where the loop starts (inspect_ai#497
+    # → PR #507, run 35269648600, landed with HANDBACK_PLANNED false and was
+    # never reviewed). Through emit-landing and the validator as an issue run.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, res, _, out = compose(repo, is_pr=False, trigger="@auto", auto="true", base="main")
+    assert m["pr"]["open"] is True and m["pr"]["labels"] == ["auto"]
+    assert m["handback"] is True
+    assert "stage" not in m                         # the loop owns the stage from here
+    assert "stage stays at Agent" in res.stdout
+    extra = repo["tmp"] / "landing-extra.json"
+    res, landing, output = run_emit_landing(repo["tmp"], cwd=repo["work"], read_only=False, start_sha=repo["start"],
+                                            extra=extra, branch=out["branch"], pr_number="", issue_number="12")
+    assert res.returncode == 0, res.stderr
+    assert "wrote=true" in output
+    manifest = json.loads((landing / "manifest.json").read_text())
+    assert manifest["has_bundle"] is True and manifest["handback"] is True and manifest["pr"]["labels"] == ["auto"]
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
+    assert v.returncode == 0, v.stdout
+
+
+def test_claude_trigger_on_an_auto_labelled_issue_owes_the_handback(repo):
+    # `@claude` (or the `claude` label) on an issue that carries `auto`: the
+    # gate reads the label, the PR gets it, so the PR is the loop's and owes
+    # the `@review` — and, the hand-back being mid-flight, no stage, whatever
+    # the trigger phrase (review round 3: keyed on the @auto phrase, this run
+    # set Review alongside its hand-back).
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, res, _, _ = compose(repo, is_pr=False, trigger="@claude", auto="true")
+    assert m["pr"]["labels"] == ["auto"] and m["handback"] is True
+    assert "stage" not in m and "stage stays at Agent" in res.stdout
+
+
+def test_handback_follows_the_label_array_not_the_auto_flag(repo):
+    # The hand-back keys on the labels `land` applies: a PR_LABELS value that
+    # fails the composer's shape check lands no label, so it owes no `@review`
+    # either — the two cannot disagree.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, _, _, _ = compose(repo, is_pr=False, trigger="@auto", auto="true", pr_labels="not json")
+    assert m["pr"]["labels"] == [] and "handback" not in m
+
+
+def test_request_review_after_open_still_requests_without_the_label(repo):
+    # The input's remaining role: a hand-back for a PR outside the loop —
+    # unchanged, so an errored run still gets it as before.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, _, _, _ = compose(repo, is_pr=False, req_review="true")
+    assert m["pr"]["labels"] == [] and m["handback"] is True
+    m, _, _, _ = compose(repo, is_pr=False, req_review="true", claude_outcome="failure", error="⚠️ it broke\n")
+    assert m["pr"]["labels"] == [] and m["handback"] is True and m["stage"] == "Review"
+
+
+def test_request_review_after_open_does_not_bypass_the_auto_error_rule(repo):
+    # An `auto`-labelled PR is the loop's whatever the caller's input says:
+    # an errored run owes it no `@review` (review round 1 caught the input
+    # slipping past the error check).
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, _, _, _ = compose(repo, is_pr=False, trigger="@auto", auto="true", req_review="true",
+                         claude_outcome="failure", error="⚠️ it broke\n")
+    assert m["pr"]["labels"] == ["auto"] and "handback" not in m and m["stage"] == "Review"
+
+
+def test_auto_kickoff_read_only_landing_owes_no_handback(repo):
+    # The fork's early-failure shape under an `auto` kickoff: the agent never
+    # initialized its branch, nothing is bundled, no PR — and no `@review`
+    # (through emit-landing: read-only, so even a handback set by mistake
+    # would be dropped with the bundle).
+    on(repo, "meridian")
+    commit(repo, subject="someone else's merged work", body="")
+    meridian = git("rev-parse", "HEAD", cwd=repo["work"]).stdout.strip()
+    m, _, _, out = compose(repo, is_pr=False, trigger="@auto", auto="true", claude_branch="",
+                           claude_outcome="skipped", error="⚠️ provisioning failed\n", checkout_sha=meridian)
+    assert out["read_only"] == "true" and "pr" not in m and "handback" not in m
+    assert m["stage"] == "Review"
+    extra = repo["tmp"] / "landing-extra.json"
+    res, landing, output = run_emit_landing(repo["tmp"], cwd=repo["work"], read_only=True, start_sha=repo["start"],
+                                            extra=extra, branch=out["branch"], pr_number="", issue_number="12")
+    assert res.returncode == 0 and "wrote=true" in output
+    manifest = json.loads((landing / "manifest.json").read_text())
+    assert manifest["has_bundle"] is False and "handback" not in manifest and "pr" not in manifest
+
+
+def test_auto_kickoff_that_errored_opens_the_pr_but_owes_no_handback(repo):
+    # The agent committed, then its step failed (the Surface step wrote the
+    # error): the work lands and the PR opens labelled `auto`, but it goes to
+    # a human (stage Review, the ⚠️ posted by `land`), not to the loop.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, _, _, _ = compose(repo, is_pr=False, trigger="@auto", auto="true", claude_outcome="failure",
+                         error="⚠️ it broke\n")
+    assert m["pr"]["open"] is True and m["pr"]["labels"] == ["auto"]
+    assert "handback" not in m
+    assert m["stage"] == "Review" and m["error"]["fail_run"] is True
 
 
 def test_issue_run_with_no_commit_opens_nothing_and_relays_the_answer(repo):
@@ -314,6 +423,7 @@ def test_pr_run_with_head_off_the_pr_branch_lands_nothing(repo):
     # error of the composer's own.
     m, _, _, out = compose(repo, is_pr=True, trigger="@auto", auto="true", sync_branch="")
     assert out["read_only"] == "true" and "handback" not in m and "error" not in m
+    assert m["stage"] == "Review"                   # nothing handed back to the loop: the loop stopped here
 
 
 def test_rejected_autonomous_pr_run_hands_back_to_a_human(repo):
@@ -347,7 +457,7 @@ def test_pr_run_on_auto_pr_owes_exactly_one_handback(repo):
     m, _, _, out = compose(repo, is_pr=True, auto="true")
     assert out["branch"] == PR_BRANCH and out["read_only"] == "false"
     assert m["handback"] is True and "pr" not in m
-    assert m["stage"] == "Review"                   # @claude on an auto PR: still hands back to a human
+    assert "stage" not in m                         # @claude on an auto PR: handed back to the loop, mid-flight
 
 
 def test_pr_run_at_auto_with_commit_stays_at_agent(repo):
@@ -448,11 +558,22 @@ def test_error_is_carried_and_no_relay_posts_over_it(repo):
     assert "comments" not in m and m["stage"] == "Review"
 
 
-def test_error_at_auto_still_hands_back_to_a_human(repo):
+def test_error_at_auto_lands_but_owes_no_handback(repo):
+    # A PR run in the loop whose agent step errored after committing: the
+    # commits land and the ⚠️ posts, but the PR goes to a human (stage
+    # Review), not back to the loop — the same rule as the PR this workflow
+    # opens (it used to owe the `@review` whatever the step's outcome). Both
+    # engines, and the merge-only shape.
     on(repo, PR_BRANCH)
     commit(repo)
     m, _, _, _ = compose(repo, is_pr=True, trigger="@auto", auto="true", error="⚠️ it broke")
-    assert m["handback"] is True and m["stage"] == "Review"
+    assert "handback" not in m and m["stage"] == "Review" and m["error"]["fail_run"] is True
+    m, _, _, _ = compose(repo, is_pr=True, engine="codex", auto="true", codex_commit="success",
+                         codex_summary="s\n", error="⚠️ it broke")
+    assert "handback" not in m and m["stage"] == "Review" and m["comments"][0]["body_file"] == "codex-comment.md"
+    head = git("rev-parse", "HEAD", cwd=repo["work"]).stdout.strip()
+    m, _, _, _ = compose(repo, is_pr=True, trigger="@auto", auto="true", merge_sha=head, error="⚠️ it broke")
+    assert "handback" not in m and m["stage"] == "Review"
 
 
 def test_codex_pr_run_carries_summary_ids_and_handback(repo):
@@ -462,7 +583,7 @@ def test_codex_pr_run_carries_summary_ids_and_handback(repo):
                          codex_ids="PRRT_b bogus PRRT_a PRRT_b", codex_summary="🤖 codex (dev agent):\n\ndone\n")
     assert m["comments"] == [{"number": 34, "body_file": "codex-comment.md"}]
     assert m["resolve_threads"] == ["PRRT_a", "PRRT_b"]
-    assert m["handback"] is True and m["stage"] == "Review"
+    assert m["handback"] is True and "stage" not in m
 
 
 def test_codex_issue_run_opens_pr_and_resolves_nothing(repo):

@@ -2105,8 +2105,13 @@ jobs:
       # attached only when the agent committed real changes, the codex
       # path's rule (a round that changed nothing settled nothing); `land`
       # intersects the ids with the PR's own threads before resolving.
-      #   agent committed, handback → handback: true, stage: Review
-      #   agent committed, handoff  → handoff_body_file, stage: Review
+      #   agent committed, handback → handback: true, and NO stage: the
+      #     re-review is mid-flight, and a card stays at Agent while any
+      #     agent of the loop is still to run (one rule for every loop,
+      #     design/atlas-tracking.md; Ransom, 2026-09-18 — until then the
+      #     hand-back set Review too)
+      #   agent committed, handoff  → handoff_body_file, stage: Review (the
+      #     hand-off ends the loop and hands the PR to a human)
       #   no agent commit (HEAD at the start SHA, or exactly the runner's
       #     clean base merge — merge-only), handoff → handoff_body_file,
       #     stage: Review (everything remaining declined with rationale —
@@ -2206,7 +2211,7 @@ jobs:
             have_summary=""
             [ "${CODEXCOMMIT_OUTCOME:-}" = "success" ] && [ -s "$DIR/codex-comment.md" ] && [[ "$PR" =~ ^[0-9]+$ ]] && have_summary=1
             if [ "$moved" = "true" ] && { [ -n "$committed" ] || [ -z "$have_summary" ]; }; then
-              extra=$(jq -c '.handback = true | .stage = "Review"' <<<"$extra")
+              extra=$(jq -c '.handback = true' <<<"$extra")
               if [ -n "$have_summary" ]; then
                 extra=$(jq -c --argjson n "$PR" '.comments = [{number: $n, body_file: "codex-comment.md"}]' <<<"$extra")
                 # One jq builds the array, so an empty or all-filtered list
@@ -2260,7 +2265,7 @@ jobs:
             if [ -n "$violation" ]; then
               echo "::error::landing: ending-contract violation — $violation; posting neither hand-back."
             elif [ "$handback" = "true" ]; then
-              extra=$(jq -c '.handback = true | .stage = "Review"' <<<"$extra")
+              extra=$(jq -c '.handback = true' <<<"$extra")
               [ -n "$committed" ] || echo "::warning::landing: the agent set handback without committing anything; the re-review re-reads unchanged code (the gate's no-progress check escalates a stall)."
             elif [ -n "$handoff" ]; then
               extra=$(jq -c --arg f "$handoff" '.handoff_body_file = $f | .stage = "Review"' <<<"$extra")

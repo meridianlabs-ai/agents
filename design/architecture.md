@@ -482,8 +482,11 @@ the model for the review-fix loop and the dev agent:
   Agent mode installs no MCP server without explicit tool grants, so there
   is no API-side commit or comment tool to deny.
 - **The hand-back is a manifest field, not a backstop.** `handback: true`
-  and `stage: Review` whenever HEAD moved past the start SHA and descends
-  from it (the same test `emit-landing` applies before bundling), which
+  whenever HEAD moved past the start SHA and descends from it (the same
+  test `emit-landing` applies before bundling) — and no `stage`: a
+  re-review request is mid-flight, so the card stays at Agent until the
+  loop ends (atlas-tracking.md's one rule; Ransom, 2026-09-18 — until then
+  the hand-back set Review as well) — which
   makes a merge-only round land and owe its `@review` like any other — so
   `Push base merge if unpushed` and `Ensure hand-back after push` are gone
   from this workflow: the "pushed but no hand-back" state they existed for
@@ -628,8 +631,10 @@ agent posts nothing and resolves nothing in-run):
   without a hand-back" into a redundant `@review`) and the `Detect agent
   self-handoff` comment scan are gone: the hand-back and the hand-off are
   fields of the manifest that carries the push, and `stage: Review` rides
-  with whichever one is set (the old `Stage - Review (self-handoff)`
-  behaviour). `Push base merge if unpushed` is gone as in #82 — the runner's
+  with the hand-off alone (the old `Stage - Review (self-handoff)`
+  behaviour; the hand-back is mid-flight and sets no stage — atlas-
+  tracking.md's one rule, Ransom, 2026-09-18). `Push base merge if
+  unpushed` is gone as in #82 — the runner's
   merge sits above the start SHA and lands through the bundle.
 - **A round the agent concluded nothing about is concluded by the
   composer, the codex way.** When the agent committed nothing of its own
@@ -714,10 +719,16 @@ the agent push mid-run:
   (`auto` on an `@auto` run or an `auto`-labelled issue, plus the issue's
   `engine:*` labels — read in the trusted job, not after the agent ran)
   and `pr.issue` for the link comment. `land` adopts an open PR for the
-  branch instead of duplicating it, labels on both paths, and the fork's
-  `request_review_after_open` becomes `handback: true` on that manifest,
-  so the `@review` posts after the PR step has labelled — the ordering the
-  input existed for. The start SHA of an issue run is the base branch's tip
+  branch instead of duplicating it, labels on both paths, and `handback:
+  true` rides on that manifest whenever those labels carry `auto` — the
+  dev agent is the third hand-back writer, next to the two fix loops, and
+  the `@auto` loop's first review comes from it now that the reviewer
+  stubs' auto-review-on-open is off (2026-09-16; keyed on the label array
+  `land` applies, so hand-back and label cannot disagree; not owed with an
+  error in the manifest, which hands back to a human instead) — or when
+  the caller's `request_review_after_open` asks for one, so the
+  `@review` posts after the PR step has labelled — the ordering the input
+  existed for. The start SHA of an issue run is the base branch's tip
   recorded after checkout (`origin/<base_branch or default branch>` — the
   fetch-depth-0 clone holds every remote branch); a PR run's is
   sync-branch's pre-merge tip, or on a closed PR (which the sync skips) the
@@ -753,10 +764,17 @@ the agent push mid-run:
   where the old `Ensure hand-back after agent push` step fired on the
   `@auto` trigger alone. A plain `@claude fix` on a PR the loop owns now
   re-engages the loop (issue #84's fourth verification item). Merge-only
-  runs owe it too, as the old backstop's post did, and the outcome of the
-  agent step does not matter (the loops' rule). The stage rule is
-  unchanged from `Stage - Review (hand-back)`: Review, except a successful
-  `@auto` run with no Surface error that left a PR in the loop.
+  runs owe it too, as the old backstop's post did. An errored run owes it
+  on neither path — the PR it ran on, or the PR it opens — since the dev
+  agent took over the loop's first review: its commits still land and the
+  ⚠️ posts, but the stage hands the PR to a human rather than the loop
+  (before that, a PR run owed the `@review` whatever the step's outcome).
+  The stage rule: Review, except a run that handed the PR back to the loop
+  (the hand-back above, on the PR it ran on or the one it opened) — that
+  hand-back is mid-flight, so the card stays at Agent whatever the trigger
+  phrase (atlas-tracking.md's one rule; Ransom, 2026-09-18 — until then the
+  exception keyed on the `@auto` phrase, so a `@claude` run on an `auto`
+  item set Review alongside its hand-back).
 - **The agent's one manifest key is `comments`.** The prompt says: commit,
   never push or post, and to say something on the issue/PR write a body
   file under the landing directory and add `{number, body_file}` to

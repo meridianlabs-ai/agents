@@ -104,7 +104,7 @@ def test_codex_commit_with_no_thread_ids_lands(repo):
     commit(repo)
     m, _, landing, extra = compose(repo, engine="codex", codex_commit="success", codex_ids="",
                                    codex_summary="🤖 auto (codex, round 3): changes committed\n")
-    assert m["handback"] is True and m["stage"] == "Review"
+    assert m["handback"] is True and "stage" not in m       # mid-flight: the card stays at Agent
     assert m["comments"] == [{"number": 42, "body_file": "codex-comment.md"}]
     assert "resolve_threads" not in m and "error" not in m
     res, landing, output = run_emit_landing(repo["tmp"], cwd=repo["work"], read_only=False,
@@ -131,7 +131,7 @@ def test_codex_commit_carries_shape_checked_unique_ids(repo):
 
 def test_codex_no_change_round_is_a_handoff(repo):
     m, _, _, _ = compose(repo, engine="codex", codex_commit="success", codex_ids="PRRT_a", codex_summary="s\n")
-    assert m["handoff_body_file"] == "codex-comment.md" and m["stage"] == "Review"
+    assert m["handoff_body_file"] == "codex-comment.md" and m["stage"] == "Review"   # the loop ended
     assert "handback" not in m and "resolve_threads" not in m and "comments" not in m
 
 
@@ -143,7 +143,7 @@ def test_claude_handback_with_replies_and_resolutions(repo):
     m, _, _, _ = compose(repo, engine="claude", agent_extra=json.dumps({
         "handback": True, "replies": [{"review_comment_id": 7, "body_file": "r.md"}],
         "resolve_threads": ["PRRT_a", "bogus"], "comments": [{"number": 1, "body_file": "x"}]}))
-    assert m["handback"] is True and m["stage"] == "Review"
+    assert m["handback"] is True and "stage" not in m       # mid-flight: the card stays at Agent
     assert m["replies"] == [{"review_comment_id": 7, "body_file": "r.md"}]
     assert m["resolve_threads"] == ["PRRT_a"]
     assert "comments" not in m  # not one of the agent's four keys
