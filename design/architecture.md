@@ -880,9 +880,11 @@ the dev-agent shape did not:
   final de-fanged bytes, a new one before the next entry would overflow the
   budget under the 60,000 de-fang cap and a single over-budget entry packed
   greedily into pieces that fill the open chunk and then new ones, a line
-  longer than the room left cut at the byte that fills it, so the cap never
-  has anything to cut, rather than losing it or withholding the verdict; a
-  chunk that fails to post is a recorded failure), the verdict as `review_verdict`
+  longer than the room left cut at the last UTF-8 character boundary that
+  fills it — never inside a character: gh serialises a stray byte as U+FFFD
+  rather than refusing it — so the cap never has anything to cut, rather
+  than losing it or withholding the verdict; a chunk that fails to post is a
+  recorded failure), the verdict as `review_verdict`
   exactly as the codex path. External mode lands the summary alone, as one
   comment on the proxy issue. The land job's job token is read-only too
   (`pull-requests: read`, for the composite's lookups): its writes — the

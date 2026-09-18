@@ -846,6 +846,52 @@ def test_post_fallback_carries_everything_the_body_cap_kept(tmp_path):
     assert all(len(b.encode()) < 60000 for b in follow_ups)
 
 
+@pytest.mark.parametrize("char,count,lead", [("é", 29450, ""), ("中", 19633, "x"), ("😀", 14725, ""), ("😀", 14725, "xy")])
+def test_post_cuts_a_long_line_at_utf8_character_boundaries(tmp_path, char, count, lead):
+    # Review round 4 of #116: a cut at an arbitrary byte split a multi-byte
+    # character, and gh serialised the stray bytes as U+FFFD instead of
+    # refusing them — silent corruption. The cut now backs off to a
+    # character boundary: every posted chunk is valid UTF-8 and every
+    # character arrives, for two-, three- and four-byte characters, at
+    # offsets that put the cut point at each position inside a character.
+    body = lead + char * count + "\nTAIL_FINDING\n"
+    assert len(body.encode()) < 59000  # under the prep cap: nothing is truncated before the fallback
+    path = "/".join(["a" * 199] * 5)
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": path, "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    # Every posted chunk file is valid UTF-8 (posted_bodies decodes strictly too).
+    for p in sorted(tmp_path.glob("unanchored-*-post.md")):
+        p.read_bytes().decode("utf-8")
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    content = fallback_content(follow_ups)
+    assert content.count(char) == count and "\ufffd" not in content and "TAIL_FINDING" in content
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def test_post_cuts_at_a_character_boundary_in_a_partly_filled_chunk(tmp_path):
+    # The open chunk already holds a finding, so the room left — and the
+    # cut point inside the long line — is offset by that entry's length. The
+    # body is just under land's own 60,000 cap (the validator admits 64 KiB;
+    # only the Claude prep step caps at 59,000), so the entry is over the
+    # chunk budget on its own and is split, its heading completing the open
+    # chunk.
+    body = "é" * 29990 + "\nTAIL_FINDING\n"
+    comments = [{"path": "src/first.py", "line": 1, "body_file": "rc0.md"}, {"path": "src/second.py", "line": 3, "body_file": "rc1.md"}]
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=comments),
+                                        {"review.md": "Review\n", "rc0.md": "short finding\n", "rc1.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    for p in sorted(tmp_path.glob("unanchored-*-post.md")):
+        p.read_bytes().decode("utf-8")
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2 and "short finding" in follow_ups[0] and "src/second.py" in follow_ups[0]
+    content = fallback_content(follow_ups)
+    assert content.count("é") == 29990 and "\ufffd" not in content and "TAIL_FINDING" in content
+
+
 def test_post_packs_small_unanchored_findings_into_one_comment(tmp_path):
     # Two findings under the chunk bound share one comment (the round-1
     # shape); a third that would pass the bound opens a second.

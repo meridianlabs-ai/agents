@@ -613,15 +613,20 @@ runs:
           # greedily, starting from the room left in the chunk that is open
           # (so the first piece completes that chunk instead of orphaning
           # the entry's heading in a comment of its own), and a line longer
-          # than the room left is cut at the byte that fills it, newline
-          # included — review round 3 of #116: `fold` at the budget itself
-          # made a budget + 1 piece, and re-splitting it removed the pieces
-          # still to be read. Byte cutting (LC_ALL=C: bytes, not characters)
-          # can split a multi-byte character; that piece's post then fails
-          # and is a recorded failure, never a silent loss. Every piece is
-          # appended in order (names are zero-padded so the glob keeps it);
-          # no recursion, no removal while pieces are pending, and a cut
-          # always advances, so this terminates on any input.
+          # than the room left is cut at the last UTF-8 character boundary
+          # that fills it, newline included — review round 3 of #116: `fold`
+          # at the budget itself made a budget + 1 piece, and re-splitting
+          # it removed the pieces still to be read; round 4: a cut at an
+          # arbitrary byte split multi-byte characters, which gh does NOT
+          # reject — it serialises each stray byte as U+FFFD, so the text
+          # was corrupted silently. awk runs under LC_ALL=C (bytes), and the
+          # cut backs off while the byte that would start the next piece is
+          # a UTF-8 continuation byte (10xxxxxx), at most three steps (a
+          # character is at most four bytes), so every piece is valid UTF-8
+          # when the input is. Every piece is appended in order (names are
+          # zero-padded so the glob keeps it); no recursion, no removal while
+          # pieces are pending, and a cut always advances, so this
+          # terminates on any input.
           add_unanchored() {
             local f="$1" pieces="$RUNNER_TEMP/unanchored-pieces" piece
             if [ "$(wc -c <"$f")" -le "$budget" ]; then
@@ -631,12 +636,16 @@ runs:
             rm -rf "$pieces"
             mkdir -p "$pieces"
             LC_ALL=C awk -v max="$budget" -v size="$(wc -c <"$RUNNER_TEMP/unanchored-$chunk.md")" -v prefix="$pieces/p." '
-              BEGIN { n = 0; out = prefix sprintf("%04d", n) }
+              BEGIN {
+                n = 0; out = prefix sprintf("%04d", n)
+                for (i = 128; i < 192; i++) cont[sprintf("%c", i)] = 1
+              }
               function next_piece() { close(out); n++; out = prefix sprintf("%04d", n); size = 0 }
               {
                 line = $0
                 while (length(line) + 1 > max - size) {
                   take = max - size - 1
+                  for (b = 0; b < 3 && take > 0 && (substr(line, take + 1, 1) in cont); b++) take--
                   if (take > 0) { print substr(line, 1, take) > out; line = substr(line, take + 1) }
                   next_piece()
                 }
