@@ -344,15 +344,22 @@ human step.
   api` is not denied, `gh` runs outside the sandbox on the sandboxed paths,
   and the token behind it can write, repository refs included. The
   load-bearing property is that nothing the agent can reach is the machine
-  account, so a write that slipped past would be `claude[bot]`'s:
-  attributable, and not accepted as a reviewer verdict or a trusted
-  re-review request by the review-fix gate (the stubs exclude bot actors
-  from the text triggers and the reusable workflows' `allowed_bots` name
-  only the machine account). It is not unable to start a loop indirectly:
-  a branch update on an open same-repo `auto` PR whose CI then fails
-  reaches `claude-auto.yml` through `workflow_run`, whose caller condition
-  and gate check the PR and the label, not who pushed, and whose codex step
-  names `claude` in `allow-bot-users` for that case. The dev agent and the
+  account, so a write that slipped past would be `claude[bot]`'s and
+  attributable as such. That identity is not inert to the loops. The
+  review-fix workflow still accepts it as a verdict author: `reviewer_login`
+  defaults to `claude[bot]`, `REVIEWER_LOGINS` names it next to the machine
+  account's two logins, and the fix action's `allowed_bots` includes it, so
+  a marked verdict comment posted directly with this token can drive a fix
+  round or a convergence on an otherwise eligible same-repo `auto` PR
+  without going through a landing. Re-review requests follow the configured
+  allow-lists: `review_allowed_bots` defaults to `claude[bot]` in the
+  review-fix gate, and the reviewer itself admits a bot's `@review` when the
+  caller's `allowed_bots` names it, as the inspect_ai fork's stub does. The
+  identity can also start a CI-fix round indirectly: a branch update on an
+  open same-repo `auto` PR whose CI then fails reaches `claude-auto.yml`
+  through `workflow_run`, whose caller condition and gate check the PR and
+  the label, not who pushed, and whose codex step names `claude` in
+  `allow-bot-users` for that case. The dev agent and the
   CI-fix loop ask that token for `actions: read` in addition
   (`additional_permissions`) so `gh run view --log-failed` works.
 - **The model credential.** Claude authenticates through Workload Identity

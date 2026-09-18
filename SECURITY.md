@@ -76,11 +76,15 @@ text are checked by the tests under `tests/`.
   reads; same-repo reviews run without the sandbox. Everywhere the agent's
   push and posting verbs are denied by settings, but `gh api` is not, so
   those denies are guard rails rather than a complete prohibition on direct
-  writes. A write that slipped past would be `claude[bot]`'s: attributable,
-  and not accepted as a reviewer verdict or a trusted request by the loop
-  gates. It can still reach the CI-fix loop indirectly, since a CI failure
-  on an already-authorized `auto` PR starts a fix round whatever identity
-  pushed the branch, on the Codex path included.
+  writes. A write that slipped past would be attributed to `claude[bot]`,
+  which the review-fix workflow still accepts as a verdict author: a marked
+  verdict comment posted with this token can drive that loop on an otherwise
+  eligible `auto` PR. Re-review requests follow the configured allow-lists
+  (`review_allowed_bots` defaults to `claude[bot]` in the review-fix gate;
+  the reviewer admits that bot when the caller's `allowed_bots` includes it,
+  as in the inspect_ai fork). The identity can also reach the CI-fix loop
+  indirectly, since a CI failure on an already-authorized `auto` PR starts a
+  fix round whatever identity pushed the branch, on the Codex path included.
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.
