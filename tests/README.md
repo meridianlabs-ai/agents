@@ -45,12 +45,15 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
 - `test_app_token_minting.py` — Phase 2 of the credential separation, as
   structural checks on the workflow text: every `gate` and `land` job (and
   the Atlas sync) mints the machine account's token first, for exactly the
-  repository and permissions the design table lists, gated on the caller's
-  app secrets; every PAT read in those jobs is the one
-  `steps.mint.outputs.token || secrets.MARVIN_TOKEN` expression (the loops'
-  `HAS_TOKEN` included); the agent job names none of it; the commit
-  identity follows the gate's token; this repo's stubs pass the app secrets
-  and no PAT, the examples pass both.
+  repository and permissions the design table lists — unconditionally where
+  the job cannot work without it, gated on the caller's app secrets only in
+  `claude.yml` (the marvin-less degradation) and the loops' gates (which
+  skip with a log line); every token read in those jobs is
+  `steps.mint.outputs.token` (`|| github.token` in `claude.yml` alone); the
+  agent job names none of it; the commit identity follows the gate's token;
+  the retired PAT is named by no tracked file outside `design/`; this
+  repo's stubs and the examples pass the two app secrets explicitly and
+  nothing else.
 - `test_atlas_sync.py` — the hourly Atlas sync's author checks
   (`.github/scripts/atlas_sync.py`, against a fake `gh`): `trusted_author`
   (trusted logins — the machine account under both its User and GitHub App

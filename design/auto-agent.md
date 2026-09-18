@@ -526,7 +526,12 @@ The simple case ships first and is independently useful:
   provisioned secret is `MARVIN_TOKEN`.) **Since #84 (2026-09-11) the PAT is
   named only in `claude.yml`'s `gate` and `land` jobs**; the job that runs
   the agent never sees it, and the land job pushes the branch and opens the
-  PR from the landing manifest (architecture.md → Landing job).
+  PR from the landing manifest (architecture.md → Landing job). **Retired
+  2026-09-18:** Phase 2 of the credential separation replaced the PAT with
+  the GitHub App `meridian-marvin` (org secrets `MARVIN_APP_CLIENT_ID` /
+  `MARVIN_APP_PRIVATE_KEY`, a token minted per trusted job — architecture.md
+  → Landing job); the reusable workflows no longer accept `MARVIN_TOKEN`,
+  and the org admin deletes the org secret after the retirement PR merged.
 - **Phase 1 — CI-failure → fix trigger. _Verified on inspect_flow._** Reusable
   `claude-auto.yml` + `examples/claude-auto-stub.yml`: on `workflow_run` failure
   for an `auto`-labeled same-repo PR, the dev agent (as marvin) reads the failing

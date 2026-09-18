@@ -37,8 +37,9 @@ gh run view "$RID" --repo meridianlabs-ai/agents --log 2>/dev/null \
   | sed -n '/=== Atlas sync summary ===/,/^$/p'
 ```
 
-If the run FAILED at preflight, MARVIN_TOKEN has a permissions problem
-(project scope) — surface that to the user rather than continuing.
+If the run FAILED at preflight, the machine account's minted token cannot
+read the Atlas project (the app's Organization projects permission or its
+installation) — surface that to the user rather than continuing.
 
 ## Step 2 — run the chip sweep
 

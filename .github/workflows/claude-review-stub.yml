@@ -80,9 +80,8 @@ jobs:
     # ack/stage steps (eyes reaction + board stage) and the land job's posts
     # (the review itself lands there — #114); never handed to the review
     # agent, which stays read-only. REQUIRED for the review to reach the PR:
-    # absent, the gate steps no-op and the land job refuses its writes (the
-    # job token below holds no write permission). No MARVIN_TOKEN: this repo
-    # exercises the app path end to end.
+    # absent, the run fails at the gate's mint step, before any review runs
+    # (the job token below holds no write permission).
     secrets:
       MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
       MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}

@@ -8,8 +8,8 @@
 # from the example and name the CI workflow in on.workflow_run.workflows.
 #
 # Requires the MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY org secrets
-# scoped to this repo (the machine account's GitHub App; no MARVIN_TOKEN —
-# this repo exercises the app path end to end).
+# scoped to this repo (the machine account's GitHub App): without them the
+# gate skips.
 
 name: Claude Auto
 

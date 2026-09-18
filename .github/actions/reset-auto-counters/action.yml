@@ -53,8 +53,8 @@ description: >-
 inputs:
   token:
     description: >-
-      Token that can edit the machine account's comments (MARVIN_TOKEN, or
-      github.token where the counters were posted by the workflow token).
+      Token that can edit the machine account's comments (its minted token,
+      or github.token where the counters were posted by the workflow token).
     required: true
   repo:
     description: owner/name the PR lives in.

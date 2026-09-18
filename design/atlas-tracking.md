@@ -437,9 +437,13 @@ next hour (analogous to sticky-APPROVED re-queueing a card moved out of Merge).
 The rest paths are replying upstream or re-requesting review; both advance our
 side's timestamp.
 
-**Preflight:** the job's first step verifies `MARVIN_TOKEN` carries the
-`project` scope (read the `X-OAuth-Scopes` header) and fails with a clear
-message if not — Atlas writes silently 403 otherwise.
+**Preflight:** the job's first steps mint the machine account's app tokens
+(the fork token and the ts-mono read token; architecture.md → Landing job),
+then a preflight reads the Atlas project and the ts-mono repository with
+them and fails with a clear message if either read fails — Atlas writes
+silently 403 otherwise. (Until 2026-09-18 this step checked the
+`MARVIN_TOKEN` PAT's `project` scope via the `X-OAuth-Scopes` header;
+installation tokens report no scopes, and the PAT is retired.)
 
 Constants the script needs (all recorded above): project id, `Stage` field +
 option ids, `Status` field + `In progress` `47fc9ee4` / `Done` `98236657`
@@ -589,8 +593,9 @@ event-driven transitions:
   - Review started (`@review` posted, or auto-review on PR open) → the
     **reviewer workflow itself** sets **Agent** immediately (and 👀-acks
     the `@review` comment) — the loop is engaged from the moment the review
-    begins, not from the first fix round. Its `MARVIN_TOKEN` is consumed only
-    by these deterministic steps; the review agent stays read-only.
+    begins, not from the first fix round. Its machine-account token (minted
+    in the gate) is consumed only by these deterministic steps; the review
+    agent stays read-only.
   - **The `auto` label is the reliable discriminator.** A loop that looks active
     (`@review`, verdict `suggestions`) can hit its cap and escalate between
     glances — so don't infer Agent-working from a mid-loop comment alone; if the
@@ -695,10 +700,12 @@ Stable IDs to bake in as constants (queried at setup, not per-run):
 
 ## Prerequisites
 
-- **`MARVIN_TOKEN` needs `project` scope** (`read:project` + `project`). The
-  built-in `GITHUB_TOKEN` cannot mutate an org Projects v2 board; the agents
-  already run as the machine account, so reuse that identity. Verify/rotate the
-  PAT before building.
+- **The machine account's token needs org-project write.** The built-in
+  `GITHUB_TOKEN` cannot mutate an org Projects v2 board; the agents already
+  run as the machine account, so reuse that identity — since Phase 2 an
+  installation token minted with `permission-organization-projects: write`
+  (the `MARVIN_TOKEN` PAT with `project` scope until its retirement on
+  2026-09-18).
 - **Create the `Stage` field** on Atlas with the four active options
   (Agent / Review / Sign-off / Merge) and capture its
   field id + option ids.

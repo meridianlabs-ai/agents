@@ -21,8 +21,9 @@ description: >-
 inputs:
   token:
     description: >-
-      Token the comment posts as (MARVIN_TOKEN, so the machine account's
-      comments trigger the reviewer; a GITHUB_TOKEN comment would be dropped).
+      Token the comment posts as (the machine account's minted token, so
+      its comments trigger the reviewer; a GITHUB_TOKEN comment would be
+      dropped).
     required: true
   repo:
     description: owner/name the PR lives in.

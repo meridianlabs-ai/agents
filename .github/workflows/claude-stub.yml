@@ -4,8 +4,7 @@
 # the stubs carry a -stub suffix. Keep the jobs in sync with the example.
 # Uses the @main reusable workflows like every other caller; requires the
 # MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY org secrets to be scoped to
-# this repo (the machine account's GitHub App; this repo is the first caller
-# on the app path and passes no MARVIN_TOKEN).
+# this repo (the machine account's GitHub App).
 
 name: Claude
 
@@ -104,8 +103,7 @@ jobs:
     # explicitly — NOT via `secrets: inherit` — so this repo's other secrets
     # aren't exposed to an external workflow pinned to a mutable @main ref
     # (least privilege; the reusable workflow consumes only the secrets named
-    # here). No MARVIN_TOKEN: this repo exercises the app path end to end.
-    # Absent app secrets resolve to empty: the agent still runs, just with
+    # here). Absent app secrets resolve to empty: the agent still runs, just with
     # issue-triggered PR creation degraded (see the reusable workflow's
     # secrets.MARVIN_APP_CLIENT_ID and design/auto-agent.md).
     secrets:

@@ -1,20 +1,24 @@
 """Phase 2 of the credential separation: the trusted jobs mint the machine
-account's token (design/architecture.md → Landing job).
+account's token (design/architecture.md → Landing job), and the PAT is retired
+(2026-09-18).
 
-The reusable workflows accept the GitHub App's two secrets next to the
-`MARVIN_TOKEN` PAT, and each `gate` and `land` job mints a one-hour
+The reusable workflows accept the GitHub App's two secrets and nothing else
+for the machine account; each `gate` and `land` job mints a one-hour
 installation token scoped to the caller repo and to that job's writes, as its
 first step. These are structural checks on the workflow text (PyYAML is not a
-test dependency), one per rule the transition relies on:
+test dependency), one per rule the contract relies on:
 
-- both app secrets are declared optional `workflow_call` secrets;
-- every trusted job mints first, gated on the job-level `HAS_APP_SECRETS`
-  boolean (a step `if:` cannot read `secrets`), for `meridianlabs-ai` and
-  exactly the caller repo, with exactly the permissions the design table
-  lists for that job;
-- every `secrets.MARVIN_TOKEN` read in a trusted job is the ONE expression
-  `steps.mint.outputs.token || secrets.MARVIN_TOKEN`, the loops' `HAS_TOKEN`
-  presence check included;
+- both app secrets are declared `workflow_call` secrets, and the retired PAT
+  is declared by none;
+- every trusted job mints first, for `meridianlabs-ai` and exactly the caller
+  repo, with exactly the permissions the design table lists for that job —
+  unconditionally where the job cannot work without the machine account, and
+  gated on the job-level `HAS_APP_SECRETS` boolean (a step `if:` cannot read
+  `secrets`) only in `claude.yml` (the marvin-less degradation) and the two
+  loops' gates (which skip with a log line instead of failing);
+- every token read in a trusted job is `steps.mint.outputs.token`, with the
+  job-token fallback (`|| github.token`) in `claude.yml` alone, and the loops'
+  `HAS_TOKEN` presence check reads the same boolean the mint is gated on;
 - the job that runs the agent names neither the app secrets, nor the mint
   step's token, nor the PAT;
 - the commit identity follows the token: the gate publishes it, the agent
@@ -24,11 +28,13 @@ test dependency), one per rule the transition relies on:
   read-only token for ts-mono that the script's ts-mono calls run under, and
   its preflight is real reads only (an installation token reports no OAuth
   scopes);
-- this repo's own stubs pass the app secrets and no PAT (the first caller on
-  the app path); the examples pass both, explicitly, never `secrets: inherit`.
+- this repo's own stubs and the examples pass the two app secrets explicitly,
+  never `secrets: inherit`, and no tracked file outside `design/` (history)
+  names the retired PAT.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -38,11 +44,14 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 EXAMPLES = ROOT / "examples"
 
 MINT_ACTION = "actions/create-github-app-token@v2"
-TOKEN_EXPR = "steps.mint.outputs.token || secrets.MARVIN_TOKEN"
+TOKEN_EXPR = "steps.mint.outputs.token"
 # The Atlas sync's second token (ts-mono, read-only), the same shape.
-TS_MONO_TOKEN_EXPR = "steps.mint_ts_mono.outputs.token || secrets.MARVIN_TOKEN"
+TS_MONO_TOKEN_EXPR = "steps.mint_ts_mono.outputs.token"
 HAS_APP_SECRETS = "      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}"
+MINT_IF = "        if: env.HAS_APP_SECRETS == 'true'\n"
 CALLER_REPO = "${{ github.event.repository.name }}"
+# Split so this file is not itself a hit for the retired secret's name.
+PAT = "MARVIN_" + "TOKEN"
 
 # The design table (design/architecture.md → Landing job → "What each job
 # mints"): trusted job → (repositories, {permission: level}). A change here
@@ -70,6 +79,16 @@ WRITE_SETS = {
     ("atlas-sync.yml", "sync"): ("inspect_ai", {"issues": "write", "pull-requests": "write",
                                                 "actions": "read", "organization-projects": "write"}),
 }
+
+# The jobs whose mint is gated on the caller's app secrets because the
+# workflow has a documented behaviour without the machine account: the dev
+# agent's job-token degradation, and the loops' gates, which skip the run
+# with a log line. Every other trusted job mints unconditionally and fails
+# at the mint step when the secrets are absent.
+CONDITIONAL_MINT = {("claude.yml", "gate"), ("claude.yml", "land"),
+                    ("claude-auto.yml", "gate"), ("claude-auto-review.yml", "gate")}
+# The one workflow that keeps `|| github.token` (the marvin-less degradation).
+JOB_TOKEN_FALLBACK = {"claude.yml"}
 
 # Reusable workflow → the job that runs the agent (untrusted).
 AGENT_JOBS = {"claude.yml": "agent", "claude-review.yml": "review",
@@ -114,18 +133,17 @@ def workflow(name: str) -> str:
 
 
 @pytest.mark.parametrize("name", REUSABLE)
-def test_app_secrets_are_declared_optional_next_to_the_pat(name):
+def test_app_secrets_are_declared_and_the_pat_is_not(name):
     text = workflow(name)
     secrets = text[text.index("    secrets:\n"):text.index("\njobs:\n")]
-    for s in ("MARVIN_TOKEN", "MARVIN_APP_CLIENT_ID", "MARVIN_APP_PRIVATE_KEY"):
+    for s in ("MARVIN_APP_CLIENT_ID", "MARVIN_APP_PRIVATE_KEY"):
         m = re.search(rf"\n      {s}:\n((?:        .*\n)+)", secrets)
         assert m, s
         assert "        required: false\n" in m.group(1), s
-    # The app secrets say what they replace; the PAT says it is transitional.
+    assert f"      {PAT}:\n" not in secrets
+    # The client id's description records the retirement and the date.
     client = secrets[secrets.index("      MARVIN_APP_CLIENT_ID:"):secrets.index("      MARVIN_APP_PRIVATE_KEY:")]
-    assert "REPLACES MARVIN_TOKEN" in client
-    pat = secrets[secrets.index("      MARVIN_TOKEN:"):secrets.index("      MARVIN_APP_CLIENT_ID:")]
-    assert "TRANSITION" in pat
+    assert "the PAT was retired 2026-09-18" in client
 
 
 # --- the mint step -----------------------------------------------------------
@@ -135,14 +153,20 @@ def test_app_secrets_are_declared_optional_next_to_the_pat(name):
 def test_trusted_job_mints_first_for_exactly_its_write_set(name, job):
     text = workflow(name)
     block = jobs(text)[job]
-    # Gated on the job-level boolean, which is the only `secrets` read in an
-    # `if`-adjacent position (a step `if:` cannot read the context itself).
-    assert HAS_APP_SECRETS in block
     first, *_ = steps(block)
     mint = mint_step(block)
     assert first == mint, "the mint step is the job's first step"
     assert f"        uses: {MINT_ACTION}\n" in mint
-    assert "        if: env.HAS_APP_SECRETS == 'true'\n" in mint
+    if (name, job) in CONDITIONAL_MINT:
+        # Gated on the job-level boolean, which is the only `secrets` read in
+        # an `if`-adjacent position (a step `if:` cannot read the context).
+        assert HAS_APP_SECRETS in block
+        assert MINT_IF in mint
+    else:
+        # The job cannot work without the machine account: no guard, so a
+        # caller without the app secrets fails here, first and loudly.
+        assert not [line for line in code_lines(block) if "HAS_APP_SECRETS" in line]
+        assert not re.search(r"^        if:", mint, re.M)
     # The v2 action has no `client-id` input; `app-id` takes the Client ID.
     assert "          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}\n" in mint
     assert "client-id" not in "\n".join(code_lines(mint))
@@ -157,30 +181,38 @@ def test_trusted_job_mints_first_for_exactly_its_write_set(name, job):
 
 
 @pytest.mark.parametrize("name,job", sorted(WRITE_SETS))
-def test_every_pat_read_in_a_trusted_job_is_the_one_token_expression(name, job):
+def test_every_token_read_in_a_trusted_job_is_the_minted_token(name, job):
     block = jobs(workflow(name))[job]
     allowed = (TOKEN_EXPR, TS_MONO_TOKEN_EXPR) if name == "atlas-sync.yml" else (TOKEN_EXPR,)
-    reads = [line for line in code_lines(block) if "secrets.MARVIN_TOKEN" in line]
-    assert reads, "the job still names the PAT as its fallback"
+    reads = [line for line in code_lines(block) if "steps.mint" in line and "outputs" in line]
+    assert reads, "the job reads the token it minted"
     for line in reads:
-        assert any(e in line for e in allowed), line
-    # And a minted token is never read except through those expressions.
-    for line in code_lines(block):
-        if "steps.mint" in line and "outputs" in line:
-            assert any(e in line for e in allowed), line
+        assert any(f"${{{{ {e}" in line for e in allowed), line
+        assert f"secrets.{PAT}" not in line
+        # The job-token fallback survives only where the design kept the
+        # marvin-less degradation; everywhere else the minted token is the
+        # whole expression.
+        if name in JOB_TOKEN_FALLBACK:
+            assert re.search(rf"\$\{{\{{ {re.escape(TOKEN_EXPR)}( \|\| github\.token)? \}}\}}", line), line
+        else:
+            assert "github.token" not in line, line
 
 
 @pytest.mark.parametrize("name", ["claude-auto.yml", "claude-auto-review.yml"])
-def test_loop_presence_check_sees_the_minted_token(name):
+def test_loop_presence_check_is_the_app_secrets_boolean(name):
     gate = jobs(workflow(name))["gate"]
-    assert f"          HAS_TOKEN: ${{{{ ({TOKEN_EXPR}) != '' }}}}\n" in gate
+    assert "          HAS_TOKEN: ${{ env.HAS_APP_SECRETS }}\n" in gate
+    resolve = [s for s in steps(gate) if "\n        id: resolve\n" in s]
+    assert len(resolve) == 1
+    assert 'if [ "$HAS_TOKEN" != "true" ]; then' in resolve[0]
+    assert "No machine-account app secrets (MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY)" in resolve[0]
 
 
 @pytest.mark.parametrize("name", REUSABLE)
 def test_agent_job_never_sees_the_app_secrets_or_a_minted_token(name):
     text = workflow(name)
     agent = jobs(text)[AGENT_JOBS[name]]
-    for needle in ("MARVIN_APP", "steps.mint", "secrets.MARVIN_TOKEN", "HAS_APP_SECRETS"):
+    for needle in ("MARVIN_APP", "steps.mint", PAT, "HAS_APP_SECRETS"):
         assert not [line for line in code_lines(agent) if needle in line], needle
     # And the app secrets are named by no job but the trusted two.
     trusted = {j for (n, j) in WRITE_SETS if n == name}
@@ -241,9 +273,9 @@ def test_atlas_sync_preflight_is_the_project_read_only():
     preflight = [s for s in steps(sync) if "Preflight" in s]
     assert len(preflight) == 1
     assert 'gh api graphql -f query=\'{node(id:"PVT_kwDOC7YMCM4BU68p"){... on ProjectV2{title}}}\'' in preflight[0]
-    # Every step that talks to GitHub reads the two token expressions: the
-    # fork token as GH_TOKEN, the ts-mono read token under the name the
-    # script routes ts-mono calls through.
+    # Every step that talks to GitHub reads the two minted tokens: the fork
+    # token as GH_TOKEN, the ts-mono read token under the name the script
+    # routes ts-mono calls through.
     talking = [s for s in steps(sync) if "GH_TOKEN:" in s]
     assert len(talking) == 2, "the preflight and the sync"
     for s in talking:
@@ -257,7 +289,8 @@ def test_atlas_sync_mints_a_read_only_ts_mono_token_second():
     first, second, *_ = steps(sync)
     assert "\n        id: mint\n" in first and "\n        id: mint_ts_mono\n" in second
     assert f"        uses: {MINT_ACTION}\n" in second
-    assert "        if: env.HAS_APP_SECRETS == 'true'\n" in second
+    # Unconditional, like the first: the sync cannot run without the secrets.
+    assert not re.search(r"^        if:", second, re.M)
     assert "          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}\n" in second
     assert "          owner: meridianlabs-ai\n" in second
     assert "          repositories: ts-mono\n" in second
@@ -266,27 +299,47 @@ def test_atlas_sync_mints_a_read_only_ts_mono_token_second():
     assert "write" not in "\n".join(code_lines(second))
 
 
-# --- this repo's stubs and the examples --------------------------------------
+# --- this repo's stubs, the examples, and the retired PAT ---------------------
 
 
-@pytest.mark.parametrize("stub", ["claude-stub.yml", "claude-review-stub.yml", "claude-auto-stub.yml"])
-def test_own_stubs_pass_the_app_secrets_and_no_pat(stub):
-    lines = code_lines(workflow(stub))
-    assert not [line for line in lines if "secrets: inherit" in line]
-    n_uses = sum(1 for line in lines if line.startswith("    uses: meridianlabs-ai/agents/.github/workflows/"))
-    assert n_uses >= 1
-    assert sum(1 for line in lines if line == "      MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}") == n_uses
-    assert sum(1 for line in lines if line == "      MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}") == n_uses
-    assert not [line for line in lines if "MARVIN_TOKEN" in line]
-
-
-@pytest.mark.parametrize("example", ["claude-stub.yml", "claude-review-stub.yml", "claude-auto-stub.yml"])
-def test_examples_pass_both_explicitly_with_the_pat_marked_transitional(example):
-    text = (EXAMPLES / example).read_text()
+def secrets_map_passes_only_the_app_secrets(text: str) -> None:
     lines = code_lines(text)
     assert not [line for line in lines if "secrets: inherit" in line]
     n_uses = sum(1 for line in lines if line.startswith("    uses: meridianlabs-ai/agents/.github/workflows/"))
     assert n_uses >= 1
-    for entry in ("MARVIN_APP_CLIENT_ID", "MARVIN_APP_PRIVATE_KEY", "MARVIN_TOKEN"):
+    for entry in ("MARVIN_APP_CLIENT_ID", "MARVIN_APP_PRIVATE_KEY"):
         assert sum(1 for line in lines if line == f"      {entry}: ${{{{ secrets.{entry} }}}}") == n_uses, entry
-    assert text.count("# TRANSITION: the machine account's PAT. Delete this line once this") == n_uses
+    assert not [line for line in lines if PAT in line]
+    assert "TRANSITION" not in text
+
+
+@pytest.mark.parametrize("stub", ["claude-stub.yml", "claude-review-stub.yml", "claude-auto-stub.yml"])
+def test_own_stubs_pass_the_app_secrets_and_nothing_else(stub):
+    secrets_map_passes_only_the_app_secrets(workflow(stub))
+
+
+@pytest.mark.parametrize("example", ["claude-stub.yml", "claude-review-stub.yml", "claude-auto-stub.yml"])
+def test_examples_pass_the_app_secrets_and_nothing_else(example):
+    secrets_map_passes_only_the_app_secrets((EXAMPLES / example).read_text())
+
+
+def test_landing_smoke_mints_unconditionally_like_the_land_jobs():
+    land = jobs((EXAMPLES / "landing-smoke.yml").read_text())["land"]
+    mint = mint_step(land)
+    assert not re.search(r"^        if:", mint, re.M)
+    assert not [line for line in code_lines(land) if "HAS_APP_SECRETS" in line]
+    assert f"          token: ${{{{ {TOKEN_EXPR} }}}}\n" in land
+
+
+def test_the_retired_pat_is_named_only_by_design_history():
+    """No tracked file outside design/ names the PAT: the workflows stopped
+    accepting it on 2026-09-18, and a mention anywhere else would claim it is
+    still in use. design/ keeps the history (the transition and the
+    retirement itself)."""
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True,
+                             capture_output=True).stdout.decode().split("\0")
+    # Regular files only: a tracked symlink to a directory is not a text.
+    offenders = sorted(path for path in tracked
+                       if path and not path.startswith("design/") and (ROOT / path).is_file()
+                       and PAT in (ROOT / path).read_text(errors="replace"))
+    assert offenders == []

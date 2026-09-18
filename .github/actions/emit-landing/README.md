@@ -6,7 +6,7 @@ Two composites and a validator move every privileged write out of the job that
 runs the agent:
 
 ```
-gate job   (trusted: trigger check + pre-agent marvin writes; job token + MARVIN_TOKEN; no checkout of PR code)
+gate job   (trusted: trigger check + pre-agent marvin writes; job token + the machine account's minted token; no checkout of PR code)
   -> agent job  (untrusted: checkout, provision, agent; job token ONLY; commits locally; emit-landing)
   -> land job   (trusted: fresh runner; land: download, validate, push, post, resolve, stage as marvin)
 ```
@@ -193,7 +193,7 @@ Land job (`needs: agent`, `if: always()`, a fresh runner, **no checkout**):
 ```yaml
       - uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
-          token: <MARVIN_TOKEN — the land job is the only job that names it>
+          token: <the machine account's token — minted by the land job; the agent job never sees it>
           allowed-issue-repos: ${{ github.repository }}
           # The same expressions as above: the validator pins the manifest's
           # pr_number / issue_number to them, and they are the trusted

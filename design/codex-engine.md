@@ -79,7 +79,8 @@ since #83) the codex step only *commits*:
 the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)
 commits the tree and writes the de-fanged summary into the landing
 directory, `emit-landing` bundles the commits, and the `land` job — a
-fresh runner holding `MARVIN_TOKEN` — pushes, posts the summary and the
+fresh runner holding the machine account's minted token — pushes, posts
+the summary and the
 `@review` the manifest carries (or, in the review loop, the hand-off
 when nothing changed — the manifest composer picks one from HEAD exactly
 as the old landing step did, and carries the `RESOLVED-THREADS:` ids as
@@ -115,7 +116,7 @@ writes the body, and the land job pushes, posts and resolves.
 
 ### Marker/author contract
 
-Codex output is posted **by the machine account** (MARVIN_TOKEN) so the
+Codex output is posted **by the machine account** (its minted app token) so the
 marker comments still trigger downstream stubs (github-actions[bot]
 comments trigger nothing — recursion guard). The review-fix loop's gate
 therefore accepts verdict-marked comments from the machine account
@@ -496,10 +497,10 @@ Verification for a change here, all cases prompted to codex (any verb):
   steps run as the runner with the provisioned PATH, discover the paths
   there (`pytest ruff mypy pyright python3`, the same list in all four
   workflows), and splice them into the verification instruction.
-- **CI-trigger parity depends on MARVIN_TOKEN**: codex-path pushes fall
-  back to `github.token` where the secret is absent, and those pushes
-  do not trigger CI (the Claude path pushes via the app token, which
-  does). Repos without the machine account can't run the loops anyway,
+- **CI-trigger parity depends on the machine account's secrets**: codex-path
+  pushes fall back to `github.token` where the app secrets are absent, and
+  those pushes do not trigger CI (the Claude path pushes via the app token,
+  which does). Repos without the machine account can't run the loops anyway,
   so the gap is dev-verb runs only.
 - **No inline review comments** from codex reviews: one summary comment
   with file:line references in the body.

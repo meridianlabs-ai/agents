@@ -31,8 +31,9 @@ inputs:
     default: ""
   token:
     description: >-
-      Token for the provenance comment (MARVIN_TOKEN so it posts as the
-      machine account, like the other deterministic posts). Empty skips the
+      Token for the provenance comment (the machine account's minted token,
+      so it posts as the machine account like the other deterministic
+      posts). Empty skips the
       comment; the job summary and log lines still happen, and the `note`
       output carries the text so a workflow that keeps its agent job
       secret-free (claude-review.yml) can hand it to its land job as the

@@ -120,20 +120,13 @@ jobs:
     needs: agent
     if: always()
     runs-on: ubuntu-latest
-    env:
-      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
-      # read the `secrets` context, so the mint step gates on this job-level
-      # boolean instead. Not a secret (the client id is an identifier).
-      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     # Fresh runner, NO checkout: the land composite is the only code that
     # runs, fetched from this repo @main by the runner.
     steps:
       # The machine account's token, as the real land jobs mint it (Phase 2):
-      # the app's, scoped to this repo's contents / issues / pull requests,
-      # when the app secrets are present; the PAT otherwise.
+      # the app's, scoped to this repo's contents / issues / pull requests.
       - name: Mint the machine account's token
         id: mint
-        if: env.HAS_APP_SECRETS == 'true'
         uses: actions/create-github-app-token@v2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
@@ -148,7 +141,7 @@ jobs:
       - id: land
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token }}
           allowed-issue-repos: ${{ github.repository }}
           # From the (trusted) dispatch input, not the manifest — the same
           # expression emit-landing got above: the validator pins the

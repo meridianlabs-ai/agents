@@ -26,8 +26,8 @@ inputs:
   push-token:
     description: >-
       Token the push (and the pre-push fetch) authenticates with. The machine
-      account's (a minted app token with contents write, or the MARVIN_TOKEN
-      PAT) wherever the caller has it: the push must re-trigger CI, and a
+      account's (a minted app token with contents write) wherever the caller
+      has it: the push must re-trigger CI, and a
       GITHUB_TOKEN push is dropped by the recursion guard. Required — the
       step fails loudly on an empty value rather than pushing
       unauthenticated (which would fail on a private repo, or as an

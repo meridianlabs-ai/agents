@@ -46,8 +46,8 @@ description: >-
   Two tokens: `read-token` (the job token) for the artifact-adjacent reads —
   the PR head-ref and default-branch lookups, the start-SHA fetch, the
   remote-tip check — and
-  `token` (the app token the land job mints in Phase 2, MARVIN_TOKEN in
-  Phase 1 and during the transition) for every write, so pushes and comments
+  `token` (the app token the land job mints; Phase 1's PAT was retired
+  2026-09-18) for every write, so pushes and comments
   come from a real identity that triggers CI and the reviewer. Both are
   step-scoped: git authenticates through a GIT_CONFIG_* credential helper
   reading the masked GIT_TOKEN (design/architecture.md → "No persisted git
@@ -61,8 +61,8 @@ inputs:
     description: >-
       The privileged token every write runs as: the machine account's — the
       installation token the land job minted (scoped to the caller repo:
-      contents, issues, pull requests, org projects), or MARVIN_TOKEN while
-      the PAT is still in use. This action does not mint; the caller decides
+      contents, issues, pull requests, org projects). This action does not
+      mint; the caller decides
       the token with one expression. Required — the push and the posts
       refuse to run on an empty value rather than degrade to an
       unauthenticated write.

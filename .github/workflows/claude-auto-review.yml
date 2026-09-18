@@ -43,8 +43,8 @@ name: Claude Auto Review (reusable)
 # refunds the round when the agent never ran. Decision (Ransom, 2026-09-09):
 # every comment the loop produces is posted by the land job as marvin after
 # the push lands; the agent posts nothing and resolves nothing in-run.
-# The machine account's token (the app token `gate` and `land` mint, or
-# MARVIN_TOKEN) is named in those two jobs and nowhere else: a process the
+# The machine account's token (the app token `gate` and `land` mint) is
+# named in those two jobs and nowhere else: a process the
 # agent left running, or a PATH/ENV edit it made through $GITHUB_PATH /
 # $GITHUB_ENV, can observe later steps of its own job but not another job
 # (Claude Security finding 4122321).
@@ -184,39 +184,33 @@ on:
           "Bash(git remote:*)",
           "Bash(git add:*)","Bash(git commit:*)","Bash(git config:*)"]}}
     secrets:
-      MARVIN_TOKEN:
-        description: >-
-          Machine-account PAT, consumed ONLY by the `gate` job (the PR lookup,
-          the round counter, stage → Agent, the converged / escalation
-          hand-off) and the `land` job (the push of the agent's commits — it
-          must come from a real identity so CI re-runs and the `@review`
-          re-triggers the reviewer; a GITHUB_TOKEN push or comment would be
-          dropped — plus the replies, the thread resolutions, the hand-back or
-          hand-off, the codex summary, the stage move and the round refund).
-          It is NEVER present in the `fix` job, where the PR's code runs.
-          Without it the loop can't function, so the gate no-ops.
-          TRANSITION: superseded by the two MARVIN_APP_* secrets below; still
-          accepted, and used only when they are absent.
-        required: false
       MARVIN_APP_CLIENT_ID:
         description: >-
           Client ID of the machine account's GitHub App (`meridian-marvin`,
-          bot login `meridian-marvin[bot]`). With MARVIN_APP_PRIVATE_KEY it
-          REPLACES MARVIN_TOKEN (Phase 2 of the credential separation,
-          design/architecture.md → Landing job): the `gate` and `land` jobs
-          each mint a one-hour installation token scoped to this repository
-          and to the permissions that job's writes need, revoked when the
-          job ends, and every push, comment, label and board move runs as
-          the bot. The `fix` job never sees either secret or a minted
-          token. Optional during the transition: when this is empty the
-          jobs fall back to MARVIN_TOKEN (the PAT); with neither the gate
-          no-ops as before.
+          bot login `meridian-marvin[bot]`; Phase 2 of the credential
+          separation, design/architecture.md → Landing job). With
+          MARVIN_APP_PRIVATE_KEY it is the machine account's only credential
+          (the PAT was retired 2026-09-18), consumed ONLY by
+          the `gate` job (the PR lookup, the round counter, stage → Agent,
+          the converged / escalation hand-off) and the `land` job (the push
+          of the agent's commits — it must come from a real identity so CI
+          re-runs and the `@review` re-triggers the reviewer; a GITHUB_TOKEN
+          push or comment would be dropped — plus the replies, the thread
+          resolutions, the hand-back or hand-off, the codex summary, the
+          stage move and the round refund); each mints a one-hour
+          installation token scoped to this repository and to the
+          permissions that job's writes need, revoked when the job ends, and
+          every push, comment, label and board move runs as the bot. NEVER
+          present in the `fix` job, where the PR's code runs. Without the
+          two secrets the loop can't function, so the gate no-ops with a log
+          line. Pass it explicitly by name in the stub's `secrets:` map,
+          never `secrets: inherit`.
         required: false
       MARVIN_APP_PRIVATE_KEY:
         description: >-
           Private key (PEM) of the GitHub App named by MARVIN_APP_CLIENT_ID;
-          read ONLY by the mint steps of the `gate` and `land` jobs.
-          Optional during the transition (see MARVIN_APP_CLIENT_ID).
+          read ONLY by the mint steps of the `gate` and `land` jobs. Needed
+          together with it (see MARVIN_APP_CLIENT_ID).
         required: false
       OPENAI_API_KEY:
         description: >-
@@ -289,9 +283,10 @@ jobs:
       continuation: ${{ steps.gate.outputs.continuation }}
       # The identity the fix job's runner-side commits carry (the base
       # merge, the codex commit): the bot's when this job minted an app
-      # token — so the commit author and the land job's pusher agree — and
-      # the User's when it fell back to the PAT. Decided here, where the
-      # minting happened; the fix job only reads these two strings.
+      # token — so the commit author and the land job's pusher agree; the
+      # User's is sync-branch's default, unreachable now that the gate
+      # skips when it did not mint. Decided here, where the minting
+      # happened; the fix job only reads these two strings.
       git_user_name: ${{ steps.mint.outcome == 'success' && 'meridian-marvin[bot]' || 'i-am-marvin' }}
       git_user_email: ${{ steps.mint.outcome == 'success' && '330132053+meridian-marvin[bot]@users.noreply.github.com' || 'i-am-marvin@users.noreply.github.com' }}
     steps:
@@ -310,10 +305,10 @@ jobs:
       # The responsible-human derivation also READS the anchor
       # repo (a public one — the inspect_ai fork — in every deployment;
       # best-effort, empty on failure). Revoked when the job ends. Every
-      # later step reads ONE expression,
-      # `steps.mint.outputs.token || secrets.MARVIN_TOKEN`, so a caller
-      # still on the PAT behaves as before, and the presence check in the
-      # resolve step sees the same value.
+      # later step reads `steps.mint.outputs.token`, and the resolve step's
+      # presence check reads the same job-level boolean this step is gated
+      # on: a caller without the app secrets skips the run with a log line
+      # (the PAT was retired 2026-09-18).
       - name: Mint the machine account's token
         id: mint
         if: env.HAS_APP_SECRETS == 'true'
@@ -342,13 +337,13 @@ jobs:
       - name: Resolve PR and check the auto label
         id: resolve
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           AUTHOR: ${{ inputs.comment_author }}
           REVIEWER: ${{ inputs.reviewer_login }}
           AUTO_LABEL: ${{ inputs.auto_label }}
-          HAS_TOKEN: ${{ (steps.mint.outputs.token || secrets.MARVIN_TOKEN) != '' }}
+          HAS_TOKEN: ${{ env.HAS_APP_SECRETS }}
         run: |
           set -euo pipefail
           # `act` here is skip or verify (proceed to the labeler check); the
@@ -380,7 +375,7 @@ jobs:
           }
           echo "review-fix gate: pr=#$PR comment_author='$AUTHOR' reviewer_login='$REVIEWER'"
           if [ "$HAS_TOKEN" != "true" ]; then
-            echo "No machine-account token (neither the app secrets nor MARVIN_TOKEN); the review loop can't push/re-request as a real identity. Skipping."
+            echo "No machine-account app secrets (MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY); the review loop can't push/re-request as a real identity. Skipping."
             act skip; exit 0
           fi
           # Codex-engine reviews post their verdict via the machine account
@@ -430,7 +425,7 @@ jobs:
         if: steps.resolve.outputs.act == 'verify'
         uses: meridianlabs-ai/agents/.github/actions/verify-auto-labeler@main
         with:
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token }}
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           label: ${{ inputs.auto_label }}
@@ -439,7 +434,7 @@ jobs:
       - name: Gate and count
         id: gate
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           PR_JSON: ${{ steps.resolve.outputs.pr_json }}
@@ -806,7 +801,7 @@ jobs:
           (steps.resolve.outcome == 'failure' || steps.labeler.outcome == 'failure' ||
            steps.gate.outcome == 'failure')
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -828,7 +823,7 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Agent
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token }}
           repo: ${{ github.repository }}
           issue: ${{ inputs.pr_number }}
           branch: ${{ steps.gate.outputs.head_branch }}
@@ -838,7 +833,7 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/set-stage@main
         with:
           stage: Review
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token }}
           repo: ${{ github.repository }}
           issue: ${{ inputs.pr_number }}
           branch: ${{ steps.gate.outputs.head_branch }}
@@ -859,7 +854,7 @@ jobs:
       - name: Converged handoff
         if: steps.gate.outputs.act == 'converged'
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           MENTION: ${{ steps.gate.outputs.mention }}
@@ -942,7 +937,7 @@ jobs:
         id: disarm
         uses: meridianlabs-ai/agents/.github/actions/disarm-auto-loop@main
         with:
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          token: ${{ steps.mint.outputs.token }}
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           label: ${{ inputs.auto_label }}
@@ -952,7 +947,7 @@ jobs:
         id: reset
         uses: meridianlabs-ai/agents/.github/actions/reset-auto-counters@main
         with:
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          token: ${{ steps.mint.outputs.token }}
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           counters: rounds
@@ -993,7 +988,7 @@ jobs:
         if: ${{ !cancelled() && steps.gate.outputs.act == 'escalate' }}
         uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
         with:
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          token: ${{ steps.mint.outputs.token }}
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
           body: ${{ steps.handoff.outputs.body }}
@@ -1014,7 +1009,7 @@ jobs:
       - name: Record round
         if: steps.gate.outputs.act == 'fix'
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           CID: ${{ steps.gate.outputs.cid }}
@@ -1037,8 +1032,9 @@ jobs:
           fi
 
   # UNTRUSTED: checks out the PR head, provisions, runs the agent. Names NO
-  # GitHub-write secret — MARVIN_TOKEN is absent (the invariant at the top of
-  # this file); the codex engine's OPENAI_API_KEY is named at its Run step
+  # GitHub-write secret — the machine account's token is absent (the
+  # invariant at the top of this file); the codex engine's OPENAI_API_KEY is
+  # named at its Run step
   # because codex must hold its own key, and the WIF inputs on the action
   # step are identifiers, not secrets (AGENTS.md). The agent commits locally
   # and never pushes or posts: the job token is read-only (permissions below),
@@ -2386,11 +2382,6 @@ jobs:
     needs: [gate, fix]
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.act == 'fix'
     runs-on: ubuntu-latest
-    env:
-      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
-      # read the `secrets` context, so the mint step gates on this job-level
-      # boolean instead. Not a secret (the client id is an identifier).
-      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     # Every write here is marvin's (the land composite's `token`, the refund's
     # GH_TOKEN); the job token only reads — the artifact, the default branch,
     # the start SHA fetch.
@@ -2409,7 +2400,6 @@ jobs:
       # ""`), so no other repository is in scope. Revoked when the job ends.
       - name: Mint the machine account's token
         id: mint
-        if: env.HAS_APP_SECRETS == 'true'
         uses: actions/create-github-app-token@v2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
@@ -2438,11 +2428,11 @@ jobs:
         if: needs.fix.result != 'cancelled' && needs.fix.result != 'skipped'
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
-          # The machine account (the minted app token, else the PAT), no
-          # fallback: the gate already exited when it had neither (a
+          # The machine account (the minted app token), no fallback: the
+          # gate already skipped when the app secrets were absent (a
           # job-token push would not re-run CI and a job-token `@review`
           # would not trigger the reviewer).
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token }}
           # The caller's trusted event number — the SAME value emit-landing
           # got: the validator pins the manifest's pr_number to it, and it is
           # where the final report goes when the manifest never validated
@@ -2492,7 +2482,7 @@ jobs:
           needs.fix.outputs.agent_started != 'true' &&
           steps.land.outputs.pushed != '1'
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           ROUND: ${{ needs.gate.outputs.round }}
