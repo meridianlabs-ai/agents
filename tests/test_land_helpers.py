@@ -518,7 +518,10 @@ def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=No
         "SLACK_TOKEN": "", "SLACK_CHANNEL": "", "SLACK_THREAD_TS": "",
         **(slack_env or {}),
     }
-    r = sh("bash", "-c", POST_STUB + post_script(), check=False, env=env)
+    # `-eo pipefail`, as GitHub invokes `shell: bash` (`bash --noprofile
+    # --norc -eo pipefail`): the step's own `set -uo pipefail` adds -u and
+    # leaves -e on, so a failing bare command aborts the real step too.
+    r = sh("bash", "-eo", "pipefail", "-c", POST_STUB + post_script(), check=False, env=env)
     calls = (state / "calls").read_text().splitlines() if (state / "calls").exists() else []
     writes = (state / "writes").read_text().splitlines() if (state / "writes").exists() else []
     failed = post_outputs(tmp_path).get("failed", "")
@@ -797,6 +800,50 @@ def test_post_measures_unanchored_entries_after_the_defang(tmp_path):
     assert sum(f"FINDING_{i}\n" in joined for i in range(50)) == 50
     assert "truncated:" not in joined and "@auto" not in joined and "`auto`" in joined
     assert len(follow_ups) >= 2 and all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def fallback_content(follow_ups: list) -> str:
+    """The follow-up comments' entries, headers dropped and newlines removed, so a
+    token the byte cut split across two comments counts once."""
+    return "".join(b.split(":\n", 1)[1] for b in follow_ups).replace("\n", "")
+
+
+def test_post_folds_a_single_line_longer_than_the_budget(tmp_path):
+    # Review round 3 of #116: folding at the budget made a budget + 1 piece
+    # (the newline), which re-split and removed its own input — under
+    # Actions' `bash -e` the step died before posting any fallback. A line
+    # longer than the budget is now folded at budget - 1, every piece fits,
+    # and every byte arrives across as many comments as it takes.
+    body = "z" * 59900 + "\nTAIL_FINDING\n"
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": "src/a.py", "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == "" and "No such file" not in r.stderr
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    joined = "".join(follow_ups)
+    assert fallback_content(follow_ups).count("z") == 59900 and "TAIL_FINDING" in joined and "truncated:" not in joined
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
+
+
+def test_post_fallback_carries_everything_the_body_cap_kept(tmp_path):
+    # The reviewer's fixture: `@AUTO` × 11,780 is under the prep cap but
+    # grows past defang's 60,000 cap in land (case-insensitive: `AUTO` →
+    # `` `AUTO` ``), so the body is cut to exactly 10,000 tokens plus the
+    # truncation note BEFORE it reaches the fallback. Everything the cap
+    # kept — 10,000 tokens and the note, one 60,000-byte line — must reach
+    # the PR: two comments, nothing missing, nothing recorded as failed.
+    body = "@AUTO" * 11780 + "\nTAIL_FINDING\n"
+    r, calls, writes, failed = run_post(tmp_path, review_landing(review_comments=[{"path": "src/a.py", "line": 3, "body_file": "rc0.md"}]),
+                                        {"review.md": "Review\n", "rc0.md": body}, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    follow_ups = [b for b in posted_bodies(tmp_path) if b.startswith("Inline review comments that could not be anchored")]
+    assert len(follow_ups) == 2
+    joined = "".join(follow_ups)
+    assert fallback_content(follow_ups).count("AUTO") == 10000 and "@AUTO" not in joined
+    assert "_[truncated: the body exceeded the comment size cap]_" in joined  # the per-body cap's own note, carried whole
+    assert all(len(b.encode()) < 60000 for b in follow_ups)
 
 
 def test_post_packs_small_unanchored_findings_into_one_comment(tmp_path):

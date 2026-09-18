@@ -594,35 +594,58 @@ runs:
             chunk=$((chunk + 1))
             : >"$RUNNER_TEMP/unanchored-$chunk.md"
           }
-          # add_unanchored FILE — append one de-fanged entry to the current
-          # chunk, posting the chunk first when the entry would not fit. An
-          # entry over the budget on its own (a body near defang's own cap,
-          # plus its header line) is split into pieces of at most the budget
-          # — at line boundaries, after folding any single line longer than
-          # the budget at byte boundaries (LC_ALL=C: bytes, not characters;
-          # a multi-byte character cut in two makes that piece's post fail,
-          # which is then a recorded failure, never a silent loss) — and
-          # each piece is added in turn. Piece names are zero-padded so the
-          # glob keeps their order.
-          add_unanchored() {
-            local f="$1" cur add piece
+          # append_unanchored FILE — append a piece that fits the budget to
+          # the current chunk, posting the chunk first when the piece would
+          # not fit. Never splits: a piece over the budget (which the
+          # splitter below cannot produce) still goes out, alone, and
+          # defang's cap is what bounds it — progress is guaranteed.
+          append_unanchored() {
+            local f="$1" cur add
             add=$(wc -c <"$f")
-            if [ "$add" -gt "$budget" ]; then
-              rm -f "$RUNNER_TEMP"/unanchored-piece.*
-              LC_ALL=C fold -b -w "$budget" "$f" \
-                | LC_ALL=C awk -v max="$budget" -v prefix="$RUNNER_TEMP/unanchored-piece." \
-                    'BEGIN { n = 0; size = 0; out = prefix sprintf("%04d", n) }
-                     { l = length($0) + 1
-                       if (size > 0 && size + l > max) { close(out); n++; out = prefix sprintf("%04d", n); size = 0 }
-                       print > out; size += l }'
-              for piece in "$RUNNER_TEMP"/unanchored-piece.*; do
-                add_unanchored "$piece"
-              done
-              return 0
-            fi
             cur=$(wc -c <"$RUNNER_TEMP/unanchored-$chunk.md")
             if [ "$cur" -gt 0 ] && [ $((cur + add)) -gt "$budget" ]; then flush_unanchored; fi
             cat "$f" >>"$RUNNER_TEMP/unanchored-$chunk.md"
+          }
+          # add_unanchored FILE — one de-fanged entry into the chunks. An
+          # entry that fits the budget is appended as is. One over the budget
+          # on its own (a body near defang's own cap, plus its header line)
+          # is split ONCE into pieces that each fit: awk packs its lines
+          # greedily, starting from the room left in the chunk that is open
+          # (so the first piece completes that chunk instead of orphaning
+          # the entry's heading in a comment of its own), and a line longer
+          # than the room left is cut at the byte that fills it, newline
+          # included — review round 3 of #116: `fold` at the budget itself
+          # made a budget + 1 piece, and re-splitting it removed the pieces
+          # still to be read. Byte cutting (LC_ALL=C: bytes, not characters)
+          # can split a multi-byte character; that piece's post then fails
+          # and is a recorded failure, never a silent loss. Every piece is
+          # appended in order (names are zero-padded so the glob keeps it);
+          # no recursion, no removal while pieces are pending, and a cut
+          # always advances, so this terminates on any input.
+          add_unanchored() {
+            local f="$1" pieces="$RUNNER_TEMP/unanchored-pieces" piece
+            if [ "$(wc -c <"$f")" -le "$budget" ]; then
+              append_unanchored "$f"
+              return 0
+            fi
+            rm -rf "$pieces"
+            mkdir -p "$pieces"
+            LC_ALL=C awk -v max="$budget" -v size="$(wc -c <"$RUNNER_TEMP/unanchored-$chunk.md")" -v prefix="$pieces/p." '
+              BEGIN { n = 0; out = prefix sprintf("%04d", n) }
+              function next_piece() { close(out); n++; out = prefix sprintf("%04d", n); size = 0 }
+              {
+                line = $0
+                while (length(line) + 1 > max - size) {
+                  take = max - size - 1
+                  if (take > 0) { print substr(line, 1, take) > out; line = substr(line, take + 1) }
+                  next_piece()
+                }
+                print line > out
+                size += length(line) + 1
+              }' "$f"
+            for piece in "$pieces"/p.*; do
+              [ -f "$piece" ] && append_unanchored "$piece"
+            done
           }
           posted=0
           for ((k = 0; k < n; k++)); do
