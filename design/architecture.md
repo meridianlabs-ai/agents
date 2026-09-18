@@ -482,8 +482,11 @@ the model for the review-fix loop and the dev agent:
   Agent mode installs no MCP server without explicit tool grants, so there
   is no API-side commit or comment tool to deny.
 - **The hand-back is a manifest field, not a backstop.** `handback: true`
-  and `stage: Review` whenever HEAD moved past the start SHA and descends
-  from it (the same test `emit-landing` applies before bundling), which
+  whenever HEAD moved past the start SHA and descends from it (the same
+  test `emit-landing` applies before bundling) — and no `stage`: a
+  re-review request is mid-flight, so the card stays at Agent until the
+  loop ends (atlas-tracking.md's one rule; Ransom, 2026-09-18 — until then
+  the hand-back set Review as well) — which
   makes a merge-only round land and owe its `@review` like any other — so
   `Push base merge if unpushed` and `Ensure hand-back after push` are gone
   from this workflow: the "pushed but no hand-back" state they existed for
@@ -628,8 +631,10 @@ agent posts nothing and resolves nothing in-run):
   without a hand-back" into a redundant `@review`) and the `Detect agent
   self-handoff` comment scan are gone: the hand-back and the hand-off are
   fields of the manifest that carries the push, and `stage: Review` rides
-  with whichever one is set (the old `Stage - Review (self-handoff)`
-  behaviour). `Push base merge if unpushed` is gone as in #82 — the runner's
+  with the hand-off alone (the old `Stage - Review (self-handoff)`
+  behaviour; the hand-back is mid-flight and sets no stage — atlas-
+  tracking.md's one rule, Ransom, 2026-09-18). `Push base merge if
+  unpushed` is gone as in #82 — the runner's
   merge sits above the start SHA and lands through the bundle.
 - **A round the agent concluded nothing about is concluded by the
   composer, the codex way.** When the agent committed nothing of its own

@@ -458,9 +458,13 @@ the dev agent authenticated as `AUTO_TOKEN`:
    2026-09-17). No hand-back is owed when the agent committed nothing, when
    the landing is read-only or when the manifest carries an error — an
    errored run hands back to a human (stage Review), not to the loop, on a
-   PR run in the loop as much as on the PR it opens. A plain `@claude`
-   issue or PR without the label gets no hand-back; its review stays on
-   demand.
+   PR run in the loop as much as on the PR it opens. The hand-back itself
+   sets no stage: atlas-tracking.md's one rule (Ransom, 2026-09-18) keeps
+   the card at Agent while any agent of the loop is still to run, and every
+   loop's hand-back is mid-flight; only a loop's end — convergence, an
+   escalation hand-off, an errored or one-shot run — sets Review. A plain
+   `@claude` issue or PR without the label gets no hand-back; its review
+   stays on demand.
 2. **CI completed** — `check_suite`/`workflow_run` completed=failure on the PR's
    head → if failing, fix and commit; the land job pushes as marvin (CI re-runs
    because PAT).

@@ -1687,7 +1687,12 @@ jobs:
       #               push landed and a failed step landed nothing.
       #               Deliberate: dropping committed work is worse, the push
       #               is what re-runs CI, and the ⚠️ says the round failed.
-      #   stage     — Review, in that case (the reviewer takes over).
+      #   stage     — never set here. A hand-back is mid-flight (the
+      #               reviewer runs next), and a card stays at Agent while
+      #               any agent of the loop is still to run; Review is the
+      #               gate's, on escalation — the loop's end (one rule for
+      #               every loop, design/atlas-tracking.md; Ransom,
+      #               2026-09-18 — until then the hand-back set Review too).
       #   comments  — codex's final message (engine codex; the commit step
       #               wrote it, de-fanged), or — the Claude path's analogue,
       #               so a round that gave up is not silent — the agent's
@@ -1770,7 +1775,7 @@ jobs:
             fi
           fi
           if [ "$moved" = "true" ]; then
-            extra=$(jq -c '.handback = true | .stage = "Review"' <<<"$extra")
+            extra=$(jq -c '.handback = true' <<<"$extra")
           fi
           # Merge-only: HEAD moved, but only to the runner's clean base merge
           # — any agent commit would have moved it further — so the agent

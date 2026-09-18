@@ -13,6 +13,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   unbundle into an empty bare repo; refuse a moved branch; push without
   `--force`), run against local repos — including `emit-landing`'s `write`
   step, lifted from the action and run against those repos.
+- `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
+  step, lifted the same way: a landed fix or merge-only attempt owes the
+  re-review request and sets no stage (a hand-back is mid-flight; Review is
+  the gate's, on escalation), the no-change relay, and the errored attempt.
 - `test_review_fix_composer.py` — `claude-auto-review.yml`'s `Compose
   landing manifest` step, lifted from the workflow the same way: the
   review loop's ending contract (exactly one hand-back), the agent-field
