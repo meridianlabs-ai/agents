@@ -63,8 +63,9 @@ inputs:
   token:
     description: >-
       Token that can read the PR's timeline, look up collaborator permissions,
-      edit the PR's labels and comment (MARVIN_TOKEN — both gates already
-      require it, and the disarm must post as a real identity).
+      edit the PR's labels and comment (the machine account's minted token:
+      both gates already require it, and the disarm must post as a real
+      identity).
     required: true
   repo:
     description: owner/name the PR lives in.

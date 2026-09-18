@@ -16,7 +16,7 @@ description: >-
 
 inputs:
   token:
-    description: Token that can edit the PR's labels (MARVIN_TOKEN or github.token).
+    description: Token that can edit the PR's labels (the machine account's minted token, or github.token).
     required: true
   repo:
     description: owner/name the PR lives in.

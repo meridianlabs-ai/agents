@@ -647,7 +647,7 @@ gh() {
 """
 
 
-def run_resolve(tmp_path, author, *, has_token="true"):
+def run_resolve(tmp_path, author):
     state = fresh_state(tmp_path)
     (state / "pr.json").write_text(json.dumps({
         "state": "OPEN", "closedAt": None, "headRefName": "claude/issue-9-x", "headRefOid": HEAD,
@@ -655,7 +655,7 @@ def run_resolve(tmp_path, author, *, has_token="true"):
     out = tmp_path / "out"
     out.write_text("")
     env = {"GITHUB_OUTPUT": str(out), "STATE": str(state), "REPO": "o/r", "PR": "42", "AUTHOR": author,
-           "REVIEWER": "claude[bot]", "AUTO_LABEL": "auto", "HAS_TOKEN": has_token,
+           "REVIEWER": "claude[bot]", "AUTO_LABEL": "auto",
            "TRUSTED_LOGINS": TRUSTED_LOGINS}
     r = sh(*STEP_BASH, RESOLVE_STUB + lift_step(WORKFLOW, "        id: resolve"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr

@@ -210,7 +210,7 @@ changes who pushes. Per step:
 | hand-back, unlanded-work, open-PR and verify fetches | gone with the landing-job split (#82, #83, #84): the land job opens the PR and posts the hand-back from the manifest, and knows what it pushed |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
 | the claude-code-action step | no `github_token` in any of the four workflows (since #81 / #82 / #83 / #84): the action's own App token, and a job-token credential helper for its fetches — load-bearing in `claude.yml`, see below |
-| the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted, else `MARVIN_TOKEN` (`\|\| github.token` in `claude.yml` only, the marvin-less degradation; the reviewer's was retired by #114) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
+| the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted (`\|\| github.token` in `claude.yml` only, the marvin-less degradation; the reviewer's was retired by #114, and the `MARVIN_TOKEN` PAT fallback by the Phase 2 retirement, 2026-09-18) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
 | `reset-origin-url` (right after the action step, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
@@ -235,8 +235,9 @@ credential: a 401 with URL auth is `credential_reject` → `HTTP_NOAUTH`, and
 helpers are tried only on the `HTTP_REAUTH` path (a URL with no credential).
 After the action step, `remote.origin.url` carries the action's
 `github_token`, so every later runner-side `git fetch`/`git push origin`
-would have used *that* and bypassed its step's helper. On a repo with
-`MARVIN_TOKEN` that is the same identity — harmless. On a marvin-less
+would have used *that* and bypassed its step's helper. On a repo whose
+action step held `MARVIN_TOKEN` that was the same identity — harmless. On a
+marvin-less
 `claude.yml` caller the URL token is the Claude App token, which the action
 revokes in its own final composite step (`Revoke app token`, `if: always()
 && inputs.github_token == ''`), so the open-PR fetch failed ("not on origin;
@@ -303,28 +304,47 @@ set and one hour, and the private key is read by nothing but the mint step of
 a job that runs no agent. The job that runs the agent never sees either
 secret or a minted token.
 
-**One expression per job decides the token.** The mint step runs only when
-the caller passed the client id (`if: env.HAS_APP_SECRETS == 'true'`, a
-job-level boolean, because a step `if:` cannot read `secrets`), and every
-later step in the job reads `steps.mint.outputs.token || secrets.MARVIN_TOKEN`
-(`|| github.token` where the workflow already degraded to the job token) —
-including the composites' `token` inputs and the loops' `HAS_TOKEN` presence
-check. Composites do not mint. A caller still passing only the PAT therefore
-behaves exactly as in Phase 1, and callers switch one repo at a time; the PAT
-input is removed by the retirement step at the end of Phase 2. What each job
-mints (2026-09-16):
+**One expression per job decides the token.** Every step in a trusted job
+that talks to GitHub reads `steps.mint.outputs.token` (`|| github.token` in
+`claude.yml`, whose marvin-less degradation to the job token stays) —
+including the composites' `token` inputs. Composites do not mint. The mint
+step is the job's first step and runs unconditionally where the job cannot
+work without the machine account (the reviewer's gate and land, the loops'
+land jobs, the Atlas sync): a caller without the app secrets fails there,
+loudly, before anything else runs. It is gated on the job-level
+`HAS_APP_SECRETS` boolean (`secrets.MARVIN_APP_CLIENT_ID != ''`; a step
+`if:` cannot read `secrets`) only in `claude.yml`'s gate and land, the one
+workflow with a documented behaviour without the machine account (the
+job-token degradation). The two loops' gates used to skip with a log line
+when the PAT was absent; since the retirement they fail at the mint step
+like every other trusted job — one policy for every mint, and a
+misconfigured caller shows as a red gate rather than a quiet skip
+(decision: Ransom, 2026-09-18, review round 1 of the retirement PR).
+
+**The PAT is retired (2026-09-18).** During the transition (agents#111,
+2026-09-16 to 2026-09-18) every reusable workflow also declared the
+`MARVIN_TOKEN` PAT as an optional secret and read
+`steps.mint.outputs.token || secrets.MARVIN_TOKEN`, so callers switched one
+repo at a time. Once every caller stub passed the app secrets (rollout
+2026-09-17) and the full `@auto` loop had run end to end on the app identity
+(fork #511, 2026-09-18), the retirement PR removed the secret from every
+`workflow_call` block, every read of it, and every stub and example; the org
+admin then deletes the org secret and revokes the fine-grained PAT in the
+`i-am-marvin` account. `MARVIN_TOKEN` in this file from here on is history.
+What each job mints (2026-09-16; the fallback column is what happens
+without the app secrets since the retirement):
 
 | job | `repositories` | permissions | fallback |
 | --- | --- | --- | --- |
-| `claude.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
-| `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN`, then job token |
-| `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | `MARVIN_TOKEN`; empty skips the ack and stage |
-| `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | `MARVIN_TOKEN`; empty refuses every write — the job token holds no write permission (#114) |
-| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | `MARVIN_TOKEN`; empty makes the gate skip |
-| `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | `MARVIN_TOKEN`; empty makes the gate skip |
-| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | `MARVIN_TOKEN` (the gate already required one) |
-| `atlas-sync.yml` (fork token, `GH_TOKEN`) | `inspect_ai` | issues, pull requests, org projects: write; actions: read | `MARVIN_TOKEN` |
-| `atlas-sync.yml` (ts-mono read token, `GH_TOKEN_TS_MONO`) | `ts-mono` | metadata, pull requests: read | `MARVIN_TOKEN` |
+| `claude.yml` gate | caller repo | issues, pull requests, org projects: write | job token |
+| `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | job token |
+| `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | none: the mint step fails the run before any review |
+| `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | none: the mint step fails the run; the job token holds no write permission (#114) |
+| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | none: the mint step fails the run |
+| `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | none: the mint step fails the run |
+| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | none: the mint step fails the run (the gate already failed without the secrets) |
+| `atlas-sync.yml` (fork token, `GH_TOKEN`) | `inspect_ai` | issues, pull requests, org projects: write; actions: read | none: the mint step fails the run |
+| `atlas-sync.yml` (ts-mono read token, `GH_TOKEN_TS_MONO`) | `ts-mono` | metadata, pull requests: read | none: the mint step fails the run |
 
 No job writes to two repositories: the land jobs of the three agent workflows
 refuse follow-up issues (`allowed-issue-repos: ""`), the reviewer's may file
@@ -347,7 +367,8 @@ whatever `git config user.*` says, and the pusher is the land job's token.
 The gate job publishes `git_user_name` / `git_user_email` outputs from its
 mint step's outcome (`meridian-marvin[bot]` /
 `330132053+meridian-marvin[bot]@users.noreply.github.com` when it minted,
-the User's identity on the PAT), and the agent job passes them to
+the User's identity — `sync-branch`'s default — on `claude.yml`'s
+marvin-less path), and the agent job passes them to
 `sync-branch` (`user-name` / `user-email` inputs, defaulting to the User) and
 to its codex prep step, so author and pusher agree on either path.
 
@@ -359,8 +380,9 @@ is NONE or CONTRIBUTOR), and so the stub gates and the `[bot]` exclusions
 name it explicitly and the claude-code-action / codex-action steps carry it
 in their bot allow-lists. App-token pushes and comments trigger workflows as
 a User's do (only `github.token` events are suppressed), so the `@review`
-hand-back and the CI re-run work unchanged. At the end of Phase 2 the User
-login is retired and the bot is the only entry.
+hand-back and the CI re-run work unchanged. The PAT is retired (2026-09-18);
+the User login leaves `TRUSTED_LOGINS` when the account itself is retired, a
+separate step, and the bot is then the only entry.
 
 Three rules define the shape:
 

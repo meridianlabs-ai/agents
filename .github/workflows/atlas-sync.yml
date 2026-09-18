@@ -27,9 +27,9 @@
 # authenticated reads of another repository, which a fork-only token cannot
 # make (review round 1 of agents#111). The script routes every ts-mono call
 # through that token (GH_TOKEN_TS_MONO) and fails closed without it; neither
-# token can write outside its one repository. Falls back to the MARVIN_TOKEN
-# PAT under both names while that secret still exists; the preflight is what
-# an app token can answer — a read of the Atlas project and of ts-mono (the
+# token can write outside its one repository. The app secrets are the only
+# credential (the PAT was retired 2026-09-18); the preflight is what an app
+# token can answer — a read of the Atlas project and of ts-mono (the
 # OAuth-scope header check is gone: installation tokens report no scopes).
 # Deterministic — no agent invocation.
 
@@ -50,23 +50,17 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    env:
-      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
-      # read the `secrets` context, so the mint step gates on this job-level
-      # boolean instead. Not a secret (the client id is an identifier).
-      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     # A wedged run would otherwise hold the concurrency group for the 6-hour
     # default and silently skip the hourly syncs in between.
     timeout-minutes: 15
     steps:
-      # The machine account's token: minted when the app secrets are present
-      # (org secrets scoped to this repo), else the PAT below. One token for
+      # The machine account's token, minted from the app secrets (org secrets
+      # scoped to this repo); the run cannot work without them. One token for
       # the run's whole write set — the fork's issues (comments, close /
       # reopen, reactions), the Atlas board (org projects) — with the fork's
       # Actions runs read for the live-run check. Revoked when the job ends.
       - name: Mint the machine account's token
         id: mint
-        if: env.HAS_APP_SECRETS == 'true'
         uses: actions/create-github-app-token@v2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
@@ -88,7 +82,6 @@ jobs:
       # scope; revoked when the job ends.
       - name: Mint the ts-mono read token
         id: mint_ts_mono
-        if: env.HAS_APP_SECRETS == 'true'
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -100,20 +93,18 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      # An installation token reports no OAuth scopes, so the checks that
-      # work for both identities are real reads: the Atlas project with the
-      # fork token, the ts-mono repository with the ts-mono token. Fail
+      # An installation token reports no OAuth scopes, so the checks are
+      # real reads: the Atlas project with the fork token, the ts-mono
+      # repository with the ts-mono token. Fail
       # loudly — without project access every board write silently 403s,
       # and without ts-mono access every companion lookup fails closed and
       # holds its promotion at Sign-off.
       - name: Preflight - tokens can read the org project and ts-mono
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
-          GH_TOKEN_TS_MONO: ${{ steps.mint_ts_mono.outputs.token || secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          GH_TOKEN_TS_MONO: ${{ steps.mint_ts_mono.outputs.token }}
         run: |
           set -euo pipefail
-          [ -n "$GH_TOKEN" ] || { echo "::error::no machine-account token: neither the MARVIN_APP_* secrets nor MARVIN_TOKEN is set"; exit 1; }
-          [ -n "$GH_TOKEN_TS_MONO" ] || { echo "::error::no ts-mono read token (GH_TOKEN_TS_MONO is empty)"; exit 1; }
           gh api graphql -f query='{node(id:"PVT_kwDOC7YMCM4BU68p"){... on ProjectV2{title}}}' \
             --jq '.data.node.title' >/dev/null \
             || { echo "::error::token cannot read the Atlas project"; exit 1; }
@@ -122,9 +113,8 @@ jobs:
 
       - name: Sync
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
-          # The ts-mono read token (atlas_sync.py -> gh_env): the PAT during
-          # the transition, so the script's fail-closed rule never fires there.
-          GH_TOKEN_TS_MONO: ${{ steps.mint_ts_mono.outputs.token || secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          # The ts-mono read token (atlas_sync.py -> gh_env).
+          GH_TOKEN_TS_MONO: ${{ steps.mint_ts_mono.outputs.token }}
           REVIEWER: ransomr
         run: python3 .github/scripts/atlas_sync.py

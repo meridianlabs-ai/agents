@@ -39,8 +39,9 @@ description: >-
 inputs:
   token:
     description: >-
-      Token the mutations run as (MARVIN_TOKEN — the same account that posts
-      the summary; resolving a thread needs write access on the repo). Unused
+      Token the mutations run as (the machine account's minted token — the
+      same account that posts the summary; resolving a thread needs write
+      access on the repo). Unused
       when `resolve` is not "true" (parse-only mode makes no API call), so a
       job that holds no write token passes its job token.
     required: true

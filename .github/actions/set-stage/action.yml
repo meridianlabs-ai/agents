@@ -17,9 +17,8 @@ inputs:
   token:
     description: >-
       Token with org-project write: the machine account's — an installation
-      token minted with `permission-organization-projects: write` (Phase 2),
-      or the MARVIN_TOKEN fine-grained PAT with organization Projects
-      read/write. Empty skips silently, so callers can pass the value
+      token minted with `permission-organization-projects: write` (Phase 2).
+      Empty skips silently, so callers can pass the value
       unconditionally.
     required: true
   repo:

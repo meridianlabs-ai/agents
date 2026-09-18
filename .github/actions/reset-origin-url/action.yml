@@ -13,8 +13,9 @@ description: >-
      and helpers are tried only on the `HTTP_REAUTH` path. So the
      step-scoped helpers the later runner-side steps define (open-PR, verify,
      hand-back and unlanded-work fetches; the push-base-merge backstop) were
-     bypassed by whatever the URL carried. On a repo with MARVIN_TOKEN that
-     is the same identity and harmless; on a marvin-less claude.yml caller
+     bypassed by whatever the URL carried. Where the action step held the
+     machine account's token that was the same identity and harmless; on a
+     marvin-less claude.yml caller
      the URL token is the Claude App token, which the action REVOKES in its
      own final composite step (`Revoke app token`, `if: always() &&
      inputs.github_token == ''`) — so every later `git fetch origin` failed
@@ -27,9 +28,9 @@ description: >-
   `git remote set-url origin <server_url>/<repository>` — idempotent, no
   network, the URL actions/checkout set — and every later `git fetch`/`git
   push origin` reaches its step's helper as designed: job token for the
-  reads, `MARVIN_TOKEN` (`|| github.token` in claude.yml) for the backstop
-  push. Gate it `if: always() && steps.claude.outcome != 'skipped'` right
-  after the action step: a failed or cancelled agent leaves the URL rewritten
+  reads, the machine account's minted token (`|| github.token` in
+  claude.yml) for the backstop push. Gate it `if: always() &&
+  steps.claude.outcome != 'skipped'` right after the action step: a failed or cancelled agent leaves the URL rewritten
   too. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/reset-origin-url@main); NO post step
   (local composite actions with post steps break teardown on the fork).

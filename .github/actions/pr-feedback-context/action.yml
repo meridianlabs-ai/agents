@@ -26,8 +26,9 @@ description: >-
 inputs:
   token:
     description: >-
-      Token gh reads the PR with (the job token, or MARVIN_TOKEN where the
-      caller already has it in hand — reads only, either works).
+      Token gh reads the PR with (the job token, or the machine account's
+      minted token where the caller already has it in hand — reads only,
+      either works).
     required: true
   repo:
     description: owner/name the PR lives in.

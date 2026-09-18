@@ -100,10 +100,11 @@ take effect on every repo's next run.
   the step never set fails silently with an empty password), and the helper
   key is `credential.${{ github.server_url }}.helper`, not the generic
   `credential.helper`, so no other host is ever answered with the token. The
-  token is the job token for reads, `MARVIN_TOKEN` for pushes that must
-  trigger CI. When adding a git network call to a workflow or composite,
-  give its step that env — never rely on `.git/config`, and never put a
-  token in a URL or an `http.*.extraheader`. A URL credential WINS over a
+  token is the job token for reads, the machine account's minted app token
+  for pushes that must trigger CI. When adding a git network call to a
+  workflow or composite, give its step that env — never rely on
+  `.git/config`, and never put a token in a URL or an `http.*.extraheader`.
+  A URL credential WINS over a
   helper (git never consults one when the URL carries auth), which is why
   the `reset-origin-url` step runs right after every claude-code-action
   step: the action rewrites `remote.origin.url` to carry its token, and

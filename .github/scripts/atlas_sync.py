@@ -33,7 +33,7 @@ lifecycle; a new proxy is seeded by hand (or by the Orca side) when one is
 wanted, and @review on a proxy remains the manual re-run path.
 
 Deterministic; runs as the machine account (GH_TOKEN: the fork-scoped app
-token atlas-sync.yml mints, or MARVIN_TOKEN during the transition; every
+token atlas-sync.yml mints; every
 ts-mono call runs under GH_TOKEN_TS_MONO instead, see gh_env). Per-item
 failures warn and continue. Every write is idempotent (skip when already at
 the target).
@@ -52,8 +52,9 @@ TS_MONO = "meridianlabs-ai/ts-mono"
 REVIEWER = os.environ.get("REVIEWER", "ransomr")
 MACHINE_ACCOUNT = "i-am-marvin"  # the User login this sync (and the loop) writes as today
 # The machine account's GitHub App login (Phase 2 of the credential
-# separation): once the workflows mint app tokens instead of using the PAT,
-# every write that is MACHINE_ACCOUNT's today carries this login. REST
+# separation): since the workflows mint app tokens (the PAT was retired
+# 2026-09-18), every write this sync and the loops make carries this login;
+# MACHINE_ACCOUNT is the User login they wrote as before. REST
 # payloads (what this module reads for comments) render it with the `[bot]`
 # suffix; GraphQL renders a Bot's login bare — graphql_login() restores the
 # suffix from `__typename` where a GraphQL author is judged (the companion
@@ -63,7 +64,8 @@ MACHINE_BOT = "meridian-marvin[bot]"
 # Authors whose comments and issue-body lines this sync believes as-is: the
 # machine account alone, under either login (the loop's hand-backs, counters
 # and stage comments post as it). Every author check reads THIS set; the
-# User login leaves it when the PAT is retired at the end of Phase 2. The bot
+# User login leaves it when the User account is retired (the PAT already
+# was, 2026-09-18). The bot
 # is trusted by name only — the collaborators endpoint answers `none` for an
 # App. Anyone else — including the reviewer's GitHub App, whose collaborator
 # permission is `none`, so a verdict it posts is not revived (decision:

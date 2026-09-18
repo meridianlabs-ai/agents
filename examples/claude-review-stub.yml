@@ -3,7 +3,10 @@
 # External-labeled issue) to run it. Release-please PRs are skipped, gated in
 # the reusable workflow.
 # Independent of the dev agent (claude.yml) — different trigger, different
-# (lower) permissions.
+# (lower) permissions. Requires the machine account's two org secrets
+# scoped to this repo, MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY:
+# the review is posted by the GitHub App they name, and a run without them
+# fails at the gate.
 #
 # Auto-review on PR open / ready_for_review is OFF by default (decision:
 # Ransom, 2026-09-16: no unasked CI reviews in any Meridian repo; reviews are
@@ -122,15 +125,11 @@ jobs:
     # steps (eyes reaction + board stage) and the land job's posts (the
     # review itself lands there — agents#114); never handed to the review
     # agent, which stays read-only. REQUIRED for the review to reach the PR:
-    # absent, the gate steps no-op and the land job refuses its writes (the
-    # job token below holds no write permission).
+    # absent, the run fails at the gate's mint step, before any review runs
+    # (the job token below holds no write permission).
     secrets:
       MARVIN_APP_CLIENT_ID: ${{ secrets.MARVIN_APP_CLIENT_ID }}
       MARVIN_APP_PRIVATE_KEY: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
-      # TRANSITION: the machine account's PAT. Delete this line once this
-      # repo has the two app secrets above (the workflow prefers them and
-      # reads the PAT only when they are absent).
-      MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
       # codex engine (design/codex-engine.md in the agents repo):
       # consumed only on items labeled engine:codex; optional.
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

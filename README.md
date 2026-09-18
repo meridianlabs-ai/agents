@@ -67,13 +67,14 @@ and `land` jobs act (pushes that run CI, the `@review` hand-back, comments,
 labels, the Atlas board). Grant both secrets to the repo in the org's
 **Secrets and variables → Actions** page and add the repo to the app's
 installation; each job then mints a one-hour token scoped to that repo and
-to what the job writes. During the transition the older `MARVIN_TOKEN` PAT
-is still accepted: a stub may pass it alongside the app secrets (the
-workflows read it only when the app secrets are absent) and delete that line
-once the repo has both app secrets. Never `secrets: inherit`. A repo with
-none of the three still runs the dev agent and the reviewer, with the
-documented degradation: pushes and PRs come from `github-actions[bot]` and
-trigger nothing, and the `@auto` loops do not engage.
+to what the job writes. The two app secrets are the whole contract: the
+machine account's older personal access token was retired on 2026-09-18 —
+the workflows no longer accept it, and the org admin deletes that org
+secret once the retirement has merged. Never `secrets: inherit`. A repo
+without the app secrets still runs the dev agent, with the documented
+degradation: pushes and PRs come from `github-actions[bot]` and trigger
+nothing; the reviewer and the `@auto` loops fail at their gates' mint
+step.
 
 **Optional — let the agents run your tests.** By default the agents review and
 build against a bare runner (no deps installed), so they verify with static
@@ -106,10 +107,10 @@ Notes:
   or comments: it commits, and the workflow's land job pushes the commits as
   the machine account (so CI runs), opens the PR on an issue run, and posts
   any comment the agent left for the thread. The machine account is the
-  GitHub App login `meridian-marvin[bot]` where the caller passes the app
-  secrets (Phase 2 of the credential separation) and the User `i-am-marvin`
-  where it still passes only the PAT; the workflows trust both, and the
-  User login is retired at the end of Phase 2. Commits do not appear mid-run;
+  GitHub App login `meridian-marvin[bot]` (Phase 2 of the credential
+  separation; its personal access token was retired 2026-09-18); the
+  workflows also still trust the User login `i-am-marvin` until that
+  account is retired separately. Commits do not appear mid-run;
   to iterate on CI failures use `@auto`, whose loop re-runs the agent on each
   red CI run.
 - PR follow-ups first merge the base branch into the PR branch on the runner,
