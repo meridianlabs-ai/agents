@@ -312,9 +312,10 @@ enforces it before the push: its `workflows` step lists the paths the
 bundle changes under `.github/workflows/` and refuses the bundle with a
 one-line report naming the files the agent itself changed — a change the
 runner's base merge brought in (the file's content at the bundle's tip
-equals the base branch's on origin, or the merged base's) is not the
-agent's and passes (decision: Ransom, 2026-09-18) — and the agent prompts
-say up front not to edit them.
+equals the base branch's on origin, or that of the base as last merged into
+the branch: the merge base of the tip and origin's base) is not the agent's
+and passes (decision: Ransom, 2026-09-18) — and the agent prompts say up
+front not to edit them.
 
 The app is not a member of `UKGovernmentBEIS`, so, like the PAT before it, it
 cannot open or push to upstream pull requests; promotion to upstream is a

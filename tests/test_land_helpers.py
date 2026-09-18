@@ -1464,8 +1464,8 @@ def test_agent_edit_of_a_base_merged_workflow_file_is_refused(repos):
 def test_base_that_moved_after_the_merge_still_exempts_the_merged_version(repos):
     # The merge brought ci.yml at version 1; a maintainer then changed it
     # again on main before the landing. Head's blob is not the base tip's,
-    # but it is the merged parent's — an ancestor of the tip — so it is the
-    # base's, not the agent's.
+    # but it is the merged base's — the merge base of head and the tip — so
+    # it is the base's, not the agent's.
     r = repos
     advance_base(r)
     merge_base_into_feature(r)
@@ -1478,11 +1478,76 @@ def test_base_that_moved_after_the_merge_still_exempts_the_merged_version(repos)
     git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/feature", cwd=repo)
 
 
+def test_fast_forwarded_base_that_moved_before_landing_still_lands(repos):
+    # Codex round 3 (a): the sync fast-forwarded the branch onto base v1
+    # (no merge commit), the agent changed source only, and main moved to
+    # v2 before the landing. Head's ci.yml is v1: the merge base of head
+    # and the tip is the v1 commit, so the file is the base's, not the
+    # agent's.
+    r = repos
+    advance_base(r)
+    git("fetch", "-q", str(r["origin"]), "main", cwd=r["work"])
+    git("reset", "-q", "--hard", "FETCH_HEAD", cwd=r["work"])
+    commit_path(r, "src/agent.py")
+    advance_base(r, text="on: push\n# v2\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+    git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/feature", cwd=repo)
+
+
+def test_reverting_a_workflow_to_an_older_base_version_is_refused(repos):
+    # Codex round 3 (b): the branch already sits at the base tip (no runner
+    # merge); the agent reverts ci.yml to an older base version and names
+    # that older base commit as a second parent of its commit. The merge
+    # base of head and the tip is the tip itself (an ancestor of head), so
+    # the old version is nobody's base and the change is the agent's.
+    r = repos
+    work = r["work"]
+    commit_path(r, ".github/workflows/ci.yml", "on: push\n# old\n")
+    old = r["head"]
+    git("push", "-q", str(r["origin"]), "HEAD:main", cwd=work)
+    commit_path(r, ".github/workflows/ci.yml", "on: push\n# current\n")
+    r["start"] = r["head"]
+    git("push", "-q", str(r["origin"]), "HEAD:main", "HEAD:feature", cwd=work)
+    commit_path(r, ".github/workflows/ci.yml", "on: push\n# old\n")
+    tree = git("rev-parse", "HEAD^{tree}", cwd=work).stdout.strip()
+    forged = git("commit-tree", tree, "-p", r["head"], "-p", old, "-m", "crafted merge of an ancestor", cwd=work).stdout.strip()
+    git("reset", "-q", "--hard", forged, cwd=work)
+    r["head"] = forged
+    emit(r)
+    repo = land_fetch(r)
+    assert base_sha(repo) == r["start"]
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    assert outputs["files"] == "`.github/workflows/ci.yml`"
+
+
+@pytest.mark.parametrize("sub", ["ls-tree", "merge-base"])
+def test_failed_comparison_read_refuses_the_bundle_unchecked(repos, sub):
+    # Codex round 3: after the diff succeeded, a failed object read during
+    # the comparison must not read as "absent at both" (round 3's blob()
+    # swallowed every error and exempted an agent-added file that way).
+    r = repos
+    commit_path(r, ".github/workflows/agent.yml")
+    emit(r)
+    repo = land_fetch(r)
+    stub = f'git() {{ if [ "$1" = {sub} ]; then echo "fatal: simulated object read failure" >&2; return 128; fi; command git "$@"; }}\n'
+    res, outputs = run_workflows_step(r, repo, stub=stub)
+    assert res.returncode != 0
+    assert "files" not in outputs
+    assert "refusing the bundle unchecked." in res.stdout
+    assert "changed only by the base merge" not in res.stdout
+    assert remote_tip(r) == r["start"]
+
+
 def test_crafted_merge_parent_does_not_exempt_a_workflow_file(repos):
     # The agent commits a workflow file on a side branch of its own and
     # merges it in: the file's blob matches the merge's second parent, but
-    # that parent is not on origin's base — the agent made it — so the
-    # bundle is refused.
+    # that parent is not on origin's base — the agent made it, and it is no
+    # merge base of head and the tip — so the bundle is refused.
     r = repos
     work = r["work"]
     git("checkout", "-q", "-b", "side", r["start"], cwd=work)
