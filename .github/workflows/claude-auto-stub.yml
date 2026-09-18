@@ -9,7 +9,7 @@
 #
 # Requires the MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY org secrets
 # scoped to this repo (the machine account's GitHub App): without them the
-# gate skips.
+# gate fails at its mint step.
 
 name: Claude Auto
 

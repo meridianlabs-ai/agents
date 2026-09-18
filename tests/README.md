@@ -47,8 +47,8 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the Atlas sync) mints the machine account's token first, for exactly the
   repository and permissions the design table lists — unconditionally where
   the job cannot work without it, gated on the caller's app secrets only in
-  `claude.yml` (the marvin-less degradation) and the loops' gates (which
-  skip with a log line); every token read in those jobs is
+  `claude.yml` (the marvin-less degradation); every token read in those
+  jobs is
   `steps.mint.outputs.token` (`|| github.token` in `claude.yml` alone); the
   agent job names none of it; the commit identity follows the gate's token;
   the retired PAT is named by no tracked file outside `design/`; this

@@ -4,7 +4,7 @@
 #
 # Requires the machine account's org secrets scoped to this repo (same as
 # claude.yml): MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY; without them
-# both gates skip.
+# both gates fail at their mint step.
 #
 # REQUIRED EDIT: under `workflows:` list THIS repo's CI workflow name(s) — the
 # `name:` field of each CI workflow (not its filename). workflow_run is the only

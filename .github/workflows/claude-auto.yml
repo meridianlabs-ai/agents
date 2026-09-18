@@ -172,7 +172,7 @@ on:
           writes need, revoked when the job ends, and every push, comment,
           label and board move runs as the bot. NEVER present in the `fix`
           job, where the PR's code runs. Without the two secrets the loop
-          can't function, so the gate no-ops with a log line. Pass it
+          can't function, so the gate fails at its mint step. Pass it
           explicitly by name in the stub's `secrets:` map, never
           `secrets: inherit`.
         required: false
@@ -210,11 +210,6 @@ jobs:
   # two jobs run on (`pr` pins the landing manifest to this PR).
   gate:
     runs-on: ubuntu-latest
-    env:
-      # Whether the caller passed the GitHub App secrets: a step `if:` cannot
-      # read the `secrets` context, so the mint step gates on this job-level
-      # boolean instead. Not a secret (the client id is an identifier).
-      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
     # Serialize per PR branch so the attempt counter's read-modify-write can't
     # race: overlapping runs (a human push mid-fix, multiple named CI workflows,
     # a re-run) would otherwise both read the same count and slip past the cap,
@@ -256,14 +251,14 @@ jobs:
       # merge, the codex commit): the bot's when this job minted an app
       # token — so the commit author and the land job's pusher agree; the
       # User's is sync-branch's default, unreachable now that the gate
-      # skips when it did not mint. Decided here, where the minting
+      # fails when it did not mint. Decided here, where the minting
       # happened; the fix job only reads these two strings.
       git_user_name: ${{ steps.mint.outcome == 'success' && 'meridian-marvin[bot]' || 'i-am-marvin' }}
       git_user_email: ${{ steps.mint.outcome == 'success' && '330132053+meridian-marvin[bot]@users.noreply.github.com' || 'i-am-marvin@users.noreply.github.com' }}
     steps:
       # The machine account's token for this job (Phase 2, design/
       # architecture.md → Landing job): a one-hour installation token of the
-      # GitHub App, minted only when the caller passed the app secrets and
+      # GitHub App, minted from the caller's app secrets and
       # scoped to THIS repository and to what this job writes — the attempt
       # counter, the escalation hand-off and the gate-failure note (issues),
       # the `auto` label's removal on escalation or an outsider's label
@@ -272,13 +267,12 @@ jobs:
       # responsible-human derivation also READS the anchor repo (a public
       # one — the inspect_ai fork — in every deployment; best-effort, empty
       # on failure). Revoked when the job ends. Every later step reads
-      # `steps.mint.outputs.token`, and the resolve step's presence check
-      # reads the same job-level boolean this step is gated on: a caller
-      # without the app secrets skips the run with a log line (the PAT was
-      # retired 2026-09-18).
+      # `steps.mint.outputs.token`. Unconditional: the loop cannot work
+      # without the machine account, so a caller without the app secrets
+      # fails here, first and loudly (the PAT was retired 2026-09-18; the
+      # gate used to skip with a log line when it was absent).
       - name: Mint the machine account's token
         id: mint
-        if: env.HAS_APP_SECRETS == 'true'
         uses: actions/create-github-app-token@v2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
@@ -309,7 +303,6 @@ jobs:
           HEAD: ${{ inputs.head_branch }}
           PR_NUMBER: ${{ inputs.pr_number }}
           AUTO_LABEL: ${{ inputs.auto_label }}
-          HAS_TOKEN: ${{ env.HAS_APP_SECRETS }}
         run: |
           set -euo pipefail
           # `act` here is skip or verify (proceed to the labeler check); the
@@ -337,10 +330,6 @@ jobs:
             done
             printf '%s' "$out"
           }
-          if [ "$HAS_TOKEN" != "true" ]; then
-            echo "No machine-account app secrets (MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY); the fix loop can't push as a real identity. Skipping."
-            act skip; exit 0
-          fi
           # The PR is the one the triggering run names (inputs.pr_number, from
           # workflow_run.pull_requests[0].number), viewed by NUMBER and checked
           # against the run — never found by branch name (Claude Security
@@ -1922,7 +1911,7 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
           # The machine account (the minted app token), no fallback: the
-          # gate already skipped when the app secrets were absent (a
+          # gate already failed when the app secrets were absent (a
           # job-token push would not re-run CI and a job-token `@review`
           # would not trigger the reviewer).
           token: ${{ steps.mint.outputs.token }}

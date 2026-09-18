@@ -73,8 +73,8 @@ the workflows no longer accept it, and the org admin deletes that org
 secret once the retirement has merged. Never `secrets: inherit`. A repo
 without the app secrets still runs the dev agent, with the documented
 degradation: pushes and PRs come from `github-actions[bot]` and trigger
-nothing; the reviewer fails at its gate, and the `@auto` loops do not
-engage.
+nothing; the reviewer and the `@auto` loops fail at their gates' mint
+step.
 
 **Optional — let the agents run your tests.** By default the agents review and
 build against a bare runner (no deps installed), so they verify with static

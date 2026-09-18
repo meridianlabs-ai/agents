@@ -146,7 +146,7 @@ def pr_json(*, state="OPEN", cross=False, head="claude/issue-1-fix", labels=("au
 
 
 def resolve(tmp_path, *, pr_number="7", head="claude/issue-1-fix", pr=None):
-    env = {"HEAD": head, "PR_NUMBER": pr_number, "AUTO_LABEL": "auto", "HAS_TOKEN": "true"}
+    env = {"HEAD": head, "PR_NUMBER": pr_number, "AUTO_LABEL": "auto"}
     fixtures = {"pr": pr} if pr is not None else {}
     return run_step(RESOLVE, tmp_path, env, fixtures)
 
@@ -200,12 +200,6 @@ def test_resolve_refuses_a_pr_on_another_branch(tmp_path):
     assert res.returncode == 0, res.stderr
     assert out == {"act": "skip"}
     assert "head branch is 'other-branch' but the failed CI run's is 'claude/issue-1-fix'" in res.stdout
-
-
-def test_resolve_skips_without_the_token_before_any_lookup(tmp_path):
-    env = {"HEAD": "b", "PR_NUMBER": "7", "AUTO_LABEL": "auto", "HAS_TOKEN": "false"}
-    res, out, calls, _ = run_step(RESOLVE, tmp_path, env, {"pr": pr_json()})
-    assert res.returncode == 0 and out == {"act": "skip"} and calls == []
 
 
 # --- Gate and count (4121987) ------------------------------------------------

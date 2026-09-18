@@ -14,11 +14,10 @@ test dependency), one per rule the contract relies on:
   repo, with exactly the permissions the design table lists for that job —
   unconditionally where the job cannot work without the machine account, and
   gated on the job-level `HAS_APP_SECRETS` boolean (a step `if:` cannot read
-  `secrets`) only in `claude.yml` (the marvin-less degradation) and the two
-  loops' gates (which skip with a log line instead of failing);
+  `secrets`) only in `claude.yml` (the marvin-less degradation); the loops'
+  gates carry no presence check any more (decision: Ransom, 2026-09-18);
 - every token read in a trusted job is `steps.mint.outputs.token`, with the
-  job-token fallback (`|| github.token`) in `claude.yml` alone, and the loops'
-  `HAS_TOKEN` presence check reads the same boolean the mint is gated on;
+  job-token fallback (`|| github.token`) in `claude.yml` alone;
 - the job that runs the agent names neither the app secrets, nor the mint
   step's token, nor the PAT;
 - the commit identity follows the token: the gate publishes it, the agent
@@ -82,11 +81,10 @@ WRITE_SETS = {
 
 # The jobs whose mint is gated on the caller's app secrets because the
 # workflow has a documented behaviour without the machine account: the dev
-# agent's job-token degradation, and the loops' gates, which skip the run
-# with a log line. Every other trusted job mints unconditionally and fails
+# agent's job-token degradation. Every other trusted job — the loops' gates
+# included (decision: Ransom, 2026-09-18) — mints unconditionally and fails
 # at the mint step when the secrets are absent.
-CONDITIONAL_MINT = {("claude.yml", "gate"), ("claude.yml", "land"),
-                    ("claude-auto.yml", "gate"), ("claude-auto-review.yml", "gate")}
+CONDITIONAL_MINT = {("claude.yml", "gate"), ("claude.yml", "land")}
 # The one workflow that keeps `|| github.token` (the marvin-less degradation).
 JOB_TOKEN_FALLBACK = {"claude.yml"}
 
@@ -199,13 +197,14 @@ def test_every_token_read_in_a_trusted_job_is_the_minted_token(name, job):
 
 
 @pytest.mark.parametrize("name", ["claude-auto.yml", "claude-auto-review.yml"])
-def test_loop_presence_check_is_the_app_secrets_boolean(name):
+def test_loop_gate_has_no_presence_check(name):
+    """The loops' gates fail at the mint step without the app secrets; the
+    resolve step no longer carries the `HAS_TOKEN` skip path the PAT had."""
     gate = jobs(workflow(name))["gate"]
-    assert "          HAS_TOKEN: ${{ env.HAS_APP_SECRETS }}\n" in gate
+    assert "HAS_TOKEN" not in gate
     resolve = [s for s in steps(gate) if "\n        id: resolve\n" in s]
     assert len(resolve) == 1
-    assert 'if [ "$HAS_TOKEN" != "true" ]; then' in resolve[0]
-    assert "No machine-account app secrets (MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY)" in resolve[0]
+    assert "act skip; exit 0" in resolve[0], "the other skip reasons stay"
 
 
 @pytest.mark.parametrize("name", REUSABLE)

@@ -313,11 +313,13 @@ work without the machine account (the reviewer's gate and land, the loops'
 land jobs, the Atlas sync): a caller without the app secrets fails there,
 loudly, before anything else runs. It is gated on the job-level
 `HAS_APP_SECRETS` boolean (`secrets.MARVIN_APP_CLIENT_ID != ''`; a step
-`if:` cannot read `secrets`) only where the workflow has a documented
-behaviour without the machine account: `claude.yml`'s gate and land (the
-job-token degradation) and the two loops' gates, whose resolve step reads
-the same boolean as its `HAS_TOKEN` presence check and skips the run with a
-log line, as it did for a missing PAT.
+`if:` cannot read `secrets`) only in `claude.yml`'s gate and land, the one
+workflow with a documented behaviour without the machine account (the
+job-token degradation). The two loops' gates used to skip with a log line
+when the PAT was absent; since the retirement they fail at the mint step
+like every other trusted job — one policy for every mint, and a
+misconfigured caller shows as a red gate rather than a quiet skip
+(decision: Ransom, 2026-09-18, review round 1 of the retirement PR).
 
 **The PAT is retired (2026-09-18).** During the transition (agents#111,
 2026-09-16 to 2026-09-18) every reusable workflow also declared the
@@ -338,9 +340,9 @@ without the app secrets since the retirement):
 | `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | job token |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | none: the mint step fails the run before any review |
 | `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | none: the mint step fails the run; the job token holds no write permission (#114) |
-| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | none: the gate skips with a log line |
-| `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | none: the gate skips with a log line |
-| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | none: the mint step fails (the gate already skipped without the secrets) |
+| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | none: the mint step fails the run |
+| `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | none: the mint step fails the run |
+| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | none: the mint step fails the run (the gate already failed without the secrets) |
 | `atlas-sync.yml` (fork token, `GH_TOKEN`) | `inspect_ai` | issues, pull requests, org projects: write; actions: read | none: the mint step fails the run |
 | `atlas-sync.yml` (ts-mono read token, `GH_TOKEN_TS_MONO`) | `ts-mono` | metadata, pull requests: read | none: the mint step fails the run |
 
