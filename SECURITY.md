@@ -49,7 +49,7 @@ text are checked by the tests under `tests/`.
   token minted from it; its own job token is read-only. The Claude action's
   own token, present while that step runs, is the exception described under
   "By design" below.
-- Every write an agent asks for lands through a manifest that a stdlib
+- Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
   trusted gate's own writes before the agent runs (acknowledgement, stage,
@@ -74,17 +74,25 @@ text are checked by the tests under `tests/`.
   step ends. It sits in `.git/config` for that step. On sandboxed reviews it
   is masked there for sandboxed commands, not for the agent's own file
   reads; same-repo reviews run without the sandbox. Everywhere the agent's
-  push and posting verbs are denied by settings. Those are guard rails:
-  anything that slipped past would be attributable to `claude[bot]` and
-  could not start a loop.
+  push and posting verbs are denied by settings, but `gh api` is not, so
+  those denies are guard rails rather than a complete prohibition on direct
+  writes. A write that slipped past would be `claude[bot]`'s: attributable,
+  and not accepted as a reviewer verdict or a trusted request by the loop
+  gates. It can still reach the CI-fix loop indirectly, since a CI failure
+  on an already-authorized `auto` PR starts a fix round whatever identity
+  pushed the branch, on the Codex path included.
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.
 - CI agents cannot edit workflow files. Changes to `.github/workflows/` are
   made from a maintainer's machine, under a maintainer's review.
-- A Claude reviewer steered by hostile PR content cannot push, cannot act as
-  the machine account from its own job, and cannot write outside the caller
-  repository. Its normal output is the review files in its landing
+- A Claude reviewer steered by hostile PR content cannot push through its
+  landing job, cannot act as the machine account from its own job, and
+  cannot have the machine account write outside the caller repository. The
+  Claude action's own installation token in the review job remains
+  write-capable, and the command denies on it are guard rails rather than a
+  complete prohibition on direct writes. Its normal output is the review
+  files in its landing
   directory, posted as the review after trigger tokens and loop markers are
   removed, with a verdict that is one of two fixed bodies. Its landing
   manifest is still data the land job acts on: a comment on another thread,
@@ -104,8 +112,9 @@ text are checked by the tests under `tests/`.
   it through `env:` and expand it as a quoted variable.
 - Every author check goes through `TRUSTED_LOGINS` or a permission lookup
   that fails closed; never a substring of a comment or issue body.
-- Every write the agent asks for goes through the landing manifest and the
-  `land` composite, from a job that checks out nothing. A trusted gate may
+- Every write the agent asks the machine account for goes through the
+  landing manifest and the `land` composite, from a job that checks out
+  nothing. A trusted gate may
   write before the agent runs (acknowledgement, stage, labels, counters),
   never after.
 - Mint the machine account's token first in each trusted job, with the

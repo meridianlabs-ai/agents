@@ -1,7 +1,8 @@
 # Credential separation in the agent workflows
 
-How the workflows in this repository keep every credential away from content
-an outsider can shape, as they stand on `main` today. Written for someone who
+How the workflows in this repository keep the machine account's credential,
+and every other secret they control, away from content an outsider can
+shape, as they stand on `main` today. Written for someone who
 maintains these workflows or adds a caller. The rules here are the ones the
 tests under `tests/` check and the ones a review of a workflow change holds
 it to; [SECURITY.md](../SECURITY.md) is the short public statement of the
@@ -47,7 +48,8 @@ differ; the exceptions are listed there, not assumed away here.
   own installation token of the Claude GitHub App, which is write-capable on
   the caller repository and is fenced by identity and a deny list, not by
   the job's `permissions:` block (section 3.5).
-- **I2. Every write the agent asks for happens in a landing job.** Pushes,
+- **I2. Every write the agent asks the machine account for happens in a
+  landing job.** Pushes,
   PR creation, comments and review replies, thread resolutions, issue
   writes, Atlas board moves and Slack posts that the agent job requests run
   in a separate job on a fresh runner. That job checks out no third-party
@@ -124,9 +126,9 @@ acknowledgement, the stage move, the loop's attempt counter), and those are
 safe only because they run before any untrusted content is checked out. The
 land job exists because everything after the agent must not share a runner,
 a process tree or a filesystem with anything the agent ran or left running.
-The agent job has everything it needs to do the work and nothing it could
-leak; the trusted jobs have the credential and run nothing that could take
-it.
+The agent job has everything it needs to do the work and no credential of
+the machine account; the trusted jobs have that credential and run nothing
+that could take it.
 
 The land job is not in the workflow's per-item concurrency group: ordering
 inside a group is arbitrary and at most one job pends, so a landing that had
@@ -205,7 +207,8 @@ reviewer's verdict comment, one of two fixed marker bodies chosen by
 
 ### 3.3 Moving commits by bundle
 
-The agent job cannot push, so it exports its commits: `emit-landing` runs
+The agent job's job token cannot push and its settings deny `git push`, so
+its commits travel by bundle: `emit-landing` runs
 `git bundle create` over the range above the run's start SHA when HEAD
 descends from it and sits on the run's branch, and drops the bundle together
 with `handback`, `stage`, `resolve_threads` and `handoff_body_file` when it
@@ -332,16 +335,24 @@ human step.
   `.git/config` no longer than the agent runs, and during that time the
   agent's own `Read` tool sees it (the sandbox mask of section 7 covers
   sandboxed commands, and same-repo runs have no sandbox at all). The
-  agent's push and posting channels
-  are closed by the composed settings instead: `Bash(git push:*)` and the
-  action's `scripts/git-push.sh` wrapper, the `gh` comment, review, create
-  and merge verbs and the reviewer's inline-comment tool are denied at
-  runtime whatever the caller's `settings` say. Those are guard rails, not
-  the boundary: the load-bearing property is that nothing the agent can
-  reach is the machine account, so a write that slipped past would be
-  `claude[bot]`'s, attributable and unable to start a loop (the stubs
-  exclude bot actors from the text triggers and the reusable workflows'
-  `allowed_bots` name only the machine account). The dev agent and the
+  composed settings deny the agent's push and posting commands:
+  `Bash(git push:*)` and the action's `scripts/git-push.sh` wrapper, the
+  `gh` comment, review, create and merge verbs and the reviewer's
+  inline-comment tool are denied at runtime whatever the caller's `settings`
+  say. Those denies are guard rails, not a complete prohibition on direct
+  writes: `Bash(gh:*)` stays allowed (the log and PR reads need it), `gh
+  api` is not denied, `gh` runs outside the sandbox on the sandboxed paths,
+  and the token behind it can write, repository refs included. The
+  load-bearing property is that nothing the agent can reach is the machine
+  account, so a write that slipped past would be `claude[bot]`'s:
+  attributable, and not accepted as a reviewer verdict or a trusted
+  re-review request by the review-fix gate (the stubs exclude bot actors
+  from the text triggers and the reusable workflows' `allowed_bots` name
+  only the machine account). It is not unable to start a loop indirectly:
+  a branch update on an open same-repo `auto` PR whose CI then fails
+  reaches `claude-auto.yml` through `workflow_run`, whose caller condition
+  and gate check the PR and the label, not who pushed, and whose codex step
+  names `claude` in `allow-bot-users` for that case. The dev agent and the
   CI-fix loop ask that token for `actions: read` in addition
   (`additional_permissions`) so `gh run view --log-failed` works.
 - **The model credential.** Claude authenticates through Workload Identity
@@ -413,8 +424,11 @@ the caller repository, `issues[]` in the caller repository (create,
 comment, reopen, assign), a `stage` move and a `pr.open` for a branch that
 already exists on origin. A compromised review job can therefore have the
 machine account post those, de-fanged, on the caller repository; it cannot
-push, and it cannot reach another repository. The `denyWrite` entry on the
-review directory holds on the sandboxed paths only.
+push through its landing job, and its manifest cannot reach another
+repository. The Claude action's own installation token in the review job is
+the separate, write-capable channel that sections 3.5 and 7 describe. The
+`denyWrite` entry on the review directory holds on the sandboxed paths
+only.
 
 **`claude-auto.yml`, the CI-fix loop** (`gate` → `fix` → `land`). The gate
 resolves the PR by the caller's `pr_number`, requires it open, same-repo and
@@ -547,8 +561,10 @@ A caller repository enables an agent by copying a stub from `examples/` into
   takes `contents: write`, for the job-token fallback push. The reviewer stub
   grants `contents`, `pull-requests` and `issues` read, `id-token` write and
   `actions` read: the review is posted by the land job as the machine
-  account, so the caller's grant bounds the review job at read and no
-  regression in the reusable workflow could hand it write again.
+  account, so the caller's grant bounds the review job's job token at read
+  and no regression in the reusable workflow could hand that token write
+  again. The ceiling is on the job token only; the Claude action's own
+  installation token is not bounded by it.
 - Grants `id-token: write` at the calling job level, because GitHub does not
   pass OIDC tokens to reusable workflows implicitly.
 - Filters comment events on `author_association` (OWNER, MEMBER,
@@ -622,9 +638,9 @@ results against the invariant each one tests.
   token holds `contents: write`, and the one place the mint step is
   conditional. The reviewer and the loops have no such path: they fail at the
   mint step.
-- **A hijacked reviewer cannot push, and cannot act as the machine account
-  from its own job.** Its job token is read-only and the land job refuses
-  bundles. Its normal output is the three review files, landed as the
+- **A hijacked reviewer cannot push through its landing job, and cannot act
+  as the machine account from its own job.** Its job token is read-only and
+  the land job refuses bundles. Its normal output is the three review files, landed as the
   review summary, the inline findings and a verdict that is one of two
   fixed bodies, after the de-fang. The enforced limits stop there: the
   review job runs tests and Python (unsandboxed on same-repo heads), its
@@ -635,10 +651,16 @@ results against the invariant each one tests.
   `issues[]` in the caller repository (create, comment, reopen, assign), a
   `stage` move and a `pr.open` for a branch that already exists on origin,
   all of which the land job would post as the machine account. So what a
-  steered reviewer can cause is a wrong review and manifest-authorized
-  writes on the caller repository, never a push and never a write outside
-  it; a human reads every review, and the loops believe a verdict only from
-  the reviewer identity.
+  steered reviewer can cause through the landing is a wrong review and
+  manifest-authorized writes on the caller repository, never a
+  machine-account push and never a machine-account write outside it; a
+  human reads every review, and the loops believe a verdict only from the
+  reviewer identity. Outside the landing, the Claude action's own
+  installation token stays write-capable on the caller repository for the
+  duration of the review step, and `gh api` through it is not denied
+  (section 3.5): the configured command denies are guard rails rather than
+  a complete prohibition on direct writes, and a write made that way is
+  `claude[bot]`'s, not the machine account's.
 - **One push per run, at the end.** Interactive users who relied on the dev
   agent pushing mid-run to watch CI lose that; iterating on CI is the `@auto`
   loop's job (accepted: Ransom, 2026-09-11, with the dev-agent conversion).
