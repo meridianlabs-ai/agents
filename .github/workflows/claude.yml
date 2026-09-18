@@ -2023,9 +2023,14 @@ jobs:
       #     ids (`land` intersects them with the PR's own threads).
       #   stage (was "Stage - Review (hand-back)") — Review: the one-shot dev
       #     agent hands back to a human when it is done, and an errored run
-      #     also needs one; EXCEPT a SUCCESSFUL @auto run that left a PR in
-      #     the loop (opened one, or ran on a PR): the review loop owns the
-      #     stage from there (design/atlas-tracking.md).
+      #     also needs one; EXCEPT a run that handed the PR back to the loop
+      #     (`handback` on an `auto` PR — the one it opened or the one it ran
+      #     on — whatever the trigger phrase): that hand-back is mid-flight,
+      #     the reviewer runs next, and a card stays at Agent while any agent
+      #     of the loop is still to run (one rule for every loop,
+      #     design/atlas-tracking.md; Ransom, 2026-09-18 — until then the
+      #     exception keyed on the @auto trigger, so a @claude run on an
+      #     `auto` item set Review with its hand-back).
       #   provenance_comment_file, error — as in the loops.
       # `moved` requires ancestry (the same test emit-landing applies before
       # it bundles — a rebased HEAD lands nothing and must owe nothing).
@@ -2053,7 +2058,6 @@ jobs:
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           ISSUE: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
           ENGINE: ${{ needs.gate.outputs.engine }}
-          TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
           AUTO: ${{ needs.gate.outputs.auto }}
           PR_LABELS: ${{ needs.gate.outputs.pr_labels }}
           HEAD_BRANCH: ${{ needs.gate.outputs.head_branch || steps.sync.outputs.branch }}
@@ -2094,6 +2098,7 @@ jobs:
           head=""
           local_branch=""
           git_ok=""
+          loop_handback=""
           if [ "$ENGINE" = "codex" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
             echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed prep, user-setup, codex or reclaim step skips it); running no git — nothing lands, no PR is opened and no hand-back is owed."
           else
@@ -2190,7 +2195,7 @@ jobs:
             # Without the label, the caller's request_review_after_open asks
             # for one as it always has (error or not).
             if [ "$(jq -r 'any(.[]; . == "auto")' <<<"$labels")" = "true" ]; then
-              [ -s "$ERROR_FILE" ] || extra=$(jq -c '.handback = true' <<<"$extra")
+              [ -s "$ERROR_FILE" ] || { extra=$(jq -c '.handback = true' <<<"$extra"); loop_handback=1; }
             elif [ "${REQ_REVIEW:-false}" = "true" ]; then
               extra=$(jq -c '.handback = true' <<<"$extra")
             fi
@@ -2199,6 +2204,7 @@ jobs:
           # the run errored (then a human gets it — the stage rule below)
           if [ "$IS_PR" = "true" ] && [ "$moved" = "true" ] && [ "${AUTO:-}" = "true" ] && [ ! -s "$ERROR_FILE" ]; then
             extra=$(jq -c '.handback = true' <<<"$extra")
+            loop_handback=1
           fi
           # -- comments (and the codex thread ids)
           if [ "$ENGINE" = "codex" ]; then
@@ -2286,20 +2292,13 @@ jobs:
               extra=$(jq -c --argjson num "$NUM" '.comments = [{number: $num, body_file: "agent-summary.md"}]' <<<"$extra")
             fi
           fi
-          # -- stage
-          agent_ok=""
-          if [ "$ENGINE" = "codex" ]; then
-            [ "${CODEXCOMMIT_OUTCOME:-}" = "success" ] && agent_ok=1
-          else
-            [ "${CLAUDE_OUTCOME:-}" = "success" ] && agent_ok=1
-          fi
-          in_loop=""
-          if [ "$IS_PR" = "true" ] || [ "$(jq -r '.pr.open // false' <<<"$extra")" = "true" ]; then in_loop=1; fi
-          # A run whose work was refused above failed, whatever the agent
-          # step said: nothing landed and no re-review is requested, so a
-          # human has to look — Review, like every errored run.
-          if [ "$TRIGGER_PHRASE" = "@auto" ] && [ -n "$agent_ok" ] && [ ! -s "$ERROR_FILE" ] && [ -z "$rejected" ] && [ -n "$in_loop" ]; then
-            echo "landing: successful @auto run with a PR in the loop; the stage stays at Agent (the review loop owns it)."
+          # -- stage: Review unless the run handed the PR back to the loop
+          # (the auto hand-back above, which an error or refused work never
+          # sets). An errored run, a run whose work was refused, a no-change
+          # run that requested nothing and every non-auto run hand the PR to
+          # a human — the loop has ended or was never engaged.
+          if [ -n "$loop_handback" ]; then
+            echo "landing: the PR is handed back to the loop; the stage stays at Agent (the reviewer runs next)."
           else
             extra=$(jq -c '.stage = "Review"' <<<"$extra")
           fi

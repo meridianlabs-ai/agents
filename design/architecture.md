@@ -769,9 +769,12 @@ the agent push mid-run:
   agent took over the loop's first review: its commits still land and the
   ⚠️ posts, but the stage hands the PR to a human rather than the loop
   (before that, a PR run owed the `@review` whatever the step's outcome).
-  The stage rule is unchanged from `Stage - Review (hand-back)`: Review,
-  except a successful `@auto` run with no Surface error that left a PR in
-  the loop.
+  The stage rule: Review, except a run that handed the PR back to the loop
+  (the hand-back above, on the PR it ran on or the one it opened) — that
+  hand-back is mid-flight, so the card stays at Agent whatever the trigger
+  phrase (atlas-tracking.md's one rule; Ransom, 2026-09-18 — until then the
+  exception keyed on the `@auto` phrase, so a `@claude` run on an `auto`
+  item set Review alongside its hand-back).
 - **The agent's one manifest key is `comments`.** The prompt says: commit,
   never push or post, and to say something on the issue/PR write a body
   file under the landing directory and add `{number, body_file}` to

@@ -667,10 +667,11 @@ or stopped. A re-review request (the manifest's `handback: true`, the
 no stage; until 2026-09-18 the fix loops' hand-backs set Review, and the
 reviewer's gate moved the card back to Agent a minute later. That gate step
 stays as a belt-and-braces reset. So: `claude.yml` sets Agent at run start
-(its `gate` job) and Review when a one-shot run ends or an `@auto` run
-errors (its `land` job, from the manifest's `stage`, since #84) — nothing
-on the `@review` hand-back of a successful `@auto` run that left a PR in
-the loop; `claude-auto.yml` sets Agent per CI-fix round, Review on
+(its `gate` job) and Review when a run ends without handing its PR back to
+the loop — a one-shot run, an errored or refused run, a no-change run that
+requested nothing (its `land` job, from the manifest's `stage`, since #84)
+— and nothing on the `@review` hand-back of an `auto` PR, whatever the
+trigger phrase; `claude-auto.yml` sets Agent per CI-fix round, Review on
 escalation; `claude-auto-review.yml` sets Agent per review-fix round,
 Review on both the converged and escalated handoffs and — from its land
 job — on a fix round's hand-off. Known accepted noise: the stub's substring

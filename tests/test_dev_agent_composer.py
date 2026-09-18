@@ -203,13 +203,14 @@ def test_auto_kickoff_opens_pr_with_handback_and_validates(repo):
 def test_claude_trigger_on_an_auto_labelled_issue_owes_the_handback(repo):
     # `@claude` (or the `claude` label) on an issue that carries `auto`: the
     # gate reads the label, the PR gets it, so the PR is the loop's and owes
-    # the `@review`; the stage still hands back to a human, as on a `@claude`
-    # PR run in the loop.
+    # the `@review` — and, the hand-back being mid-flight, no stage, whatever
+    # the trigger phrase (review round 3: keyed on the @auto phrase, this run
+    # set Review alongside its hand-back).
     on(repo, ISSUE_BRANCH)
     commit(repo)
-    m, _, _, _ = compose(repo, is_pr=False, trigger="@claude", auto="true")
+    m, res, _, _ = compose(repo, is_pr=False, trigger="@claude", auto="true")
     assert m["pr"]["labels"] == ["auto"] and m["handback"] is True
-    assert m["stage"] == "Review"
+    assert "stage" not in m and "stage stays at Agent" in res.stdout
 
 
 def test_handback_follows_the_label_array_not_the_auto_flag(repo):
@@ -422,6 +423,7 @@ def test_pr_run_with_head_off_the_pr_branch_lands_nothing(repo):
     # error of the composer's own.
     m, _, _, out = compose(repo, is_pr=True, trigger="@auto", auto="true", sync_branch="")
     assert out["read_only"] == "true" and "handback" not in m and "error" not in m
+    assert m["stage"] == "Review"                   # nothing handed back to the loop: the loop stopped here
 
 
 def test_rejected_autonomous_pr_run_hands_back_to_a_human(repo):
@@ -455,7 +457,7 @@ def test_pr_run_on_auto_pr_owes_exactly_one_handback(repo):
     m, _, _, out = compose(repo, is_pr=True, auto="true")
     assert out["branch"] == PR_BRANCH and out["read_only"] == "false"
     assert m["handback"] is True and "pr" not in m
-    assert m["stage"] == "Review"                   # @claude on an auto PR: still hands back to a human
+    assert "stage" not in m                         # @claude on an auto PR: handed back to the loop, mid-flight
 
 
 def test_pr_run_at_auto_with_commit_stays_at_agent(repo):
@@ -581,7 +583,7 @@ def test_codex_pr_run_carries_summary_ids_and_handback(repo):
                          codex_ids="PRRT_b bogus PRRT_a PRRT_b", codex_summary="🤖 codex (dev agent):\n\ndone\n")
     assert m["comments"] == [{"number": 34, "body_file": "codex-comment.md"}]
     assert m["resolve_threads"] == ["PRRT_a", "PRRT_b"]
-    assert m["handback"] is True and m["stage"] == "Review"
+    assert m["handback"] is True and "stage" not in m
 
 
 def test_codex_issue_run_opens_pr_and_resolves_nothing(repo):
