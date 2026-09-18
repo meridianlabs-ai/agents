@@ -42,13 +42,19 @@ replaced); and accounts whose write access a permission lookup has verified.
 
 ## Guarantees
 
-Each of these holds on `main` and is checked by the tests under `tests/`.
+Each of these holds on `main`; the ones that can be read from the workflow
+text are checked by the tests under `tests/`.
 
 - A job that runs an agent holds no credential of the machine account and no
-  token that can push: its job token is read-only.
-- Every write an agent causes lands through a manifest that a stdlib
+  token minted from it; its own job token is read-only. The Claude action's
+  own token, present while that step runs, is the exception described under
+  "By design" below.
+- Every write an agent asks for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
-  no code; a manifest with one bad field lands nothing.
+  no code; a refused manifest causes none of the actions it requested. The
+  trusted gate's own writes before the agent runs (acknowledgement, stage,
+  labels, counters) and the land job's final error report are deterministic
+  and not agent-controlled.
 - The machine account's tokens are minted per job, for one repository and the
   permissions that job uses, from the GitHub App's secrets, and are revoked at
   job end.
@@ -63,32 +69,45 @@ Each of these holds on `main` and is checked by the tests under `tests/`.
 
 - The Claude GitHub App's own installation token is present in the agent job
   while the action step runs: no workflow passes a token to the action, so it
-  mints its own, scoped to the caller repository and revoked when the step
-  ends. On sandboxed reviews the token is masked in `.git/config` for
-  sandboxed commands, and everywhere the agent's push and posting verbs are
-  denied. Anything that slipped past would be attributable to `claude[bot]`
-  and could not start a loop.
+  mints its own, with contents, pull requests and issues write on the caller
+  repository whatever the job's own permissions say, and revokes it when the
+  step ends. It sits in `.git/config` for that step. On sandboxed reviews it
+  is masked there for sandboxed commands, not for the agent's own file
+  reads; same-repo reviews run without the sandbox. Everywhere the agent's
+  push and posting verbs are denied by settings. Those are guard rails:
+  anything that slipped past would be attributable to `claude[bot]` and
+  could not start a loop.
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.
 - CI agents cannot edit workflow files. Changes to `.github/workflows/` are
   made from a maintainer's machine, under a maintainer's review.
-- A Claude reviewer steered by hostile PR content can write only into its
-  landing directory. The land job posts that as the review, after removing
-  trigger tokens and loop markers; the verdict is one of two fixed bodies.
-  It cannot push, open a PR or write outside the caller repository.
+- A Claude reviewer steered by hostile PR content cannot push, cannot act as
+  the machine account from its own job, and cannot write outside the caller
+  repository. Its normal output is the review files in its landing
+  directory, posted as the review after trigger tokens and loop markers are
+  removed, with a verdict that is one of two fixed bodies. Its landing
+  manifest is still data the land job acts on: a comment on another thread,
+  a caller-repository issue write, a stage move or the adoption of an
+  existing branch's PR that a compromised review job requested would post
+  as the machine account. A human reads every review.
 
 ## Adding or changing a workflow
 
-- No secret in any job that runs an agent, or that runs code from a checkout
-  the org does not fully control. Not in `env:`, not as an action input,
-  not through a composite.
+- No secret of the machine account, and no other secret this repository
+  controls, in any job that runs an agent or code from a checkout the org
+  does not fully control. Not in `env:`, not as an action input, not through
+  a composite. The model credential (Workload Identity Federation, or
+  `OPENAI_API_KEY` for codex) and the Claude action's own token are the
+  known exceptions.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
 - Every author check goes through `TRUSTED_LOGINS` or a permission lookup
   that fails closed; never a substring of a comment or issue body.
-- Every write goes through the landing manifest and the `land` composite,
-  from a job that checks out nothing.
+- Every write the agent asks for goes through the landing manifest and the
+  `land` composite, from a job that checks out nothing. A trusted gate may
+  write before the agent runs (acknowledgement, stage, labels, counters),
+  never after.
 - Mint the machine account's token first in each trusted job, with the
   narrowest `repositories` and `permission-*` inputs, and read it from
   `steps.mint.outputs.token` only.

@@ -30,24 +30,41 @@ constraints enforced in code hold where prompts do not.
 
 ## 2. Invariants
 
-Every workflow that runs an agent, in this repository and in the Meridian
-repositories that call or copy it, satisfies these.
+The four reusable workflows in this repository (`claude.yml`,
+`claude-review.yml`, `claude-auto.yml`, `claude-auto-review.yml`) satisfy
+these as written, and `tests/test_app_token_minting.py` checks the ones
+that can be read from the workflow text. Section 4 records, workflow by
+workflow, where the Atlas sync, the `actions` repository's workflows and
+the other Meridian repositories' conversions meet them and where they
+differ; the exceptions are listed there, not assumed away here.
 
-- **I1. The agent job is credential-free.** A job that runs an agent, or any
-  code from a checkout the org does not fully control, holds nothing beyond
-  its own single-repo, read-only job token and the model credential. It
-  references no secret of the machine account: not in `env:`, not as an
-  action input, not through a composite.
-- **I2. Privileged writes happen in a landing job.** Pushes, PR creation,
-  comments and review replies, thread resolutions, issue writes, Atlas board
-  moves and Slack posts run in a separate job on a fresh runner. That job
-  checks out no third-party code, installs nothing, and acts only on a
-  validated manifest and a git bundle produced by the agent job.
+- **I1. The agent job holds no credential of the machine account.** A job
+  that runs an agent, or any code from a checkout the org does not fully
+  control, references no secret of the machine account and no token minted
+  from it: not in `env:`, not as an action input, not through a composite.
+  What it does hold is its own single-repo, read-only job token, the model
+  credential, and, while the `claude-code-action` step runs, that action's
+  own installation token of the Claude GitHub App, which is write-capable on
+  the caller repository and is fenced by identity and a deny list, not by
+  the job's `permissions:` block (section 3.5).
+- **I2. Every write the agent asks for happens in a landing job.** Pushes,
+  PR creation, comments and review replies, thread resolutions, issue
+  writes, Atlas board moves and Slack posts that the agent job requests run
+  in a separate job on a fresh runner. That job checks out no third-party
+  code, installs nothing, and acts only on a validated manifest and a git
+  bundle produced by the agent job. Two kinds of write sit outside the
+  manifest and are deterministic, never agent-controlled: the trusted
+  gate's own writes before the agent runs (the acknowledgement, the stage
+  move to Agent, labels, loop counters), and the land job's final error
+  report, posted to the PR or issue the event payload names when the
+  manifest was refused.
 - **I3. The privileged identity is minted per job and scoped per repository.**
   Each trusted job obtains its own GitHub App installation token, for the one
   repository it writes to and the permissions it uses, and the token is
-  revoked when the job ends. No long-lived write token exists anywhere in the
-  system.
+  revoked when the job ends. The reusable workflows in this repository read
+  no long-lived write token; revoking the retired PAT in the machine
+  account and deleting its org secret are administrative steps that these
+  files do not establish (section 3.4).
 - **I4. Untrusted code never runs before authorization or outside a sandbox.**
   Who may trigger a run is decided by a deterministic step, by login or by a
   permission lookup that fails closed, before any PR head is checked out and
@@ -55,21 +72,35 @@ repositories that call or copy it, satisfies these.
   runs only inside the reviewer's OS-level sandbox, and project configuration
   from that tree (`.claude/`, `.mcp.json`, `CLAUDE.md`) is removed before the
   agent starts.
-- **I5. No credential is persisted in the workspace.** Every `actions/checkout`
-  runs `persist-credentials: false`. A runner-side git command that must
+- **I5. No credential is persisted in the workspace.** Every
+  `actions/checkout` in the four reusable workflows runs
+  `persist-credentials: false`. A runner-side git command that must
   authenticate does so through a credential helper defined in that one step's
   environment, keyed to `github.server_url` so no other host is ever
-  answered.
-- **I6. Artifacts and logs carry no secrets.** No agent transcript is uploaded,
-  by any switch (decision: Ransom, 2026-09-08). Cost, model, turns and the
-  error flag go to the job summary; the only artifact is the landing
-  directory, which holds a manifest, body files and a bundle of commits.
+  answered. The one credential that does sit in the workspace for a bounded
+  time is the Claude action's own token, which the action writes into
+  `remote.origin.url` for the duration of its step and the `reset-origin-url`
+  composite removes right after (section 3.5). The Atlas sync's checkout of
+  this repository, in a trusted job that runs no agent, uses checkout's
+  defaults and so persists the job token.
+- **I6. No transcript is uploaded.** The enforced policy is that no agent
+  transcript is uploaded, by any switch (decision: Ransom, 2026-09-08). Cost,
+  model, turns and the error flag go to the job summary; the reusable
+  workflows' only artifact is the landing directory, which holds a manifest,
+  body files and a bundle of commits. The body files are agent-written text
+  that the land job posts after the de-fang; nothing scans them for secrets,
+  so this is a policy about the transcript, not a guarantee about every
+  file an agent produces. The `actions` repository's ci-perf workflow
+  uploads its evidence files and refuses to publish any that contains its
+  key (section 4.2).
 
 ## 3. The architecture
 
 ### 3.1 Gate, agent, land
 
-Every agent workflow is three jobs:
+The four reusable workflows are three jobs each (the `actions`
+repository's two agent workflows fold the gate's role into the agent job's
+`if:` and run two; section 4.2):
 
 ```
 gate   (trusted)    trigger check by login or permission lookup; the pre-agent
@@ -78,8 +109,10 @@ gate   (trusted)    trigger check by login or permission lookup; the pre-agent
                     no PR code.
   -> agent/fix/review (untrusted)
                     checkout with persist-credentials: false; provisioning;
-                    the agent; commits locally and never pushes; job token
-                    only; emit-landing runs last, if: always(), with no token.
+                    the agent; commits locally and never pushes; the read-only
+                    job token, plus the Claude action's own token while its
+                    step runs; emit-landing runs last, if: always(), with no
+                    token.
   -> land  (trusted, fresh runner)
                     mints its own token; downloads the artifact; validates
                     the manifest; pushes the bundle; opens or adopts the PR;
@@ -117,10 +150,16 @@ agent's `comments`, pinned to the run's own thread) before the merge. A
 mistyped field is dropped with a warning rather than refused, because the
 validator's refusal is all-or-nothing and would take the commits with it.
 
-The manifest is the trust boundary. The land job treats the artifact as
-data: `.github/scripts/validate_manifest.py` (stdlib only, one line per
-violation, any violation refuses the whole manifest) runs before any network
-call and before any field is read into a shell variable. It requires:
+The manifest is the trust boundary for what the agent asked for. The land
+job treats the artifact as data: `.github/scripts/validate_manifest.py`
+(stdlib only, one line per violation, any violation refuses the whole
+manifest) runs before anything in the artifact is acted on or read into a
+shell variable. The composite's only earlier network calls look up trusted
+values to validate against (the PR's live head ref and the repository's
+default branch, by the caller's `pr-number` input, never by a number from
+the manifest). A refused manifest causes none of the actions it requested;
+the land job then posts one error report to the PR or issue the event
+payload names, and fails the run. It requires:
 
 - `schema` 1; `repo` and `run_id` equal to the land job's own, so an
   artifact from another run cannot be replayed; a manifest under 1 MiB.
@@ -214,10 +253,13 @@ land job runs for seconds. Every GitHub call in the job reads
 `steps.mint.outputs.token`; composites take it as an input and never mint.
 The mint step runs unconditionally wherever the job cannot work without the
 machine account, so a caller without the secrets fails there, loudly, before
-anything else runs (decision: Ransom, 2026-09-18). Only `claude.yml`'s gate
-and land gate it on `secrets.MARVIN_APP_CLIENT_ID != ''` and fall back to
-`github.token`: the dev agent has a documented degradation (below), the
-reviewer and the loops do not. What each job mints:
+anything else runs (decision: Ransom, 2026-09-18). Of this repository's
+workflows only `claude.yml`'s gate and land gate it on
+`secrets.MARVIN_APP_CLIENT_ID != ''` and fall back to `github.token`: the
+dev agent has a documented degradation (below), the reviewer and the loops
+do not. The `actions` repository's two workflows and inspect_flow's gates
+still mint conditionally (sections 4.2 and 4.3). What each job in this
+repository mints:
 
 | job | `repositories` | permissions |
 | --- | --- | --- |
@@ -243,8 +285,10 @@ reads one workflow-level `env` value, `TRUSTED_LOGINS:
 i-am-marvin,meridian-marvin[bot]`; `atlas_sync.py` and the checkout and
 promote skills carry the same pair as one constant each. The User
 `i-am-marvin` is the account whose personal access token the app replaced;
-the token is retired (2026-09-18) and the login stays trusted until the
-account itself is retired, a separate step. The bot is trusted by login and
+the reusable workflows stopped accepting that token on 2026-09-18, revoking
+it in the account and deleting the `MARVIN_TOKEN` org secret are the
+admin's steps, and the login stays trusted until the account itself is
+retired, a separate step. The bot is trusted by login and
 never by lookup: the collaborators endpoint reports `none` for an App, its
 comments carry no MEMBER or COLLABORATOR association, and so the caller
 stubs' `[bot]` exclusions name it as the one exception and the
@@ -268,7 +312,8 @@ human step.
 
 ### 3.5 What the agent job still holds
 
-- **The job token, read-only.** Every agent job's `permissions:` block is
+- **The job token, read-only.** In the four reusable workflows every agent
+  job's `permissions:` block is
   `contents: read`, `pull-requests: read`, `issues: read`, `actions: read`
   and `id-token: write`. The checkout runs on it with
   `persist-credentials: false`; the three writing workflows assert right
@@ -277,13 +322,17 @@ human step.
   with it through a step-scoped helper and never pushes.
 - **The Claude GitHub App's own installation token.** No workflow passes a
   `github_token` to `claude-code-action`, so the action exchanges the job's
-  OIDC token for its own installation token of the Claude app, scoped to the
-  caller repository with the permissions that app holds there, and revokes
-  it when the step ends. The action rewrites `remote.origin.url` to carry it
-  for the step's duration; the `reset-origin-url` composite puts the
-  credential-free URL back immediately after the step, so it sits in
-  `.git/config` no longer than the agent runs. The job's `permissions:`
-  block does not scope this token. The agent's push and posting channels
+  OIDC token for its own installation token of the Claude app, requesting
+  contents, pull requests and issues write on the caller repository (its
+  `src/github/token.ts`), and revokes it when the step ends. The job's
+  `permissions:` block does not scope this token: it can push and post
+  whatever the job token may not. The action rewrites `remote.origin.url`
+  to carry it for the step's duration; the `reset-origin-url` composite puts
+  the credential-free URL back immediately after the step, so it sits in
+  `.git/config` no longer than the agent runs, and during that time the
+  agent's own `Read` tool sees it (the sandbox mask of section 7 covers
+  sandboxed commands, and same-repo runs have no sandbox at all). The
+  agent's push and posting channels
   are closed by the composed settings instead: `Bash(git push:*)` and the
   action's `scripts/git-push.sh` wrapper, the `gh` comment, review, create
   and merge verbs and the reviewer's inline-comment tool are denied at
@@ -355,7 +404,17 @@ build hook cannot forge a verdict, and a runner step turns them into
 on the job token, the review posted by the machine account only). The review
 job's `emit-landing` runs `read-only` and the land job runs `land` with
 `refuse-bundle`, so this workflow can never be turned into a push channel by
-a forged manifest.
+a forged manifest. That is the enforced limit, and it is narrower than
+"review text only": the review job is not confined to writing those three
+files (it runs tests and Python, unsandboxed on same-repo heads, and its
+`gh` runs outside the sandbox on the sandboxed paths), and under
+`refuse-bundle` the validator still accepts `comments[]` on any thread of
+the caller repository, `issues[]` in the caller repository (create,
+comment, reopen, assign), a `stage` move and a `pr.open` for a branch that
+already exists on origin. A compromised review job can therefore have the
+machine account post those, de-fanged, on the caller repository; it cannot
+push, and it cannot reach another repository. The `denyWrite` entry on the
+review directory holds on the sandboxed paths only.
 
 **`claude-auto.yml`, the CI-fix loop** (`gate` → `fix` → `land`). The gate
 resolves the PR by the caller's `pr_number`, requires it open, same-repo and
@@ -398,7 +457,8 @@ caller contract below.
 
 ### 4.2 The `actions` repository
 
-**`inspect-ai-ci-perf.yml`** (`analyze` → `publish`). The analysis job
+**`inspect-ai-ci-perf.yml`** (`analyze` → `publish`, two jobs: there is no
+gate, the trigger conditions live on the jobs). The analysis job
 checks out upstream `inspect_ai`, collects CI timings and runs the agent
 under a read-only job token and a dedicated Anthropic key from a capped
 Console workspace (an API key by necessity; the cap bounds a leak), behind a
@@ -410,13 +470,16 @@ at the exact SHA the analysis used (upstream `main` is inside the org's trust
 domain: Meridian maintains it, and it is not pinned to a reviewed SHA;
 decision 2026-09-08), verifies the collected files against the sha256 values
 recorded before the agent ran, validates `findings.json` with the publisher's
-own validator (this workflow's manifest), and only then mints a fork-scoped
-token (issues and org projects write) and writes fork issues and Atlas
-cards. The `workflow_dispatch` ref stays unrestricted (decision 2026-09-08):
+own validator (this workflow's manifest), and writes fork issues and Atlas
+cards. Its mint step is the job's first step, before the checkout and the
+validation, not after them, and it is conditional on the app secrets being
+configured (fork-scoped, issues and org projects write); the credential
+exists while the evidence is validated, on a runner the agent never had. The `workflow_dispatch` ref stays unrestricted (decision 2026-09-08):
 publication requires `inspect_ai_ref == 'main'`, which is what makes an
 arbitrary-ref dispatch harmless.
 
-**`triage-test-failures.yml`** (`agent` → `land`). The agent job downloads a
+**`triage-test-failures.yml`** (`agent` → `land`, two jobs, the trigger
+condition on the agent job). The agent job downloads a
 failed scheduled run's logs and its `triage-context` artifact, validates the
 artifact's fields (SHA shape, Slack id shapes) before using any, checks out
 upstream at the tested commit and runs the agent with reads plus file writes
@@ -438,8 +501,12 @@ the fallback while the app secrets are granted to the repo.
 **`release-please-vscode.yml`** (`build` → `publish`) applies the same split
 without an agent: `build` runs with no secrets and no environment and uploads
 the `.vsix`; `publish`, gated by an `environment` with required reviewers,
-checks out nothing and publishes the downloaded package with the marketplace
-tokens, so no consuming-repo script runs next to them.
+checks out nothing, installs the two publisher CLIs with `--ignore-scripts`
+in a step that holds no secret, and publishes the downloaded package with
+the marketplace tokens, so no consuming-repo script runs next to them. Those
+tokens (`VSCE_PAT`, `OVSX_PAT`) are long-lived secrets by necessity, held as
+environment secrets behind required reviewers rather than as repository
+secrets; this workflow is where I3 does not apply.
 
 The `actions` repository's own dev, reviewer and loop stubs follow the caller
 contract below, with the reviewer stub admitting only OWNER, MEMBER,
@@ -451,10 +518,14 @@ workflow's authoritative check.
 `inspect_flow`'s `inspect-update.yml` and `inspect-ai-main-failure.yml` and
 `ts-mono`'s `dependabot-fix.yml` are gate/agent/land workflows of their own,
 built on this repository's `emit-landing` and `land` composites: each gate
-and land job mints a token scoped to its own repository, the agent job holds
-the job token only, and the `dependabot-fix` gate reads the Dependabot
-alerts under a `permission-vulnerability-alerts: read` token so the agent
-job never holds one.
+and land job mints a token scoped to its own repository (the inspect_flow
+gates conditionally: `inspect-update` after its decide step,
+`inspect-ai-main-failure` when the app secret is present), the agent jobs
+hold the job token only and pass `github_token: github.token` to the
+action so no App token is minted there, and the `dependabot-fix` gate reads
+the Dependabot alerts under a `permission-vulnerability-alerts: read` token
+so the agent job never holds one. `inspect-ai-main-failure` adds a fourth,
+trusted `close-on-green` job.
 
 ## 5. The caller contract
 
@@ -551,12 +622,23 @@ results against the invariant each one tests.
   token holds `contents: write`, and the one place the mint step is
   conditional. The reviewer and the loops have no such path: they fail at the
   mint step.
-- **A hijacked reviewer's remaining write, as the machine account, is
-  none.** Its job token is read-only, the land job refuses bundles, and the
-  only content it can put in front of the land job is the review text, the
-  inline findings and a verdict that is one of two fixed bodies, all posted
-  after the de-fang. What a steered reviewer can still do is write a wrong
-  review, which is what human judgment on the review is for.
+- **A hijacked reviewer cannot push, and cannot act as the machine account
+  from its own job.** Its job token is read-only and the land job refuses
+  bundles. Its normal output is the three review files, landed as the
+  review summary, the inline findings and a verdict that is one of two
+  fixed bodies, after the de-fang. The enforced limits stop there: the
+  review job runs tests and Python (unsandboxed on same-repo heads), its
+  workspace stays writable on the sandboxed paths and `gh` runs outside
+  the sandbox there, and the landing manifest it uploads is data the
+  validator checks for shape, not intent. Under `refuse-bundle` the
+  validator accepts `comments[]` on any thread of the caller repository,
+  `issues[]` in the caller repository (create, comment, reopen, assign), a
+  `stage` move and a `pr.open` for a branch that already exists on origin,
+  all of which the land job would post as the machine account. So what a
+  steered reviewer can cause is a wrong review and manifest-authorized
+  writes on the caller repository, never a push and never a write outside
+  it; a human reads every review, and the loops believe a verdict only from
+  the reviewer identity.
 - **One push per run, at the end.** Interactive users who relied on the dev
   agent pushing mid-run to watch CI lose that; iterating on CI is the `@auto`
   loop's job (accepted: Ransom, 2026-09-11, with the dev-agent conversion).
@@ -565,9 +647,13 @@ results against the invariant each one tests.
 - **Two-job failure modes.** The land job runs under `always()` after the
   gate succeeded and decides from the manifest what to land: a Claude step
   that ended in failure after committing still lands those commits with a
-  ⚠️ error posted alongside; a cancelled agent job lands nothing; a
-  codex-path failure of any kind lands nothing because `emit-landing` goes
-  read-only unless the unresolved-merge guard succeeded. A provisioning
+  ⚠️ error posted alongside; a cancelled agent job lands nothing. On the
+  codex path nothing is bundled unless the unresolved-merge guard
+  succeeded, which withholds the push on a failed prep, user setup, codex
+  step or reclaim; after a successful guard, a later failure (the
+  commit-summary step, for instance) still lands the commits codex had
+  already made, with the error posted alongside, so a red codex run does
+  not mean an untouched branch. A provisioning
   failure over a stale branch lands the runner's clean base merge and burns
   one loop attempt where it used to burn none; accepted, bounded to one.
 - **The validator is security-critical code.** It is one small stdlib
