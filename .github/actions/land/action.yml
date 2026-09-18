@@ -5,8 +5,10 @@ description: >-
   download the `landing` artifact the agent job's `emit-landing` step
   uploaded, validate its manifest (.github/scripts/validate_manifest.py —
   every field is data until it passes), and only then act on it with the
-  privileged token: push the bundled commits (never --force, and never over
-  a branch that moved during the run), open or adopt the PR, post the
+  privileged token: push the bundled commits (never --force, never over a
+  branch that moved during the run, and never a bundle that changes files
+  under .github/workflows/, which the machine account may not push), open
+  or adopt the PR, post the
   de-fanged comments, inline review comments and review replies, resolve
   review threads that belong to that PR, file follow-up issues in
   allow-listed repos (or comment on, reopen and assign existing ones) and
@@ -230,9 +232,12 @@ runs:
     # payload on `schedule`). The PR is the caller's trusted `pr-number` —
     # the validator pins the manifest's pr_number to it, so nothing is read
     # from the unvalidated manifest here. Either lookup failing leaves its
-    # value empty, which the validator refuses.
+    # value empty, which the validator refuses. The same PR read yields the
+    # PR's base ref, which the fetch step fetches for the `workflows` step
+    # (a workflow change the runner's base merge brought in is not the
+    # agent's); it comes from the trusted PR, never from the manifest.
     - id: lookup
-      if: (inputs.pr-head-ref == '' && inputs.pr-number != '') || inputs.default-branch == ''
+      if: inputs.pr-number != '' || inputs.default-branch == ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.read-token }}
@@ -243,9 +248,15 @@ runs:
       run: |
         set -uo pipefail
         ref=""
-        if [ -z "$PR_HEAD_REF" ] && [[ "$EVENT_PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
-          ref=$(gh pr view "$EVENT_PR_NUMBER" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null) || ref=""
-          [ -n "$ref" ] || echo "::warning::land: could not read PR #$EVENT_PR_NUMBER's head ref; the validator will refuse a manifest naming it."
+        base=""
+        if [[ "$EVENT_PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
+          pr=$(gh pr view "$EVENT_PR_NUMBER" --repo "$REPO" --json headRefName,baseRefName 2>/dev/null) || pr=""
+          if [ -n "$pr" ]; then
+            [ -n "$PR_HEAD_REF" ] || ref=$(jq -r '.headRefName // ""' <<<"$pr")
+            base=$(jq -r '.baseRefName // ""' <<<"$pr")
+          fi
+          [ -n "$PR_HEAD_REF$ref" ] || echo "::warning::land: could not read PR #$EVENT_PR_NUMBER's head ref; the validator will refuse a manifest naming it."
+          [ -n "$base" ] || echo "::warning::land: could not read PR #$EVENT_PR_NUMBER's base ref; workflow files the base merge changed cannot be told from the agent's."
         fi
         default=""
         if [ -z "$DEFAULT_BRANCH" ]; then
@@ -254,6 +265,7 @@ runs:
         fi
         {
           echo "ref=$ref"
+          echo "base=$base"
           echo "default_branch=$default"
         } >>"$GITHUB_OUTPUT"
 
@@ -312,6 +324,11 @@ runs:
     # start_sha, (c) the branch on origin has not moved past what the agent
     # started from. `git fetch <bundle>` needs the bundle's prerequisite
     # (start_sha) present, so that is fetched from origin first, by SHA.
+    # Also fetches the tip of the run's base branch (the PR's base, else the
+    # default branch — trusted context, not the manifest) as refs/land/base:
+    # the reference the `workflows` step below tells the runner's base merge
+    # from the agent's own changes by. A failed base fetch is a warning; it
+    # only costs that exemption.
     - id: fetch
       if: steps.plan.outputs.has_bundle == 'true'
       shell: bash
@@ -322,6 +339,7 @@ runs:
         BRANCH: ${{ steps.plan.outputs.branch }}
         START_SHA: ${{ steps.plan.outputs.start_sha }}
         HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+        BASE: ${{ steps.lookup.outputs.base || inputs.default-branch || steps.lookup.outputs.default_branch }}
         GIT_CONFIG_GLOBAL: /dev/null
         # Step-scoped credential (design/architecture.md → "No persisted git
         # credentials"): the READ token, under the one variable name every
@@ -376,6 +394,120 @@ runs:
           echo "land: origin/$BRANCH does not exist yet; the push creates it."
         fi
         echo "land: bundle verified — $(git rev-list --count "$START_SHA..$HEAD_SHA") commit(s) $START_SHA..$HEAD_SHA for $BRANCH."
+        base_sha=""
+        if [ -n "$BASE" ] && git fetch --quiet --no-tags "$URL" "refs/heads/$BASE:refs/land/base"; then
+          base_sha=$(git rev-parse refs/land/base)
+          echo "land: origin/$BASE is at $base_sha (the base the workflows check compares against)."
+        else
+          echo "::warning::land: no base branch tip (base '${BASE:-?}'); workflow files the base merge changed cannot be told from the agent's."
+        fi
+        echo "base_sha=$base_sha" >>"$GITHUB_OUTPUT"
+
+    # Push, part 1b (local, no token): the machine account has no Workflows
+    # permission (design/credential-separation.md → 3.4 The identity;
+    # decision: Ransom, 2026-09-17), so GitHub refuses a push that creates,
+    # changes or deletes a file under .github/workflows/ — until 2026-09-18
+    # deep in the push step's log, after the agent had spent its whole run
+    # (agents #114). Refuse it here, by name, before the push: workflow
+    # changes are made from a maintainer's machine, never by a CI agent, and
+    # Report says so in one line. Only the AGENT's changes count (decision:
+    # Ransom, 2026-09-18): the runner merges the base branch into the branch
+    # before the agent starts (sync-branch), and a workflow change that
+    # merge brought in is already on origin. A changed path is exempt when
+    # its blob at head_sha equals its blob at a trusted reference: the base
+    # branch's tip on origin (refs/land/base, fetched by the fetch step from
+    # trusted context), or the EFFECTIVE base — the merge base(s) of head_sha
+    # and that tip, i.e. the newest base commit(s) already in the branch's
+    # history: the base as sync-branch merged it (or fast-forwarded to it),
+    # or as the branch forked from it, should the base have moved since.
+    # Both are fixed by ancestry against origin's tip: nothing the agent
+    # commits can move a branch on origin, and naming an older base commit
+    # as an extra parent of a merge does not make it the merge base while a
+    # newer one is already an ancestor (round 3 trusted every such parent,
+    # which let an agent pick the historical version it wanted). Absent at
+    # both (the base deleted it) is equal too. With no base tip nothing is
+    # exempt. Skipped when origin already sits at
+    # head_sha: nothing would be pushed, so nothing is refused. The paths
+    # are agent-chosen: read NUL-separated for the blob lookups, shown
+    # shell-quoted (%q) so a hostile name stays on one line; the list is
+    # capped, and Report de-fangs it before it renders on the PR/issue. A
+    # listing that FAILS refuses the bundle too (unchecked is not clean) and
+    # sets no `files`, so Report tells the two apart. Refusing here withholds
+    # the push and everything that depends on it, but not the manifest's
+    # `comments[]`: the Post step runs on this path for those alone.
+    - id: workflows
+      if: steps.plan.outputs.has_bundle == 'true' && steps.fetch.outputs.already == ''
+      shell: bash
+      env:
+        WORK: ${{ runner.temp }}/landing-repo
+        START_SHA: ${{ steps.plan.outputs.start_sha }}
+        HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+        BASE_SHA: ${{ steps.fetch.outputs.base_sha }}
+        GIT_CONFIG_GLOBAL: /dev/null
+      run: |
+        set -euo pipefail
+        cd "$WORK"
+        # --no-renames: a file moved out of the directory is listed as its
+        # deletion, which the push would be refused for just the same. The
+        # listings are written out and checked, not streamed: a process
+        # substitution's exit status is invisible to set -e, and a failed
+        # diff must not read as "no workflow files". (A file, not a variable:
+        # the NUL separators a shell variable cannot hold.)
+        if ! git diff -z --name-only --no-renames "$START_SHA" "$HEAD_SHA" -- .github/workflows/ >"$RUNNER_TEMP/workflow-paths"; then
+          echo "::error::land: could not list the paths the bundle changes (git diff failed, see above); refusing the bundle unchecked."
+          exit 1
+        fi
+        paths=()
+        while IFS= read -r -d '' p; do paths+=("$p"); done <"$RUNNER_TEMP/workflow-paths"
+        if [ "${#paths[@]}" -eq 0 ]; then
+          echo "land: no workflow files in $START_SHA..$HEAD_SHA."
+          exit 0
+        fi
+        # The trusted references (above): the base tip and the effective
+        # base. merge-base exits 1 with no output when the histories are
+        # unrelated (then the tip is the only reference); anything else
+        # non-zero is a failed read.
+        trusted=()
+        if [ -n "$BASE_SHA" ]; then
+          trusted+=("$BASE_SHA")
+          rc=0
+          bases=$(git merge-base --all "$HEAD_SHA" "$BASE_SHA") || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::land: could not find the merge base of $HEAD_SHA and the base tip $BASE_SHA (git merge-base failed, see above); refusing the bundle unchecked."
+            exit 1
+          fi
+          [ -z "$bases" ] || while IFS= read -r c; do trusted+=("$c"); done <<<"$bases"
+        fi
+        # entry REV PATH — sets ENTRY to the object id at PATH in REV's tree,
+        # empty when absent. Absence is evidence; a failed read is not, so a
+        # failing ls-tree refuses the bundle unchecked (in the main shell,
+        # not a subshell: an exit inside $(…) would not stop the step).
+        entry() {
+          local out
+          out=$(git ls-tree "$1" -- "$2") \
+            || { echo "::error::land: could not read $(printf '%q' "$2") at $1 (git ls-tree failed, see above); refusing the bundle unchecked."; exit 1; }
+          ENTRY=""
+          if [ -n "$out" ]; then out="${out%%$'\t'*}"; ENTRY="${out##* }"; fi
+        }
+        agent=()
+        for p in "${paths[@]}"; do
+          entry "$HEAD_SHA" "$p"; hb="$ENTRY"
+          exempt=""
+          for ref in ${trusted[@]+"${trusted[@]}"}; do
+            entry "$ref" "$p"
+            [ "$ENTRY" != "$hb" ] || { exempt=1; break; }
+          done
+          [ -n "$exempt" ] || agent+=("$p")
+        done
+        if [ "${#agent[@]}" -gt 0 ]; then
+          files=$(for p in "${agent[@]:0:20}"; do printf '`%q`, ' "$p"; done)
+          files="${files%, }"
+          [ "${#agent[@]}" -le 20 ] || files="$files and $(( ${#agent[@]} - 20 )) more"
+          echo "files=$files" >>"$GITHUB_OUTPUT"
+          echo "::error::land: the agent's commits change workflow files ($files), which the machine account may not push (it has no Workflows permission); refusing the bundle — changes under .github/workflows/ are made from a maintainer's machine."
+          exit 1
+        fi
+        echo "land: ${#paths[@]} workflow file(s) in $START_SHA..$HEAD_SHA changed only by the base merge (matching origin's base at ${BASE_SHA}); not the agent's."
 
     # Push, part 2 (the write, privileged token). A separate step because
     # a step has one GIT_TOKEN; nothing but the push happens here.
@@ -505,7 +637,16 @@ runs:
     # moved, which is exactly what post-pr-comment exists to prevent. What
     # failed is recorded in the `failed` output; Report names it on the
     # PR/issue and fails the run at the end.
+    #
+    # Also runs when the `workflows` step refused the bundle (the one
+    # failure before the push that does not void the whole manifest): the
+    # `comments[]` bodies name their own issue or PR and do not depend on the
+    # push, so the agent's explanation still reaches the requester, while
+    # everything that does — inline review comments, replies, thread
+    # resolutions, follow-up issues, the Slack text — is withheld with the
+    # push, as after a failed push.
     - id: post
+      if: always() && (steps.pr.outcome == 'success' || steps.workflows.outcome == 'failure')
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
@@ -513,6 +654,7 @@ runs:
         DIR: ${{ runner.temp }}/landing
         LIB: ${{ github.action_path }}/lib.sh
         PR_NUMBER: ${{ steps.pr.outputs.number }}
+        REFUSED: ${{ steps.workflows.outcome == 'failure' && '1' || '' }}
         SLACK_TOKEN: ${{ inputs.slack-token }}
         SLACK_CHANNEL: ${{ inputs.slack-channel }}
         SLACK_THREAD_TS: ${{ inputs.slack-thread-ts }}
@@ -538,6 +680,11 @@ runs:
           i=$((i + 1))
         done < <(jq -r '.comments // [] | .[] | (.number|tostring), .body_file, (.review // false | tostring)' "$m")
         echo "posted_comments=$posted_comments" >>"$GITHUB_OUTPUT"
+        if [ -n "$REFUSED" ]; then
+          echo "land: the bundle was refused; posting nothing that depends on the push (inline review comments, replies, thread resolutions, follow-up issues, Slack)."
+          echo "failed=$failed" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
         # -- inline review comments (need the PR), anchored to the PR's
         #    CURRENT head (looked up here — the manifest names no commit, and
         #    on a pull_request run the review job's checkout was the merge
@@ -956,6 +1103,9 @@ runs:
         EVENT_PR_NUMBER: ${{ inputs.pr-number }}
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         PUSHED: ${{ steps.push.outputs.pushed }}
+        # The workflow files a refused bundle changes (agent-chosen paths;
+        # the hint de-fangs them).
+        WORKFLOW_FILES: ${{ steps.workflows.outputs.files }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
         # The PR step runs only after the push succeeded or was not needed,
         # and its failure skips every step that follows — so it is exactly
@@ -976,6 +1126,7 @@ runs:
           validate=${{ steps.validate.outcome }}
           plan=${{ steps.plan.outcome }}
           fetch=${{ steps.fetch.outcome }}
+          workflows=${{ steps.workflows.outcome }}
           push=${{ steps.push.outcome }}
           pr=${{ steps.pr.outcome }}
           post=${{ steps.post.outcome }}
@@ -1011,7 +1162,7 @@ runs:
         # The landing-failure note is our own text (lib.sh), so it needs no
         # de-fang — and it names no trigger token either.
         if [ -n "$failed" ]; then
-          hint=$(landing_failure_hint "$failed" "$PUSHED" "$withheld")
+          hint=$(landing_failure_hint "$failed" "$PUSHED" "$withheld" "$WORKFLOW_FILES")
           {
             printf '⚠️ **Landing failed** at step(s): %s' "$failed"
             [ -z "$withheld" ] || printf ' (never ran: %s)' "$withheld"
