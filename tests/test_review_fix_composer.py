@@ -24,7 +24,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto-review.yml"
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_manifest.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import run_emit_landing, sh, git  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, step_block, run_emit_landing, sh, git  # noqa: E402
 
 
 def composer_script() -> str:
@@ -207,3 +207,12 @@ def test_claude_mistyped_fields_are_dropped_not_fatal(repo):
     assert "replies" not in m
     assert "mistyped field(s)" in res.stdout and "handback (not a boolean)" in res.stdout
     assert "dropped 2 malformed replies" in res.stdout
+
+
+def test_prompts_forbid_workflow_file_edits():
+    # As test_dev_agent_composer: the review fixer's prompt, on both
+    # engines, says not to touch .github/workflows/ — the land composite
+    # refuses the whole bundle otherwise.
+    text = WORKFLOW.read_text()
+    assert WORKFLOW_FILES_RULE + " in a comment so a maintainer makes it from their machine." in step_block(text, "prompt")
+    assert WORKFLOW_FILES_RULE + " in your final message so a maintainer makes it from their machine." in step_block(text, "codexprep")

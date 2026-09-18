@@ -21,7 +21,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude.yml"
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_manifest.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import run_emit_landing, sh, git  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, run_emit_landing, sh, git, step_block  # noqa: E402
 
 
 def composer_script() -> str:
@@ -646,3 +646,13 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_reset():
     text = WORKFLOW.read_text()
     assert text.count("\nenv:\n") == 1 and "\n  TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]\n" in text
     assert "trusted-logins: ${{ env.TRUSTED_LOGINS }}" in text
+
+
+def test_prompts_forbid_workflow_file_edits():
+    # The land composite refuses a bundle touching .github/workflows/ (the
+    # machine account has no Workflows permission), so the dev agent hears
+    # it in its LANDING paragraph before spending the run — on both
+    # engines: the Claude system prompt and codex's CONSTRAINTS line.
+    text = WORKFLOW.read_text()
+    assert WORKFLOW_FILES_RULE + " in a comment so a maintainer makes it from their machine." in step_block(text, "sysprompt")
+    assert WORKFLOW_FILES_RULE + " in your final message so a maintainer makes it from their machine." in step_block(text, "codexcompose")

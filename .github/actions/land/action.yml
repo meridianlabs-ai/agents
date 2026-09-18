@@ -5,8 +5,10 @@ description: >-
   download the `landing` artifact the agent job's `emit-landing` step
   uploaded, validate its manifest (.github/scripts/validate_manifest.py —
   every field is data until it passes), and only then act on it with the
-  privileged token: push the bundled commits (never --force, and never over
-  a branch that moved during the run), open or adopt the PR, post the
+  privileged token: push the bundled commits (never --force, never over a
+  branch that moved during the run, and never a bundle that changes files
+  under .github/workflows/, which the machine account may not push), open
+  or adopt the PR, post the
   de-fanged comments, inline review comments and review replies, resolve
   review threads that belong to that PR, file follow-up issues in
   allow-listed repos (or comment on, reopen and assign existing ones) and
@@ -376,6 +378,44 @@ runs:
           echo "land: origin/$BRANCH does not exist yet; the push creates it."
         fi
         echo "land: bundle verified — $(git rev-list --count "$START_SHA..$HEAD_SHA") commit(s) $START_SHA..$HEAD_SHA for $BRANCH."
+
+    # Push, part 1b (local, no token): the machine account has no Workflows
+    # permission (design/credential-separation.md → 3.4 The identity;
+    # decision: Ransom, 2026-09-17), so GitHub refuses a push that creates,
+    # changes or deletes a file under .github/workflows/ — until 2026-09-18
+    # deep in the push step's log, after the agent had spent its whole run
+    # (agents #114). Refuse it here, by name, before the push: workflow
+    # changes are made from a maintainer's machine, never by a CI agent, and
+    # Report says so in one line. Skipped when origin already sits at
+    # head_sha: nothing would be pushed, so nothing is refused. The paths
+    # are agent-chosen: git quotes unusual bytes (core.quotePath), so each is
+    # one line here; the list is capped, and Report de-fangs it before it
+    # renders on the PR/issue.
+    - id: workflows
+      if: steps.plan.outputs.has_bundle == 'true' && steps.fetch.outputs.already == ''
+      shell: bash
+      env:
+        WORK: ${{ runner.temp }}/landing-repo
+        START_SHA: ${{ steps.plan.outputs.start_sha }}
+        HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+        GIT_CONFIG_GLOBAL: /dev/null
+      run: |
+        set -euo pipefail
+        cd "$WORK"
+        # --no-renames: a file moved out of the directory is listed as its
+        # deletion, which the push would be refused for just the same.
+        paths=()
+        while IFS= read -r p; do paths+=("$p"); done \
+          < <(git diff --name-only --no-renames "$START_SHA" "$HEAD_SHA" -- .github/workflows/)
+        if [ "${#paths[@]}" -gt 0 ]; then
+          files=$(printf '`%s`, ' "${paths[@]:0:20}")
+          files="${files%, }"
+          [ "${#paths[@]}" -le 20 ] || files="$files and $(( ${#paths[@]} - 20 )) more"
+          echo "files=$files" >>"$GITHUB_OUTPUT"
+          echo "::error::land: the agent's commits change workflow files ($files), which the machine account may not push (it has no Workflows permission); refusing the bundle — changes under .github/workflows/ are made from a maintainer's machine."
+          exit 1
+        fi
+        echo "land: no workflow files in $START_SHA..$HEAD_SHA."
 
     # Push, part 2 (the write, privileged token). A separate step because
     # a step has one GIT_TOKEN; nothing but the push happens here.
@@ -956,6 +996,9 @@ runs:
         EVENT_PR_NUMBER: ${{ inputs.pr-number }}
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         PUSHED: ${{ steps.push.outputs.pushed }}
+        # The workflow files a refused bundle changes (agent-chosen paths;
+        # the hint de-fangs them).
+        WORKFLOW_FILES: ${{ steps.workflows.outputs.files }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
         # The PR step runs only after the push succeeded or was not needed,
         # and its failure skips every step that follows — so it is exactly
@@ -976,6 +1019,7 @@ runs:
           validate=${{ steps.validate.outcome }}
           plan=${{ steps.plan.outcome }}
           fetch=${{ steps.fetch.outcome }}
+          workflows=${{ steps.workflows.outcome }}
           push=${{ steps.push.outcome }}
           pr=${{ steps.pr.outcome }}
           post=${{ steps.post.outcome }}
@@ -1011,7 +1055,7 @@ runs:
         # The landing-failure note is our own text (lib.sh), so it needs no
         # de-fang — and it names no trigger token either.
         if [ -n "$failed" ]; then
-          hint=$(landing_failure_hint "$failed" "$PUSHED" "$withheld")
+          hint=$(landing_failure_hint "$failed" "$PUSHED" "$withheld" "$WORKFLOW_FILES")
           {
             printf '⚠️ **Landing failed** at step(s): %s' "$failed"
             [ -z "$withheld" ] || printf ' (never ran: %s)' "$withheld"

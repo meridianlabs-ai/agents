@@ -163,7 +163,8 @@ open_or_adopt_pr() {
   echo "opened ${url##*/} $url"
 }
 
-# landing_failure_hint FAILED PUSHED [WITHHELD] — the one-line consequence
+# landing_failure_hint FAILED PUSHED [WITHHELD [WORKFLOW_FILES]] — the
+# one-line consequence
 # the Report step adds under "Landing failed at step(s): FAILED" (a
 # comma-separated list of step names, `post (…)` included): whether the
 # agent's commits reached the branch, and which hand-back / verdict /
@@ -171,16 +172,21 @@ open_or_adopt_pr() {
 # same format, of the planned `handback` / `verdict` / `handoff` / `stage`
 # steps that never ran (skipped, not failed, because the PR step failed after
 # the push — or, for the verdict, because the Post step lost a comment) — each owed just
-# like a failed one, and named once even when it appears in both lists. Our
-# own text, so it names no live trigger token.
+# like a failed one, and named once even when it appears in both lists.
+# WORKFLOW_FILES is the `workflows` step's list of the files under
+# .github/workflows/ the bundle changes — agent-chosen paths, so they are
+# de-fanged here; everything else is our own text, so the line names no live
+# trigger token.
 landing_failure_hint() {
-  local failed="$1" pushed="$2" withheld="${3:-}" hint="" list owed
+  local failed="$1" pushed="$2" withheld="${3:-}" files="${4:-}" hint="" list owed
   # Report joins with ", "; match on step names with the spaces removed.
   list=",${failed// /},"
   owed="$list${withheld// /},"
   case "$list" in
     *,download,*|*,validate,*|*,plan,*)
       hint="The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted." ;;
+    *,workflows,*)
+      hint="The agent's commits change workflow files ($(defang_str "$files")), which the machine account may not push (it has no Workflows permission); changes under \`.github/workflows/\` are made from a maintainer's machine. The commits were **not** pushed and are lost with the runner: there is no branch to look for." ;;
     *,fetch,*|*,push,*) hint="The agent's commits were **not** pushed." ;;
     *) [ -z "$pushed" ] || hint="The agent's commits were pushed; only what follows the push is affected." ;;
   esac

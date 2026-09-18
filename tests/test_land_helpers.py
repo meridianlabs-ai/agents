@@ -5,10 +5,10 @@ can: the de-fang/retry helpers in .github/actions/land/lib.sh, and the git
 sequence the fetch/push steps execute (bundle the agent's commits above the
 start SHA in one repo; in an EMPTY bare repo fetch the start SHA by SHA from
 origin, verify and unbundle, check the tip and ancestry, refuse a moved
-branch, push without --force). The sequence here mirrors the steps line for
-line, so a git behaviour change (or an edit to the steps that this does not
-follow) shows up as a failing test rather than a red land job on every
-caller.
+branch, refuse a bundle that changes files under .github/workflows/, push
+without --force). The sequence here mirrors the steps line for line, so a
+git behaviour change (or an edit to the steps that this does not follow)
+shows up as a failing test rather than a red land job on every caller.
 """
 
 import json
@@ -37,6 +37,26 @@ def git(*args, cwd, check=True):
 
 def bash_lib(snippet: str, cwd=None) -> subprocess.CompletedProcess:
     return sh("bash", "-c", f". '{LIB}'\n{snippet}", cwd=cwd, check=False)
+
+
+# The sentence every agent prompt's LANDING paragraph (and every codex
+# CONSTRAINTS line) carries, up to the engine-specific "where to say so"
+# clause: the land composite's `workflows` step refuses a bundle touching
+# .github/workflows/, and the agent must hear that before spending its run.
+WORKFLOW_FILES_RULE = (
+    "Do NOT create or edit files under .github/workflows/: the workflow cannot push them "
+    "(the machine account has no Workflows permission) and the landing refuses the whole bundle, "
+    "so every commit of the run is lost; if the task needs a workflow change, stop and say so"
+)
+
+
+def step_block(text: str, step_id: str, indent: int = 6) -> str:
+    """The text of one workflow/composite step: from its `id:` line to the next
+    step's `- ` at INDENT spaces (6 for a job's steps, 4 for a composite's)."""
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"id: {step_id}" or line.strip() == f"- id: {step_id}")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(" " * indent + "- ")), len(lines))
+    return "".join(lines[start:end])
 
 
 # --- lib.sh -----------------------------------------------------------------
@@ -431,9 +451,10 @@ def test_slack_post_file_appends_the_tail_after_the_cap(tmp_path):
 # where a wrong branch writes to someone else's issue or board item.
 
 
-def post_script() -> str:
+def step_script(step_id: str) -> str:
+    """The bash under `run: |` of one of the land composite's steps."""
     lines = LAND.read_text().splitlines()
-    start = lines.index("    - id: post")
+    start = lines.index(f"    - id: {step_id}")
     run_at = next(i for i in range(start, len(lines)) if lines[i] == "      run: |")
     body = []
     for line in lines[run_at + 1:]:
@@ -444,6 +465,10 @@ def post_script() -> str:
         else:
             break
     return "\n".join(body) + "\n"
+
+
+def post_script() -> str:
+    return step_script("post")
 
 
 # `gh` answers from $SCENARIO: the issue's assignee count (`0`, `1`, or a
@@ -961,6 +986,10 @@ def test_land_outputs_what_the_reviewer_landed():
          "The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted."),
         ("push", "", "The agent's commits were **not** pushed."),
         ("fetch", "", "The agent's commits were **not** pushed."),
+        ("workflows", "",
+         "The agent's commits change workflow files (), which the machine account may not push (it has no Workflows permission); "
+         "changes under `.github/workflows/` are made from a maintainer's machine. "
+         "The commits were **not** pushed and are lost with the runner: there is no branch to look for."),
         ("post (comment on #79 failed after 5 attempts; issue create in o/r failed)", "1",
          "The agent's commits were pushed; only what follows the push is affected."),
         ("handback", "1",
@@ -1018,6 +1047,31 @@ def test_landing_failure_hint_names_withheld_steps(failed, pushed, withheld, exp
     assert "@" not in r.stdout
 
 
+WORKFLOWS_HINT = (
+    "The agent's commits change workflow files ({files}), which the machine account may not push (it has no Workflows permission); "
+    "changes under `.github/workflows/` are made from a maintainer's machine. "
+    "The commits were **not** pushed and are lost with the runner: there is no branch to look for."
+)
+
+
+@pytest.mark.parametrize(
+    "files,rendered",
+    [
+        ("`.github/workflows/x.yml`", "`.github/workflows/x.yml`"),
+        ("`.github/workflows/a.yml`, `.github/workflows/b.yml` and 3 more",
+         "`.github/workflows/a.yml`, `.github/workflows/b.yml` and 3 more"),
+        # The paths are the agent's: a live trigger in one is broken like any
+        # agent text, since the report posts from a write-access account.
+        ("`.github/workflows/@review.yml`", "`.github/workflows/`review`.yml`"),
+    ],
+)
+def test_landing_failure_hint_names_the_refused_workflow_files(files, rendered):
+    r = bash_lib(f"landing_failure_hint 'workflows' '' '' '{files}'")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == WORKFLOWS_HINT.format(files=rendered)
+    assert "@" not in r.stdout
+
+
 def test_verdict_step_is_withheld_when_a_comment_was_lost():
     # The verdict (claude-review.yml's codex path) is the only marker-bearing
     # body besides the hand-back, and it must never post over a review body
@@ -1043,6 +1097,26 @@ def test_verdict_bodies_would_not_survive_the_defang(tmp_path):
     r = bash_lib(f"defang '{src}' '{dst}'")
     assert r.returncode == 0, r.stderr
     assert "claude-review-summary" not in dst.read_text()
+
+
+def test_workflows_step_gates_the_push_and_reaches_the_report():
+    # The refusal runs after the bundle is verified and before the push, in
+    # the same empty bare repo; the push has no always(), so a refusal skips
+    # it (and the PR, hand-back and stage after it) exactly as a failed
+    # fetch does. Report lists the step's outcome and hands its file list to
+    # the hint, which is where the plain sentence comes from.
+    text = LAND.read_text()
+    assert text.index("    - id: fetch\n") < text.index("    - id: workflows\n") < text.index("    - id: push\n")
+    block = step_block(text, "workflows", indent=4)
+    assert block.splitlines()[1].strip() == "if: steps.plan.outputs.has_bundle == 'true' && steps.fetch.outputs.already == ''"
+    assert "GIT_TOKEN:" not in block  # local diff only: no token in its env
+    push = step_block(text, "push", indent=4)
+    assert push.splitlines()[1].strip() == "if: steps.plan.outputs.has_bundle == 'true'"
+    assert "always()" not in push
+    report = step_block(text, "report", indent=4)
+    assert "workflows=${{ steps.workflows.outcome }}" in report
+    assert "WORKFLOW_FILES: ${{ steps.workflows.outputs.files }}" in report
+    assert 'landing_failure_hint "$failed" "$PUSHED" "$withheld" "$WORKFLOW_FILES"' in report
 
 
 def test_stage_and_handoff_steps_run_after_a_failed_hand_back():
@@ -1168,6 +1242,92 @@ def test_partially_pushed_bundle_is_still_landable(repos):
     tip = remote_tip(r)
     assert tip == first
     assert tip_is_ancestor(repo, tip, r["head"])
+
+
+def commit_path(r, path, text="x\n"):
+    """One more agent commit on the work repo, touching PATH; head moves."""
+    f = r["work"] / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text)
+    git("add", str(f), cwd=r["work"])
+    git("commit", "-qm", f"touch {path}", cwd=r["work"])
+    r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
+
+
+def run_workflows_step(r, repo):
+    """The land composite's `workflows` step, lifted and run in the bare repo
+    `land_fetch` filled, as GitHub runs it (`bash -eo pipefail`)."""
+    out = r["tmp"] / "workflows-out.txt"
+    out.write_text("")
+    env = {"WORK": str(repo), "START_SHA": r["start"], "HEAD_SHA": r["head"], "GITHUB_OUTPUT": str(out)}
+    res = sh("bash", "-eo", "pipefail", "-c", step_script("workflows"), check=False, env=env)
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    return res, outputs
+
+
+@pytest.mark.parametrize("path", [".github/workflows/x.yml", ".github/workflows/nested/x.yml"])
+def test_bundle_touching_a_workflow_file_is_refused_before_the_push(repos, path):
+    r = repos
+    commit_path(r, path)
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    assert outputs["files"] == f"`{path}`"
+    assert (f"::error::land: the agent's commits change workflow files (`{path}`), which the machine account "
+            "may not push (it has no Workflows permission); refusing the bundle — changes under .github/workflows/ "
+            "are made from a maintainer's machine.") in res.stdout
+    # Nothing was pushed: the branch is where the agent started.
+    assert remote_tip(r) == r["start"]
+    # And the report the requester reads names the file and the loss.
+    hint = bash_lib(f"landing_failure_hint 'workflows' '' '' '{outputs['files']}'")
+    assert hint.returncode == 0, hint.stderr
+    assert hint.stdout == WORKFLOWS_HINT.format(files=f"`{path}`")
+
+
+def test_bundle_deleting_a_workflow_file_is_refused(repos):
+    # A deletion (or a move out of the directory, which --no-renames lists
+    # as one) is refused like an edit: GitHub refuses that push too.
+    r = repos
+    commit_path(r, ".github/workflows/old.yml")
+    # Re-base the run on a start that already has the file, then delete it.
+    r["start"] = r["head"]
+    git("push", "-q", str(r["origin"]), "HEAD:feature", cwd=r["work"])
+    git("mv", ".github/workflows/old.yml", "elsewhere.yml", cwd=r["work"])
+    git("commit", "-qm", "move the workflow out", cwd=r["work"])
+    r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    assert outputs["files"] == "`.github/workflows/old.yml`"
+
+
+def test_workflow_file_list_is_capped(repos):
+    r = repos
+    for i in range(23):
+        commit_path(r, f".github/workflows/w{i:02d}.yml")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    names = ", ".join(f"`.github/workflows/w{i:02d}.yml`" for i in range(20))
+    assert outputs["files"] == f"{names} and 3 more"
+
+
+@pytest.mark.parametrize("path", [".github/other.yml", ".github/workflows-notes/x.yml", "src/.github/workflows/x.yml", "workflows/x.yml"])
+def test_bundle_without_workflow_files_passes_and_the_push_proceeds(repos, path):
+    r = repos
+    commit_path(r, path)
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+    assert f"land: no workflow files in {r['start']}..{r['head']}." in res.stdout
+    # The push step follows as before.
+    git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/feature", cwd=repo)
+    assert remote_tip(r) == r["head"]
 
 
 def test_tampered_bundle_tip_is_detected(repos):
