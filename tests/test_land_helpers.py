@@ -527,7 +527,7 @@ curl() {
 """
 
 
-def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None, pr_number=""):
+def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None, pr_number="", refused=False):
     state = tmp_path / "state"
     state.mkdir()
     landing = tmp_path / "landing"
@@ -541,6 +541,7 @@ def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=No
         "STATE": str(state), "SCENARIO": scenario, "LIB": str(LIB), "DIR": str(landing),
         "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR_NUMBER": pr_number,
         "SLACK_TOKEN": "", "SLACK_CHANNEL": "", "SLACK_THREAD_TS": "",
+        "REFUSED": "1" if refused else "",
         **(slack_env or {}),
     }
     # `-eo pipefail`, as GitHub invokes `shell: bash` (`bash --noprofile
@@ -760,6 +761,46 @@ def test_post_records_a_lost_follow_up_comment(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "comment on #5 failed after 5 attempts" in failed
     assert "follow-up comment (part 1) with unanchored inline review comment(s) on #5 failed after 5 attempts" in failed
+
+
+def test_post_on_a_refused_bundle_posts_only_the_comments(tmp_path):
+    # The `workflows` step refused the bundle: the Post step still runs (its
+    # `if` admits that one failure) and posts the manifest's comments[] —
+    # they name their own issue/PR and do not depend on the push — but
+    # nothing that does: no reply, no thread resolution, no follow-up
+    # issue, no Slack post. Nothing is recorded as failed: the refusal is
+    # Report's to explain.
+    manifest = {
+        "schema": 1, "repo": "o/r", "run_id": 123, "branch": "b", "start_sha": "a" * 40, "head_sha": "b" * 40,
+        "has_bundle": True, "pr_number": 5,
+        "comments": [{"number": 9, "body_file": "c.md"}],
+        "replies": [{"review_comment_id": 11, "body_file": "r.md"}],
+        "resolve_threads": ["PRRT_x"],
+        "issues": [{"repo": "o/r", "title": "t", "body_file": "i.md"}],
+        "slack": {"text_file": "s.md"},
+    }
+    files = {"c.md": "the task needs a workflow change; a maintainer must make it\n", "r.md": "reply\n", "i.md": "issue\n", "s.md": "slack\n"}
+    r, calls, writes, failed = run_post(tmp_path, manifest, files, pr_number="5", refused=True,
+                                        slack_env={"SLACK_TOKEN": "xoxb", "SLACK_CHANNEL": "C1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert failed == ""
+    assert post_outputs(tmp_path)["posted_comments"] == "1"
+    assert calls == ["api repos/o/r/issues/9/comments -F body=@" + str(tmp_path / "comment-0.md") + " --silent"]
+    assert posted_bodies(tmp_path) == [files["c.md"]]
+    assert writes == []
+    assert not (tmp_path / "state" / "slack-request").exists()
+    assert "posting nothing that depends on the push" in r.stdout
+
+
+def test_post_step_runs_on_the_refusal_path_only_for_the_comments():
+    text = LAND.read_text()
+    block = step_block(text, "post", indent=4)
+    assert block.splitlines()[1].strip() == "if: always() && (steps.pr.outcome == 'success' || steps.workflows.outcome == 'failure')"
+    assert "REFUSED: ${{ steps.workflows.outcome == 'failure' && '1' || '' }}" in block
+    # The verdict, hand-back, hand-off and stage steps stay skipped: none
+    # admits a failed `workflows` step.
+    for step in ("verdict", "handback", "handoff", "stage"):
+        assert "steps.workflows" not in step_block(text, step, indent=4), step
 
 
 def big_finding(i: int) -> str:
@@ -986,10 +1027,10 @@ def test_land_outputs_what_the_reviewer_landed():
          "The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted."),
         ("push", "", "The agent's commits were **not** pushed."),
         ("fetch", "", "The agent's commits were **not** pushed."),
+        # `workflows` failed with no file list: the listing itself failed.
         ("workflows", "",
-         "The agent's commits change workflow files (), which the machine account may not push (it has no Workflows permission); "
-         "changes under `.github/workflows/` are made from a maintainer's machine. "
-         "The commits were **not** pushed and are lost with the runner: there is no branch to look for."),
+         "The landing could not check whether the agent's commits change workflow files (listing the bundle's paths failed, see the run log), "
+         "so the bundle was refused unchecked. The commits were **not** pushed and are lost with the runner: there is no branch to look for."),
         ("post (comment on #79 failed after 5 attempts; issue create in o/r failed)", "1",
          "The agent's commits were pushed; only what follows the push is affected."),
         ("handback", "1",
@@ -1254,13 +1295,14 @@ def commit_path(r, path, text="x\n"):
     r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
 
 
-def run_workflows_step(r, repo):
+def run_workflows_step(r, repo, stub=""):
     """The land composite's `workflows` step, lifted and run in the bare repo
-    `land_fetch` filled, as GitHub runs it (`bash -eo pipefail`)."""
+    `land_fetch` filled, as GitHub runs it (`bash -eo pipefail`); STUB is
+    shell prepended to it (a failing `git`, say)."""
     out = r["tmp"] / "workflows-out.txt"
     out.write_text("")
     env = {"WORK": str(repo), "START_SHA": r["start"], "HEAD_SHA": r["head"], "GITHUB_OUTPUT": str(out)}
-    res = sh("bash", "-eo", "pipefail", "-c", step_script("workflows"), check=False, env=env)
+    res = sh("bash", "-eo", "pipefail", "-c", stub + step_script("workflows"), check=False, env=env)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     return res, outputs
 
@@ -1301,6 +1343,25 @@ def test_bundle_deleting_a_workflow_file_is_refused(repos):
     res, outputs = run_workflows_step(r, repo)
     assert res.returncode != 0
     assert outputs["files"] == "`.github/workflows/old.yml`"
+
+
+def test_failed_path_listing_refuses_the_bundle_unchecked(repos):
+    # A diff that fails (a corrupt object, a resource limit) must not read as
+    # "no workflow files": the step captures the listing and fails on a
+    # non-zero status, sets no `files` (so Report says the check did not
+    # run, not that the agent changed workflow files), and the push is
+    # never reached.
+    r = repos
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, stub='git() { echo "fatal: simulated diff read failure" >&2; return 128; }\n')
+    assert res.returncode != 0
+    assert "files" not in outputs
+    assert "::error::land: could not list the paths the bundle changes (git diff failed, see above); refusing the bundle unchecked." in res.stdout
+    assert "no workflow files" not in res.stdout
+    assert remote_tip(r) == r["start"]
+    hint = bash_lib("landing_failure_hint 'workflows' '' '' ''")
+    assert hint.stdout.startswith("The landing could not check whether the agent's commits change workflow files")
 
 
 def test_workflow_file_list_is_capped(repos):

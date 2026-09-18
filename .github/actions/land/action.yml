@@ -390,7 +390,11 @@ runs:
     # head_sha: nothing would be pushed, so nothing is refused. The paths
     # are agent-chosen: git quotes unusual bytes (core.quotePath), so each is
     # one line here; the list is capped, and Report de-fangs it before it
-    # renders on the PR/issue.
+    # renders on the PR/issue. A listing that FAILS refuses the bundle too
+    # (unchecked is not clean) and sets no `files`, so Report tells the two
+    # apart. Refusing here withholds the push and everything that depends on
+    # it, but not the manifest's `comments[]`: the Post step runs on this
+    # path for those alone.
     - id: workflows
       if: steps.plan.outputs.has_bundle == 'true' && steps.fetch.outputs.already == ''
       shell: bash
@@ -403,10 +407,16 @@ runs:
         set -euo pipefail
         cd "$WORK"
         # --no-renames: a file moved out of the directory is listed as its
-        # deletion, which the push would be refused for just the same.
+        # deletion, which the push would be refused for just the same. The
+        # listing is captured, not streamed: a process substitution's exit
+        # status is invisible to set -e, and a failed diff must not read as
+        # "no workflow files".
+        if ! listing=$(git diff --name-only --no-renames "$START_SHA" "$HEAD_SHA" -- .github/workflows/); then
+          echo "::error::land: could not list the paths the bundle changes (git diff failed, see above); refusing the bundle unchecked."
+          exit 1
+        fi
         paths=()
-        while IFS= read -r p; do paths+=("$p"); done \
-          < <(git diff --name-only --no-renames "$START_SHA" "$HEAD_SHA" -- .github/workflows/)
+        [ -z "$listing" ] || while IFS= read -r p; do paths+=("$p"); done <<<"$listing"
         if [ "${#paths[@]}" -gt 0 ]; then
           files=$(printf '`%s`, ' "${paths[@]:0:20}")
           files="${files%, }"
@@ -545,7 +555,16 @@ runs:
     # moved, which is exactly what post-pr-comment exists to prevent. What
     # failed is recorded in the `failed` output; Report names it on the
     # PR/issue and fails the run at the end.
+    #
+    # Also runs when the `workflows` step refused the bundle (the one
+    # failure before the push that does not void the whole manifest): the
+    # `comments[]` bodies name their own issue or PR and do not depend on the
+    # push, so the agent's explanation still reaches the requester, while
+    # everything that does — inline review comments, replies, thread
+    # resolutions, follow-up issues, the Slack text — is withheld with the
+    # push, as after a failed push.
     - id: post
+      if: always() && (steps.pr.outcome == 'success' || steps.workflows.outcome == 'failure')
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
@@ -553,6 +572,7 @@ runs:
         DIR: ${{ runner.temp }}/landing
         LIB: ${{ github.action_path }}/lib.sh
         PR_NUMBER: ${{ steps.pr.outputs.number }}
+        REFUSED: ${{ steps.workflows.outcome == 'failure' && '1' || '' }}
         SLACK_TOKEN: ${{ inputs.slack-token }}
         SLACK_CHANNEL: ${{ inputs.slack-channel }}
         SLACK_THREAD_TS: ${{ inputs.slack-thread-ts }}
@@ -578,6 +598,11 @@ runs:
           i=$((i + 1))
         done < <(jq -r '.comments // [] | .[] | (.number|tostring), .body_file, (.review // false | tostring)' "$m")
         echo "posted_comments=$posted_comments" >>"$GITHUB_OUTPUT"
+        if [ -n "$REFUSED" ]; then
+          echo "land: the bundle was refused; posting nothing that depends on the push (inline review comments, replies, thread resolutions, follow-up issues, Slack)."
+          echo "failed=$failed" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
         # -- inline review comments (need the PR), anchored to the PR's
         #    CURRENT head (looked up here — the manifest names no commit, and
         #    on a pull_request run the review job's checkout was the merge
