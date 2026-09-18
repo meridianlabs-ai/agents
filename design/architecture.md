@@ -265,6 +265,8 @@ restored it — see design/codex-engine.md → Hook-safe landing.
 
 ### Landing job
 
+> **Where the current shape is described.** [credential-separation.md](credential-separation.md) states the gate/agent/land pattern, the manifest contract, the machine account's identity (`meridian-marvin`, the two `TRUSTED_LOGINS`, per-job minting) and the caller contract as they stand on `main`, in the present tense, and [SECURITY.md](../SECURITY.md) is the public statement of the trust boundaries and guarantees. This section and "No persisted git credentials" above are the history of how they got there, issue by issue, and stay as written.
+
 Step-scoped credentials bound *where* a token sits, not *who can reach it*:
 every agent workflow used to hand `MARVIN_TOKEN` to the job that ran the
 agent — as the `claude-code-action` step's `github_token`, and as `GH_TOKEN`
