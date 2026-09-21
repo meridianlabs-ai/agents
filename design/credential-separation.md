@@ -307,7 +307,15 @@ commit that touches `.github/workflows/` therefore fails at the land job's
 push with GitHub's "refusing to allow a GitHub App to create or update
 workflow" error. That is the intended boundary: the workflows that hold the
 credentials are changed from a maintainer's machine, under a maintainer's
-review, never by an agent running in CI.
+review, never by an agent running in CI. Since 2026-09-18 the land job
+enforces it before the push: its `workflows` step lists the paths the
+bundle changes under `.github/workflows/` and refuses the bundle with a
+one-line report naming the files the agent itself changed — a change the
+runner's base merge brought in (the file's content at the bundle's tip
+equals the base branch's on origin, or that of the base as last merged into
+the branch: the merge base of the tip and origin's base) is not the agent's
+and passes (decision: Ransom, 2026-09-18) — and the agent prompts say up
+front not to edit them.
 
 The app is not a member of `UKGovernmentBEIS`, so, like the PAT before it, it
 cannot open or push to upstream pull requests; promotion to upstream is a
@@ -689,7 +697,8 @@ results against the invariant each one tests.
   script shared by every land job, with one failing test per rule, and it
   fails closed on any key it does not know.
 - **CI agents cannot change workflow files.** The app's missing Workflows
-  permission fails such a push at the land job with GitHub's remote error
-  rather than a plain report line; a land-job pre-check that refuses a
-  bundle touching `.github/workflows/` and a prompt line telling the agent
-  not to edit them would make the failure clearer (proposed, not decided).
+  permission fails such a push at the land job with GitHub's remote error;
+  since 2026-09-18 the land job's `workflows` step refuses the bundle
+  before the push with a plain report line, and the agent prompts say not
+  to edit them (section 3.4). A run that needs a workflow change still
+  spends itself before the refusal is posted.
