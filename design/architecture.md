@@ -205,7 +205,6 @@ changes who pushes. Per step:
 | step | token |
 | --- | --- |
 | `sync-branch` (all three workflows) | job token — fetches only |
-| `push-base-merge` | unused since #84 (gone from the loops with #82/#83, from `claude.yml` with #84): the runner's base merge sits above the manifest's start SHA and lands through the bundle |
 | codex commit steps | none — in all three workflows (#82, #83, #84) the codex step only commits; the `land` job pushes |
 | hand-back, unlanded-work, open-PR and verify fetches | gone with the landing-job split (#82, #83, #84): the land job opens the PR and posts the hand-back from the manifest, and knows what it pushed |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
@@ -426,8 +425,8 @@ Three rules define the shape:
   in an *empty* bare repo: fetch the start SHA from origin by SHA (read
   token), `git bundle verify`, unbundle, assert the tip is `head_sha` and
   descends from `start_sha`, `ls-remote` the branch's live tip and refuse
-  unless it is an ancestor of `head_sha` ("moved during the run", as
-  `push-base-merge`), then push `head_sha:refs/heads/<branch>` with the
+  unless it is an ancestor of `head_sha` ("moved during the run"), then
+  push `head_sha:refs/heads/<branch>` with the
   privileged token through the same step-scoped credential-helper block as
   every other push — never `--force`, and the read and the write are
   separate steps because a step has one `GIT_TOKEN`. After the push it
@@ -1444,10 +1443,11 @@ stale code.
 So the merge is now a **deterministic `Sync branch with base` step** in all
 three workflows, running before either engine starts, on PR-context runs only.
 The step body lives once, in the `.github/actions/sync-branch` composite
-(referenced `@main` like `set-stage`); the two enforcement pieces below are
-composites too — `unresolved-merge-guard`, and `push-base-merge`, which no
-workflow calls since #84 (the merge lands through the landing bundle) — so
-the three workflows differ only in their inputs (`claude.yml` passes
+(referenced `@main` like `set-stage`); the enforcement piece below is a
+composite too — `unresolved-merge-guard` (the `push-base-merge` backstop
+that once pushed the runner's merge was unused since #84, when the merge
+started landing through the landing bundle, and was removed on 2026-09-22) —
+so the three workflows differ only in their inputs (`claude.yml` passes
 `checkout: true` because its checkout is not on the PR head), never in the
 logic. Four details are load-bearing:
 
@@ -1644,41 +1644,39 @@ substring collision in trigger gates). Design choices:
   version produced a good review that went nowhere because no posting tool
   was allowed, which is why `gh` and the inline-comment MCP were
   allow-listed until the landing manifest carried the review instead.
-- **Auto-review is OFF everywhere since 2026-09-16** (decision: Ransom;
-  actions first on 2026-09-14 after actions#110 was reviewed unasked, then
-  every repo after inspect_ai#501 was). Reviews are asked for — an `@review`
-  comment, or from an Orca workspace — never posted by CI. The reviewer
-  stubs carry only the `issue_comment` trigger; `examples/claude-review-stub.yml`
-  keeps the `pull_request` trigger and its `if` clause commented out for a
-  repo that wants them back, and the fork's dev stub sets
-  `request_review_after_open: "false"`. The rest of this list describes
-  the `pull_request` path as it was designed, for that day.
-- **Auto-review triggered on `pull_request`; a `pull_request_target`
-  switch was attempted 2026-08-26 and REVERTED 2026-08-27**: Anthropic's
-  workload-identity token exchange rejects prt-shaped OIDC subjects
-  ("Invalid OIDC token", 2/2 on first exercise — the subject shape had
-  never been minted org-wide before). Until the console allowlists that
-  shape, reviewer-file PRs skip auto-review (workflow validation) and get
-  a manual top-level @review comment instead (decision: Ransom). The
-  verify step makes that skip visible (issue #27): when the no-execution-file
-  path fires on a pull_request run whose PR touches `.github/workflows/`, it
-  posts a nudge comment asking for the manual re-trigger (token backticked so
-  the nudge itself can't start a run; once per PR via a marker comment) —
-  the bot-actor skip on ordinary PRs stays a log-level notice. The
-  reusable KEEPS its dual-event handling and the prt fork-head refusal —
-  inert under pull_request, correct if prt ever returns. The original
-  prt rationale, kept for that day: The workflow — prompt, permissions, args — resolves from the
-  BASE branch, so a PR editing the reviewer's own files still auto-reviews
-  and the PR's copy never runs; this also satisfies the app-token exchange's
-  server-side workflow validation, which refuses OIDC tokens attesting a
-  workflow that differs from the default branch. The trust model: prt runs
-  carry base-repo secrets and the reviewer checks out and exercises the PR
-  head, so the same-repo gate (enforced twice — the stub's `if:` and the
-  reusable trig step's fork-head refusal) is a SECURITY boundary, not an
-  ergonomic skip. Same-repo heads imply write-access authors — the same
-  trust level the `@review` comment path enforces in the reusable's trig
-  check (issue #13): before checkout, the comment path requires a trusted
-  commenter — a `TRUSTED_LOGINS` login (the loops' hand-back, posted by
+- **Auto-review is OFF everywhere since 2026-09-16, and the reusable's
+  `pull_request` / `pull_request_target` path was REMOVED on 2026-09-22**
+  (decision: Ransom; actions first on 2026-09-14 after actions#110 was
+  reviewed unasked, then every repo after inspect_ai#501 was). Reviews are
+  asked for — an `@review` comment, or from an Orca workspace — never
+  posted by CI. `issue_comment` is the only event the trig step admits: any
+  other event fails the gate red with an error naming the caller stub, so a
+  stub that still fires a PR event is noticed rather than silently no-oped.
+  The reviewer stubs carry only the `issue_comment` trigger and the fork's
+  dev stub sets `request_review_after_open: "false"`; a repo that wants a
+  review from CI posts a top-level `@review` as a write-access identity
+  (inspect_harbor's `synchronize` trigger for its nightly registry PR was
+  the one caller still on the PR-event path at removal time — its stub is
+  the dependent change). Gone with the path: the gate's release-please
+  skip, the prt fork-head refusal, the merge-ref checkout, the `ack`-on-PR-
+  event rule and the verify step's workflow-validation nudge (issue #27) —
+  all PR-event-only. History, for the record: auto-review ran on
+  `pull_request` `opened`/`reopened`/`ready_for_review` (never
+  `synchronize`, which fires on every push and would have re-reviewed and
+  re-billed every fix commit, the agent's own included); a
+  `pull_request_target` switch was attempted 2026-08-26 and REVERTED
+  2026-08-27 because Anthropic's workload-identity token exchange rejects
+  prt-shaped OIDC subjects ("Invalid OIDC token", 2/2 on first exercise),
+  so reviewer-file PRs skipped auto-review (server-side workflow
+  validation) and needed a manual `@review`. prt's appeal was that the
+  workflow resolves from the BASE branch (a PR editing the reviewer's own
+  files could not run its own copy); its trust model — base-repo secrets
+  plus a checkout of the PR head, so the same-repo gate was a SECURITY
+  boundary, not an ergonomic skip — rested on same-repo heads implying
+  write-access authors. The comment path replaces that with an explicit
+  decision by the commenter, next.
+- **The comment path's trust model** (issue #13): before checkout, trig
+  requires a trusted commenter — a `TRUSTED_LOGINS` login (the loops' hand-back, posted by
   their land jobs as the machine account), a caller-allow-listed bot on a
   same-repo head, or an account with write access — whatever the head repo
   (Claude Security 4085111, 2026-09-15: a same-repo head used to admit any
@@ -1688,27 +1686,19 @@ substring collision in trigger gates). Design choices:
   and external mode always requires
   the trusted commenter (its checkout is an untrusted upstream head; the
   `claude-setup` step is additionally mode-gated so an upstream tree can
-  never supply it). No TOCTOU on either path: prt's head *repo* is
-  immutable, so its payload gate cannot be raced by later pushes (those
-  only add same-repo commits), and the comment path checks out the head
-  SHA captured at trust-check time rather than re-resolving
-  refs/pull/N/head after the gate. One caveat on the pin: it fixes what
-  the gate decided on, so a fork push landing *before* the gate's lookup —
-  in the seconds after the maintainer's `@review` — is still the head that
-  gets admitted; irreducible, since the trigger comment carries no head
-  SHA to compare against. Fork PRs get no auto-review run at all; the
-  comment path is the explicit human-decision route, a maintainer's
-  `@review` being the same trust decision made explicitly — and since
-  issue #59 that admission is about *who may ask*, not about trusting the
-  code: an admitted fork head takes the sandboxed path described under
-  "Untrusted checkouts" above. The dev agent, which has no sandbox, refuses
-  fork heads outright (same section; its agent job holds no write
-  credential since #84, but the checkout would still execute fork code).
-- **Auto-runs on PR `opened`/`reopened`/`ready_for_review`, not `synchronize`.**
-  `synchronize` fires on every push, so reviewing on it would re-review (and
-  re-bill ~$0.40–1) on every fix commit, including the agent's own. On-demand
-  re-review via `@review` is the lighter default. Enabling `synchronize` is the
-  knob for continuous review if the manual re-review becomes tedious.
+  never supply it). No TOCTOU: the run checks out the head SHA captured at
+  trust-check time rather than re-resolving refs/pull/N/head after the
+  gate. One caveat on the pin: it fixes what the gate decided on, so a fork
+  push landing *before* the gate's lookup — in the seconds after the
+  maintainer's `@review` — is still the head that gets admitted;
+  irreducible, since the trigger comment carries no head SHA to compare
+  against. A fork PR is reviewed only by this route, a maintainer's
+  `@review` being an explicit trust decision — and since issue #59 that
+  admission is about *who may ask*, not about trusting the code: an
+  admitted fork head takes the sandboxed path described under "Untrusted
+  checkouts" above. The dev agent, which has no sandbox, refuses fork heads
+  outright (same section; its agent job holds no write credential since
+  #84, but the checkout would still execute fork code).
 - **Comprehensive per pass, not one finding at a time.** The prompt asks for
   *every* confident finding in a single review (nits included), still behind a
   high-confidence bar. This is mostly for the `@auto` loop: the reviewer runs

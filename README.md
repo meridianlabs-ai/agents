@@ -134,10 +134,12 @@ The reviewer posts a top-level summary plus inline comments on a PR. It runs:
   `External`-labeled issue).
 - **Never on its own.** Auto-review on PR open / reopen / ready-for-review is
   off in every Meridian repo (decision: Ransom, 2026-09-16, after inspect_ai#501
-  was reviewed unasked; actions went first on 2026-09-14 after actions#110).
-  Reviews are driven from Orca workspaces instead. The example stub keeps the
-  `pull_request` trigger as a commented-out block for a repo that wants it
-  back.
+  was reviewed unasked; actions went first on 2026-09-14 after actions#110),
+  and the reusable workflow's `pull_request` / `pull_request_target` path was
+  removed on 2026-09-22: an `@review` comment is the only event it admits, and
+  a stub that still fires a PR event gets a red run naming the fix. Reviews are
+  driven from Orca workspaces instead; a repo that wants a review from CI posts
+  a top-level `@review` comment as a write-access identity.
 
 It is read-only: it can run tests to verify a finding but cannot modify code or
 push. Its findings are confidence-filtered (few high-signal items over many

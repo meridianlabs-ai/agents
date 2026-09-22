@@ -590,7 +590,7 @@ event-driven transitions:
   - Loop still running → the **`auto` label is still present** and the last
     agent action is a bare **`@review`** (reviewer verdict `suggestions`) →
     **Agent**.
-  - Review started (`@review` posted, or auto-review on PR open) → the
+  - Review started (`@review` posted) → the
     **reviewer workflow itself** sets **Agent** immediately (and 👀-acks
     the `@review` comment) — the loop is engaged from the moment the review
     begins, not from the first fix round. Its machine-account token (minted

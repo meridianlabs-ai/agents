@@ -420,7 +420,7 @@ runs:
           || { echo "::error::land: the bundle's tip ($tip) is not the manifest's head_sha ($HEAD_SHA)."; exit 1; }
         git merge-base --is-ancestor "$START_SHA" "$HEAD_SHA" \
           || { echo "::error::land: head_sha does not descend from start_sha; refusing (the agent rewrote history)."; exit 1; }
-        # Non-fast-forward guard, as push-base-merge: the remote may have
+        # Non-fast-forward guard: the remote may have
         # moved during the run (a human pushed to the PR branch, the agent
         # landed something server-side). A tip that is an ancestor of the
         # bundle's head — start_sha itself, or a bundle commit the agent
@@ -734,9 +734,8 @@ runs:
           exit 0
         fi
         # -- inline review comments (need the PR), anchored to the PR's
-        #    CURRENT head (looked up here — the manifest names no commit, and
-        #    on a pull_request run the review job's checkout was the merge
-        #    ref). One that cannot anchor (422: the line is outside the PR's
+        #    CURRENT head (looked up here — the manifest names no commit).
+        #    One that cannot anchor (422: the line is outside the PR's
         #    diff — a live-branch continuation reviewed past the frozen diff,
         #    or a mis-numbered line), or that still fails after its retries,
         #    is folded into follow-up comments on the PR — BOUNDED chunks of
