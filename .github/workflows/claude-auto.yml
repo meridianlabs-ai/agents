@@ -21,6 +21,25 @@ name: Claude Auto (reusable)
 # is removed and no round runs. The machine-account login otherwise only
 # matters for attribution in later phases.
 #
+# WHICH PR a failed run is for is established here, not taken from the caller
+# (Claude Security finding 4628657, qualified 2026-09-21): the stub forwards
+# `workflow_run.pull_requests[0].number`, and GitHub documents that list as
+# the open PRs matching the run's head, which "do not necessarily indicate
+# pull requests that triggered the run" — two PRs from one branch into
+# different bases share a head SHA and both appear, in no specified order,
+# and the one left after the other closes is not thereby the origin. So the
+# gate's first step (the shared bind-ci-run composite) reads the run back
+# from the API, requires it to be this repo's own pull_request run on the
+# forwarded branch with its latest attempt the one that failed, and binds it
+# to the ONE same-repo PR from that branch that was open when the run was
+# created, at the run's head SHA — none or several refuse, and a caller
+# number that disagrees refuses. Only then does the label gate look at the
+# PR. The land job derives the same context again before pushing. What this
+# cannot do, and does not claim: name the triggering PR when two shared the
+# branch (nothing GitHub exposes tells their runs apart; the merge commit a
+# PR run tested is not in the API), or authorize an actor — the label check
+# and the model actions' own actor checks stay what they are.
+#
 # Three jobs (design/architecture.md → Landing job; issue #82, the first loop
 # conversion after the reviewer's in #81): `gate` resolves the PR, enforces
 # the label gate and the attempt cap, and does the pre-agent marvin writes
@@ -42,23 +61,34 @@ on:
   workflow_call:
     inputs:
       head_branch:
-        description: PR head branch whose CI failed (from workflow_run.head_branch).
+        description: >-
+          PR head branch whose CI failed (from workflow_run.head_branch). The
+          gate's bind step requires it to be the run's own head branch as the
+          API reports it.
         required: true
         type: string
       pr_number:
         description: >-
-          PR number (from workflow_run.pull_requests[0].number): the PR this
-          run acts on — the gate views it by number and requires it open,
-          same-repo and on head_branch, never resolving a PR from the branch
-          name (Claude Security finding 4122320) — and the key of the
-          concurrency group shared with claude-auto-review.yml (both
-          serialize per PR). Empty when CI ran on a non-PR branch, which the
-          gate skips.
+          PR number (from workflow_run.pull_requests[0].number). NOT the
+          run's trigger identity: GitHub's list is an association (the open
+          PRs matching the head), so the gate binds the run to its PR itself
+          (bind-ci-run: the one same-repo PR from head_branch open when the
+          run was created, at the run's head SHA) and requires this number to
+          agree — a disagreement, or several candidates, skips with the
+          reason. It is also the key of the concurrency group shared with
+          claude-auto-review.yml (both serialize per PR), which is why it is
+          an input and not derived. Viewed by number, never resolved from the
+          branch name (Claude Security finding 4122320). Empty when CI ran on
+          a non-PR branch, which the gate skips.
         required: false
         type: string
         default: ""
       ci_run_id:
-        description: The failed CI run id, so the agent can read its failing logs.
+        description: >-
+          The failed CI run id (from workflow_run.id), so the agent can read
+          its failing logs. The gate's bind step requires it to be the run
+          this workflow_run event completed and reads the run back from the
+          API; the reusable workflow acts on no other run.
         required: true
         type: string
       auto_label:
@@ -247,6 +277,14 @@ jobs:
       engine: ${{ steps.gate.outputs.engine }}
       attempt: ${{ steps.gate.outputs.attempt }}
       mention: ${{ steps.who.outputs.mention }}
+      # The run's context the bind step established (trusted: read from the
+      # API before any PR code ran): the fix job requires its checkout to be
+      # at `head_sha` (the head the run tested), and the land job derives
+      # the same context again and requires these three to be reproduced
+      # before it pushes.
+      head_sha: ${{ steps.bind.outputs.head_sha }}
+      base_ref: ${{ steps.bind.outputs.base_ref }}
+      run_attempt: ${{ steps.bind.outputs.run_attempt }}
       # The identity the fix job's runner-side commits carry (the base
       # merge, the codex commit): the bot's when this job minted an app
       # token — so the commit author and the land job's pusher agree; the
@@ -284,30 +322,68 @@ jobs:
           permission-pull-requests: write
           permission-organization-projects: write
 
-      # The gate is three steps (deterministic, in shell — it decides whether
-      # the agent runs): resolve the PR and enforce the `auto`-label check;
-      # verify who applied the label (shared composite); then compute the
-      # attempt count and decide. Decide: skip (no PR / not labeled / no
-      # token / unverified or outsider labeler), escalate (over cap), or fix.
-      # The counter increments BEFORE the agent runs, so an agent that
-      # crashes still consumes an attempt rather than looping forever — and
-      # it is computed only AFTER the labeler check passes, so an outsider's
-      # label never burns attempts. Downstream steps read every gate output
-      # (`act`, `pr`, `engine`, `attempt`, `cid`) from the LAST step, which
-      # re-emits the resolve step's, so the split is invisible to them.
+      # The gate is four steps (deterministic, in shell — it decides whether
+      # the agent runs): bind the failed run to its PR (shared composite,
+      # below); resolve that PR and enforce the `auto`-label check; verify
+      # who applied the label (shared composite); then compute the attempt
+      # count and decide. Decide: skip (unbound run / no PR / not labeled /
+      # unverified or outsider labeler), escalate (over cap), or fix. The
+      # counter increments BEFORE the agent runs, so an agent that crashes
+      # still consumes an attempt rather than looping forever — and it is
+      # computed only AFTER the binding and the labeler check pass, so a run
+      # that is not this PR's, or an outsider's label, never burns attempts.
+      # Downstream steps read every gate output (`act`, `pr`, `engine`,
+      # `attempt`, `cid`) from the LAST step, which re-emits the resolve
+      # step's, so the split is invisible to them.
+      #
+      # Bind first (finding 4628657; the composite's description carries the
+      # rule and its limits): the run is `inputs.ci_run_id`, which must be
+      # this workflow_run event's own run; it is read back from the API and
+      # must be this repo's pull_request run on `inputs.head_branch` whose
+      # latest attempt is the one that just failed; and it binds to the one
+      # same-repo PR from that branch open when it was created, at the run's
+      # head SHA, which must be the PR `inputs.pr_number` names. Anything
+      # else refuses with a reason the resolve step logs — no counter, stage,
+      # sync or model work follows. A persistent API failure fails this step,
+      # which the gate-failure failsafe surfaces (in the log only: with no
+      # bound PR there is no PR the note may be posted on).
+      - name: Bind the failed run to its PR
+        id: bind
+        uses: meridianlabs-ai/agents/.github/actions/bind-ci-run@main
+        with:
+          token: ${{ steps.mint.outputs.token }}
+          repo: ${{ github.repository }}
+          run-id: ${{ inputs.ci_run_id }}
+          event-name: ${{ github.event_name }}
+          event-run-id: ${{ github.event.workflow_run.id }}
+          event-run-attempt: ${{ github.event.workflow_run.run_attempt }}
+          expect-head-branch: ${{ inputs.head_branch }}
+          expect-pr: ${{ inputs.pr_number }}
+
       - name: Resolve PR and check the auto label
         id: resolve
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           HEAD: ${{ inputs.head_branch }}
-          PR_NUMBER: ${{ inputs.pr_number }}
+          # The BOUND PR (empty when the bind step refused), not the caller's
+          # number: the bind step required the two to agree.
+          PR_NUMBER: ${{ steps.bind.outputs.pr }}
+          BIND_OK: ${{ steps.bind.outputs.ok }}
+          BIND_REASON: ${{ steps.bind.outputs.reason }}
           AUTO_LABEL: ${{ inputs.auto_label }}
         run: |
           set -euo pipefail
           # `act` here is skip or verify (proceed to the labeler check); the
           # final act (skip/fix/escalate) is the Gate and count step's.
           act() { echo "act=$1" >>"$GITHUB_OUTPUT"; }
+          # An unbound run is skipped before any PR read: the bind step's
+          # reason says which check refused (no PR, a foreign or stale run,
+          # several PRs sharing the branch, a caller number that disagrees).
+          if [ "$BIND_OK" != "1" ]; then
+            echo "${BIND_REASON:-the run could not be bound to a PR (no reason recorded)}"
+            act skip; exit 0
+          fi
           # Retry a gh call on transient failure. A 5xx / secondary rate limit
           # returns an HTML error page, which `gh --jq` then rejects with
           # "invalid character '<'"; under `set -e` an unguarded call like that
@@ -330,16 +406,20 @@ jobs:
             done
             printf '%s' "$out"
           }
-          # The PR is the one the triggering run names (inputs.pr_number, from
-          # workflow_run.pull_requests[0].number), viewed by NUMBER and checked
-          # against the run — never found by branch name (Claude Security
-          # finding 4122320): `gh pr list --head` matches the ref name in ANY
-          # head repository, newest first, so a fork PR whose branch was named
-          # like an open same-repo PR was the one resolved — its labels decided
-          # whether a round ran, and the round's counter, comments, label
-          # removal and board moves landed on it while the fix was pushed to
-          # the same-repo branch. Each check that fails skips with its reason;
-          # there is deliberately no fallback to a branch listing.
+          # The PR is the one the bind step bound the run to (it required the
+          # caller's inputs.pr_number, from workflow_run.pull_requests[0].number,
+          # to agree), viewed by NUMBER and checked against the run again —
+          # never found by branch name (Claude Security finding 4122320): `gh
+          # pr list --head` matches the ref name in ANY head repository, newest
+          # first, so a fork PR whose branch was named like an open same-repo
+          # PR was the one resolved — its labels decided whether a round ran,
+          # and the round's counter, comments, label removal and board moves
+          # landed on it while the fix was pushed to the same-repo branch.
+          # (The bind step's own listing is a REST `pulls?head=owner:branch`
+          # ENUMERATION filtered to this repository's heads, used to prove no
+          # other PR can be the origin — not a lookup that picks one.) Each
+          # check that fails skips with its reason; there is deliberately no
+          # fallback to a branch listing.
           if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
             echo "No PR number from the triggering run (pr_number='$PR_NUMBER': CI ran on a non-PR branch, or the run named no PR); nothing to do."
             act skip; exit 0
@@ -502,26 +582,30 @@ jobs:
           echo "cid=$cid" >>"$GITHUB_OUTPUT"
           if [ "$next" -gt "$CAP" ]; then act escalate; else act fix; fi
 
-      # Failsafe: if any of the three gate steps errored (e.g. a transient API
+      # Failsafe: if any of the four gate steps errored (e.g. a transient API
       # failure the retries above couldn't ride out), `act` was never set, so
       # every step below skips and nothing reaches the PR — the loop would
       # stall silently with the label still on. Surface it so a human knows
       # to resume. Kept trigger-free ON PURPOSE: the body must not contain a
       # literal @auto or @review, or this comment would re-fire the loop (see
-      # design/auto-agent.md).
+      # design/auto-agent.md). Posted only on the PR the bind step BOUND the
+      # run to, never on the caller's unverified number: a bind step that
+      # errored has bound nothing, and the note then stays in the job log —
+      # a run whose PR is unknown may not write to a PR of the caller's
+      # choosing.
       - name: Surface gate failure
         if: >-
           always() &&
-          (steps.resolve.outcome == 'failure' || steps.labeler.outcome == 'failure' ||
-           steps.gate.outcome == 'failure')
+          (steps.bind.outcome == 'failure' || steps.resolve.outcome == 'failure' ||
+           steps.labeler.outcome == 'failure' || steps.gate.outcome == 'failure')
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.resolve.outputs.pr || inputs.pr_number }}
+          PR: ${{ steps.bind.outputs.pr }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
-          [ -z "${PR:-}" ] && { echo "No PR number; nothing to surface."; exit 0; }
+          [ -z "${PR:-}" ] && { echo "No bound PR (the bind step refused or errored); the failure stays in this log."; exit 0; }
           gh issue comment "$PR" --repo "$REPO" --body "$(printf '⚠️ auto: the CI-fix run errored before it could act (a transient GitHub API failure in a gate step). The loop is paused, not stopped — the label is still on. Re-run the failed job (%s) or push a new commit to resume.' "$RUN_URL")" || true
 
       # Atlas tracking (design/atlas-tracking.md): a CI-fix round is the agent
@@ -810,12 +894,23 @@ jobs:
       # rev-parse on its own line under -e, so a failure is this step's (not
       # echo's success with an empty sha); Surface agent errors reads the
       # outcome, and the emit step falls back to github.sha so the manifest
-      # carrying that error still validates.
+      # carrying that error still validates. The tip must be the head the
+      # failed run TESTED (the gate's `head_sha`, from the run's API record):
+      # the checkout is by branch name, so a push between the gate and this
+      # step would put the agent on code the failing logs do not describe.
+      # Then this step fails, nothing below runs, and the attempt is
+      # refunded; the newer push's own run drives the next round.
       - name: Record base SHA
         id: base
+        env:
+          TESTED_SHA: ${{ needs.gate.outputs.head_sha }}
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
+          if [ "$sha" != "$TESTED_SHA" ]; then
+            echo "::error::the checked-out tip $sha is not the head the failed run tested (${TESTED_SHA:-unknown}); the branch moved since the gate bound the run, so this round is for a stale run and does nothing."
+            exit 1
+          fi
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
 
       # ---- Deterministic base-branch sync (design/architecture.md) ---------
@@ -1510,7 +1605,7 @@ jobs:
           # and name all three causes so a tripped security invariant is not
           # read as a checkout hiccup and blindly re-triggered.
           if [ "${BASE_OUTCOME:-}" != "success" ]; then
-            err="checking out the PR branch, verifying no credential was persisted in the workspace, or reading the branch SHA failed before the agent started — see the job logs for which; no fix was attempted. Re-trigger to retry only if it was the checkout or the SHA read; a persisted credential is a workflow bug, not a transient."
+            err="checking out the PR branch, verifying no credential was persisted in the workspace, or reading the branch SHA failed before the agent started, or the checked-out tip was no longer the head the failed run tested (the branch moved since the gate bound the run) — see the job logs for which; no fix was attempted. A moved branch needs nothing: its own CI run drives the next round. Re-trigger to retry only if it was the checkout or the SHA read; a persisted credential is a workflow bug, not a transient."
           fi
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every
@@ -1605,7 +1700,14 @@ jobs:
             err="codex finished but committing its leftover edits failed — codex's own local commits, if any, still land; its uncommitted edits did not (see the job logs)."
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
-            err="the CI-fix step failed before producing a result (see the job logs)."
+            if [ -s "$file" ]; then
+              err="the CI-fix step failed before producing a result (see the job logs)."
+            else
+              # Never launched: the action refused the actor, or failed to
+              # start. The composer withholds the whole round (the runner's
+              # base merge included) and the attempt is refunded.
+              err="the CI-fix step failed before the agent launched (the action refused to run for this actor, or failed to start — see the job logs); nothing was landed, the runner's base merge included, and the attempt is refunded."
+            fi
           fi
           # Completed-but-blocked (Claude path): the action reports success,
           # but the agent left edits to tracked files uncommitted — they die
@@ -1720,6 +1822,22 @@ jobs:
       # the git dir is pinned by env like the guard and the commit step
       # (AGENTS.md; the reclaim's refusal of a redirect is the primary
       # defence, this is belt and braces).
+      #
+      # The Claude path has the same withholding for a step that FAILED
+      # WITHOUT LAUNCHING the agent (no execution output: the action's own
+      # actor-permission refusal, or a bootstrap failure before Claude
+      # started — the two are indistinguishable from outside the action).
+      # Before this (finding 4628657's local reproduction) such a round still
+      # bundled the runner's clean base merge, so a declined authorization
+      # pushed a marvin commit, re-ran CI and kept its attempt while the
+      # codex path's refusal landed nothing. Now neither engine lands a
+      # round its agent never ran: no git, no hand-back, and the refund
+      # (agent not started, nothing pushed) gives the attempt back. A Claude
+      # step that launched and then failed is unchanged — its commits, if
+      # any, land and owe the hand-back (the push re-runs CI). A round whose
+      # agent step was SKIPPED (a provisioning failure) is unchanged too: the
+      # Surface step's provisioning clauses document that the base merge
+      # lands there (decision 2026-09-09).
       - name: Compose landing manifest
         id: landing
         if: always()
@@ -1733,6 +1851,7 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          AGENT_STARTED: ${{ steps.launched.outputs.value }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
           PROV_NOTE: ${{ steps.provenance.outputs.note }}
@@ -1754,6 +1873,8 @@ jobs:
           head=""
           if [ "$ENGINE" = "codex" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
             echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed prep, user-setup, codex or reclaim step skips it); running no git — nothing lands and no hand-back is owed."
+          elif [ "$ENGINE" != "codex" ] && [ "${CLAUDE_OUTCOME:-}" = "failure" ] && [ "${AGENT_STARTED:-}" != "true" ]; then
+            echo "landing: the Claude step failed without launching the agent (no execution output: the action refused the actor, or failed to start); running no git — nothing lands, not the runner's base merge either, no hand-back is owed, and the attempt is refunded."
           elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
             if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
@@ -1820,6 +1941,10 @@ jobs:
       # start SHA. Either way the manifest still carries the Surface step's
       # error for the land job to post (the README's snippet skips the step
       # outright there; here the report matters more than the empty bundle).
+      # read-only on the Claude path too when the step failed without
+      # launching the agent (the composer's condition, see its comment): the
+      # runner's base merge above the start SHA is not packaged for a round
+      # nobody authorized to run.
       - name: Emit landing manifest
         if: always()
         uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
@@ -1835,7 +1960,7 @@ jobs:
           branch: ${{ inputs.head_branch }}
           pr-number: ${{ needs.gate.outputs.pr }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
-          read-only: ${{ needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success' && 'true' || 'false' }}
+          read-only: ${{ ((needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success') || (needs.gate.outputs.engine != 'codex' && steps.claude.outcome == 'failure' && steps.launched.outputs.value != 'true')) && 'true' || 'false' }}
 
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate,
@@ -1905,9 +2030,41 @@ jobs:
       # rules it out (a fix job is skipped only when its gate did not
       # succeed), so the test is belt and braces for the same "no artifact,
       # no agent" shape should the job gate ever loosen.
+      # Revalidate the run's context before anything is pushed (finding
+      # 4628657): the same derivation the gate made, from the API again, in
+      # this trusted job — the run is still this event's own failed
+      # pull_request run at the same attempt, it still binds to the one
+      # same-repo PR from the branch open when it was created, that PR is
+      # the gate's, still open, with the same base and its head still at the
+      # SHA the run tested. A PR retargeted, a branch pushed, a run re-run
+      # or a closed PR from the branch reopened during the round withholds
+      # the landing (the step below says so on the PR the GATE bound and
+      # fails the job); a PR opened during the round does not — created
+      # after the run, it cannot be the run's origin. Nothing the agent job
+      # uploaded is consulted for any of it. Same skip as the Land step: a
+      # cancelled or skipped fix job has nothing to land, and the refund
+      # below still runs.
+      - name: Revalidate the run binding
+        id: rebind
+        if: needs.fix.result != 'cancelled' && needs.fix.result != 'skipped'
+        uses: meridianlabs-ai/agents/.github/actions/bind-ci-run@main
+        with:
+          token: ${{ steps.mint.outputs.token }}
+          repo: ${{ github.repository }}
+          run-id: ${{ inputs.ci_run_id }}
+          event-name: ${{ github.event_name }}
+          event-run-id: ${{ github.event.workflow_run.id }}
+          event-run-attempt: ${{ github.event.workflow_run.run_attempt }}
+          expect-head-branch: ${{ inputs.head_branch }}
+          expect-pr: ${{ needs.gate.outputs.pr }}
+          revalidate: "true"
+          expect-head-sha: ${{ needs.gate.outputs.head_sha }}
+          expect-base-ref: ${{ needs.gate.outputs.base_ref }}
+          expect-run-attempt: ${{ needs.gate.outputs.run_attempt }}
+
       - name: Land
         id: land
-        if: needs.fix.result != 'cancelled' && needs.fix.result != 'skipped'
+        if: needs.fix.result != 'cancelled' && needs.fix.result != 'skipped' && steps.rebind.outputs.ok == '1'
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
           # The machine account (the minted app token), no fallback: the
@@ -1916,19 +2073,45 @@ jobs:
           # would not trigger the reviewer).
           token: ${{ steps.mint.outputs.token }}
           # The gate job's PR lookup — trusted, computed before any PR code
-          # ran, and the SAME value emit-landing got: the validator pins the
-          # manifest's pr_number to it, and it is where the final report
-          # goes when the manifest never validated (missing artifact,
-          # tampered manifest).
+          # ran, reproduced by the revalidation above, and the SAME value
+          # emit-landing got: the validator pins the manifest's pr_number to
+          # it, and it is where the final report goes when the manifest
+          # never validated (missing artifact, tampered manifest).
           pr-number: ${{ needs.gate.outputs.pr }}
-          # The PR's head ref, from the event payload: the gate resolved the
-          # PR BY this branch name (`gh pr list --head`), so it is the PR's
-          # live headRefName and the validator's pin for the manifest's
-          # branch — no lookup of its own needed.
+          # The PR's head ref: the gate's bind step required it to be the
+          # run's head branch and the bound PR's head ref, and the
+          # revalidation just did again, so it is the PR's live headRefName
+          # and the validator's pin for the manifest's branch — no lookup of
+          # its own needed.
           pr-head-ref: ${{ inputs.head_branch }}
           # The CI-fix manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""
+
+      # The revalidation refused: say so where the gate bound the run (the
+      # only PR this run may write to), trigger-free like every bot comment
+      # here, and fail the job so the refusal is a red X, not a quiet skip.
+      # The attempt is NOT refunded here (the refund's condition is the
+      # agent never having run): the round ran; it is its landing that the
+      # changed context withheld, and the branch's own next CI run drives
+      # the next round.
+      - name: Report withheld landing
+        if: ${{ !cancelled() && steps.rebind.outcome == 'success' && steps.rebind.outputs.ok != '1' }}
+        uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
+        with:
+          token: ${{ steps.mint.outputs.token }}
+          repo: ${{ github.repository }}
+          pr: ${{ needs.gate.outputs.pr }}
+          body: "⚠️ auto: the CI-fix round's landing was withheld — the run's context changed while the agent worked: ${{ steps.rebind.outputs.reason }} Nothing was pushed or posted from this round; the branch's next CI run starts the next one."
+          what: withheld-landing note
+
+      - name: Fail on a withheld landing
+        if: ${{ !cancelled() && steps.rebind.outcome == 'success' && steps.rebind.outputs.ok != '1' }}
+        env:
+          REASON: ${{ steps.rebind.outputs.reason }}
+        run: |
+          echo "::error::land: the landing was withheld — $REASON"
+          exit 1
 
       # Infra crashes must not burn fix attempts: the counter increments in
       # the gate job, BEFORE the agent runs (so real crashes still consume

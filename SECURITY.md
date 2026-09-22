@@ -64,6 +64,17 @@ text are checked by the tests under `tests/`.
   touches `.github/workflows/` fails at the push.
 - The reviewer runs only when a trusted commenter asks for it, except inside
   the `@auto` loop, where the machine account requests each round's review.
+- A CI-fix round acts on the PR its failed run is bound to, not on the
+  number the caller forwarded: the gate reads the run back from the API
+  (this repository's own failed `pull_request` run, on the forwarded
+  branch, its latest attempt) and binds it to the one same-repo PR from
+  that branch that was open when the run was created, at the run's head
+  SHA; the land job derives the same context again before pushing. Two
+  PRs sharing a branch, a run re-run, a branch pushed or a PR retargeted
+  mid-round stop the round rather than guess. This is a proof that no other
+  PR can be the run's origin, not a record of which PR GitHub considered the
+  trigger — the API carries none (design/auto-agent.md → Binding the failed
+  run to its PR).
 
 ## By design, not a finding
 

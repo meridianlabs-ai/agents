@@ -16,7 +16,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
 - `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
   step, lifted the same way: a landed fix or merge-only attempt owes the
   re-review request and sets no stage (a hand-back is mid-flight; Review is
-  the gate's, on escalation), the no-change relay, and the errored attempt.
+  the gate's, on escalation), the no-change relay, the errored attempt, and
+  the two refusal paths that land nothing — a Claude step that failed
+  without launching the agent (the base merge included; 4628657) and a
+  codex round whose guard did not succeed.
 - `test_review_fix_composer.py` — `claude-auto-review.yml`'s `Compose
   landing manifest` step, lifted from the workflow the same way: the
   review loop's ending contract (exactly one hand-back), the agent-field
@@ -66,13 +69,37 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   APPROVED review naming the companion's current head (never on
   `reviewDecision` alone) — the machine account's App login included, with
   GraphQL's bare Bot login restored to its REST form before the check.
+- `test_ci_fix_binding.py` — the CI-fix loop's run-to-PR binding (Claude
+  Security 4628657): the `bind-ci-run` composite's step, lifted the same
+  way and run against a stub `gh` answering the run record and the
+  repository's pull requests from the run's head branch. The reusable acts
+  only on the workflow_run event's own run, read back from the API (this
+  repo's `pull_request` run, same-repo head, on the forwarded branch, latest
+  attempt the one that failed); the candidate origins are the same-repo PRs
+  from that branch open when the run was created, and exactly one binds —
+  both association orders, same SHA / different base, a PR closed after the
+  run started, fork and same-owner-fork heads in the listing, pagination;
+  the bound PR must be the caller's number (an association from another
+  repository refuses), open, at the run's head SHA; `revalidate` reproduces
+  the gate's context before landing (a retargeted PR, a pushed branch, a
+  re-run, a reopened PR); actors are recorded, not judged; a persistent API
+  error fails the step. Every fixture is synthetic — GitHub's event
+  generation and association ordering are not reproduced. Also the
+  workflow's wiring (the event's own run id and attempt reach both bind
+  steps, Land waits for the revalidation, the fix job requires the tested
+  head and goes read-only on a Claude step that failed without launching)
+  and the example stub's forwarding of the event's own fields.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
   the auto label`, `Gate and count`), the escalation's reset (the
   `reset-auto-counters` composite's step, given the gate's `cid`) and the
   land job's `Refund infra-crashed attempt` step, lifted
   the same way and run against a stub
-  `gh`: the PR is resolved from `pr_number` and refused when closed, a fork
-  head or on another branch (never listed by branch name); the attempt
+  `gh`: the PR is the bind step's bound PR (an unbound run skips with the
+  bind step's reason and reads nothing), viewed by number and refused when
+  closed, a fork head or on another branch (never listed by branch name);
+  a write-access human's label authorizes another author's PR and a
+  read-only labeler disarms (the trusted-labeler policy 4628657's fix
+  preserves); the attempt
   counter is read only from a trusted author's marker comment (the loop's
   own first — the machine account under either of its logins — else a
   write-access account's; permission lookups cached and fail-closed; other

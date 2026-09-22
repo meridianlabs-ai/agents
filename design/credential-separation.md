@@ -446,7 +446,13 @@ the separate, write-capable channel that sections 3.5 and 7 describe. The
 only.
 
 **`claude-auto.yml`, the CI-fix loop** (`gate` → `fix` → `land`). The gate
-resolves the PR by the caller's `pr_number`, requires it open, same-repo and
+first binds the failed run to its PR (`bind-ci-run`, design/auto-agent.md →
+Binding the failed run to its PR): the run is the workflow_run event's own,
+read back from the API as this repository's failed `pull_request` run on the
+named head branch, and it binds to the one same-repo PR from that branch
+open when the run was created, at the run's head SHA — which must be the
+caller's `pr_number`; none, several or a disagreement skips. The gate then
+requires that PR open, same-repo and
 on the named head branch, verifies who applied the `auto` label
 (`verify-auto-labeler`: the machine account under either login or a
 write-access account, from the PR timeline; a GitHub App labeler or a failed
@@ -456,7 +462,11 @@ the label), and reads the attempt counter only from a marker comment by a
 `Record attempt` is the gate's write. The fix job holds the read-only job
 token and `actions: read` for the failed run's logs; its manifest carries the
 fix commits with `handback: true` and no stage, or a relay of the agent's
-final message when it committed nothing. The land job pushes, posts exactly
+final message when it committed nothing; a Claude step that failed without
+launching the agent packages nothing, the runner's base merge included, as
+the codex refusal path does. The land job derives the run's context again
+(`bind-ci-run` with `revalidate`) and pushes only when the gate's PR, head
+SHA, base ref and run attempt are reproduced, posts exactly
 `@review`, and refunds the attempt when the agent did not run and nothing was
 pushed, PATCHing only the loop's own counter comment.
 

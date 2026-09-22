@@ -1,0 +1,500 @@
+"""Tests for the CI-fix loop's run-to-PR binding (Claude Security 4628657).
+
+The caller stub forwards `workflow_run.pull_requests[0].number`, which
+GitHub documents as an association — the open PRs matching the run's head,
+"not necessarily ... pull requests that triggered the run" — so the reusable
+workflow binds the failed run to its PR itself: the `bind-ci-run`
+composite's step is lifted out of the action (the way the gate tests lift
+theirs) and run here against a stub `gh` that answers the two API reads it
+makes — the run's record and the repository's pull requests from the run's
+head branch — from fixtures, one case per rule:
+
+- the reusable acts only on the workflow_run event's own run, read back from
+  the API: this repository's own `pull_request` run, same-repo head, on the
+  forwarded branch, latest attempt the one that failed;
+- the candidate origins are the same-repo PRs from that branch that were
+  open when the run was created; exactly one binds (both association
+  orders, same SHA / different base, a PR closed after the run started,
+  fork heads and same-owner forks in the listing, a paginated listing);
+- the bound PR must be the caller's number (an association from another
+  repository refuses), open, at the run's head SHA (a head that advanced
+  while queued refuses);
+- with `revalidate`, the gate's context must be reproduced before landing;
+- actors are recorded, not judged (the trusted-labeler policy and the model
+  actions' own actor checks are unchanged), and a persistent API error fails
+  the step rather than binding.
+
+Every fixture is synthetic: no case here reproduces GitHub's event
+generation, the contents or order of a real completed-event association
+array, or a hosted run. What the tests prove is what the enforcing shell
+does with each input, including the inputs the scanner's scenario would
+produce if GitHub produced them.
+
+Also the workflow wiring the binding depends on (structural, on the YAML
+text): the gate and land jobs pass the event's own run id and attempt, the
+Land step is gated on the revalidation, emit-landing goes read-only on a
+Claude step that failed without launching, and the example stub forwards
+the event's own fields.
+"""
+
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+ACTION = ROOT / ".github" / "actions" / "bind-ci-run" / "action.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
+EXAMPLE = ROOT / "examples" / "claude-auto-stub.yml"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_ci_fix_gate import step_script  # noqa: E402
+from test_land_helpers import sh, step_block  # noqa: E402
+
+BIND = step_script(ACTION, "    - id: bind", 8)
+
+SHA_A = "a" * 40      # the head the run tested
+SHA_B = "b" * 40      # a later push
+RUN_CREATED = "2026-09-20T10:00:00Z"
+BEFORE = "2026-09-20T09:00:00Z"
+AFTER = "2026-09-20T10:05:00Z"
+
+# A stub `gh` answering the two reads from fixture files in $STUB and logging
+# every call. The run read 404s without a `run` fixture (a foreign or deleted
+# run); a `run-fail` fixture makes it fail like a 5xx (an HTML body) on
+# every attempt; the pull request listing is the `pulls` fixture verbatim
+# (one or more JSON arrays, as `--paginate` prints pages), `pulls-fail` fails
+# it the same way. Anything else is unexpected.
+GH_STUB = r'''#!/bin/bash
+printf '%s\n' "$*" >>"$STUB/calls"
+case "$1 $2" in
+  api\ repos/o/r/actions/runs/*)
+    if [ -f "$STUB/run-fail" ]; then echo '<html>502</html>'; exit 1; fi
+    if [ -f "$STUB/run" ]; then cat "$STUB/run"; else echo '{"message":"Not Found"}'; exit 1; fi ;;
+  api\ repos/o/r/pulls\?*)
+    if [ -f "$STUB/pulls-fail" ]; then echo '<html>502</html>'; exit 1; fi
+    if [ -f "$STUB/pulls" ]; then cat "$STUB/pulls"; else echo '[]'; fi ;;
+  *) echo "unexpected gh $*" >&2; exit 2 ;;
+esac
+'''
+
+
+def run_json(*, id=9002, repo="o/r", head_repo="o/r", event="pull_request", conclusion="failure",
+             branch="shared", sha=SHA_A, attempt=1, created=RUN_CREATED, workflow_id=77,
+             actor="alice", triggering_actor=None, pull_requests=()):
+    return json.dumps({
+        "id": id, "workflow_id": workflow_id, "event": event, "conclusion": conclusion,
+        "head_branch": branch, "head_sha": sha, "run_attempt": attempt, "created_at": created,
+        "repository": {"full_name": repo},
+        "head_repository": {"full_name": head_repo} if head_repo is not None else None,
+        "actor": {"login": actor}, "triggering_actor": {"login": triggering_actor or actor},
+        "pull_requests": [{"number": n, "base": {"ref": b, "repo": {"name": "r"}}} for n, b in pull_requests],
+    })
+
+
+def pr(number, *, state="open", created=BEFORE, closed=None, head_repo="o/r", head_ref="shared",
+       head_sha=SHA_A, base_repo="o/r", base_ref="main"):
+    return {"number": number, "state": state, "created_at": created, "closed_at": closed,
+            "head": {"ref": head_ref, "sha": head_sha, "repo": {"full_name": head_repo}},
+            "base": {"ref": base_ref, "sha": "c" * 40, "repo": {"full_name": base_repo}},
+            "labels": [{"name": "auto"}], "user": {"login": "someone"}}
+
+
+def pages(*page_lists):
+    return "\n".join(json.dumps(list(p)) for p in page_lists) + "\n"
+
+
+def bind(tmp_path, *, run=None, pulls=None, expect_pr="101", run_id="9002", event_run_id="9002",
+         event_attempt="1", event_name="workflow_run", head="shared", revalidate=None, fixtures=None):
+    """Run the lifted step under the composite's shell options (`bash
+    --noprofile --norc -eo pipefail`), with the fixtures given; `revalidate`
+    is the gate's (head_sha, base_ref, run_attempt) to reproduce."""
+    binp = tmp_path / "bin"
+    binp.mkdir(exist_ok=True)
+    for name, body in (("gh", GH_STUB), ("sleep", "#!/bin/bash\nexit 0\n")):
+        f = binp / name
+        f.write_text(body)
+        f.chmod(f.stat().st_mode | stat.S_IEXEC)
+    stub = tmp_path / "stub"
+    stub.mkdir(exist_ok=True)
+    if run is not None:
+        (stub / "run").write_text(run)
+    if pulls is not None:
+        (stub / "pulls").write_text(pulls if isinstance(pulls, str) else pages(pulls))
+    for name, content in (fixtures or {}).items():
+        (stub / name).write_text(content)
+    out = tmp_path / "output"
+    out.write_text("")
+    env = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
+           "GH_TOKEN": "x", "REPO": "o/r", "RUN_ID": run_id, "EVENT_NAME": event_name,
+           "EVENT_RUN_ID": event_run_id, "EVENT_RUN_ATTEMPT": event_attempt, "HEAD": head,
+           "EXPECT_PR": expect_pr, "REVALIDATE": "true" if revalidate else "false",
+           "EXPECT_HEAD_SHA": revalidate[0] if revalidate else "",
+           "EXPECT_BASE": revalidate[1] if revalidate else "",
+           "EXPECT_ATTEMPT": revalidate[2] if revalidate else ""}
+    res = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", BIND, check=False, env=env)
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    calls = (stub / "calls").read_text().splitlines() if (stub / "calls").exists() else []
+    return res, outputs, calls
+
+
+def refused(res, out, fragment):
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "" and "pr" not in out, out
+    assert fragment in out["reason"], out["reason"]
+    assert out["reason"] in res.stdout
+
+
+def run_reads(calls):
+    return [c for c in calls if c.startswith("api repos/o/r/actions/runs/")]
+
+
+def pull_lists(calls):
+    return [c for c in calls if c.startswith("api repos/o/r/pulls?")]
+
+
+# --- the happy path ----------------------------------------------------------
+
+
+def test_binds_the_only_same_repo_pr_open_on_the_branch_when_the_run_was_created(tmp_path):
+    res, out, calls = bind(tmp_path, run=run_json(pull_requests=[(101, "main")]), pulls=[pr(101)])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["reason"] == ""
+    assert out["pr"] == "101" and out["head_sha"] == SHA_A and out["head_branch"] == "shared"
+    assert out["base_ref"] == "main" and out["run_attempt"] == "1" and out["workflow_id"] == "77"
+    assert out["created_at"] == RUN_CREATED and out["actor"] == "alice" and out["triggering_actor"] == "alice"
+    # One run read, one enumeration of this repo's PRs from the branch, by
+    # the owner-qualified head filter, paginated. Never `gh pr view` or a
+    # branch-name lookup that picks one PR.
+    assert len(run_reads(calls)) == 1 and pull_lists(calls) == [
+        "api repos/o/r/pulls?state=all&per_page=100&head=o:shared --paginate"]
+    assert len(calls) == 2
+    assert "bound to PR #101 (shared -> main at " + SHA_A in res.stdout
+
+
+def test_the_head_branch_is_uri_encoded_in_the_listing(tmp_path):
+    res, out, calls = bind(tmp_path, run=run_json(branch="claude/issue-1 fix"), head="claude/issue-1 fix",
+                           pulls=[pr(101, head_ref="claude/issue-1 fix")])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1"
+    assert pull_lists(calls) == ["api repos/o/r/pulls?state=all&per_page=100&head=o:claude%2Fissue-1%20fix --paginate"]
+
+
+# --- the candidate set: which PRs can have been the origin --------------------
+
+
+@pytest.mark.parametrize("expect_pr", ["101", "102"])
+def test_two_prs_sharing_the_head_refuse_whichever_the_association_named_first(tmp_path, expect_pr):
+    # The scanner's topology (observed once on the fork, PRs 314/315): one
+    # branch into two bases. Both PRs' runs have the same head SHA, branch
+    # and event; nothing the API exposes tells them apart, and `[0]` is
+    # whichever GitHub listed first — modelled here by the number the caller
+    # forwards, since no fixture can reproduce GitHub's ordering. Neither
+    # order binds: no counter, stage, sync or model work follows.
+    res, out, calls = bind(tmp_path, expect_pr=expect_pr,
+                           run=run_json(pull_requests=[(101, "main"), (102, "alternate")]),
+                           pulls=[pr(101, base_ref="main"), pr(102, base_ref="alternate")])
+    refused(res, out, "cannot be bound to one PR: #101 (open, base main) and #102 (open, base alternate)")
+    assert "Close or retarget the PR that should not share the branch" in out["reason"]
+    assert len(calls) == 2
+
+
+def test_a_pr_closed_after_the_run_was_created_still_counts(tmp_path):
+    # The surviving-association case: the other PR closed before the run
+    # completed, so the completed event's list held only #101 — a singleton
+    # that is not thereby the origin. #102 was open when the run was created
+    # and could have triggered it, so the run stays ambiguous.
+    res, out, _ = bind(tmp_path, run=run_json(pull_requests=[(101, "main")]),
+                       pulls=[pr(101), pr(102, state="closed", closed=AFTER, base_ref="alternate")])
+    refused(res, out, "#101 (open, base main) and #102 (closed, base alternate)")
+
+
+def test_a_pr_closed_before_the_run_was_created_does_not_count(tmp_path):
+    # ...whereas one closed before the run existed cannot have triggered it:
+    # the legitimate PR's later failing run binds.
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101), pr(102, state="closed", closed=BEFORE)])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["pr"] == "101"
+
+
+def test_a_pr_opened_after_the_run_was_created_does_not_count(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101), pr(102, created=AFTER)])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["pr"] == "101"
+
+
+def test_a_pr_created_or_closed_at_the_runs_own_second_counts(tmp_path):
+    # Inclusive at both ends: second-precision timestamps make "the same
+    # second" the fail-closed side.
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101), pr(102, created=RUN_CREATED)])
+    refused(res, out, "cannot be bound to one PR")
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101), pr(102, state="closed", closed=RUN_CREATED)])
+    refused(res, out, "cannot be bound to one PR")
+
+
+def test_fork_heads_and_same_owner_forks_in_the_listing_are_not_candidates(tmp_path):
+    # `head=o:shared` matches every head in the owner's repositories; only
+    # THIS repository's heads are candidates (a fork PR named like the branch
+    # was finding 4122320's problem, and an owner may hold a same-named fork).
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[
+        pr(101), pr(103, head_repo="someone/r"), pr(104, head_repo="o/r-fork"), pr(105, head_ref="other")])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["pr"] == "101"
+
+
+def test_a_paginated_listing_is_flattened(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=pages([pr(101)], [pr(102, base_ref="alternate")]))
+    refused(res, out, "#101 (open, base main) and #102 (open, base alternate)")
+
+
+def test_no_candidate_refuses(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(102, state="closed", closed=BEFORE)])
+    refused(res, out, "no same-repo PR from 'shared' was open when run 9002 was created")
+
+
+# --- the bound PR against the caller's number, its state and its head ---------
+
+
+def test_an_association_from_another_repository_refuses(tmp_path):
+    # Observed on the fork (run 35355080785): the association list named an
+    # UPSTREAM PR — a number that means a different PR in this repository.
+    # The run binds to #101 here; the caller's 5470 disagrees, so nothing
+    # runs against either number.
+    res, out, _ = bind(tmp_path, expect_pr="5470", run=run_json(pull_requests=[(5470, "main")]), pulls=[pr(101)])
+    refused(res, out, "named PR #5470, but run 9002 binds to PR #101")
+
+
+def test_a_head_that_advanced_while_the_run_was_queued_refuses(tmp_path):
+    # The run tested SHA_A; the PR's live head is SHA_B (a push since). The
+    # newer push's own run supersedes this one; fixing SHA_B against SHA_A's
+    # logs is never right.
+    res, out, _ = bind(tmp_path, run=run_json(sha=SHA_A), pulls=[pr(101, head_sha=SHA_B)])
+    refused(res, out, f"PR #101's head is now {SHA_B} but run 9002 tested {SHA_A}")
+
+
+def test_a_bound_pr_that_closed_since_refuses(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101, state="closed", closed=AFTER)])
+    refused(res, out, "PR #101 is closed, not open")
+
+
+# --- the run itself: this event's own, this repo's own, still the failure ------
+
+
+def test_only_a_workflow_run_event_is_acted_on(tmp_path):
+    res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], event_name="issue_comment")
+    refused(res, out, "acts only on a workflow_run event")
+    assert calls == []
+
+
+def test_ci_run_id_must_be_the_run_this_event_completed(tmp_path):
+    res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], run_id="9003")
+    refused(res, out, "ci_run_id 9003 is not the run this event completed (9002)")
+    assert calls == []
+    for bad in ("", "abc", "0", "-1", "9002x"):
+        res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], run_id=bad, event_run_id=bad)
+        refused(res, out, "is not a run id")
+        assert calls == []
+
+
+def test_no_pr_number_skips_before_any_read(tmp_path):
+    for empty in ("", "null", "abc"):
+        res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], expect_pr=empty)
+        refused(res, out, "No PR number from the triggering run")
+        assert calls == []
+
+
+def test_a_foreign_run_refuses(tmp_path):
+    # Not found in this repo (the id belongs to another repository, or was
+    # deleted): a refusal, not a failed step.
+    res, out, calls = bind(tmp_path, pulls=[pr(101)])
+    refused(res, out, "run 9002 is not a run of o/r (not found)")
+    assert len(run_reads(calls)) == 1 and pull_lists(calls) == []
+    # Found but recorded against another repository.
+    res, out, _ = bind(tmp_path, run=run_json(repo="o/other"), pulls=[pr(101)])
+    refused(res, out, "run 9002 belongs to 'o/other', not o/r")
+
+
+def test_a_fork_head_run_refuses(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(head_repo="someone/r"), pulls=[pr(101)])
+    refused(res, out, "head is in 'someone/r' (a fork)")
+    res, out, _ = bind(tmp_path, run=run_json(head_repo=None), pulls=[pr(101)])
+    refused(res, out, "(a fork)")
+
+
+def test_a_run_that_is_not_a_pull_request_run_refuses(tmp_path):
+    # A `push` run on the same branch has the same head; it is not a PR's.
+    res, out, _ = bind(tmp_path, run=run_json(event="push"), pulls=[pr(101)])
+    refused(res, out, "is a 'push' run, not a pull_request run")
+
+
+def test_a_run_on_another_branch_than_the_caller_forwarded_refuses(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(branch="other"), pulls=[pr(101)])
+    refused(res, out, "ran on branch 'other', not 'shared'")
+
+
+def test_a_rerun_since_the_event_makes_it_stale(tmp_path):
+    # The event completed attempt 1; someone re-ran the failed jobs, so the
+    # run's latest attempt is 2 (in progress, or already green). The
+    # re-run's own completion event decides; this one does nothing.
+    res, out, _ = bind(tmp_path, run=run_json(attempt=2, conclusion=None, triggering_actor="bob"),
+                       pulls=[pr(101)])
+    refused(res, out, "has moved on to attempt 2 since attempt 1 completed")
+
+
+def test_a_latest_attempt_that_did_not_fail_refuses(tmp_path):
+    for conclusion in ("success", "cancelled", None):
+        res, out, _ = bind(tmp_path, run=run_json(conclusion=conclusion), pulls=[pr(101)])
+        refused(res, out, "not failure; nothing to fix")
+
+
+def test_a_run_without_a_usable_head_sha_or_creation_time_refuses(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(sha="not-a-sha"), pulls=[pr(101)])
+    refused(res, out, "records no head SHA")
+    res, out, _ = bind(tmp_path, run=run_json(created="yesterday"), pulls=[pr(101)])
+    refused(res, out, "records no creation time")
+
+
+def test_actors_are_recorded_not_judged(tmp_path):
+    # Binding is about WHICH PR the run is for. Who pushed or re-ran is
+    # emitted for the log; authorization stays the `auto` label (verified by
+    # who applied it) and the model actions' own actor checks — a maintainer
+    # may deliberately authorize another author's PR, and a PR-author or
+    # actor rule here would break that (design decision preserved).
+    res, out, _ = bind(tmp_path, run=run_json(actor="read-only-member", triggering_actor="a-writer"),
+                       pulls=[pr(101)])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["actor"] == "read-only-member" and out["triggering_actor"] == "a-writer"
+    assert "actor 'read-only-member', triggering actor 'a-writer'" in res.stdout
+
+
+def test_the_association_list_is_logged_as_information_only(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(pull_requests=[(101, "main"), (5470, "main")]), pulls=[pr(101)])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1"
+    assert "associated PRs (informational — GitHub lists the open PRs matching the head, not the trigger): r#101 (base main), r#5470 (base main)." in res.stdout
+
+
+# --- API failures fail the step; they never bind -------------------------------
+
+
+def test_a_persistent_run_read_error_fails_the_step(tmp_path):
+    res, out, calls = bind(tmp_path, pulls=[pr(101)], fixtures={"run-fail": ""})
+    assert res.returncode != 0
+    assert "ok" not in out
+    assert len(run_reads(calls)) == 4 and pull_lists(calls) == []       # four attempts, as ghr
+
+
+def test_a_persistent_listing_error_fails_the_step(tmp_path):
+    res, out, calls = bind(tmp_path, run=run_json(), fixtures={"pulls-fail": ""})
+    assert res.returncode != 0
+    assert "ok" not in out
+    assert len(pull_lists(calls)) == 4
+
+
+# --- revalidation before landing -----------------------------------------------
+
+
+def test_revalidation_reproduces_the_gates_context(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)], revalidate=(SHA_A, "main", "1"))
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["pr"] == "101"
+
+
+def test_revalidation_refuses_a_retargeted_pr(tmp_path):
+    # The runner merged `main` into the branch; landing a merge of the wrong
+    # base against a PR now targeting `release` is refused.
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101, base_ref="release")],
+                       revalidate=(SHA_A, "main", "1"))
+    refused(res, out, "base changed from 'main' to 'release' during the round")
+
+
+def test_revalidation_refuses_a_branch_pushed_during_the_round(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101, head_sha=SHA_B)], revalidate=(SHA_A, "main", "1"))
+    refused(res, out, f"PR #101's head is now {SHA_B} but run 9002 tested {SHA_A}")
+
+
+def test_revalidation_refuses_a_rerun_and_a_reopened_second_pr(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(attempt=2), pulls=[pr(101)], revalidate=(SHA_A, "main", "1"))
+    refused(res, out, "has moved on to attempt 2")
+    # A PR from the branch that was closed when the run was created but has
+    # been reopened since reads as open with its original creation time, so
+    # it joins the candidates: the fail-closed side.
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101), pr(102, base_ref="alternate")],
+                       revalidate=(SHA_A, "main", "1"))
+    refused(res, out, "cannot be bound to one PR")
+
+
+def test_revalidation_refuses_when_the_gates_context_is_missing(tmp_path):
+    for ctx in (("", "main", "1"), (SHA_A, "", "1"), (SHA_A, "main", ""), ("nope", "main", "1")):
+        res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], revalidate=ctx)
+        refused(res, out, "revalidation was asked for without the gate's context")
+        assert calls == [], ctx
+
+
+def test_revalidation_refuses_a_gate_head_sha_the_run_does_not_carry(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)], revalidate=(SHA_B, "main", "1"))
+    refused(res, out, f"head SHA read {SHA_B} at the gate and {SHA_A} now")
+
+
+# --- the wiring in claude-auto.yml and the example stub ------------------------
+
+
+def test_gate_and_land_pass_the_events_own_run_to_the_binding():
+    text = WORKFLOW.read_text()
+    for step_id in ("bind", "rebind"):
+        block = step_block(text, step_id)
+        assert "uses: meridianlabs-ai/agents/.github/actions/bind-ci-run@main" in block
+        assert "run-id: ${{ inputs.ci_run_id }}" in block
+        assert "event-name: ${{ github.event_name }}" in block
+        assert "event-run-id: ${{ github.event.workflow_run.id }}" in block
+        assert "event-run-attempt: ${{ github.event.workflow_run.run_attempt }}" in block
+        assert "expect-head-branch: ${{ inputs.head_branch }}" in block
+    assert "expect-pr: ${{ inputs.pr_number }}" in step_block(text, "bind")
+    rebind = step_block(text, "rebind")
+    assert 'revalidate: "true"' in rebind
+    assert "expect-pr: ${{ needs.gate.outputs.pr }}" in rebind
+    for name in ("head_sha", "base_ref", "run_attempt"):
+        assert f"expect-{name.replace('_', '-')}: ${{{{ needs.gate.outputs.{name} }}}}" in rebind
+        assert f"      {name}: ${{{{ steps.bind.outputs.{name} }}}}" in text     # the gate job's outputs
+
+
+def test_the_gate_resolves_the_bound_pr_and_the_land_step_waits_for_the_revalidation():
+    text = WORKFLOW.read_text()
+    resolve = step_block(text, "resolve")
+    assert "PR_NUMBER: ${{ steps.bind.outputs.pr }}" in resolve
+    assert "BIND_OK: ${{ steps.bind.outputs.ok }}" in resolve
+    assert "PR_NUMBER: ${{ inputs.pr_number }}" not in resolve
+    land = step_block(text, "land")
+    assert "steps.rebind.outputs.ok == '1'" in land.split("uses:")[0]
+    assert "pr-number: ${{ needs.gate.outputs.pr }}" in land
+    # The failsafe posts only on the bound PR, never on the caller's number.
+    surface = text[text.index("- name: Surface gate failure"):text.index("- name: Stage - Agent")]
+    assert "PR: ${{ steps.bind.outputs.pr }}" in surface and "inputs.pr_number" not in surface
+    assert "steps.bind.outcome == 'failure'" in surface
+
+
+def test_the_fix_job_requires_the_tested_head_and_withholds_an_unlaunched_claude_round():
+    text = WORKFLOW.read_text()
+    base = step_block(text, "base")
+    assert "TESTED_SHA: ${{ needs.gate.outputs.head_sha }}" in base
+    assert 'if [ "$sha" != "$TESTED_SHA" ]; then' in base and "exit 1" in base
+    landing = step_block(text, "landing")
+    assert "AGENT_STARTED: ${{ steps.launched.outputs.value }}" in landing
+    emit = text[text.index("- name: Emit landing manifest"):text.index("  land:\n")]
+    assert ("read-only: ${{ ((needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success') || "
+            "(needs.gate.outputs.engine != 'codex' && steps.claude.outcome == 'failure' && "
+            "steps.launched.outputs.value != 'true')) && 'true' || 'false' }}") in emit
+
+
+def test_the_example_stub_forwards_the_events_own_fields():
+    # The stub's part of the contract: the three inputs are the event's own
+    # fields, so the reusable's bind step compares like with like. The
+    # comment says what pull_requests[0] is and is not.
+    text = EXAMPLE.read_text()
+    assert "head_branch: ${{ github.event.workflow_run.head_branch }}" in text
+    assert "pr_number: ${{ github.event.workflow_run.pull_requests[0].number }}" in text
+    assert "ci_run_id: ${{ github.event.workflow_run.id }}" in text
+    assert "`pull_requests[0].number` is an ASSOCIATION, not the triggering PR" in text

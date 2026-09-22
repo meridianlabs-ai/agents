@@ -207,6 +207,106 @@ finding 4121989) that is enforced in three layers rather than assumed:
 The injection blast-radius argument in architecture.md → Permissions is
 unchanged.
 
+### Binding the failed run to its PR
+
+The CI-fix loop is the one entry point whose PR does not come from the event
+that names it: `workflow_run` names a *run*, and the stub forwards
+`workflow_run.pull_requests[0].number`. GitHub's REST schema describes that
+list as the open pull requests matching the run's head SHA or head branch
+and says they "do not necessarily indicate pull requests that triggered the
+run" — an association, not a trigger record, and its order is unspecified.
+Claude Security finding 4628657 (2026-09-21; investigated the same day, the
+qualified report and its reproduction harness are in the inspect_ai
+investigation worktree `investigate-4628657-ci-run-pr-binding`) built on
+that: two PRs from one head branch into different bases — a topology
+observed once on the fork, PRs 314 and 315 for two minutes on 2026-08-24 —
+share a head SHA, so both PRs' CI runs look alike and both PRs appear in
+each run's list; whichever is `[0]` decides which PR's label, counter,
+stage, base merge and landing a run drives, with the *other* PR's failing
+logs. Until 2026-09-22 the gate and the landing trusted that number as
+long as the PR was open, same-repo and on the run's branch, which any
+such pair satisfies.
+
+What the investigation did and did not establish shapes the fix, and is
+recorded here so a later reader does not re-assert the parts that failed:
+
+- **Supported.** The gate and the landing validator bound the run to its PR
+  by nothing but the caller's number and the branch name; a wrongly
+  associated run reached the counter, the stage move, the base merge and
+  (on the Claude path, after the model action refused the actor) a landed
+  merge-only push. Reproduced against the pinned shell with a fake API and
+  local repositories, not on GitHub.
+- **Not supported.** The scanner's "any public reader can open a same-repo
+  PR" — GitHub's documentation requires source write access or organization
+  membership. A read-only *organization member* is the reduced-privilege
+  case that remains relevant. Both model actions check actors (Claude the
+  workflow's and the original run's, Codex the current one) and refuse a
+  read-only human, after the gate's writes and the base sync. No retained
+  API response held a two-element list; the completed event's actual array
+  contents and ordering are unobserved. No live attack, credential
+  disclosure or `main` write was shown.
+
+The fix (`bind-ci-run`, a shared composite the gate runs first and the land
+job runs again before pushing) establishes the run's context from trusted
+reads and refuses everything else:
+
+1. The event must be `workflow_run` and `ci_run_id` its own run; the run is
+   read back from the API and must be this repository's own `pull_request`
+   run, with a same-repo head, on the forwarded branch, whose latest attempt
+   is the one that just completed and concluded `failure`.
+2. The candidates are the pull requests of this repository whose head is
+   this repository's branch and that were **open when the run was created**
+   (`created_at` on or before the run's; still open, or closed on or after
+   it). Exactly one binds. Several refuse — the same-head/different-base
+   pair, and the PR that closed after the run started but whose closing
+   left the other as the sole surviving association. A PR opened after the
+   run cannot be its origin and does not count.
+3. The bound PR must be the number the caller forwarded (a fork run's list
+   has been seen naming an *upstream* PR — a number that means another PR
+   here), still open, with its live head at the run's `head_sha` (a branch
+   that advanced while the run was queued is a stale run; the new push's own
+   run supersedes it). The fix job then requires its checkout to sit at
+   that SHA, and the land job derives the whole context again and requires
+   the gate's PR, head SHA, base ref and run attempt to be reproduced.
+
+Why a singleton rule and not a proof of origin: GitHub exposes no immutable
+field that names the triggering PR of a `pull_request` run — not the run
+record (whose `head_sha` is the PR head, not the merge commit it tested),
+not the check suite (the same association semantics), not the job records.
+A signed receipt from the CI job itself (the job's OIDC token carries
+`ref: refs/pull/N/merge`, `base_ref`, `head_ref`, `run_id`) would be exact,
+but the CI job runs the PR's own workflow file and is the adversary's, so
+it would need every caller's CI workflow changed to mint and publish a
+token whose only safe use is this check, and a verifier for it; that is a
+design decision for Ransom, not a drop-in (recorded under Open follow-ups).
+The singleton rule proves the weaker thing that suffices: *no other*
+same-repo PR can have been the origin, so acting on this one is acting on
+the run's PR. Its cost is availability, by design: while two PRs share a
+branch, neither PR's failing runs drive a round, and the gate says which
+two and why; a maintainer closes or retargets the one that should not be
+there and the next push or re-run binds cleanly. An organization member
+who can open PRs can hold a branch in that state, which is the fail-closed
+side and no more than the ability to open PRs already grants.
+
+What the binding leaves alone, deliberately: **authorization**. The `auto`
+label, verified by who applied it, stays the opt-in — a maintainer may
+label another author's PR on purpose, and a "PR author must be a writer"
+rule would refuse that while telling two writers' PRs apart no better.
+The run's `actor` and `triggering_actor` are logged for the record, not
+judged; the model actions' own actor checks stay where they are. And a
+Claude step that fails *without launching the agent* (the action's actor
+refusal, or a bootstrap failure — indistinguishable from outside it) now
+lands nothing, the runner's base merge included, and its attempt is
+refunded, as the codex refusal path always did; a step that launched and
+then failed still lands what it committed. A provisioning failure, whose
+agent step is skipped rather than failed, keeps landing the base merge
+(decision 2026-09-09, recorded on the Surface step).
+
+Tests: `tests/test_ci_fix_binding.py` runs the composite's shell against
+synthetic run and pull-request records for every rule above, both
+association orders included; they do not reproduce GitHub's event
+generation or ordering, which remain unobserved.
+
 The **`auto` label is the canonical "this loop is live" state**, which makes it a
 one-click **kill-switch**: every turn re-checks the label *before* doing work, so
 **removing the label halts all further turns** immediately. This is cleaner than
@@ -558,7 +658,10 @@ The simple case ships first and is independently useful:
   branch — a mismatch skips with its reason, and there is no fallback to a
   branch-name listing (`gh pr list --head` matches the ref name in any head
   repository, so a fork PR named like an open same-repo PR was the one
-  resolved); and the attempt counter is read, in the gate and in the land
+  resolved); since 2026-09-22 that number is first BOUND to the failed run
+  by the gate itself (Binding the failed run to its PR, above: the one
+  same-repo PR from the branch open when the run was created, at the run's
+  head SHA; finding 4628657); and the attempt counter is read, in the gate and in the land
   job's refund, only from a marker comment whose author is one of the
   workflow's `TRUSTED_LOGINS` (the loop's own comment, preferred) or holds
   write access — an outsider's marker comment is ignored and never edited,
@@ -662,6 +765,23 @@ The simple case ships first and is independently useful:
   cheap pre-filter (consistency with `claude-review.yml`, reduces forged-marker
   surface); the deployed inspect_flow and fork stubs can be synced to match when
   convenient — purely surface-reduction, not a security gap.
+- **Exact run-to-PR provenance (design decision, not started).** The
+  binding above (Binding the failed run to its PR) refuses when two PRs
+  share a branch because no API field names a `pull_request` run's
+  triggering PR. The one exact source GitHub offers is the CI job's own
+  OIDC token (`ref: refs/pull/N/merge`, `base_ref`, `head_ref`, `sha` of
+  the merge commit, `run_id`, `run_attempt`, signed by GitHub), which would
+  let a run drive the right PR even while another shares its branch. It
+  would cost: every caller's CI workflow minting a token with a dedicated
+  audience and publishing it as an artifact (the CI job runs the PR's own
+  workflow file, so the receipt is adversary-produced and only the
+  signature is trusted), a verifier in the gate (issuer, signature,
+  audience, expiry, exact run id and attempt), and a policy for callers
+  that do not publish one (fail closed to today's singleton rule). Bearer
+  tokens in artifacts need their own review even with a private audience.
+  Ransom's call whether the availability cost of the singleton rule is
+  worth avoiding; the 2026-09-21 investigation lists it as a design
+  candidate, not a tested drop-in.
 
 ## Kickoff: `@auto` as a distinct trigger
 

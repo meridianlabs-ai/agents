@@ -24,8 +24,8 @@ take effect on every repo's next run.
   `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
   `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
-  `post-pr-comment`, `resolve-reported-threads`, `pr-feedback-context`,
-  `emit-landing`, `land`).
+  `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
+  `pr-feedback-context`, `emit-landing`, `land`).
   Referenced fully-qualified
   (`meridianlabs-ai/agents/.github/actions/<name>@main`) so they resolve
   regardless of what the job checked out; put step bodies that would otherwise
