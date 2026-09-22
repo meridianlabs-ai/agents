@@ -76,9 +76,8 @@ take effect on every repo's next run.
   PRs into workspaces; a local review skill runs the review), so the
   GitHub-hosted autonomous loop is not engaged on new PRs. The `@auto`
   workflows themselves stay in place for now — this is a policy change,
-  not a removal. Still request the CI review with a top-level `@review`
-  comment (mandatory for workflow-editing PRs; see CLAUDE.md), then
-  address its findings yourself on the branch. If a PR does carry the
+  not a removal. Review workflow-editing PRs in Orca and address any
+  findings on the branch. If a PR does carry the
   label (a Marvin-opened PR from an `auto` issue inherits it), don't
   race the loop — it is serialized per PR, and a session push mid-round
   invalidates its state.
