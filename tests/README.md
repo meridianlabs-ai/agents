@@ -144,6 +144,12 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   step 3 block with the helper and `gh` stubbed — that the companion merge
   happens only after `companion_mergeable.py` passes on the head as it is
   then, pinned to the SHA it returned, and never after a failed recheck.
+  Also lifts the CHANGELOG-section check and the conflicted-paths block
+  (finding 4628737): entries carrying apostrophes, backticks, `$(…)`, quotes
+  and regex specials are each reported with their heading and none of them
+  runs (the block fails on an entry under a released heading, a dropped
+  entry, or a copy under both), and a conflicted file name with spaces,
+  quotes and `$(…)` is inspected without reaching the shell's parser.
 - `test_checks_at_head.py` — the merge queue's deferral of External PR
   trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
   Claude Security 4122327 criterion 2): the decision on canned payloads

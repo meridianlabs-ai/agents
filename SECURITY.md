@@ -162,6 +162,10 @@ text are checked by the tests under `tests/`.
   known exceptions.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
+  The skills under `skills/` that a maintainer's local agent runs with their
+  `gh` login follow the same rule for text from a PR or its tree — entry
+  text, file names, branch names, titles: a quoted variable, the environment
+  or stdin, never a value pasted into a command template (finding 4628737).
 - Every author check goes through `TRUSTED_LOGINS` or a permission lookup
   that fails closed; never a substring of a comment or issue body.
 - Every write the agent asks the machine account for goes through the
