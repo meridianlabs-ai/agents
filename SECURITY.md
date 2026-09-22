@@ -49,6 +49,24 @@ text are checked by the tests under `tests/`.
   token minted from it; its own job token is read-only. The Claude action's
   own token, present while that step runs, is the exception described under
   "By design" below.
+- A job that runs the Claude agent references no `OPENAI_API_KEY`. Each
+  reusable workflow runs each engine in a job of its own (`agent` and
+  `agent-codex`, `review` and `review-codex`, `fix` and `fix-codex`), the
+  trusted gate's `engine` output selecting exactly one at the job level,
+  which GitHub evaluates before dispatching a job. A secret a step
+  references is delivered to the job's runner whether or not that step's
+  `if:` ends up true (the runner builds its `secrets` context from the job
+  message before any step runs), so the codex key is referenced only in the
+  codex job's codex-action step and a Claude-engine run's job message never
+  carries it (Claude Security finding 4629153).
+- In a codex job nothing from the checked-out tree executes as the runner:
+  the caller's `claude-setup` action is not run there, and the shared
+  provisioning recipe (uv and a dev-install of the checkout, the tree's own
+  build backend) runs as the unprivileged `codex` user after that user
+  exists and before the codex-action step, so a head the pipeline itself
+  produced from an outsider's issue text meets the same boundary as codex
+  itself: no sudo, no GitHub token, no OIDC request token, no view of the
+  runner's processes (finding 4628446).
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -158,8 +176,13 @@ text are checked by the tests under `tests/`.
   controls, in any job that runs an agent or code from a checkout the org
   does not fully control. Not in `env:`, not as an action input, not through
   a composite. The model credential (Workload Identity Federation, or
-  `OPENAI_API_KEY` for codex) and the Claude action's own token are the
-  known exceptions.
+  `OPENAI_API_KEY` in the codex job alone) and the Claude action's own token
+  are the known exceptions. Never reference `OPENAI_API_KEY` in a job that
+  runs the Claude agent — a referenced secret reaches the job's runner
+  whatever the referencing step's `if:` says — and never run code from the
+  checkout as the runner in a codex job: those jobs provision with
+  `provision-fallback` `user: codex` after `create-codex-user`, and no
+  `./`-local action.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
 - Every author check goes through `TRUSTED_LOGINS` or a permission lookup

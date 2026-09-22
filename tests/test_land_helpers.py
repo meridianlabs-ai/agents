@@ -12,6 +12,7 @@ shows up as a failing test rather than a red land job on every caller.
 """
 
 import json
+import re
 import os
 import subprocess
 from pathlib import Path
@@ -57,6 +58,39 @@ def step_block(text: str, step_id: str, indent: int = 6) -> str:
     start = next(i for i, line in enumerate(lines) if line.strip() == f"id: {step_id}" or line.strip() == f"- id: {step_id}")
     end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(" " * indent + "- ")), len(lines))
     return "".join(lines[start:end])
+
+
+def job_block(text: str, job: str) -> str:
+    """The text of one top-level job of a workflow: from its `  <job>:` line
+    to the next top-level job (or the end). The four reusable workflows run
+    each engine in its own job since 2026-09-22 (findings 4628446 and
+    4629153), so a step lifted by id must be lifted from the right job."""
+    body = text[text.index("\njobs:\n") + len("\njobs:\n"):]
+    starts = [(m.start(), m.group(1)) for m in re.finditer(r"^  ([a-z_-]+):$", body, re.M)]
+    for i, (s, name) in enumerate(starts):
+        if name == job:
+            return body[s:(starts[i + 1][0] if i + 1 < len(starts) else len(body))]
+    raise KeyError(job)
+
+
+def lift_run(text: str, anchor: str) -> str:
+    """A step's bash, lifted from workflow TEXT (a job block, usually): the
+    block scalar under the first `run: |` after the anchor line is every
+    following line indented past the `run:` key, up to the first that is
+    not — test_review_fix_gate.lift_step over text instead of a path."""
+    lines = text.splitlines()
+    start = lines.index(anchor)
+    run_at = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+    indent = len(lines[run_at]) - len(lines[run_at].lstrip()) + 2
+    body = []
+    for line in lines[run_at + 1:]:
+        if line.strip() == "":
+            body.append("")
+        elif line.startswith(" " * indent):
+            body.append(line[indent:])
+        else:
+            break
+    return "\n".join(body) + "\n"
 
 
 # --- lib.sh -----------------------------------------------------------------

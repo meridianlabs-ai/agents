@@ -70,7 +70,11 @@ differ; the exceptions are listed there, not assumed away here.
 - **I4. Untrusted code never runs before authorization or outside a sandbox.**
   Who may trigger a run is decided by a deterministic step, by login or by a
   permission lookup that fails closed, before any PR head is checked out and
-  before any local action runs. Code from a fork head or an external checkout
+  before any local action runs. In a codex job no code from the checkout
+  runs as the runner at all: the caller's `claude-setup` action is never
+  run there and the provisioning recipe runs as the `codex` user, after
+  that user exists (findings 4628446 and 4629153, 2026-09-22; section 3.1).
+  Code from a fork head or an external checkout
   runs only inside the reviewer's OS-level sandbox, and project configuration
   from that tree (`.claude/`, `.mcp.json`, `CLAUDE.md`) is removed before the
   agent starts.
@@ -100,26 +104,51 @@ differ; the exceptions are listed there, not assumed away here.
 
 ### 3.1 Gate, agent, land
 
-The four reusable workflows are three jobs each (the `actions`
-repository's two agent workflows fold the gate's role into the agent job's
-`if:` and run two; section 4.2):
+The four reusable workflows are four jobs each — a gate, one untrusted job
+per engine of which the gate's `engine` output selects exactly one, and
+the land job (the `actions` repository's two agent workflows fold the
+gate's role into the agent job's `if:` and run two; section 4.2):
 
 ```
 gate   (trusted)    trigger check by login or permission lookup; the pre-agent
                     writes as the machine account (👀, stage → Agent, opt-in
                     label, loop counters); mints its own token; checks out
-                    no PR code.
-  -> agent/fix/review (untrusted)
-                    checkout with persist-credentials: false; provisioning;
-                    the agent; commits locally and never pushes; the read-only
-                    job token, plus the Claude action's own token while its
-                    step runs; emit-landing runs last, if: always(), with no
-                    token.
-  -> land  (trusted, fresh runner)
+                    no PR code; resolves the engine.
+  -> agent/fix/review (untrusted, Claude engine; if: engine != 'codex')
+                    checkout with persist-credentials: false; provisioning
+                    as the runner (the caller's claude-setup or the fallback
+                    recipe); the agent; commits locally and never pushes;
+                    the read-only job token, plus the Claude action's own
+                    token while its step runs; names no other secret;
+                    emit-landing runs last, if: always(), with no token.
+  -> agent-codex/fix-codex/review-codex (untrusted, codex; if: engine == 'codex')
+                    the same checkout and sync; the codex user boundary;
+                    provisioning AS the codex user (the fallback recipe,
+                    never the caller's action); codex, the reclaim and the
+                    deterministic commit; the read-only job token and
+                    OPENAI_API_KEY at the codex-action step — the one job
+                    of the workflow that references it.
+  -> land  (trusted, fresh runner; needs both agent jobs)
                     mints its own token; downloads the artifact; validates
                     the manifest; pushes the bundle; opens or adopts the PR;
                     posts; resolves; files issues; moves the stage; reports.
 ```
+
+The engine split (2026-09-22, findings 4628446 and 4629153) exists because
+a secret a step references is delivered to the job's runner whether or not
+the step runs: the runner builds its `secrets` expression context from the
+job message before the first step (`actions/runner`,
+`Runner.Worker/ExecutionContext.cs`: `ExpressionValues["secrets"] =
+Global.Variables.ToSecretsContext()` in `InitializeJob`), and a step's `if:`
+is evaluated on the runner when the step is reached (`StepsRunner`), so the
+codex step's `${{ secrets.OPENAI_API_KEY }}` used to put the OpenAI key into
+every Claude-engine agent job's message, where the unsandboxed, sudo-capable
+Claude agent could read it out of the runner's memory. A job-level `if:` is
+decided by the service before the job is dispatched, and a skipped job has
+no job message. Whether the service scopes referenced secrets per job or per
+called workflow is not documented; the split makes the Claude job's YAML
+reference no key, which is the documented condition for a secret not to be
+delivered, and section 7 records the remaining uncertainty.
 
 The gate exists because some writes must happen before the agent runs (the
 acknowledgement, the stage move, the loop's attempt counter), and those are
@@ -404,9 +433,16 @@ human step.
   Federation: the job's OIDC token is exchanged for a short-lived Anthropic
   credential under a rule that matches `repository_owner ==
   "meridianlabs-ai"`; there is no API key. The codex engine has no such
-  exchange, so `OPENAI_API_KEY` is the one secret an agent job names,
-  consumed only on items labelled `engine:codex`, and codex itself runs as
-  an unprivileged `codex` user with no GitHub credential at all.
+  exchange, so `OPENAI_API_KEY` is the one secret an agent job names — the
+  codex job, at its codex-action step, and no other job (section 3.1): the
+  Claude job's YAML references it nowhere, so a Claude-engine run's job
+  message never carries it. Codex itself runs as an unprivileged `codex`
+  user with no GitHub credential at all, and since 2026-09-22 so does the
+  provisioning of its checkout: the codex jobs run the shared fallback
+  recipe under `sudo -u codex -H` after `create-codex-user`, never the
+  caller's `claude-setup` composite as the runner, so a hostile build hook
+  or action in a head the pipeline itself authored runs with codex's
+  boundary, not ahead of the key (finding 4628446).
 
 The agent commits and stops (decision: Ransom, 2026-09-09: every comment the
 loop produces is posted by the land job as the machine account after the
@@ -662,8 +698,13 @@ results against the invariant each one tests.
   run the lifted `run:` scripts against a stub `gh` and check that every
   trust decision is by login or permission, fail-closed (I4).
 - `grep -n 'secrets\.' .github/workflows/<file>` must hit only the
-  `workflow_call` declarations, the `gate` job, the `land` job and the codex
-  step's `OPENAI_API_KEY` (I1, I2). `grep -rn 'secrets\.'
+  `workflow_call` declarations, the `gate` job, the `land` job and the
+  codex job's codex-action step (`openai-api-key: ${{
+  secrets.OPENAI_API_KEY }}`); the Claude job hits nothing (I1, I2;
+  `test_engine_job_isolation.py` checks this, the job-level engine
+  selection, the land job's `needs`, and that the codex job runs no
+  `./`-local action and provisions with `user: codex` between
+  `create-codex-user` and the codex-action step). `grep -rn 'secrets\.'
   .github/actions/emit-landing` stays empty.
 - `grep -n 'persist-credentials' .github/workflows/<file>` shows `false` on
   every checkout (I5); `grep -n '${{ inputs\.' <file>` inside `run:` blocks
@@ -679,7 +720,17 @@ results against the invariant each one tests.
   `.claude/settings.json` leaves no marker file after a maintainer's
   `@review`, and a no-role account's `@review`, `@auto` or forged marker
   comment produces no run past the gate (I4); the run's only artifact is the
-  landing directory (I6).
+  landing directory (I6). For the engine split (not yet run as of
+  2026-09-22): a canary Claude-engine run on a caller whose stub passes
+  `OPENAI_API_KEY` dumps the Runner.Worker process memory as root from
+  inside the agent step (`sudo gcore` or `/proc/<pid>/mem`) and finds no
+  `sk-` value and no App private key — the first settles that the split
+  keeps the key out of the Claude job's message, the second whether the
+  service scopes referenced secrets per job or per called workflow
+  (section 7); and a `claude/issue-N-*` branch carrying a hostile
+  `claude-setup/action.yml` and a `pyproject.toml` build hook that each
+  write a marker file as the invoking uid triggers, on a codex run, no
+  marker owned by `runner` — only `codex`-owned ones, if any.
 
 ## 7. Costs and residual risks
 
@@ -756,3 +807,28 @@ results against the invariant each one tests.
   before the push with a plain report line, and the agent prompts say not
   to edit them (section 3.4). A run that needs a workflow change still
   spends itself before the refusal is posted.
+- **Secret delivery is per job by GitHub's documented condition, not by a
+  documented rule.** GitHub says a referenced secret can be harvested by
+  code running in the job and that unreferenced ones are scrubbed; it does
+  not say whether "referenced" is decided per job or per called workflow.
+  The engine split gives the Claude job a YAML that references no
+  `OPENAI_API_KEY`, and the stubs keep passing the key to every reusable
+  workflow (the declaration is kept for backward compatibility: a stub
+  naming an undeclared secret fails to load). If delivery were per called
+  workflow, the Claude job's message would still carry the key, and the
+  App secrets the gate and land jobs reference with it; the canary in
+  section 6 is the check. Nothing in this repository can settle it.
+- **The Claude job still executes the checkout as the runner.** Its
+  provisioning (the caller's `claude-setup`, the fallback dev-install) and
+  the agent's own test runs execute the tree's code unsandboxed, as the
+  runner, with sudo, the OIDC request token and the Claude action's
+  installation token in reach — the concession SECURITY.md makes for
+  same-repo heads, now stated for heads the pipeline itself authored as
+  well: an outsider's issue text steers the first run's agent, and a second
+  automated run on the branch it produced executes that branch's build
+  hooks before the agent. What the split removes from that job is the
+  OpenAI key; what remains is exactly what a prompt-injected Claude agent
+  already holds there. Refusing agent bundles that touch paths a later job
+  executes (`.github/actions/**`, `pyproject.toml` build configuration,
+  `.claude/**`, `CLAUDE.md`, `.mcp.json`) at the land job is the open
+  follow-up from finding 4628446, not done here.

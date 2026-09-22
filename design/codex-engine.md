@@ -147,12 +147,21 @@ engine uses an **`OPENAI_API_KEY` org secret** (created by Ransom,
 2026-08-31) — the one exception to this repo's no-API-key-secrets
 invariant. Containment: the reusable workflows declare it as an
 optional secret, stubs pass it explicitly (never `secrets: inherit`),
-and it is exposed ONLY to the `openai/codex-action` step, which uses it
-server-side to mint a scoped proxy credential; it never appears in
-prompts, sandboxed command environments, or other steps. Repos without
-the secret: codex-labeled runs fail at the codex step with a clear
-error rather than silently falling back (a silent Claude fallback would
-misattribute output).
+and it is referenced ONLY by the `openai/codex-action` step of the codex
+job — the `agent-codex`, `review-codex` and `fix-codex` jobs, one per
+workflow, which the gate's `engine` output selects at the job level (One
+job per engine, below). The action uses it server-side to mint a scoped
+proxy credential; it never appears in prompts, sandboxed command
+environments, or other steps, and since 2026-09-22 never in another job's
+message either: until then the codex step sat in the same job as the
+Claude agent with a step-level `if:`, and a referenced secret reaches the
+job's runner whatever the step's `if:` says (the runner builds its
+`secrets` context from the job message before any step runs), so every
+Claude-engine run's job carried the key where the unsandboxed,
+sudo-capable Claude agent could read it out of Runner.Worker's memory
+(Claude Security finding 4629153). Repos without the secret: codex-labeled
+runs fail at the codex step with a clear error rather than silently
+falling back (a silent Claude fallback would misattribute output).
 
 ## Safety strategy: unprivileged-user, not drop-sudo
 
@@ -384,9 +393,10 @@ Verification for a change here, all cases prompted to codex (any verb):
 - **External proxy reviews stay on Claude** — their contributor-code
   sandbox overlay is Claude-settings-specific.
 - **Codex reviews run tests since 2026-09-01** (they were static in the
-  first cut): the review step uses the `:workspace` profile with
-  claude-setup provisioning, so codex can verify findings with
-  pytest/ruff/mypy like the Claude reviewer. Read-only-ness of the
+  first cut): the review step uses the `:workspace` profile with a
+  provisioned venv (claude-setup until 2026-09-22, the fallback recipe run
+  as the codex user since — One job per engine, below), so codex can
+  verify findings with pytest/ruff/mypy like the Claude reviewer. Read-only-ness of the
   review is enforced by instruction plus structure — the review path
   has no landing step and no push credentials, so stray
   writes die with the runner (decided after inspect_ai#392's review
@@ -494,9 +504,12 @@ Verification for a change here, all cases prompted to codex (any verb):
   before codex starts, so a venv on `GITHUB_PATH` does not resolve as bare
   names (inspect_flow#818: `command -v pytest ruff mypy` printed nothing;
   only the `drop-sudo` strategy forwards the runner PATH). The compose
-  steps run as the runner with the provisioned PATH, discover the paths
-  there (`pytest ruff mypy pyright python3`, the same list in all four
-  workflows), and splice them into the verification instruction.
+  steps used to run as the runner with the provisioned PATH and discover
+  the paths there; since the provisioning runs as codex (2026-09-22) they
+  look the same list (`pytest ruff mypy pyright python3`, in all four
+  workflows) up in the venv's bin directory the `provision-fallback`
+  composite reports (`bin`), and splice the paths into the verification
+  instruction.
 - **CI-trigger parity depends on the machine account's secrets**: codex-path
   pushes fall back to `github.token` where the app secrets are absent, and
   those pushes do not trigger CI (the Claude path pushes via the app token,
@@ -612,6 +625,82 @@ Verification for a change here, all cases prompted to codex (any verb):
   execution log (#65).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
+
+## One job per engine (2026-09-22)
+
+Each reusable workflow runs the codex engine in a job of its own —
+`agent-codex` (claude.yml), `review-codex` (claude-review.yml),
+`fix-codex` (both loops) — next to the Claude job it used to share, and the
+gate's `engine` output selects exactly one of the two at the job level
+(`if: needs.gate.outputs.engine == 'codex'` / `!= 'codex'`). The land job
+`needs` both and gates its steps on the one that ran (`AGENT_RESULT` /
+`AGENT_OUTCOME` job env in claude.yml and the loops; the reviewer's land
+job skips on either being cancelled and reads the Claude job's outputs,
+which are empty when the codex job ran). Two Claude Security findings
+(2026-09-22) drove it:
+
+- **4629153 — the Claude job carried OPENAI_API_KEY.** A secret a step
+  references is delivered to the job's runner whether or not the step
+  runs: the runner builds its `secrets` expression context from the job
+  message before the first step (`actions/runner`,
+  `Runner.Worker/ExecutionContext.cs`, `InitializeJob`:
+  `ExpressionValues["secrets"] = Global.Variables.ToSecretsContext()`) and
+  evaluates a step's `if:` itself when the step is reached
+  (`StepsRunner`). The codex step's `if: engine == 'codex'` therefore kept
+  the key out of the codex *process* on Claude runs but not out of
+  Runner.Worker's memory, where an unsandboxed agent with passwordless
+  sudo (every same-repo Claude run) could read it. A job-level `if:` is
+  decided by the service before dispatch and a skipped job gets no job
+  message, so the Claude job now references no key at all; the codex job
+  references it at its codex-action step and nowhere else
+  (`tests/test_engine_job_isolation.py`). What is not settled — and cannot
+  be from this repository — is whether the service scopes referenced
+  secrets per job or per called workflow; design/credential-separation.md
+  → section 7 carries that residual and section 6 the canary that would
+  settle it.
+- **4628446 — provisioning ran head code as the runner ahead of the codex
+  boundary.** The caller's `./.github/actions/claude-setup` and the
+  fallback's `uv pip install -e` (the checkout's build backend) executed
+  as `runner` — passwordless sudo, the OIDC request token, unrestricted
+  egress — before `create-codex-user` and before the codex-action step
+  that holds the key, on heads the pipeline itself produces: a
+  `claude/issue-N-*` branch an earlier run wrote from an outsider's issue
+  text, pushed and labelled by the machine account, so "same-repo" says
+  nothing about who wrote its build hooks. In the codex job the order is
+  now checkout → sync → (prep) → `create-codex-user` → **provisioning as
+  the codex user** → compose → codex: the shared `provision-fallback`
+  composite takes `user: codex` and runs its `provision.sh` under `sudo -u
+  codex -H` from a copy in `$RUNNER_TEMP`, so the uv bootstrap, the venv,
+  the build backend and the tiktoken warm all run with codex's own
+  boundary (no sudo, no token, no view of the runner's processes), and
+  the workspace group grant is what lets them write. A composite action
+  can only run as the runner, so the codex jobs never run the caller's
+  `claude-setup`, even on callers that define one; the venv lands in the
+  checkout as before, codex-owned, and the compose steps take the tool
+  paths from the composite's `bin` output. The reclaim step's process kill
+  covers anything provisioning left running as codex, and its embedded-
+  repository refusal covers a `.git` it planted.
+
+Caller-visible effects of the codex-side change (the Claude jobs are
+unchanged, minus the key): a codex run on a caller with a `claude-setup`
+action (the inspect_ai fork's `meridian` branch for dev-agent issue runs,
+inspect_flow, ts-mono) gets the generic recipe instead — the runner's
+default Python rather than the action's pin, no Actions cache, `.[dev]`
+plus a `dev` dependency group when one exists — and a caller whose
+project is not a Python project (ts-mono: pnpm) gets no provisioning on
+codex runs at all; codex's prompt says so and tells it that it may
+install what verification needs inside its sandbox, which has network.
+The Claude jobs still run the caller's `claude-setup` as the runner, which
+is exactly how the Claude agent itself runs there (SECURITY.md → By
+design). The loops' prep steps split in two around the new order — the
+identity and landing-directory part before the codex user exists (the
+`.git/config` it writes is what `create-codex-user` snapshots), the
+prompt composition after provisioning — so their Surface steps name a
+`codexcompose` failure separately, and `agent_outcome` counts it.
+
+The stubs are unchanged: every reusable workflow still declares
+`OPENAI_API_KEY` (a stub passing an undeclared secret fails to load) and
+the stubs keep passing it; only the codex job reads it.
 
 ## Network inside the codex sandbox
 

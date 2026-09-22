@@ -208,6 +208,23 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   human is authorized by the permission lookup and refused when it fails;
   the workflow's agent steps carry no bot allow-list; and the dev stubs
   exclude both machine logins on the label path like everywhere else.
+- `test_engine_job_isolation.py` — one untrusted job per engine (Claude
+  Security findings 4628446 and 4629153): in each reusable workflow the
+  Claude job references no `OPENAI_API_KEY` and runs no codex, the codex
+  job references it only at its codex-action step, the two are selected by
+  the gate's `engine` output at the job level and gate no step on it, the
+  land job waits for both; the codex job `uses:` no action from the
+  checkout and provisions with `provision-fallback` `user: codex` between
+  `Create codex user` and the codex-action step, its prompts taking the
+  tool paths from the composite's `bin` output; the Claude job keeps the
+  runner-side `claude-setup` and fallback. Also the composite's dispatch
+  step (lifted and run against a stub `sudo`: a `$RUNNER_TEMP` copy under
+  `sudo -u codex -H` when `user` is set, the recipe directly otherwise, a
+  failing sudo fails the step) and `provision.sh` against stub `curl`/`uv`
+  (the venv and the `.[dev]` / `--group dev` install, the `.git/info/exclude`
+  lines, and the `GITHUB_PATH` appends made only when that file is there).
+  The four composer tests lift each engine's composer from its own job
+  (`job_block` / `lift_run` in `test_land_helpers.py`).
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc

@@ -67,7 +67,7 @@ EXAMPLE = ROOT / "examples" / "claude-auto-stub.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_ci_fix_gate import TRUSTED_LOGINS, step_script  # noqa: E402
-from test_land_helpers import sh, step_block  # noqa: E402
+from test_land_helpers import sh, step_block, job_block  # noqa: E402
 
 BIND = step_script(ACTION, "    - id: bind", 8)
 
@@ -627,14 +627,24 @@ def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_f
     the refund keys on the agent outcome and the push only."""
     text = WORKFLOW.read_text()
     assert "id: launched" not in text and "agent_started" not in text and "AGENT_STARTED" not in text
-    landing = step_block(text, "landing")
-    assert 'elif [ "$ENGINE" != "codex" ] && [ "${CLAUDE_OUTCOME:-}" = "failure" ]; then' in landing
-    emit = text[text.index("- name: Emit landing manifest"):text.index("  land:\n")]
-    assert ("read-only: ${{ ((needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success') || "
-            "(needs.gate.outputs.engine != 'codex' && steps.claude.outcome == 'failure')) && 'true' || 'false' }}") in emit
+    # One job per engine since 2026-09-22: the Claude job's composer and
+    # emit withhold on the Claude step's outcome, the codex job's on its
+    # unresolved-merge guard.
+    claude_job, codex_job = job_block(text, "fix"), job_block(text, "fix-codex")
+    assert 'if [ "${CLAUDE_OUTCOME:-}" = "failure" ]; then' in step_block(claude_job, "landing")
+    assert 'if [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then' in step_block(codex_job, "landing")
+    assert "read-only: ${{ steps.claude.outcome == 'failure' && 'true' || 'false' }}" in claude_job
+    assert "read-only: ${{ steps.codexguard.outcome != 'success' && 'true' || 'false' }}" in codex_job
+    assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
+    assert ("      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || "
+            "steps.codexcompose.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || "
+            "steps.codexfix.outcome }}\n") in codex_job
+    land = job_block(text, "land")
+    assert ("      AGENT_OUTCOME: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_outcome "
+            "|| needs.fix.outputs.agent_outcome }}\n") in land
     refund = text[text.index("- name: Refund infra-crashed attempt"):]
     refund = refund[:refund.index("run: |")]
-    assert "needs.fix.outputs.agent_outcome != 'success' &&" in refund
+    assert "env.AGENT_OUTCOME != 'success' &&" in refund
     assert "steps.land.outputs.pushed != '1'" in refund
     assert "execution" not in refund
 

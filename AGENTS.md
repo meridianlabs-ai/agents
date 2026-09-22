@@ -137,6 +137,20 @@ take effect on every repo's next run.
   `--ignore-submodules=dirty`; keep all of that when touching them. See
   design/architecture.md → No persisted git credentials and
   design/codex-engine.md → Hook-safe landing.
+- **One untrusted job per engine** (Claude Security findings 4628446 and
+  4629153, 2026-09-22): each reusable workflow has a Claude job (`agent`,
+  `review`, `fix`) and a codex job (`agent-codex`, `review-codex`,
+  `fix-codex`), the gate's `engine` output selecting one at the job level,
+  and the land job `needs` both. `OPENAI_API_KEY` is referenced in the codex
+  job's codex-action step and nowhere else — never add a reference to a
+  job that runs the Claude agent: a referenced secret reaches the runner
+  whatever the step's `if:` says. In a codex job nothing from the checkout
+  runs as the runner: no `uses: ./...`, and provisioning is
+  `provision-fallback` with `user: codex`, placed after `Create codex user`
+  and before the codex-action step. A step that must exist on both engines
+  is copied into both jobs (the checkout, assert, base and sync steps
+  already are); the composers and Surface steps are per-engine.
+  `tests/test_engine_job_isolation.py` enforces all of this.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat
   them as sensitive, and don't add API-key secrets; auth is Workload Identity
   Federation.

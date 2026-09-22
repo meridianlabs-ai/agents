@@ -180,11 +180,16 @@ runs to Codex"`). Codex v1 differences: review findings arrive as one
 summary comment (no inline comments; codex fix rounds do resolve the
 Claude reviewer's inline threads they report as addressed), and
 external proxy reviews always use Claude. Codex reviews run tests to
-verify findings like the Claude reviewer — via the repo's claude-setup
-action, or a fallback uv dev-install when the checkout has a
-pyproject.toml but no claude-setup (fork PR branches, and any Python
-caller repo that never added the action); non-Python repos degrade to
-static review.
+verify findings like the Claude reviewer. Codex runs provision the
+checkout differently from Claude runs: every codex run uses the shared uv
+dev-install recipe when the checkout has a `pyproject.toml`, executed as
+the unprivileged codex user, and never the repo's `claude-setup` action
+(which runs as the runner, ahead of the codex sandbox) — so a repo that
+pins a Python version or installs non-Python tooling in `claude-setup`
+does not get that on codex runs, and a non-Python repo gets no
+provisioning there (codex may install what it needs inside its sandbox,
+which has network). Claude runs keep using `claude-setup`, with the uv
+dev-install as the fallback when the checkout lacks it.
 Details: [design/codex-engine.md](design/codex-engine.md).
 
 ## The inspect_ai fork

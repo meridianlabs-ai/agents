@@ -285,6 +285,8 @@ job on a fresh runner**, where nothing the agent job did can reach it:
 ```
 gate job   (trusted: trigger check + pre-agent marvin writes; job token + the machine account's token, minted here; no checkout of PR code)
   -> agent job  (untrusted: checkout, provision, agent; job token ONLY; commits locally; emit-landing)
+                 — since 2026-09-22 one such job per engine, the gate selecting which runs; OPENAI_API_KEY is
+                 named only in the codex job (design/codex-engine.md → One job per engine)
   -> land job   (trusted: fresh runner; mints its own token; downloads the artifact; validates; pushes, posts, resolves, stages as marvin)
 ```
 
@@ -1196,7 +1198,22 @@ out different things on the inspect_ai fork:
   the error comment names the case and says to fix it by hand rather than
   re-trigger.
 
-### Untrusted checkouts: sandboxed execution of untrusted code
+**Codex jobs provision as the codex user, never through the shim (2026-09-22;
+Claude Security findings 4628446 and 4629153).** Each workflow runs the codex
+engine in its own job since then (design/codex-engine.md → One job per
+engine), and in that job the order is `create-codex-user` first, then the
+`provision-fallback` composite with `user: codex` — its recipe runs under
+`sudo -u codex -H` — then the prompt composition and codex. The shim is a
+composite action and can only run as the runner, so the codex jobs never run
+it, even on callers that define one: the caller's tree — its `pyproject.toml`
+build hooks, its `claude-setup` — may be a branch the pipeline itself wrote
+from an outsider's issue text, and it used to execute as `runner` (sudo, the
+OIDC request token) ahead of the codex-action step holding `OPENAI_API_KEY`.
+The Claude jobs keep both steps as they were: the Claude agent runs
+unsandboxed as the runner on those heads anyway and executes the tree when
+it runs the tests, so the pre-agent provisioning adds nothing there, and
+those jobs no longer name the key. The compose steps read the tool paths
+from the composite's `bin` output instead of the runner PATH.
 
 External-review mode (`@review` on an `External` proxy issue) checks out an
 outside contributor's PR head — **untrusted code** — into a job that holds
