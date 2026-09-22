@@ -369,7 +369,8 @@ human step.
   the label, not who pushed, while the codex step named `claude` in
   `allow-bot-users` for that case. The gate's bind step now refuses a run
   whose actor is any bot but the machine account, on both engines, before
-  any write (finding 4628657), so a Claude-App push ends the automatic loop
+  any write (finding 4628657; decision: Ransom, 2026-09-22, the Claude App is
+  not a run actor), so a Claude-App push ends the automatic loop
   for that branch until the machine account or a write-access human pushes;
   the codex step's `claude` entry is unreachable for the run actor and is
   kept only for the step's own workflow-actor check. The dev agent and the

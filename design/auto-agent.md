@@ -290,8 +290,9 @@ reads and refuses everything else:
    tip it merged — GitHub records a pull_request run's PR head, not its
    merge, and a *re-run* of that run reuses the original merge commit
    (`GITHUB_SHA`/`GITHUB_REF`); only a new push builds a new one. The doc
-   says so rather than claiming the tested tree; exact tested-commit
-   provenance needs a producer inside the CI run (Open follow-ups).
+   says so rather than claiming the tested tree; this is an accepted limit
+   of the loop, not an open item (decision: Ransom, 2026-09-22; Decisions,
+   below).
 5. **The run's actors are authorized in the gate.** `actor` (whose push or
    PR open/reopen started the run) and `triggering_actor` (who re-ran it,
    when different) must each be one of `TRUSTED_LOGINS` or hold write
@@ -318,8 +319,9 @@ A signed receipt from the CI job itself (the job's OIDC token carries
 `ref: refs/pull/N/merge`, `base_ref`, `head_ref`, `run_id`) would be exact,
 but the CI job runs the PR's own workflow file and is the adversary's, so
 it would need every caller's CI workflow changed to mint and publish a
-token whose only safe use is this check, and a verifier for it; that is a
-design decision for Ransom, not a drop-in (recorded under Open follow-ups).
+token whose only safe use is this check, and a verifier for it. Ransom
+decided against building it (2026-09-22; Decisions, below): the chain above
+is the loop's automatic path, with its limits stated.
 The singleton rule proves the weaker thing that suffices: *no other*
 same-repo PR can have been the origin, so acting on this one is acting on
 the run's PR. Its cost is availability, by design: while two PRs share a
@@ -354,6 +356,39 @@ runner, where before it landed and kept its attempt; the codex path always
 behaved this way. A provisioning failure, whose agent step is skipped
 rather than failed, keeps landing the base merge (decision 2026-09-09,
 recorded on the Surface step).
+
+**Decisions (Ransom, 2026-09-22, closing the implementation loop's round-3
+scope stop).**
+
+1. *Exact tested-commit provenance: not pursued.* The chain above — the
+   run's head commit; the base branch unchanged on the PR's timeline since
+   the run's creation; the base tip read at the gate and pinned through
+   `sync-branch`; run actors that are trusted logins or write-access
+   accounts; the singleton same-repo PR rule — is the loop's automatic
+   path. Its stated limits are accepted as limits, not deferred: the merge
+   commit the run built and the base tip it merged are not established (no
+   API field carries them; a re-run reuses the original merge commit), and
+   a same-head/different-base pair fails closed. The alternatives were a
+   provenance producer inside every caller's CI run (the job's OIDC token —
+   `ref: refs/pull/N/merge`, `base_ref`, `head_ref`, the merge `sha`,
+   `run_id`, `run_attempt` — minted with a dedicated audience under
+   `id-token: write` granted to the PR-controlled job, published as an
+   artifact, verified by `bind-ci-run` for issuer, signature, audience,
+   expiry and exact run id/attempt; the 2026-09-21 investigation's design
+   candidate) and a manual-only loop; neither is built.
+2. *The Claude App is not a CI-run actor.* The gate refuses runs started or
+   re-run by any bot other than the machine account, on both engines, and
+   `claude[bot]` is not added to the run-actor trusted logins. A push the
+   Claude App made itself therefore ends the automatic continuation for
+   that branch until the machine account or a write-access human pushes;
+   SECURITY.md and credential-separation.md disclose it. (Before this, the
+   Codex step's own allow-list admitted `claude` and the Claude step
+   refused it; the gate now decides first, strictly.)
+3. *Two PRs sharing a head: no manual binding route.* While the pair exists
+   neither PR's failing runs drive a round; the way out is the recovery
+   above (close the extra PR, push a new commit). No maintainer-triggered
+   binding of a run to a PR is added; the availability cost stands as
+   designed.
 
 Tests: `tests/test_ci_fix_binding.py` runs the composite's shell against
 synthetic run, pull-request, timeline and permission records for every rule
@@ -822,26 +857,6 @@ The simple case ships first and is independently useful:
   cheap pre-filter (consistency with `claude-review.yml`, reduces forged-marker
   surface); the deployed inspect_flow and fork stubs can be synced to match when
   convenient — purely surface-reduction, not a security gap.
-- **Exact run provenance (design decision for Ransom; returned as the
-  scope stop of the 4628657 loop, round 3).** The binding above establishes
-  the run's head commit, the base branch it merged into, the base tip the
-  sync merges, and that no other PR can be the origin; it cannot establish
-  the merge commit the run tested, the base tip it merged, or which of two
-  PRs sharing a branch GitHub considered the trigger — no API field carries
-  any of them. The one exact source GitHub offers is the CI job's own OIDC
-  token (`ref: refs/pull/N/merge`, `base_ref`, `head_ref`, `sha` of the
-  merge commit, `run_id`, `run_attempt`, signed by GitHub). Options: (A)
-  keep the current chain as the automatic path and accept the stated
-  limits; (B) a provenance producer — every caller's CI workflow grants
-  `id-token: write` to the PR's own job, mints a token with a dedicated
-  audience and publishes it as an artifact (adversary-produced; only the
-  signature is trusted), and `bind-ci-run` verifies issuer, signature,
-  audience, expiry, exact run id and attempt before reading the claims,
-  failing closed for callers that publish none — at the cost of a bearer
-  token in an artifact and of granting the PR's job OIDC minting; (C) no
-  automatic CI-fix at all: a maintainer starts a round by hand (an `@auto`
-  comment already exists as the manual trigger). The 2026-09-21
-  investigation lists (B) as a design candidate, not a tested drop-in.
 
 ## Kickoff: `@auto` as a distinct trigger
 

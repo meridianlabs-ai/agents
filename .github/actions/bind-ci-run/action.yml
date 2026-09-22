@@ -57,7 +57,9 @@ description: >-
      refuses; an unlisted `[bot]` login is never looked up and refuses —
      the same rule the Claude engine step applies through `allowed_bots`,
      now enforced for both engines here, in trusted control flow, before
-     any counter, stage, sync or model work, and again before landing).
+     any counter, stage, sync or model work, and again before landing; the
+     Claude App's own login is deliberately not admitted — decision:
+     Ransom, 2026-09-22).
      This is the model actions' own actor policy moved early, not a PR-
      author rule: the `auto` label, verified by who applied it, remains the
      authorization of the PR, and a maintainer may deliberately label
@@ -84,15 +86,19 @@ description: >-
   is permitted to have advanced between the run and the gate — the loop's
   job is to make the branch pass against the base as it is now — but not
   between the gate and the merge, so the context the counter was charged
-  for is the context that is merged. Exact tested-commit provenance would
-  need a producer inside the CI run (design/auto-agent.md → Open
-  follow-ups); this composite does not claim it. The
+  for is the context that is merged. Exact tested-commit provenance is not
+  established and is accepted as the loop's limit — no producer inside the
+  CI run is built (decision: Ransom, 2026-09-22; design/auto-agent.md →
+  Binding the failed run to its PR → Decisions); this composite does not
+  claim it. The
   singleton rule is not a proof of origin either: it is a proof that no
   OTHER same-repo PR can have been the origin, which is what makes acting
   on this one safe. Its cost is availability while two PRs share a branch;
   the way out is to CLOSE the PR that should not share it (retargeting
   keeps it a candidate) and then push a new commit (re-running the old run
-  keeps its creation time, so a PR closed after that still counts).
+  keeps its creation time, so a PR closed after that still counts). No
+  manual route binding a run to a PR exists, by decision (Ransom,
+  2026-09-22).
 
   Every refusal is a normal exit with `ok` empty and `reason` set (the
   caller skips and logs it); a persistent API error fails the step, which

@@ -83,8 +83,10 @@ text are checked by the tests under `tests/`.
   branch it was merged into and the base tip that is merged now, and that
   no other PR can be the run's origin — not which PR GitHub considered the
   trigger, not the merge commit the run built, and not the base tip it
-  merged, since the API carries none of them (design/auto-agent.md →
-  Binding the failed run to its PR).
+  merged, since the API carries none of them. Those limits are accepted as
+  the loop's, and two PRs sharing a head fail closed until one is closed and
+  a new commit pushed (decision: Ransom, 2026-09-22; design/auto-agent.md →
+  Binding the failed run to its PR → Decisions).
 
 ## By design, not a finding
 
@@ -109,8 +111,9 @@ text are checked by the tests under `tests/`.
   check before any write, on both engines (the Codex step's own allow-list
   admitted `claude` until 2026-09-22; the gate now decides first). A push the
   Claude App made itself therefore ends the automatic loop for that branch
-  until the machine account or a write-access human pushes; a policy
-  tightening, recorded as a decision for Ransom in design/auto-agent.md.
+  until the machine account or a write-access human pushes (decision:
+  Ransom, 2026-09-22; design/auto-agent.md → Binding the failed run to its
+  PR → Decisions).
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.
