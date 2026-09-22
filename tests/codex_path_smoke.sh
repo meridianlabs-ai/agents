@@ -1,0 +1,156 @@
+#!/bin/bash
+# Hosted-runner smoke test for the codex path's runner-side search path
+# (Claude Security finding 4628448; design/codex-engine.md → Runner-side
+# search path). The unit tests in test_codex_path.py stub `sudo` and have no
+# codex user; this runs the SAME composite bodies, lifted from the checked-out
+# revision, on a real Ubuntu runner with real identities, the real image PATH
+# and real sudo — `.github/workflows/codex-path-smoke.yml` runs it, and it
+# runs by hand on any Ubuntu box with passwordless sudo from the repo root:
+#
+#     GITHUB_WORKSPACE=$PWD RUNNER_TEMP=$(mktemp -d) bash tests/codex_path_smoke.sh
+#
+# What it establishes, in order (every step logs what it did; any failure
+# exits non-zero):
+#
+#   1. `create-codex-user` step 1 (snapshots, user, groups) runs.
+#   2. The pre-grant check (`assert-runner-only-path`, protect on) PASSES on
+#      the stock job PATH — protecting the image's world-writable hops
+#      (/opt, /opt/pipx_bin, the toolcache, /usr/local/bin) rather than
+#      refusing them — and afterwards the codex user can create nothing in
+#      them while the runner user still can (npm's global bin).
+#   3. The same check REFUSES a workspace venv on the job PATH, and an
+#      outward symlink from the workspace to /usr/bin (review round 1 of
+#      #131).
+#   4. `create-codex-user` step 3 (the grant and the rest) runs.
+#   5. As the codex user: plant `sudo`, `bash`, `git`, `find`, `jq` in the
+#      workspace venv, tamper with .git/config, and try to plant into the
+#      protected directories (must fail).
+#   6. `reclaim-codex-workspace` — its nested check (no protect), then its
+#      script — completes with real sudo/pkill, restores the config, and none
+#      of the planted files ran. Then `codex-usage` and `unresolved-merge-guard`
+#      complete the same way.
+#
+# It does not run codex-action or codex itself (no API key, and the boundary
+# under test is the runner-side PATH, not the model). The workflow's
+# `mechanism` job separately shows the runner picking a planted interpreter
+# when a workspace venv IS on GITHUB_PATH, which is what the refusal in 3
+# prevents.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+: "${GITHUB_WORKSPACE:?set GITHUB_WORKSPACE (the checkout the codex user is granted)}"
+: "${RUNNER_TEMP:?set RUNNER_TEMP}"
+SYSTEM_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+hijack_log=/tmp/codex-path-smoke.hijack.log
+rm -f "$hijack_log"
+
+say() { printf '\n==> %s\n' "$*"; }
+fail() { echo "::error::smoke: $*" >&2; exit 1; }
+
+say "revision $(git -C "$root" rev-parse HEAD) on ${ImageOS:-?}/${ImageVersion:-?}; workspace $GITHUB_WORKSPACE; user $(id -un) ($(id))"
+echo "job PATH: $PATH"
+
+# The Nth `run: |` block of a composite, dedented — the same extraction the
+# unit tests use, so what runs here is the reviewed body of this revision.
+lift() { # <action dir name> <block number, 1-based>
+  python3 - "$root/.github/actions/$1/action.yml" "$2" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+blocks = []
+for i, line in enumerate(lines):
+    if line != "      run: |":
+        continue
+    body = []
+    for later in lines[i + 1:]:
+        if later.strip() == "":
+            body.append("")
+        elif later.startswith("        "):
+            body.append(later[8:])
+        else:
+            break
+    blocks.append("\n".join(body) + "\n")
+sys.stdout.write(blocks[int(sys.argv[2]) - 1])
+PY
+}
+ASSERT=$(lift assert-runner-only-path 1)
+run_assert() { # <PATH> <protect> [user]
+  PATH="$1" USER_NAME="${3:-codex}" PROTECT="$2" SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$ASSERT"
+}
+
+say "1. create-codex-user, step 1: snapshots, user, groups"
+/bin/bash -c "$(lift create-codex-user 1)"
+id codex
+test -f "$RUNNER_TEMP/git-config.pre-codex" || fail "no config snapshot"
+
+say "2. pre-grant check with protect on, stock job PATH — must pass"
+job_path="$PATH"
+before=$(for d in /opt /opt/pipx_bin /usr/local/bin; do [ -d "$d" ] && stat -c '%A %U %n' "$d"; done || true)
+echo "before: $before"
+run_assert "$job_path" true | tee "$RUNNER_TEMP/smoke-assert-stock.log"
+after=$(for d in /opt /opt/pipx_bin /usr/local/bin; do [ -d "$d" ] && stat -c '%A %U %n' "$d"; done || true)
+echo "after: $after"
+grep -q 'none inside the workspace or writable by codex' "$RUNNER_TEMP/smoke-assert-stock.log" || fail "stock PATH did not pass"
+say "2b. the protected hops: codex cannot create in them, runner can"
+for d in /opt/pipx_bin /usr/local/bin; do
+  [ -d "$d" ] || continue
+  if sudo -u codex sh -c "echo x >'$d/sudo'" 2>/dev/null; then fail "codex could write $d/sudo"; fi
+  echo "codex cannot write $d: ok"
+  touch "$d/.codex-path-smoke" && rm "$d/.codex-path-smoke" && echo "runner still writes $d: ok"
+done
+say "2c. the runner's npm global install still works after protection (what openai/codex-action does)"
+npm install -g @openai/codex >"$RUNNER_TEMP/smoke-npm.log" 2>&1 || { tail -20 "$RUNNER_TEMP/smoke-npm.log"; fail "npm install -g failed after protection"; }
+command -v codex && echo "codex CLI installed at $(command -v codex): ok"
+say "2d. every entry of the job PATH after protection, for the record"
+printf '%s\n' "$job_path" | tr ':' '\n' | while IFS= read -r e; do [ -e "$e" ] && stat -L -c '%A %U:%G %n' "$e" || echo "(missing) $e"; done
+
+say "3. the check refuses a workspace venv on PATH and an outward workspace symlink"
+mkdir -p "$GITHUB_WORKSPACE/.venv/bin"
+if run_assert "$GITHUB_WORKSPACE/.venv/bin:$job_path" true >"$RUNNER_TEMP/smoke-refuse-venv.log" 2>&1; then fail "workspace venv on PATH was not refused"; fi
+grep -q "lies inside the workspace" "$RUNNER_TEMP/smoke-refuse-venv.log" || { cat "$RUNNER_TEMP/smoke-refuse-venv.log"; fail "wrong refusal"; }
+echo "refused: $(grep -o "job PATH entry '[^']*' lies inside the workspace[^,]*" "$RUNNER_TEMP/smoke-refuse-venv.log")"
+ln -s /usr/bin "$GITHUB_WORKSPACE/tools"
+if run_assert "$GITHUB_WORKSPACE/tools:$job_path" true >"$RUNNER_TEMP/smoke-refuse-link.log" 2>&1; then fail "outward workspace symlink on PATH was not refused"; fi
+grep -q "lies inside the workspace" "$RUNNER_TEMP/smoke-refuse-link.log" || { cat "$RUNNER_TEMP/smoke-refuse-link.log"; fail "wrong refusal"; }
+echo "refused: $(grep -o "job PATH entry '[^']*' lies inside the workspace[^,]*" "$RUNNER_TEMP/smoke-refuse-link.log")"
+rm "$GITHUB_WORKSPACE/tools"
+
+say "4. create-codex-user, step 3 (its second run block): the grant and the rest"
+/bin/bash -c "$(lift create-codex-user 2)"
+stat -c '%A %U:%G %n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.venv/bin"
+
+say "5. as codex: plant into the venv, tamper with .git/config, try the protected dirs"
+sudo -u codex bash -c '
+  set -e
+  ws="$1"; log="$2"
+  for t in sudo bash git find jq; do
+    printf "#!/bin/bash\necho HIJACKED:%s >>%s\nexec /usr/bin/%s \"\$@\"\n" "$t" "$log" "$t" >"$ws/.venv/bin/$t"
+    chmod +x "$ws/.venv/bin/$t"
+  done
+  git -C "$ws" config core.sshCommand "echo TAMPERED"
+  ls -l "$ws/.venv/bin"
+  for d in /opt/pipx_bin /usr/local/bin; do
+    [ -d "$d" ] || continue
+    if echo x >"$d/sudo" 2>/dev/null; then echo "::error::codex planted $d/sudo"; exit 1; fi
+    echo "codex cannot plant into $d: ok"
+  done
+' _ "$GITHUB_WORKSPACE" "$hijack_log"
+grep -q TAMPERED "$GITHUB_WORKSPACE/.git/config" || fail "tamper did not land"
+
+say "6. reclaim: nested check (no protect) then the reclaim script, with the planted venv NOT on PATH (as in a real job)"
+run_assert "$job_path" false
+SNAPSHOT='' EMBEDDED_SNAPSHOT='' SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$(lift reclaim-codex-workspace 1)"
+grep -q TAMPERED "$GITHUB_WORKSPACE/.git/config" && fail "config not restored"
+grep -q 'fsmonitor = false' "$GITHUB_WORKSPACE/.git/config" || fail "pins not appended"
+stat -c '%A %U:%G %n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.git"
+say "6b. codex-usage (no sessions: reports nothing) and the guard"
+summary=$RUNNER_TEMP/smoke-summary.md; out=$RUNNER_TEMP/smoke-output.txt; : >"$summary"; : >"$out"
+CODEX_HOME_DIR=/home/codex/.codex REQ_MODEL='' REQ_EFFORT='' SYSTEM_PATH="$SYSTEM_PATH" GITHUB_STEP_SUMMARY="$summary" GITHUB_OUTPUT="$out" /bin/bash -c "$(lift codex-usage 1)"
+CONFLICTS='' GIT_DIR="$GITHUB_WORKSPACE/.git" GIT_COMMON_DIR="$GITHUB_WORKSPACE/.git" GIT_WORK_TREE="$GITHUB_WORKSPACE" GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$(lift unresolved-merge-guard 1)"
+
+say "6c. and once more with the planted venv FIRST on this shell's PATH — the pins hold even then"
+PATH="$GITHUB_WORKSPACE/.venv/bin:$job_path" SNAPSHOT='' EMBEDDED_SNAPSHOT='' SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$(lift reclaim-codex-workspace 1)"
+PATH="$GITHUB_WORKSPACE/.venv/bin:$job_path" CODEX_HOME_DIR=/home/codex/.codex REQ_MODEL='' REQ_EFFORT='' SYSTEM_PATH="$SYSTEM_PATH" GITHUB_STEP_SUMMARY="$summary" GITHUB_OUTPUT="$out" /bin/bash -c "$(lift codex-usage 1)"
+
+if [ -e "$hijack_log" ]; then cat "$hijack_log"; fail "a planted file ran"; fi
+say "no planted file ran. smoke passed."

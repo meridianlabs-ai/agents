@@ -45,10 +45,11 @@ inputs:
       which has no reclaim step — and its first commands are `sudo test` and
       `sudo find`, so nothing here may resolve through a directory codex
       could write (Claude Security finding 4628448; design/codex-engine.md →
-      Runner-side search path). The hosted runner image's system
-      directories.
+      Runner-side search path). The hosted runner image's root-owned system
+      directories — NOT `/usr/local/bin`, which the image ships
+      world-writable.
     required: false
-    default: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    default: /usr/sbin:/usr/bin:/sbin:/bin
 
 outputs:
   model:

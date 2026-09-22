@@ -25,19 +25,29 @@ description: >-
      so codex can read the snapshots but not replace them. The review
      path has no reclaim step and never reads them; harmless there.
   2. Create the `codex` system user and cross-enrol the groups; then, in a
-     nested `assert-runner-only-path` step, refuse to go on if any directory
-     on the job PATH lies inside the workspace or is writable by the new
-     user (Claude Security finding 4628448; design/codex-engine.md →
+     nested `assert-runner-only-path` step (`protect: "true"`), make sure
+     no directory on the job PATH — no hop of any entry as written, nor of
+     a symlink hop's target — is inside the workspace or writable by the
+     new user (Claude Security finding 4628448; design/codex-engine.md →
      Runner-side search path): the runner prepends `GITHUB_PATH` entries to
      every later step's PATH — and resolves each step's shell interpreter
      through them — so a codex-writable directory there would let codex
      plant the `sudo`, `bash` or `git` the first post-codex step runs as
      `runner`. Checked after the user exists (the probe is `sudo -u codex
      test -w`) and BEFORE the grant below, which is what would make a
-     workspace directory writable; a caller whose provisioning put its venv
-     on `GITHUB_PATH` (the workflows pass `provision-fallback` `add-to-path:
-     false` on the codex path; a caller's own `claude-setup` must do the
-     same) fails here, before codex runs, with the entry named. Then
+     workspace directory writable. A workspace entry is refused, so a
+     caller whose provisioning put its venv on `GITHUB_PATH` (the
+     workflows pass `provision-fallback` `add-to-path: false` on the codex
+     path; a caller's own `claude-setup` must do the same) fails here,
+     before codex runs, with the entry named. A writable hop OUTSIDE the
+     workspace is made runner-only instead (`chown runner`, `chmod go-w`)
+     and refused only if still writable: the hosted Ubuntu image ships
+     `/opt` — `/opt/pipx_bin` and `/opt/hostedtoolcache` are on the job
+     PATH — and `/usr/local/bin` mode 777 (actions/runner-images
+     `configure-system.sh`, `install-nodejs.sh`), which any unprivileged
+     user could plant into; protecting them takes that away from codex
+     while runner keeps its own writes (openai/codex-action's `npm install
+     -g` puts the CLI in `/usr/local/bin`). Then
      `chown -R runner:codex` + `chmod -R g+rwX` + setgid on every directory
      of the workspace — the action's `examples/unprivileged-user.yml`
      recipe; the group grant is what lets codex (primary group codex) write
@@ -144,6 +154,7 @@ runs:
     - uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
       with:
         user: codex
+        protect: "true"
 
     - shell: bash
       run: |

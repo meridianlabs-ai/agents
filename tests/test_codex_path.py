@@ -27,10 +27,13 @@ executables that log `HIJACKED` when run, first on the job PATH:
   runs the check, then grants — in that order.
 
 `sudo` is a stub in the tests' "system" directory (no codex user and no
-root here): it runs the command as the current user, answers `-u <user>
-test -w`/`-O` probes from FAKE_CODEX_WRITABLE / FAKE_CODEX_OWNED, finds no
-codex process to kill and makes `chown` a no-op. On macOS the same
-directory carries a `cp` shim for GNU's `--remove-destination`.
+root here): it runs the command as the current user; a `-u <user> test -w`
+probe answers from the real mode bits (world-writable = writable by the
+user, so `chmod o+w` makes a directory codex-writable and the check's
+`chmod go-w` protection is observable) or from FAKE_CODEX_OWNED (paths the
+user "owns", always writable and `find -user` positive); `pkill` finds
+nothing and `chown` is a no-op. On macOS the same directory carries a `cp`
+shim for GNU's `--remove-destination`.
 """
 
 import os
@@ -55,7 +58,7 @@ PROVISION = ACTIONS / "provision-fallback" / "action.yml"
 WORKFLOWS = {name: ROOT / ".github" / "workflows" / name
              for name in ("claude.yml", "claude-review.yml", "claude-auto.yml", "claude-auto-review.yml")}
 ASSERT_USES = "uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main"
-SYSTEM_DIRS = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+SYSTEM_DIRS = "/usr/sbin:/usr/bin:/sbin:/bin"
 ME = subprocess.run(["id", "-un"], check=True, text=True, capture_output=True).stdout.strip()
 
 # The tools the planted directory shadows: everything the lifted scripts
@@ -97,12 +100,21 @@ def composite_steps(action: Path) -> list:
 SUDO_STUB = r"""#!/bin/bash
 # Stand-in for /usr/bin/sudo: the command runs as the current user.
 printf '%s\n' "$*" >>"$SUDO_LOG"
+owned() { grep -qxF -- "$1" <<<"${FAKE_CODEX_OWNED:-}"; }
 if [ "$1" = -u ]; then
-  shift 2
+  user=$2; shift 2
   [ "$1" = -H ] && shift
-  if [ "$1" = test ] && [ "$2" = -w ]; then grep -qxF -- "$3" <<<"${FAKE_CODEX_WRITABLE:-}"; exit; fi
-  if [ "$1" = test ] && [ "$2" = -O ]; then grep -qxF -- "$3" <<<"${FAKE_CODEX_OWNED:-}"; exit; fi
+  if [ "$1" = test ] && [ "$2" = -w ]; then
+    # The user can write what it "owns" and what is world-writable; like
+    # test -w, a symlink is judged by its target (-L), never by itself.
+    [ ! -L "$3" ] && owned "$3" && exit 0
+    [ -n "$(find -L "$3" -maxdepth 0 -perm -0002 2>/dev/null)" ]; exit
+  fi
   exec "$@"
+fi
+if [ "$1" = find ] && [ "$3" = -maxdepth ] && [ "$5" = -user ]; then
+  # `find <p> -maxdepth 0 -user <u>`: the ownership probe, from the list.
+  owned "$2" && printf '%s\n' "$2"; exit 0
 fi
 case "$1" in
   pkill) exit 1 ;;               # nothing runs as codex
@@ -143,7 +155,19 @@ def world(tmp_path):
                       capture_output=True, check=False).returncode != 0:
         (system / "cp").write_text(CP_SHIM)
         (system / "cp").chmod(0o755)
-    system_path = f"{system}:{os.environ['PATH']}"
+    # The system PATH the steps pin to: the stub directory, then the
+    # directories the real tools live in — not this process's whole PATH,
+    # whose extra entries (a macOS /System/Cryptexes chain passes through a
+    # world-writable directory) are not what is under test.
+    tool_dirs = []
+    for tool in ("git", "jq", "find", "sort", "cmp", "diff", "cp", "mv", "rm", "mkdir", "cat", "grep", "tr",
+                 "head", "cut", "mktemp", "sleep", "dirname", "basename", "id", "pkill", "chmod", "wc", "sed"):
+        found = shutil.which(tool)
+        assert found, tool
+        d = os.path.dirname(found)
+        if d not in tool_dirs:
+            tool_dirs.append(d)
+    system_path = ":".join([str(system), *tool_dirs])
     planted = ws / ".venv" / "bin"
     planted.mkdir(parents=True)
     for name in PLANTED:
@@ -202,11 +226,17 @@ def repo(w):
 ASSERT_SCRIPT = composite_runs(ASSERT)[0]
 
 
-def check(w, job_path, user="nobody-here", **more):
+def check(w, job_path, user="nobody-here", protect="false", **more):
     """The check with the given job PATH; `user` defaults to a login that does
     not exist, so only the path rules apply; pass ME to probe writability
-    (answered by the stub sudo from FAKE_CODEX_WRITABLE / FAKE_CODEX_OWNED)."""
-    return run(ASSERT_SCRIPT, w, PATH=job_path, USER_NAME=user, **more)
+    (answered by the stub sudo from mode bits and FAKE_CODEX_OWNED)."""
+    return run(ASSERT_SCRIPT, w, PATH=job_path, USER_NAME=user, PROTECT=protect, **more)
+
+
+def writable(*paths):
+    """World-writable: what the stub sudo reports as writable by the user."""
+    for p in paths:
+        p.chmod(p.stat().st_mode | 0o002)
 
 
 def test_refuses_a_workspace_directory_on_the_job_path(world):
@@ -224,6 +254,7 @@ def test_refuses_the_workspace_itself_and_a_symlink_into_it(world):
     link.symlink_to(w["planted"])
     r = check(w, f"{link}:{w['system_path']}")
     assert r.returncode == 1 and f"'{link}' lies inside the workspace" in r.stdout
+    assert f"(at {link})" in r.stdout
     # A workspace given through a symlink is resolved the same way.
     wslink = w["tmp"] / "wslink"
     wslink.symlink_to(w["ws"])
@@ -255,24 +286,32 @@ def test_a_clean_path_passes_and_the_system_directories_are_checked_too(world):
     assert r.returncode == 0, r.stdout + r.stderr
     assert f"or writable by {ME}" in r.stdout
     probes = w["sudo_log"].read_text().splitlines()
-    for d in ("/usr/bin", "/usr", "/"):
+    for d in (os.path.dirname(shutil.which("cat")), "/"):
         assert f"-u {ME} test -w {d}" in probes
     assert f"-u {ME} test -w {w['system']}" in probes and f"-u {ME} test -w {w['tmp']}" in probes
 
 
 def test_refuses_an_entry_or_ancestor_the_user_can_write(world):
     w = world
-    tools = w["tmp"] / "opt" / "tools" / "bin"
+    opt = w["tmp"] / "opt"
+    tools = opt / "tools" / "bin"
     tools.mkdir(parents=True)
     job = f"{tools}:{w['system_path']}"
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE=str(tools))
+    r = check(w, job, user=ME)
+    assert r.returncode == 0, r.stdout + r.stderr
+    writable(tools)
+    r = check(w, job, user=ME)
     assert r.returncode == 1 and f"'{tools}' is writable by the {ME} user (at {tools})" in r.stdout
+    tools.chmod(0o755)
     # A writable ANCESTOR is a rename-and-replace path (write on the parent
     # is all a same-parent rename needs).
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE=str(w["tmp"] / "opt"))
-    assert r.returncode == 1 and f"(at {w['tmp'] / 'opt'})" in r.stdout
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE="")
-    assert r.returncode == 0, r.stdout + r.stderr
+    writable(opt)
+    r = check(w, job, user=ME)
+    assert r.returncode == 1 and f"(at {opt})" in r.stdout
+    # So is one the user owns, whatever its mode.
+    opt.chmod(0o755)
+    r = check(w, job, user=ME, FAKE_CODEX_OWNED=str(opt))
+    assert r.returncode == 1 and f"(at {opt})" in r.stdout
 
 
 def test_refuses_a_not_yet_existing_entry_the_user_could_create(world):
@@ -281,10 +320,12 @@ def test_refuses_a_not_yet_existing_entry_the_user_could_create(world):
     parent.mkdir()
     missing = parent / "bin"
     job = f"{missing}:{w['system_path']}"
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE=str(parent))
+    writable(parent)
+    r = check(w, job, user=ME)
     assert r.returncode == 1 and f"'{missing}' is writable by the {ME} user (at {parent})" in r.stdout
     # Nobody can create it: accepted (the runner's own later addition).
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE="")
+    parent.chmod(0o755)
+    r = check(w, job, user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
     # A missing entry under the workspace is refused by path, user or not.
     r = check(w, f"{w['ws'] / 'nope' / 'bin'}:{w['system_path']}")
@@ -300,18 +341,129 @@ def test_sticky_directory_allows_only_an_existing_child_the_user_does_not_own(wo
     mine.mkdir()
     job = f"{mine}:{w['system_path']}"
     # /tmp-like: the user can create there but not rename our directory away.
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE=str(sticky))
+    r = check(w, job, user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
-    # ... unless the child is the user's own,
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE=str(sticky), FAKE_CODEX_OWNED=str(mine))
+    # ... unless the child is the user's own (refused at the child itself:
+    # an owner can write it),
+    r = check(w, job, user=ME, FAKE_CODEX_OWNED=str(mine))
+    assert r.returncode == 1 and f"(at {mine})" in r.stdout
+    # ... a symlink child the user owns counts too (lstat, not its target),
+    link = sticky / "runner-link"
+    link.symlink_to(mine)
+    r = check(w, f"{link}:{w['system_path']}", user=ME, FAKE_CODEX_OWNED=str(link))
     assert r.returncode == 1 and f"(at {sticky})" in r.stdout
     # ... or does not exist yet (the user creates it),
-    r = check(w, f"{sticky / 'not-yet'}:{w['system_path']}", user=ME, FAKE_CODEX_WRITABLE=str(sticky))
+    r = check(w, f"{sticky / 'not-yet'}:{w['system_path']}", user=ME)
     assert r.returncode == 1 and f"(at {sticky})" in r.stdout
     # ... and without the sticky bit a writable parent is refused outright.
     sticky.chmod(0o777)
-    r = check(w, job, user=ME, FAKE_CODEX_WRITABLE=str(sticky))
+    r = check(w, job, user=ME)
     assert r.returncode == 1 and f"(at {sticky})" in r.stdout
+
+
+def test_symlink_hops_are_checked_where_they_live_not_only_where_they_point(world):
+    # Review round 1 of #131: resolving the entry first and checking the
+    # target let `ws/tools -> /usr/bin` through; after the grant codex
+    # replaces `tools` with a directory holding `bash`.
+    w = world
+    out = w["ws"] / "tools"
+    out.symlink_to("/usr/bin")
+    r = check(w, f"{out}:{w['system_path']}")
+    assert r.returncode == 1, r.stdout
+    assert f"'{out}' lies inside the workspace" in r.stdout and f"(at {w['ws']})" in r.stdout
+    # An external symlink under a directory the user can write: the link is
+    # the user's to replace.
+    parent = w["tmp"] / "codex-owned"
+    parent.mkdir()
+    link = parent / "tools"
+    link.symlink_to("/usr/bin")
+    writable(parent)
+    r = check(w, f"{link}:{w['system_path']}", user=ME)
+    assert r.returncode == 1 and f"'{link}' is writable by the {ME} user (at {parent})" in r.stdout
+    parent.chmod(0o755)
+    r = check(w, f"{link}:{w['system_path']}", user=ME)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # An intermediate symlink component: `x/link/bin` with `link -> target`
+    # is refused for what `target` is (writable) or where it is (the
+    # workspace), and passes when neither.
+    x = w["tmp"] / "x"
+    x.mkdir()
+    target = w["tmp"] / "target"
+    (target / "bin").mkdir(parents=True)
+    (x / "link").symlink_to(target)
+    entry = x / "link" / "bin"
+    writable(target)
+    r = check(w, f"{entry}:{w['system_path']}", user=ME)
+    assert r.returncode == 1 and f"(at {target})" in r.stdout
+    target.chmod(0o755)
+    r = check(w, f"{entry}:{w['system_path']}", user=ME)
+    assert r.returncode == 0, r.stdout + r.stderr
+    (x / "link").unlink()
+    (x / "link").symlink_to(w["ws"] / "sub")
+    (w["ws"] / "sub" / "bin").mkdir(parents=True)
+    r = check(w, f"{entry}:{w['system_path']}")
+    assert r.returncode == 1 and "lies inside the workspace" in r.stdout
+    # A relative link target is resolved against the link's directory (and
+    # reported as walked, `..` and all).
+    (x / "link").unlink()
+    (x / "link").symlink_to("../target")
+    writable(target)
+    r = check(w, f"{entry}:{w['system_path']}", user=ME)
+    assert r.returncode == 1 and f"(at {x}/../target)" in r.stdout
+    # A loop is refused (the hop limit), not passed.
+    (x / "link").unlink()
+    (x / "loop").symlink_to("loop")
+    r = check(w, f"{x / 'loop' / 'bin'}:{w['system_path']}")
+    assert r.returncode == 1 and "more than 8 symlinks" in r.stdout
+
+
+def test_protect_makes_writable_image_hops_runner_only_instead_of_refusing(world):
+    # The hosted image ships /opt (pipx_bin, hostedtoolcache) and
+    # /usr/local/bin mode 777: create-codex-user protects such hops before
+    # the grant rather than failing every codex run — and never a workspace
+    # one.
+    w = world
+    opt = w["tmp"] / "opt"
+    pipx = opt / "pipx_bin"
+    pipx.mkdir(parents=True)
+    tool = pipx / "pipx"
+    tool.write_text("#!/bin/bash\n")
+    tool.chmod(0o777)
+    writable(opt, pipx)
+    job = f"{pipx}:{w['system_path']}"
+    # Without protection: refused at the first writable hop.
+    r = check(w, job, user=ME)
+    assert r.returncode == 1 and f"(at {pipx})" in r.stdout
+    # With it: the hops and the file lose their write bits and the check
+    # passes; `chown` is the stub's no-op, so the mode change carries it.
+    r = check(w, job, user=ME, protect="true")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"protected job PATH hop {pipx}" in r.stdout and f"protected job PATH hop {opt}" in r.stdout
+    assert "(3 hop(s)/file(s) protected)" in r.stdout
+    assert not (pipx.stat().st_mode & 0o022) and not (opt.stat().st_mode & 0o022) and not (tool.stat().st_mode & 0o022)
+    assert f"chown {ME} {pipx}" in w["sudo_log"].read_text()
+    # Afterwards the plain check passes too (what the reclaim runs).
+    r = check(w, job, user=ME)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # A hop the user OWNS stays writable after chmod and is still refused.
+    r = check(w, job, user=ME, protect="true", FAKE_CODEX_OWNED=str(opt))
+    assert r.returncode == 1 and "still writable" in r.stdout and f"(at {opt})" in r.stdout
+    # Protection never reaches into the workspace: that entry is refused.
+    r = check(w, f"{w['planted']}:{w['system_path']}", user=ME, protect="true")
+    assert r.returncode == 1 and "lies inside the workspace" in r.stdout
+    assert w["planted"].stat().st_mode & 0o777 == 0o755
+    # And a writable file inside an otherwise clean entry is refused without
+    # protection, fixed with it.
+    other = w["tmp"] / "ub"
+    other.mkdir()
+    f = other / "git"
+    f.write_text("#!/bin/bash\n")
+    f.chmod(0o777)
+    r = check(w, f"{other}:{w['system_path']}", user=ME)
+    assert r.returncode == 1 and f"holds {f}, a file writable by the {ME} user" in r.stdout
+    r = check(w, f"{other}:{w['system_path']}", user=ME, protect="true")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f.stat().st_mode & 0o777 == 0o755
 
 
 def test_the_checks_own_probes_never_resolve_through_the_job_path(world):
@@ -322,6 +474,7 @@ def test_the_checks_own_probes_never_resolve_through_the_job_path(world):
     w = world
     evil = w["tmp"] / "evil"
     shutil.copytree(w["planted"], evil)
+    # The planted files are 755 (not writable by the user, only runnable).
     r = check(w, f"{evil}:{w['system_path']}", user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
     assert hijacked(w) == ""
@@ -338,7 +491,7 @@ def test_create_codex_user_checks_the_path_after_the_user_and_before_the_grant()
     assert "sudo adduser --system --home /home/codex --shell /bin/bash --group codex" in first
     assert "sudo usermod -a -G runner codex" in first
     assert "chown" not in first and "chmod" not in first
-    assert ASSERT_USES in check_step and "user: codex" in check_step
+    assert ASSERT_USES in check_step and "user: codex" in check_step and 'protect: "true"' in check_step
     assert 'sudo chown -R runner:codex "$GITHUB_WORKSPACE"' in grant
     assert 'sudo chmod -R g+rwX "$GITHUB_WORKSPACE"' in grant
     # The snapshots stay the first thing, before any grant.
@@ -349,6 +502,8 @@ def test_assert_runner_only_path_defaults():
     text = ASSERT.read_text()
     assert "default: codex" in text
     assert f"default: {SYSTEM_DIRS}" in text
+    assert 'default: "false"' in text  # protect is opt-in: the reclaim refuses
+    assert "/usr/local" not in SYSTEM_DIRS  # the image ships /usr/local/bin mode 777
     # The script pins its own PATH before the first external command.
     script = ASSERT_SCRIPT
     assert script.index('export PATH="$SYSTEM_PATH"') < script.index("sudo ")
@@ -377,6 +532,7 @@ def test_reclaim_runs_the_nested_check_first_then_pins_its_path():
     assert len(steps) == 2
     assert ASSERT_USES in steps[0] and "user: codex" in steps[0]
     assert "system-path: ${{ inputs.system-path }}" in steps[0]
+    assert "protect" not in steps[0]  # after codex a writable hop is refused, not fixed
     script = composite_runs(RECLAIM)[0]
     body = script[script.index("set -euo pipefail"):]
     assert body.index('export PATH="$SYSTEM_PATH"') < body.index("sudo pkill")

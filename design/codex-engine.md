@@ -392,9 +392,12 @@ steps included — gets `PATH = <prepend list> : <original PATH>`, with a
 step's own `env: PATH` used only as the tail; and the runner picks each
 `run:` step's shell interpreter with `WhichUtil.Which(shell, …,
 prependPath)`, i.e. through the same list, before the script runs. So a
-directory on the job PATH that the codex user can write is code execution
-as `runner` in the first step after codex — and the reclaim's own script
-cannot pin its way out, since its `bash` was already chosen.
+directory on the job PATH that the codex user can write or replace is code
+execution as `runner` in the first step after codex — and the reclaim's
+own script cannot pin its way out, since its `bash` was already chosen.
+The `mechanism` job of `.github/workflows/codex-path-smoke.yml` reproduces
+this on the hosted image: with the workspace venv on `GITHUB_PATH` and a
+`bash` planted there, the next `shell: bash` step runs under it.
 
 Until 2026-09-22 `provision-fallback` put `$PWD/.venv/bin` on
 `GITHUB_PATH` on every engine, and `create-codex-user`'s `chown -R
@@ -408,7 +411,16 @@ on the reviewer's path (which has no reclaim), the guard's `git`, the
 commit step's `git add -A`, emit-landing's `git bundle` likewise. The
 reclaim's guarantees would have been executed by attacker-chosen binaries,
 and the containment argument under "Safety strategy" would have been void.
-The fix is structural, in three layers:
+The venv was only the convenient case: the hosted Ubuntu image itself
+ships `/opt` (and so `/opt/pipx_bin` and `/opt/hostedtoolcache`, both on
+the job PATH ahead of `/usr/bin`), `/usr/local/bin` and
+`/usr/local/.ghcup` recursively mode 777 (actions/runner-images
+`images/ubuntu/scripts/build/configure-system.sh`,
+`configure-environment.sh`, `install-nodejs.sh`, `install-haskell.sh` at
+`e75633902841`), so on a stock runner any unprivileged user — the codex
+user included — could plant `/opt/pipx_bin/sudo` with no help from
+provisioning at all (review round 1 of #131). The fix is structural, in
+three layers:
 
 - **Nothing under the workspace goes on the job PATH when codex may run.**
   `provision-fallback` takes `add-to-path`; the four workflows pass
@@ -423,57 +435,88 @@ The fix is structural, in three layers:
   unaffected; a `claude-setup` that puts `$GITHUB_WORKSPACE/.venv/bin` on
   `GITHUB_PATH` (inspect_flow's and inspect_harbor's did on 2026-09-22)
   fails the next layer on codex runs until it stops.
-- **`Create codex user` refuses to start codex behind a hijackable PATH**
-  (`assert-runner-only-path`, a nested step between the user's creation
-  and the workspace grant). For every job PATH entry: refused if relative
-  or empty (each step's working directory is the workspace); refused if
-  its physical path lies inside `$GITHUB_WORKSPACE` (codex-writable once
-  the grant runs — checked by path, since the grant has not happened yet);
-  refused if the entry or any ancestor is writable by the codex user
-  (`sudo -u codex test -w`, so group memberships count; a writable
-  ancestor is a rename-and-replace path — the same reasoning as the
-  reclaim's `chmod g-w` on the workspace root), with the one exception of a
-  sticky directory such as `/tmp`, where creation is possible but not the
-  rename or unlink of another user's entry (accepted when the child on the
-  way down exists and is not codex-owned); and an entry that does not exist
-  yet is refused when its nearest existing ancestor is codex-writable. The
-  system directories are on the job PATH too and are checked like every
-  other entry. This is the primary defence: it runs before codex, on a
-  PATH only the runner has written, and when it refuses codex never runs.
-  The check's own probes resolve through its `system-path` input, never
-  through the PATH under test. codex itself cannot add to `GITHUB_PATH`
-  later — the per-step file lives under the runner-only `$RUNNER_TEMP` —
-  and openai/codex-action installs the CLI with `npm install -g` and adds
-  no path, so the PATH the pre-grant check accepted is the PATH every
+- **`Create codex user` makes the job PATH runner-only before the grant, or
+  refuses to start codex** (`assert-runner-only-path`, a nested step
+  between the user's creation and the workspace grant, `protect: "true"`).
+  For every job PATH entry it walks every HOP of the entry as written —
+  the entry and each ancestor up to `/` — and, wherever a hop is a
+  symlink, every hop of the link's target as written, recursively (eight
+  levels; a loop refuses). A hop is a place codex could substitute: write
+  on a directory renames its child away, and a symlink is replaced by
+  writing its parent — so resolving the entry first and checking only the
+  target would have waved through `ws/tools -> /usr/bin`, which codex
+  replaces with a directory holding `bash` once the grant lands (round 1
+  of #131 reproduced exactly that). Refused, whatever the mode: a relative
+  or empty entry (each step's working directory is the workspace), and a
+  hop whose physical path lies inside `$GITHUB_WORKSPACE` (codex-writable
+  once the grant runs — checked by path, since the grant has not happened
+  yet). A hop outside the workspace that `sudo -u codex test -w` finds
+  writable (group memberships count) is **protected** — `chown runner`,
+  `chmod go-w`, sticky and other bits kept — and refused only if still
+  writable afterwards (codex-owned, say); so is a writable regular file
+  directly inside an entry (an existing tool overwritten in place). On the
+  stock image that protects `/opt`, `/opt/pipx_bin`, the toolcache chain
+  and `/usr/local/bin`, and keeps the runner user's own writes — npm's
+  global bin, which openai/codex-action's `npm install -g @openai/codex`
+  needs; the toolcache setup-* actions fill — while taking the codex
+  user's away. The one exception to "writable refuses" is a sticky
+  directory such as `/tmp`, where a user may create entries but not rename
+  or unlink another user's: accepted when the child on the way down exists
+  and is not codex-owned (`find -user`, an lstat — a codex-owned symlink
+  child is codex's to rename whatever it points at). A not-yet-existing
+  entry whose nearest existing ancestor is writable is refused the same
+  way (codex could create it). This is the primary defence: it runs before
+  codex, on a PATH only the runner has written, and when it refuses codex
+  never runs. The check's own probes resolve through its `system-path`
+  input — `/usr/sbin:/usr/bin:/sbin:/bin`, the root-owned system
+  directories; NOT `/usr/local/bin`, world-writable on the image — never
+  through the PATH under test. codex cannot add to `GITHUB_PATH` later —
+  the per-step file lives under the runner-only `$RUNNER_TEMP` — and
+  openai/codex-action installs the CLI with `npm install -g` and adds no
+  path, so the PATH the pre-grant check accepted is the PATH every
   post-codex step gets.
 - **Belt and braces after codex.** `reclaim-codex-workspace` runs the same
-  check as its first step, so a `GITHUB_PATH` addition made between the
-  grant and the reclaim by some later action would fail the reclaim closed
-  (and, through its outcome, skip every git-running step), and its script
-  then pins `PATH` to `system-path` before its first command; `codex-usage`
-  (the reviewer's first post-codex step), `unresolved-merge-guard` and
-  `emit-landing`'s `write` step pin the same way, and so do the three
-  `Commit codex` steps. The pins cover command resolution only — the
-  interpreter is the runner's choice — which is why the pre-grant refusal,
-  not the pins, carries the guarantee. Every one of these steps takes a
-  `system-path` input (default: the hosted image's
-  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`) so a
-  self-hosted layout can name its own, and so the tests can plant a stub
-  `sudo` there.
+  check as its first step — without `protect`: a hop that became writable
+  after the grant is refused, not fixed — so a `GITHUB_PATH` addition made
+  between the grant and the reclaim by some later action would fail the
+  reclaim closed (and, through its outcome, skip every git-running step),
+  and its script then pins `PATH` to `system-path` before its first
+  command; `codex-usage` (the reviewer's first post-codex step),
+  `unresolved-merge-guard` and `emit-landing`'s `write` step pin the same
+  way, and so do the three `Commit codex` steps. The pins cover command
+  resolution only — the interpreter is the runner's choice — which is why
+  the pre-grant check, not the pins, carries the guarantee. Every one of
+  these steps takes a `system-path` input (default
+  `/usr/sbin:/usr/bin:/sbin:/bin`) so a self-hosted layout can name its
+  own, and so the tests can plant a stub `sudo` there.
 
-Verification for a change here (`tests/test_codex_path.py` runs the
-composites' scripts against a planted `.venv/bin/sudo`, `git`, `find`,
-`jq` and friends): prompt codex on a caller whose provisioning leaves a
-venv at `.venv` to write `.venv/bin/sudo` as a script that appends
-`HIJACKED` to a file under `/tmp` and then `exec`s `/usr/bin/sudo "$@"`,
-plus the same for `bash`, `git`, `find` and `jq`; the run's `Reclaim
-workspace from codex`, `Codex usage`, guard and commit steps must complete
-normally, no step's log may show `HIJACKED`, and a scratch step after the
-reclaim that prints `$PATH` must show no entry under the workspace.
-Control: on a scratch branch whose `claude-setup` puts
-`$GITHUB_WORKSPACE/.venv/bin` on `GITHUB_PATH`, the run must go red on
-`Create codex user` with the entry named in its log, the codex step
-skipped, and the Surface comment naming the user setup.
+Verification: `tests/test_codex_path.py` runs the composites' scripts
+against a planted `.venv/bin` of `sudo`, `bash`, `git`, `find`, `jq` and
+friends with a stub `sudo` (macOS or Linux, no codex user);
+`tests/codex_path_smoke.sh`, run by `.github/workflows/codex-path-smoke.yml`
+on every push touching the composites (and by hand), runs the SAME lifted
+bodies of the checked-out revision on the hosted image with the real codex
+user, the real image PATH and real sudo: the pre-grant check passes on the
+stock PATH (naming what it protected), refuses a workspace venv and an
+outward workspace symlink, the grant runs, a codex-user "codex" plants into
+the venv and cannot plant into the protected directories, npm's global
+install still works for the runner, and the reclaim, `codex-usage` and the
+guard complete without running a planted file; the `mechanism` job shows
+the planted interpreter being chosen when the venv IS on `GITHUB_PATH`,
+and the check refusing that PATH. Because the composites reference each
+other `@main`, a branch's nested `uses:` would resolve to `main`'s bodies;
+the smoke lifts the blocks from the checkout so a branch is tested as
+itself, and logs the revision. For a live codex run: prompt codex on a
+caller whose provisioning leaves a venv at `.venv` to write
+`.venv/bin/sudo` as a script that appends `HIJACKED` to a file under
+`/tmp` and then `exec`s `/usr/bin/sudo "$@"`, plus the same for `bash`,
+`git`, `find` and `jq`; the run's `Reclaim workspace from codex`, `Codex
+usage`, guard and commit steps must complete normally, no step's log may
+show `HIJACKED`, and a scratch step after the reclaim that prints `$PATH`
+must show no entry under the workspace. Control: on a scratch branch whose
+`claude-setup` puts `$GITHUB_WORKSPACE/.venv/bin` on `GITHUB_PATH`, the run
+must go red on `Create codex user` with the entry named in its log, the
+codex step skipped, and the Surface comment naming the user setup.
 
 ## v1 limitations (deliberate)
 

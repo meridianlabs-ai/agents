@@ -203,18 +203,25 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
 - `test_codex_path.py` — the codex path's runner-side search path (Claude
   Security 4628448): the `assert-runner-only-path` check `create-codex-user`
   runs before its grant and `reclaim-codex-workspace` runs after codex
-  (a workspace entry by path or symlink, a relative or empty entry, an
-  entry or ancestor the user can write, a not-yet-existing entry the user
-  could create, the sticky-directory exception, a clean PATH, and the
+  (a workspace entry by path or symlink — inward, outward, and through an
+  intermediate symlink component or a writable symlink parent — a relative
+  or empty entry, an entry or ancestor the user can write, a not-yet-existing
+  entry the user could create, the sticky-directory exception, a symlink
+  loop, a clean PATH, `protect` making a writable image hop or file
+  runner-only instead of refusing and never touching the workspace, and the
   check's own probes resolving through the pinned system PATH — `sudo` is a
-  stub answering the writability probes); the reclaim, `codex-usage`, the
+  stub answering the writability probes from mode bits); the reclaim, `codex-usage`, the
   unresolved-merge guard and `emit-landing`'s `write` step run against a
   PLANTED `.venv/bin` of `sudo`, `git`, `find`, `jq` and friends first on
   the job PATH and touch none of it; `provision-fallback` writes nothing to
   GITHUB_PATH under `add-to-path: false`; and the wiring — the four
   workflows pass `add-to-path` from the gate's engine, the compose steps
   discover the tools from `.venv/bin` first, the commit steps pin PATH, the
-  user is created, checked, then granted.
+  user is created, checked, then granted. `codex_path_smoke.sh` is the
+  hosted-runner counterpart (`.github/workflows/codex-path-smoke.yml`): the
+  same lifted bodies with the real codex user, image PATH and sudo, plus a
+  control job showing the runner pick a planted interpreter when the venv IS
+  on GITHUB_PATH.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,
   from text or from an `auto`/`claude` label (Claude Security finding

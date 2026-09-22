@@ -79,16 +79,21 @@ text are checked by the tests under `tests/`.
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - No runner-side step after a Codex run resolves a command, or its shell
-  interpreter, through a directory the codex user can write. A job that may
-  run codex puts nothing under its workspace on `GITHUB_PATH`; before the
-  codex user is given write access to the checkout, the job fails if any
-  entry of its PATH lies inside the workspace or is writable by that user,
-  so codex never runs behind a hijackable search path; the reclaim step
-  repeats the check after codex, and every post-codex composite runs its
-  commands with `PATH` pinned to system directories. Codex cannot add to
-  the job PATH itself: the per-step `GITHUB_PATH` file is runner-only
-  (Claude Security finding 4628448, 2026-09-22; design/codex-engine.md →
-  Runner-side search path).
+  interpreter, through a directory the codex user can write or replace. A
+  job that may run codex puts nothing under its workspace on
+  `GITHUB_PATH`; before the codex user is given write access to the
+  checkout, every hop of every PATH entry (symlink targets included) is
+  checked: one inside the workspace fails the job, one the user can write
+  outside it — the hosted image ships `/opt` and `/usr/local/bin`
+  world-writable — is made runner-only first and fails the job if it stays
+  writable, so codex never runs behind a hijackable search path; the
+  reclaim step repeats the check after codex without the repair, and every
+  post-codex composite runs its commands with `PATH` pinned to the
+  root-owned system directories. Codex cannot add to the job PATH itself:
+  the per-step `GITHUB_PATH` file is runner-only. A hosted smoke workflow
+  runs the check and the post-codex steps against a planted venv with the
+  real codex user (Claude Security finding 4628448, 2026-09-22;
+  design/codex-engine.md → Runner-side search path).
 - The reviewer runs only when a trusted commenter asks for it, except inside
   the `@auto` loop, where the machine account requests each round's review.
 - A CI-fix round acts on the PR its failed run is bound to, not on the

@@ -144,11 +144,15 @@ take effect on every repo's next run.
   runs as `runner`. Never put a path under `$GITHUB_WORKSPACE` on
   `GITHUB_PATH` in a job that may run codex (`provision-fallback` takes
   `add-to-path: false` there; the codex prompts get the tools by absolute
-  path from `.venv/bin`); `create-codex-user` refuses to start codex, and
-  the reclaim refuses to continue, when any PATH entry is inside the
-  workspace or codex-writable (`assert-runner-only-path`); and every
-  post-codex composite pins `PATH` to system directories (`system-path`)
-  before its first command — a new post-codex step should too. See
+  path from `.venv/bin`); `create-codex-user` walks every hop of every
+  PATH entry (symlink targets too) before the grant, refuses a workspace
+  hop, makes a codex-writable hop outside the workspace runner-only (the
+  image ships `/opt` and `/usr/local/bin` mode 777) and refuses to start
+  codex if one stays writable; the reclaim repeats the check without the
+  repair (`assert-runner-only-path`); and every post-codex composite pins
+  `PATH` to the root-owned system directories (`system-path`, no
+  `/usr/local`) before its first command — a new post-codex step should
+  too. `tests/codex_path_smoke.sh` runs all of it on a hosted runner. See
   design/architecture.md → No persisted git credentials,
   design/codex-engine.md → Hook-safe landing and → Runner-side search
   path.

@@ -1468,7 +1468,7 @@ jobs:
           # and the reclaim re-checked; this pin is belt and braces on the
           # step that commits (design/codex-engine.md → Runner-side search
           # path).
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
           mkdir -p "$DIR"
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge

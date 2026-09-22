@@ -1567,7 +1567,7 @@ jobs:
           # and the reclaim re-checked; this pin is belt and braces on the
           # step that commits (design/codex-engine.md → Runner-side search
           # path).
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
           # Untracked files count: new source files are legitimate codex
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).

@@ -100,10 +100,11 @@ inputs:
       the tree, and `git` and `jq` must never resolve through a directory
       codex could write (Claude Security finding 4628448;
       design/codex-engine.md → Runner-side search path). The hosted runner
-      image's system directories; harmless on the Claude path, which needs
-      nothing else here.
+      image's root-owned system directories — NOT `/usr/local/bin`, which
+      the image ships world-writable; harmless on the Claude path, which
+      needs nothing else here.
     required: false
-    default: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    default: /usr/sbin:/usr/bin:/sbin:/bin
 
 outputs:
   emitted:

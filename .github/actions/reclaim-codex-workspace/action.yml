@@ -23,10 +23,12 @@ description: >-
      (`sudo pkill`) would run as `runner` → root before any kill or
      refusal below. Two layers: a nested `assert-runner-only-path` step
      first — the same check `Create codex user` ran before the grant,
-     repeated after codex in case a later step added to `GITHUB_PATH` —
-     fails this step closed (and, through its outcome, skips every
-     git-running step) if any PATH entry is inside the workspace or
-     writable by codex; and the reclaim script pins its own PATH to
+     repeated after codex in case a later step added to `GITHUB_PATH`, this
+     time without `protect` (a hop that became writable after the grant is
+     refused, not fixed) — fails this step closed (and, through its
+     outcome, skips every git-running step) if any PATH entry, any hop of
+     it or of a symlink hop's target, is inside the workspace or writable
+     by codex; and the reclaim script pins its own PATH to
      `system-path` before its first command, so every command below is
      the system one whatever the job PATH holds. The interpreter the
      runner picked for this step is outside both layers' reach, which is
@@ -139,9 +141,10 @@ inputs:
     description: >-
       The PATH this step's commands run with, pinned before the first of
       them (see description, 0) and handed to the nested PATH check for its
-      probes. The hosted runner image's system directories.
+      probes. The hosted runner image's root-owned system directories — NOT
+      `/usr/local/bin`, which the image ships world-writable.
     required: false
-    default: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    default: /usr/sbin:/usr/bin:/sbin:/bin
 
 runs:
   using: composite
