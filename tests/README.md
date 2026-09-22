@@ -206,8 +206,20 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   4628345 — its label was the triage agent's decision, only written by
   marvin), other Apps' labels and every bot's text trigger are refused, a
   human is authorized by the permission lookup and refused when it fails;
+  an opened issue whose first line is `/import`'s `Upstream issue:` line
+  is no text trigger, body or title (Claude Security 4629154), while the
+  same text in a human's own issue and a label on an import still are;
   the workflow's agent steps carry no bot allow-list; and the dev stubs
   exclude both machine logins on the label path like everywhere else.
+- `test_import.py` — `skills/import/import.sh` against a stub `gh` that
+  answers the upstream issue from a fixture and records the created title
+  and body: every trigger phrase and loop marker in the copied title and
+  snapshot is de-fanged before `gh issue create` (Claude Security 4629154 —
+  the fork issue is posted under the importing maintainer's login, whom the
+  gate authorizes), the import's own shape (`Upstream issue:` first line,
+  `---` rule, qualified `#N` refs) survives, `--dry-run` previews the
+  de-fanged title and creates nothing, and ordinary text is copied
+  unchanged.
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc

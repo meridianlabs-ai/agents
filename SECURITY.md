@@ -59,7 +59,11 @@ text are checked by the tests under `tests/`.
   permissions that job uses, from the GitHub App's secrets, and are revoked at
   job end.
 - Whether a comment, label or issue-body line is believed is decided by its
-  author's login or verified write access, never by the text itself.
+  author's login or verified write access, never by the text itself. Text a
+  maintainer republishes from the public upstream tracker (`/import`) is
+  de-fanged before it is posted under their login, and `claude.yml`'s trigger
+  check reads no body or title text on an opened issue whose first line is
+  the import's `Upstream issue:` line.
 - A label the machine account applies is a write, not a decision, and never
   starts the dev agent: `claude.yml`'s trigger check refuses both of its
   logins on the `auto`/`claude` label path as it does on text. The machine
