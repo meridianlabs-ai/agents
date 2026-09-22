@@ -40,6 +40,28 @@ description: >-
      observed — refuses), must still be open, and its live head must be the
      run's `head_sha` (a head that advanced while the run was queued is a
      stale run; the newer push's own run supersedes it).
+  5. The base the run tested is the PR's base AS IT WAS when the run was
+     created. The PR's timeline records every retarget (`base_ref_changed`,
+     and GitHub's own `automatic_base_change_succeeded`) with a timestamp;
+     one at or after the run's creation means the run merged into a base
+     the PR no longer targets, and refuses — the next push's own run tests
+     the current base. With no such event the current base IS the tested
+     base, and it is emitted as `base_ref` for the fix job's sync to pin
+     (sync-branch's `base` input) and the land job to reproduce.
+  6. The run's actors must be authorized: `actor` (whose event started the
+     run — the push, or the PR's open/reopen) and `triggering_actor` (who
+     re-ran it, when different) must each be one of `trusted-logins` or an
+     account with admin/maintain/write on the repository, looked up on the
+     collaborators endpoint (cached per login, fail closed: a failed lookup
+     refuses; an unlisted `[bot]` login is never looked up and refuses —
+     the same rule the Claude engine step applies through `allowed_bots`,
+     now enforced for both engines here, in trusted control flow, before
+     any counter, stage, sync or model work, and again before landing).
+     This is the model actions' own actor policy moved early, not a PR-
+     author rule: the `auto` label, verified by who applied it, remains the
+     authorization of the PR, and a maintainer may deliberately label
+     another author's PR — its runs are then driven by whoever pushes to
+     the branch (a writer, or the machine account), who is the actor judged.
 
   With `revalidate: "true"` (the land job) the same derivation runs again and
   must reproduce the gate's context — PR, head SHA, base ref, run attempt —
@@ -48,14 +70,17 @@ description: >-
   the round does not: created after the run, it cannot be its origin).
 
   What this does NOT establish, so nobody re-asserts it: which PR GitHub
-  itself considered the trigger (no immutable field carries it), the merge
-  commit the run tested, or the actor's authorization — `actor` and
-  `triggering_actor` are emitted for the record and the model actions'
-  own actor checks stay where they are; PR authorization remains the `auto`
-  label and verify-auto-labeler's check of who applied it (a maintainer may
-  deliberately authorize another author's PR). The singleton rule is not a
-  proof of origin either: it is a proof that no OTHER same-repo PR can have
-  been the origin, which is what makes acting on this one safe.
+  itself considered the trigger (no immutable field carries it), or the
+  merge commit the run tested — GitHub records a pull_request run's PR head,
+  not the merge it built; what is established is that head and the base
+  branch it was merged into (by the absence of a retarget since), and the
+  runner's sync merges that base's CURRENT tip, as a re-run of CI would. The
+  singleton rule is not a proof of origin either: it is a proof that no
+  OTHER same-repo PR can have been the origin, which is what makes acting
+  on this one safe. Its cost is availability while two PRs share a branch;
+  the way out is to CLOSE the PR that should not share it (retargeting
+  keeps it a candidate) and then push a new commit (re-running the old run
+  keeps its creation time, so a PR closed after that still counts).
 
   Every refusal is a normal exit with `ok` empty and `reason` set (the
   caller skips and logs it); a persistent API error fails the step, which
@@ -66,11 +91,20 @@ description: >-
 inputs:
   token:
     description: >-
-      Token that can read the repository's workflow runs and pull requests
-      (the machine account's minted token in the gate and land jobs; its
-      `actions: read` is implied by the pull-requests permission for the run
-      read — the job token works too).
+      Token that can read the repository's workflow runs (`actions: read` —
+      a permission of its own, which the gate and land jobs' mints request
+      explicitly; pull-requests does not imply it, and only a public
+      repository answers the run read without it), its pull requests and
+      their timelines, and collaborator permissions (the machine account's
+      minted token in the gate and land jobs).
     required: true
+  trusted-logins:
+    description: >-
+      Comma-separated logins admitted as run actors without a lookup — the
+      workflow's TRUSTED_LOGINS (the machine account's two logins). Any
+      other `[bot]` login is refused; every other login needs write access.
+    required: false
+    default: i-am-marvin,meridian-marvin[bot]
   repo:
     description: owner/name the run and the PR live in (`github.repository`).
     required: true
@@ -133,7 +167,9 @@ outputs:
     description: The run's head branch (equal to `expect-head-branch`).
     value: ${{ steps.bind.outputs.head_branch }}
   base_ref:
-    description: The bound PR's base branch, as read now.
+    description: >-
+      The bound PR's base branch — the base the run tested, since the PR's
+      timeline shows no retarget at or after the run's creation.
     value: ${{ steps.bind.outputs.base_ref }}
   run_attempt:
     description: The run's latest attempt (equal to `event-run-attempt`).
@@ -145,10 +181,10 @@ outputs:
     description: When the run was created (the instant the candidate PRs are judged at).
     value: ${{ steps.bind.outputs.created_at }}
   actor:
-    description: The run's `actor` login, for the record (not an authorization decision).
+    description: The run's `actor` login, authorized as a trusted login or a write-access account.
     value: ${{ steps.bind.outputs.actor }}
   triggering_actor:
-    description: The run's `triggering_actor` login (who re-ran it, if anyone), for the record.
+    description: The run's `triggering_actor` login (who re-ran it, if anyone), authorized the same way.
     value: ${{ steps.bind.outputs.triggering_actor }}
 
 runs:
@@ -169,6 +205,7 @@ runs:
         EXPECT_HEAD_SHA: ${{ inputs.expect-head-sha }}
         EXPECT_BASE: ${{ inputs.expect-base-ref }}
         EXPECT_ATTEMPT: ${{ inputs.expect-run-attempt }}
+        TRUSTED_LOGINS: ${{ inputs.trusted-logins }}
       run: |
         set -uo pipefail
         # A refusal is a decision, not an error: `ok` stays empty, `reason`
@@ -255,12 +292,54 @@ runs:
         [[ "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
           || refuse "run $RUN_ID records no creation time ('$created'); refusing."
         workflow_id=$(j '.workflow_id // ""')
+        [[ "$workflow_id" =~ ^[1-9][0-9]{0,18}$ ]] \
+          || refuse "run $RUN_ID records no workflow id ('$workflow_id'); refusing."
         actor=$(j '.actor.login // ""')
         triggering_actor=$(j '.triggering_actor.login // ""')
         # The association list, logged for the record only: it is what the
         # caller's pr_number came from, and it is NOT a trigger record.
         echo "bind: run $RUN_ID (workflow $workflow_id, attempt $run_attempt, event $run_event, actor '$actor', triggering actor '$triggering_actor', created $created) tested $run_head_sha on $run_head_repo:$run_head_branch."
         echo "bind: the run's associated PRs (informational — GitHub lists the open PRs matching the head, not the trigger): $(j '[.pull_requests[]? | "\(.base.repo.name // "?")#\(.number) (base \(.base.ref // "?"))"] | join(", ") | if . == "" then "none" else . end')."
+
+        # 2b. The run's actors. The same rule the loops' author checks use
+        #     (finding 4121987's trusted_author, and the Claude engine step's
+        #     allowed_bots): a TRUSTED_LOGINS login passes by name; any other
+        #     `[bot]` is refused without a lookup (the collaborators endpoint
+        #     404s for Apps, and github-actions[bot] is any repository's
+        #     workflow); a human needs admin/maintain/write, looked up once
+        #     per login, and a failed lookup refuses. Both actors are judged
+        #     when they differ (a re-run by someone else). Decided here, in
+        #     trusted control flow, so a run an unauthorized account started
+        #     never reaches the counter, the escalation, the stage move, the
+        #     base sync or an engine (which would refuse it later, after
+        #     those writes — the asymmetry finding 4628657's investigation
+        #     measured), and decided again before landing.
+        perms=""
+        trusted_actor() {
+          local login="$1" perm
+          [ -n "$login" ] || return 1
+          case ",${TRUSTED_LOGINS// /}," in *",$login,"*) return 0 ;; esac
+          case "$login" in *"[bot]") return 1 ;; esac
+          case "$perms" in
+            *"|$login="*) perm=${perms##*"|$login="}; perm=${perm%%"|"*} ;;
+            *) # Retried like every other read here; a Not Found (a deleted
+               # account) or a persistent error both read as no permission.
+               perm=""
+               if read_api "repos/$REPO/collaborators/$login/permission"; then
+                 perm=$(jq -r '.permission // ""' <<<"$API_OUT")
+               fi
+               perms="$perms|$login=$perm|" ;;
+          esac
+          case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
+        }
+        [ -n "$actor" ] || refuse "run $RUN_ID records no actor; refusing."
+        trusted_actor "$actor" \
+          || refuse "run $RUN_ID was started by '$actor', who is not a trusted login and holds no write access here (or whose permission could not be read); the CI-fix loop acts only on runs a write-access account or the machine account started."
+        if [ -n "$triggering_actor" ] && [ "$triggering_actor" != "$actor" ]; then
+          trusted_actor "$triggering_actor" \
+            || refuse "run $RUN_ID was re-run by '$triggering_actor', who is not a trusted login and holds no write access here (or whose permission could not be read); refusing."
+        fi
+        echo "bind: actor $actor${triggering_actor:+ and triggering actor $triggering_actor} authorized."
 
         # 3. The candidate origins: every PR of this repo whose head is this
         #    repo's HEAD branch and that was open when the run was created.
@@ -291,7 +370,7 @@ runs:
         if [ "$n" -eq 0 ]; then
           refuse "no same-repo PR from '$HEAD' was open when run $RUN_ID was created ($created); the run cannot be bound to a PR. Nothing to do."
         elif [ "$n" -ne 1 ]; then
-          refuse "run $RUN_ID cannot be bound to one PR: $(jq -r '[.[] | "#\(.number) (\(.state), base \(.base))"] | join(" and ")' <<<"$cands") all had head branch '$HEAD' when it was created ($created), and GitHub records which PRs a run is associated with, not which one triggered it. Close or retarget the PR that should not share the branch, then push or re-run CI."
+          refuse "run $RUN_ID cannot be bound to one PR: $(jq -r '[.[] | "#\(.number) (\(.state), base \(.base))"] | join(" and ")' <<<"$cands") all had head branch '$HEAD' when it was created ($created), and GitHub records which PRs a run is associated with, not which one triggered it. Close the PR that should not share the branch (retargeting it keeps it a candidate), then push a new commit (re-running this run keeps its creation time)."
         fi
         bound=$(jq -r '.[0].number' <<<"$cands")
         state=$(jq -r '.[0].state' <<<"$cands")
@@ -306,6 +385,29 @@ runs:
         [ "$pr_head" = "$run_head_sha" ] \
           || refuse "PR #$bound's head is now $pr_head but run $RUN_ID tested $run_head_sha: the branch moved while the run was queued or running, and the newer push's own run supersedes it."
         [ -n "$base" ] || refuse "PR #$bound records no base branch; refusing."
+
+        # 5. The base the run tested: the PR's timeline records every
+        #    retarget with a timestamp (`base_ref_changed` by hand, GitHub's
+        #    `automatic_base_change_succeeded` when a base branch was merged
+        #    or deleted). One at or after the run's creation means the run
+        #    merged into a base the PR no longer targets — refuse; the next
+        #    push's own run tests the current base. Read the same way
+        #    verify-auto-labeler reads the timeline (100 per page, flattened
+        #    locally). A persistent fetch failure fails the step.
+        rc=0
+        read_api "repos/$REPO/issues/$bound/timeline?per_page=100" --paginate || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::bind: could not read PR #$bound's timeline after retries."
+          exit 1
+        fi
+        retargeted=$(jq -rs --arg t "$created" '
+          [ .[] | if type == "array" then .[] else . end
+            | select(.event == "base_ref_changed" or .event == "automatic_base_change_succeeded")
+            | select((.created_at // "") >= $t) | .created_at ] | sort | first // empty' <<<"$API_OUT") \
+          || { echo "::error::bind: could not parse PR #$bound's timeline."; exit 1; }
+        [ -z "$retargeted" ] \
+          || refuse "PR #$bound was retargeted at $retargeted, after run $RUN_ID was created ($created): the run tested a merge into a base the PR no longer targets (now '$base'), and the next push's own run tests the current one."
+
         if [ "$REVALIDATE" = "true" ]; then
           [ "$run_head_sha" = "$EXPECT_HEAD_SHA" ] \
             || refuse "the run's head SHA read $EXPECT_HEAD_SHA at the gate and $run_head_sha now; refusing."
@@ -327,4 +429,4 @@ runs:
           echo "actor=$actor"
           echo "triggering_actor=$triggering_actor"
         } >>"$GITHUB_OUTPUT"
-        echo "bind: run $RUN_ID is bound to PR #$bound ($HEAD -> $base at $run_head_sha): the only same-repo PR from that branch open when the run was created."
+        echo "bind: run $RUN_ID is bound to PR #$bound ($HEAD -> $base at $run_head_sha): the only same-repo PR from that branch open when the run was created, its base unchanged since, its actors authorized."

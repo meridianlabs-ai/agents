@@ -67,14 +67,20 @@ text are checked by the tests under `tests/`.
 - A CI-fix round acts on the PR its failed run is bound to, not on the
   number the caller forwarded: the gate reads the run back from the API
   (this repository's own failed `pull_request` run, on the forwarded
-  branch, its latest attempt) and binds it to the one same-repo PR from
-  that branch that was open when the run was created, at the run's head
-  SHA; the land job derives the same context again before pushing. Two
-  PRs sharing a branch, a run re-run, a branch pushed or a PR retargeted
-  mid-round stop the round rather than guess. This is a proof that no other
-  PR can be the run's origin, not a record of which PR GitHub considered the
-  trigger — the API carries none (design/auto-agent.md → Binding the failed
-  run to its PR).
+  branch, its latest attempt), requires the run's actors — who started it
+  and who re-ran it — to be the machine account or write-access accounts,
+  and binds it to the one same-repo PR from that branch that was open when
+  the run was created, at the run's head SHA, whose timeline records no
+  retarget since the run was created; that base is what the runner merges,
+  and the land job derives the whole context again before pushing. Two PRs
+  sharing a branch, a run started or re-run by an account without write
+  access, a run re-run, a branch pushed or a PR retargeted at any point
+  after the run stop the round rather than guess, before any counter, stage
+  move, merge or model work. What this establishes is the run's head commit
+  and the base branch it was merged into, and that no other PR can be the
+  run's origin — not which PR GitHub considered the trigger, and not the
+  merge commit the run built, since the API carries neither
+  (design/auto-agent.md → Binding the failed run to its PR).
 
 ## By design, not a finding
 

@@ -268,6 +268,39 @@ reads and refuses everything else:
    run supersedes it). The fix job then requires its checkout to sit at
    that SHA, and the land job derives the whole context again and requires
    the gate's PR, head SHA, base ref and run attempt to be reproduced.
+4. **The base the run tested** is the PR's base as it was when the run was
+   created. A PR's current base is only a description of the PR now; a
+   sole PR tested against `release` and retargeted to `main` before the
+   gate passes every current-metadata check with its head unchanged (review
+   round 1). The PR's timeline is the authority: GitHub records every
+   retarget as a `base_ref_changed` event (and its own as
+   `automatic_base_change_succeeded`) with a timestamp, so one at or after
+   the run's creation refuses, at the gate and again at landing; with none,
+   the current base is the tested base. That base is then *pinned*: the
+   gate emits it, the fix job's `sync-branch` takes it as its `base` input
+   and fails before fetching or merging anything if the PR's live base has
+   moved off it, and the land job's revalidation requires it again. What
+   this does not recover is the merge commit the run built — GitHub records
+   a pull_request run's PR head, not its merge — so the runner merges that
+   base's *current* tip, as a re-run of CI would; the design doc says so
+   rather than claiming the tested tree.
+5. **The run's actors are authorized in the gate.** `actor` (whose push or
+   PR open/reopen started the run) and `triggering_actor` (who re-ran it,
+   when different) must each be one of `TRUSTED_LOGINS` or hold write
+   access, by the same cached, fail-closed collaborators lookup the loops'
+   author checks use; any other `[bot]` is refused without a lookup. This
+   is the model actions' own actor policy — Claude checks the workflow's
+   and the original run's actor, Codex the current one — moved to where
+   the gate's writes have not yet happened (they ran *after* the counter,
+   the stage move and the base merge; the investigation measured exactly
+   that), applied to both engines, and re-applied by the land job. It is
+   **not** a PR-author rule: a maintainer may deliberately label another
+   author's PR, and the runs that then drive it come from whoever pushes
+   to the branch — a writer or the machine account — who is the actor
+   judged. A read-only organization member's `opened` run (the investigation's
+   remaining reduced-privilege case) is refused before the PR is even
+   enumerated; the exhausted-cap path is behind the same check, so such a
+   run can no longer disarm, reset or hand off either.
 
 Why a singleton rule and not a proof of origin: GitHub exposes no immutable
 field that names the triggering PR of a `pull_request` run — not the run
@@ -283,29 +316,39 @@ The singleton rule proves the weaker thing that suffices: *no other*
 same-repo PR can have been the origin, so acting on this one is acting on
 the run's PR. Its cost is availability, by design: while two PRs share a
 branch, neither PR's failing runs drive a round, and the gate says which
-two and why; a maintainer closes or retargets the one that should not be
-there and the next push or re-run binds cleanly. An organization member
-who can open PRs can hold a branch in that state, which is the fail-closed
-side and no more than the ability to open PRs already grants.
+two and why. The way out is to **close** the PR that should not share the
+branch — retargeting it keeps it a candidate — and then **push a new
+commit**: re-running the old run keeps its creation time, so a PR closed
+after that still counts against it. An organization member who can open
+PRs can hold a branch in that state, which is the fail-closed side and no
+more than the ability to open PRs already grants (and, since the actor
+check above, such a member's own runs never reach the gate's writes).
 
-What the binding leaves alone, deliberately: **authorization**. The `auto`
-label, verified by who applied it, stays the opt-in — a maintainer may
-label another author's PR on purpose, and a "PR author must be a writer"
-rule would refuse that while telling two writers' PRs apart no better.
-The run's `actor` and `triggering_actor` are logged for the record, not
-judged; the model actions' own actor checks stay where they are. And a
+What the binding leaves alone, deliberately: **the PR's authorization**.
+The `auto` label, verified by who applied it, stays the opt-in — a
+maintainer may label another author's PR on purpose, and a "PR author must
+be a writer" rule would refuse that while telling two writers' PRs apart no
+better. The actor check judges who *ran* CI, not who *authored* the PR. And a
 Claude step that fails *without launching the agent* (the action's actor
 refusal, or a bootstrap failure — indistinguishable from outside it) now
 lands nothing, the runner's base merge included, and its attempt is
 refunded, as the codex refusal path always did; a step that launched and
-then failed still lands what it committed. A provisioning failure, whose
-agent step is skipped rather than failed, keeps landing the base merge
-(decision 2026-09-09, recorded on the Surface step).
+then failed still lands what it committed. "Launched" is read from the
+action's own `execution_file` output and nothing else: a file at the
+action's default path is one the PR's provisioning step can pre-create,
+and reading it as launch evidence let a refused round bundle the base merge
+and dodge its refund (review round 1). A provisioning failure, whose agent
+step is skipped rather than failed, keeps landing the base merge (decision
+2026-09-09, recorded on the Surface step).
 
 Tests: `tests/test_ci_fix_binding.py` runs the composite's shell against
-synthetic run and pull-request records for every rule above, both
-association orders included; they do not reproduce GitHub's event
-generation or ordering, which remain unobserved.
+synthetic run, pull-request, timeline and permission records for every rule
+above, both association orders included, plus `sync-branch`'s pinned base
+against a local origin and the fix job's launch signal; they do not
+reproduce GitHub's event generation or ordering, which remain unobserved.
+The gate's and land job's minted tokens carry `actions: read` for the run
+read (a permission of its own; a public caller answers without it, a
+private one 404s — `tests/test_app_token_minting.py` pins it).
 
 The **`auto` label is the canonical "this loop is live" state**, which makes it a
 one-click **kill-switch**: every turn re-checks the label *before* doing work, so

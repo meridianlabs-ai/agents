@@ -65,10 +65,15 @@ WRITE_SETS = {
                                                   "organization-projects": "write"}),
     ("claude-review.yml", "land"): (CALLER_REPO, {"issues": "write", "pull-requests": "write",
                                                   "organization-projects": "write"}),
+    # actions: read is the run-to-PR binding's read of the failed run
+    # (`actions/runs/<id>`, in the gate and again in the land job's
+    # revalidation) — a permission of its own that pull requests does not
+    # imply; a private caller 404s without it (finding 4628657, round 1).
     ("claude-auto.yml", "gate"): (CALLER_REPO, {"issues": "write", "pull-requests": "write",
-                                                "organization-projects": "write"}),
+                                                "organization-projects": "write", "actions": "read"}),
     ("claude-auto.yml", "land"): (CALLER_REPO, {"contents": "write", "issues": "write",
-                                                "pull-requests": "write", "organization-projects": "write"}),
+                                                "pull-requests": "write", "organization-projects": "write",
+                                                "actions": "read"}),
     # contents: read is the closed-PR continuation's live-branch-tip read
     # (`repos/<repo>/branches/<head>`), a 404 on a private caller without it.
     ("claude-auto-review.yml", "gate"): (CALLER_REPO, {"contents": "read", "issues": "write",

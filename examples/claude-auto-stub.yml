@@ -40,7 +40,12 @@ jobs:
   # requests that triggered the run" (two PRs from one branch into different
   # bases both appear, in no specified order) — so the reusable derives the
   # PR itself (the one same-repo PR from `head_branch` open when the run was
-  # created, at the run's head SHA) and skips unless this number agrees.
+  # created, at the run's head SHA, not retargeted since) and skips unless
+  # this number agrees; it also requires the run's actors (who started and
+  # who re-ran it) to be the machine account or write-access accounts before
+  # any counter, stage, merge or model work. What it cannot establish, and
+  # does not claim: which PR GitHub considered the trigger when two share
+  # the branch, or the merge commit the run built.
   ci-fix:
     if: >-
       github.event_name == 'workflow_run' &&

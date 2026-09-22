@@ -321,6 +321,10 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-organization-projects: write
+          # The bind step reads the failed run back (`actions/runs/<id>`):
+          # a permission of its own, which pull requests does not imply —
+          # only a public caller would answer the read without it.
+          permission-actions: read
 
       # The gate is four steps (deterministic, in shell — it decides whether
       # the agent runs): bind the failed run to its PR (shared composite,
@@ -340,11 +344,15 @@ jobs:
       # rule and its limits): the run is `inputs.ci_run_id`, which must be
       # this workflow_run event's own run; it is read back from the API and
       # must be this repo's pull_request run on `inputs.head_branch` whose
-      # latest attempt is the one that just failed; and it binds to the one
+      # latest attempt is the one that just failed; its actors (who started
+      # it, who re-ran it) must be TRUSTED_LOGINS or write-access accounts
+      # (the engines' own actor rule, decided here before any write instead
+      # of after the counter and the base merge); and it binds to the one
       # same-repo PR from that branch open when it was created, at the run's
-      # head SHA, which must be the PR `inputs.pr_number` names. Anything
-      # else refuses with a reason the resolve step logs — no counter, stage,
-      # sync or model work follows. A persistent API failure fails this step,
+      # head SHA, with no retarget on its timeline since, which must be the
+      # PR `inputs.pr_number` names. Anything else refuses with a reason the
+      # resolve step logs — no counter, escalation, stage, sync or model work
+      # follows. A persistent API failure fails this step,
       # which the gate-failure failsafe surfaces (in the log only: with no
       # bound PR there is no PR the note may be posted on).
       - name: Bind the failed run to its PR
@@ -359,6 +367,7 @@ jobs:
           event-run-attempt: ${{ github.event.workflow_run.run_attempt }}
           expect-head-branch: ${{ inputs.head_branch }}
           expect-pr: ${{ inputs.pr_number }}
+          trusted-logins: ${{ env.TRUSTED_LOGINS }}
 
       - name: Resolve PR and check the auto label
         id: resolve
@@ -952,6 +961,13 @@ jobs:
           pr: ${{ needs.gate.outputs.pr }}
           engine: ${{ needs.gate.outputs.engine }}
           token: ${{ github.token }}
+          # The base the gate's bind step established the run tested (the
+          # PR's base, with no retarget since the run was created): the
+          # composite refuses to merge anything else, so a PR retargeted
+          # between the gate and this step fails the sync (the agent is
+          # skipped, the attempt refunded) instead of merging a base the
+          # failing logs never saw.
+          base: ${{ needs.gate.outputs.base_ref }}
           # The merge commit's author: the gate decided it from which token
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
@@ -1527,8 +1543,16 @@ jobs:
         env:
           EXEC: ${{ steps.claude.outputs.execution_file }}
         run: |
-          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
-          if [ -s "$file" ]; then echo "value=true"; else echo "value=false"; fi >>"$GITHUB_OUTPUT"
+          # The action's OUTPUT only, never a fallback path: the action sets
+          # `execution_file` after Claude ran (its run entrypoint), and sets
+          # nothing when it refused the actor or failed to start — whereas a
+          # file at the default path is one the PR's own provisioning step
+          # can pre-create (review round 1 of finding 4628657's fix: a
+          # preseeded file read as "launched", so a refused round bundled
+          # the base merge and dodged its refund). The landing composer and
+          # the refund key on this value; a forged file no longer reaches
+          # either.
+          if [ -n "$EXEC" ] && [ -s "$EXEC" ]; then echo "value=true"; else echo "value=false"; fi >>"$GITHUB_OUTPUT"
 
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
@@ -1700,7 +1724,10 @@ jobs:
             err="codex finished but committing its leftover edits failed — codex's own local commits, if any, still land; its uncommitted edits did not (see the job logs)."
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
-            if [ -s "$file" ]; then
+            # Launched means the action's own output names a non-empty
+            # file (the `launched` step's rule; a file at the default path
+            # alone is PR-forgeable).
+            if [ -n "$EXEC" ] && [ -s "$EXEC" ]; then
               err="the CI-fix step failed before producing a result (see the job logs)."
             else
               # Never launched: the action refused the actor, or failed to
@@ -2015,6 +2042,8 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-organization-projects: write
+          # The revalidation reads the failed run back, as the gate did.
+          permission-actions: read
 
       # Skipped when the fix job was cancelled (claude-review.yml's land job
       # skips the same way). The usual cause is the concurrency group: its
@@ -2057,6 +2086,7 @@ jobs:
           event-run-attempt: ${{ github.event.workflow_run.run_attempt }}
           expect-head-branch: ${{ inputs.head_branch }}
           expect-pr: ${{ needs.gate.outputs.pr }}
+          trusted-logins: ${{ env.TRUSTED_LOGINS }}
           revalidate: "true"
           expect-head-sha: ${{ needs.gate.outputs.head_sha }}
           expect-base-ref: ${{ needs.gate.outputs.base_ref }}

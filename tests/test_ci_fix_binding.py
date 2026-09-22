@@ -19,10 +19,23 @@ head branch — from fixtures, one case per rule:
 - the bound PR must be the caller's number (an association from another
   repository refuses), open, at the run's head SHA (a head that advanced
   while queued refuses);
+- the base the run tested is the PR's base with no retarget recorded on its
+  timeline at or after the run's creation (a `base_ref_changed` or GitHub's
+  `automatic_base_change_succeeded` event refuses); the fix job's sync pins
+  that base (`sync-branch`'s `base` input, lifted and run here against a
+  local origin);
+- the run's actors (`actor`, and `triggering_actor` when different) must be
+  a trusted login or hold write access — the model actions' own actor rule
+  moved into trusted control flow, for both engines, before any write and
+  again before landing; it is not a PR-author rule (the trusted-labeler
+  policy is unchanged);
 - with `revalidate`, the gate's context must be reproduced before landing;
-- actors are recorded, not judged (the trusted-labeler policy and the model
-  actions' own actor checks are unchanged), and a persistent API error fails
-  the step rather than binding.
+- a persistent API error fails the step rather than binding.
+
+The fix job's `launched` signal, which the landing composer and the refund
+key on, is lifted too: it believes only the Claude action's own
+`execution_file` output, never a file at the default path (which the PR's
+provisioning step can pre-create).
 
 Every fixture is synthetic: no case here reproduces GitHub's event
 generation, the contents or order of a real completed-event association
@@ -51,7 +64,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
 EXAMPLE = ROOT / "examples" / "claude-auto-stub.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_ci_fix_gate import step_script  # noqa: E402
+from test_ci_fix_gate import TRUSTED_LOGINS, step_script  # noqa: E402
 from test_land_helpers import sh, step_block  # noqa: E402
 
 BIND = step_script(ACTION, "    - id: bind", 8)
@@ -67,7 +80,9 @@ AFTER = "2026-09-20T10:05:00Z"
 # run); a `run-fail` fixture makes it fail like a 5xx (an HTML body) on
 # every attempt; the pull request listing is the `pulls` fixture verbatim
 # (one or more JSON arrays, as `--paginate` prints pages), `pulls-fail` fails
-# it the same way. Anything else is unexpected.
+# it the same way; the bound PR's timeline is the `timeline` fixture (empty
+# without one); a collaborator permission is the `perm.<login>` fixture's
+# text, a 404 without one. Anything else is unexpected.
 GH_STUB = r'''#!/bin/bash
 printf '%s\n' "$*" >>"$STUB/calls"
 case "$1 $2" in
@@ -77,6 +92,17 @@ case "$1 $2" in
   api\ repos/o/r/pulls\?*)
     if [ -f "$STUB/pulls-fail" ]; then echo '<html>502</html>'; exit 1; fi
     if [ -f "$STUB/pulls" ]; then cat "$STUB/pulls"; else echo '[]'; fi ;;
+  api\ repos/o/r/issues/*/timeline\?*)
+    if [ -f "$STUB/timeline-fail" ]; then echo '<html>502</html>'; exit 1; fi
+    if [ -f "$STUB/timeline" ]; then cat "$STUB/timeline"; else echo '[]'; fi ;;
+  pr\ view)
+    if [ -f "$STUB/pr" ]; then cat "$STUB/pr"; else echo '{"message":"Not Found"}'; exit 1; fi ;;
+  api\ repos/o/r/branches/*)
+    if [ -f "$STUB/branch-sha" ]; then printf '%s' "$(cat "$STUB/branch-sha")"; else echo '{"message":"Not Found"}'; exit 1; fi ;;
+  api\ repos/o/r/collaborators/*)
+    login=${2#repos/o/r/collaborators/}; login=${login%/permission}
+    if [ -f "$STUB/perm.$login" ]; then printf '{"permission":"%s","role_name":"%s"}' "$(cat "$STUB/perm.$login")" "$(cat "$STUB/perm.$login")"
+    else echo '{"message":"Not Found"}'; exit 1; fi ;;
   *) echo "unexpected gh $*" >&2; exit 2 ;;
 esac
 '''
@@ -108,10 +134,13 @@ def pages(*page_lists):
 
 
 def bind(tmp_path, *, run=None, pulls=None, expect_pr="101", run_id="9002", event_run_id="9002",
-         event_attempt="1", event_name="workflow_run", head="shared", revalidate=None, fixtures=None):
+         event_attempt="1", event_name="workflow_run", head="shared", revalidate=None, fixtures=None,
+         timeline=None, perms=None, trusted=TRUSTED_LOGINS):
     """Run the lifted step under the composite's shell options (`bash
     --noprofile --norc -eo pipefail`), with the fixtures given; `revalidate`
-    is the gate's (head_sha, base_ref, run_attempt) to reproduce."""
+    is the gate's (head_sha, base_ref, run_attempt) to reproduce; `perms`
+    maps logins to their collaborator permission (the default run actor
+    `alice` holds write unless a case says otherwise)."""
     binp = tmp_path / "bin"
     binp.mkdir(exist_ok=True)
     for name, body in (("gh", GH_STUB), ("sleep", "#!/bin/bash\nexit 0\n")):
@@ -124,8 +153,14 @@ def bind(tmp_path, *, run=None, pulls=None, expect_pr="101", run_id="9002", even
         (stub / "run").write_text(run)
     if pulls is not None:
         (stub / "pulls").write_text(pulls if isinstance(pulls, str) else pages(pulls))
+    if timeline is not None:
+        (stub / "timeline").write_text(timeline if isinstance(timeline, str) else pages(timeline))
+    for login, perm in ({"alice": "write"} | (perms or {})).items():
+        if perm is not None:
+            (stub / f"perm.{login}").write_text(perm)
     for name, content in (fixtures or {}).items():
         (stub / name).write_text(content)
+    (stub / "calls").write_text("")
     out = tmp_path / "output"
     out.write_text("")
     env = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
@@ -134,7 +169,7 @@ def bind(tmp_path, *, run=None, pulls=None, expect_pr="101", run_id="9002", even
            "EXPECT_PR": expect_pr, "REVALIDATE": "true" if revalidate else "false",
            "EXPECT_HEAD_SHA": revalidate[0] if revalidate else "",
            "EXPECT_BASE": revalidate[1] if revalidate else "",
-           "EXPECT_ATTEMPT": revalidate[2] if revalidate else ""}
+           "EXPECT_ATTEMPT": revalidate[2] if revalidate else "", "TRUSTED_LOGINS": trusted}
     res = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", BIND, check=False, env=env)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     calls = (stub / "calls").read_text().splitlines() if (stub / "calls").exists() else []
@@ -156,6 +191,19 @@ def pull_lists(calls):
     return [c for c in calls if c.startswith("api repos/o/r/pulls?")]
 
 
+def timeline_reads(calls):
+    return [c for c in calls if "/timeline?" in c]
+
+
+def lookups(calls, login=None):
+    return [c for c in calls if c.startswith("api repos/o/r/collaborators/")
+            and (login is None or f"/{login}/" in c)]
+
+
+def retarget(at):
+    return {"event": "base_ref_changed", "created_at": at, "actor": {"login": "someone"}}
+
+
 # --- the happy path ----------------------------------------------------------
 
 
@@ -166,12 +214,15 @@ def test_binds_the_only_same_repo_pr_open_on_the_branch_when_the_run_was_created
     assert out["pr"] == "101" and out["head_sha"] == SHA_A and out["head_branch"] == "shared"
     assert out["base_ref"] == "main" and out["run_attempt"] == "1" and out["workflow_id"] == "77"
     assert out["created_at"] == RUN_CREATED and out["actor"] == "alice" and out["triggering_actor"] == "alice"
-    # One run read, one enumeration of this repo's PRs from the branch, by
-    # the owner-qualified head filter, paginated. Never `gh pr view` or a
-    # branch-name lookup that picks one PR.
+    # One run read, one permission lookup for the actor, one enumeration of
+    # this repo's PRs from the branch, by the owner-qualified head filter,
+    # paginated, one read of the bound PR's timeline. Never `gh pr view` or
+    # a branch-name lookup that picks one PR.
     assert len(run_reads(calls)) == 1 and pull_lists(calls) == [
         "api repos/o/r/pulls?state=all&per_page=100&head=o:shared --paginate"]
-    assert len(calls) == 2
+    assert lookups(calls) == ["api repos/o/r/collaborators/alice/permission"]
+    assert timeline_reads(calls) == ["api repos/o/r/issues/101/timeline?per_page=100 --paginate"]
+    assert len(calls) == 4
     assert "bound to PR #101 (shared -> main at " + SHA_A in res.stdout
 
 
@@ -198,8 +249,8 @@ def test_two_prs_sharing_the_head_refuse_whichever_the_association_named_first(t
                            run=run_json(pull_requests=[(101, "main"), (102, "alternate")]),
                            pulls=[pr(101, base_ref="main"), pr(102, base_ref="alternate")])
     refused(res, out, "cannot be bound to one PR: #101 (open, base main) and #102 (open, base alternate)")
-    assert "Close or retarget the PR that should not share the branch" in out["reason"]
-    assert len(calls) == 2
+    assert "Close the PR that should not share the branch (retargeting it keeps it a candidate), then push a new commit (re-running this run keeps its creation time)." in out["reason"]
+    assert len(calls) == 3 and timeline_reads(calls) == []      # run, actor, listing; no PR chosen
 
 
 def test_a_pr_closed_after_the_run_was_created_still_counts(tmp_path):
@@ -340,7 +391,7 @@ def test_a_rerun_since_the_event_makes_it_stale(tmp_path):
     # run's latest attempt is 2 (in progress, or already green). The
     # re-run's own completion event decides; this one does nothing.
     res, out, _ = bind(tmp_path, run=run_json(attempt=2, conclusion=None, triggering_actor="bob"),
-                       pulls=[pr(101)])
+                       pulls=[pr(101)], perms={"bob": "write"})
     refused(res, out, "has moved on to attempt 2 since attempt 1 completed")
 
 
@@ -357,17 +408,128 @@ def test_a_run_without_a_usable_head_sha_or_creation_time_refuses(tmp_path):
     refused(res, out, "records no creation time")
 
 
-def test_actors_are_recorded_not_judged(tmp_path):
-    # Binding is about WHICH PR the run is for. Who pushed or re-ran is
-    # emitted for the log; authorization stays the `auto` label (verified by
-    # who applied it) and the model actions' own actor checks — a maintainer
-    # may deliberately authorize another author's PR, and a PR-author or
-    # actor rule here would break that (design decision preserved).
-    res, out, _ = bind(tmp_path, run=run_json(actor="read-only-member", triggering_actor="a-writer"),
-                       pulls=[pr(101)])
+# --- the run's actors (B2: authorization in trusted control flow) -------------
+
+
+def test_a_run_started_by_a_read_only_account_refuses_before_any_pr_read(tmp_path):
+    # The reduced-privilege case the investigation kept open: an organization
+    # member with read access opens a same-repo PR from a writer's branch;
+    # the `opened` run's actor is that member. The Claude engine refused it
+    # later — after the counter, the stage move and the base merge. Now the
+    # gate refuses it first, and the land job would again. The PR is never
+    # even enumerated.
+    res, out, calls = bind(tmp_path, run=run_json(actor="read-only-member"), pulls=[pr(101)],
+                           perms={"read-only-member": "read"})
+    refused(res, out, "was started by 'read-only-member', who is not a trusted login and holds no write access")
+    assert pull_lists(calls) == [] and timeline_reads(calls) == []
+    assert lookups(calls) == ["api repos/o/r/collaborators/read-only-member/permission"]
+
+
+def test_a_write_access_actor_passes_and_is_looked_up_once(tmp_path):
+    for perm in ("write", "maintain", "admin"):
+        res, out, calls = bind(tmp_path, run=run_json(actor="bob", triggering_actor="bob"), pulls=[pr(101)],
+                               perms={"bob": perm})
+        assert res.returncode == 0, res.stderr
+        assert out["ok"] == "1" and out["actor"] == "bob" and out["triggering_actor"] == "bob", perm
+        assert lookups(calls) == ["api repos/o/r/collaborators/bob/permission"], perm
+
+
+def test_a_trusted_login_passes_without_a_lookup_and_other_bots_are_refused(tmp_path):
+    # The machine account's pushes (the land job's) re-run CI as its bot
+    # login; that is the loop's own next round. Any other App is refused
+    # without a lookup (the endpoint 404s for Apps; github-actions[bot] is
+    # every repository's workflow) — the Claude engine step's allowed_bots
+    # rule, now applied to both engines before any write.
+    for login in TRUSTED_LOGINS.split(","):
+        res, out, calls = bind(tmp_path, run=run_json(actor=login), pulls=[pr(101)])
+        assert res.returncode == 0, res.stderr
+        assert out["ok"] == "1" and lookups(calls) == [], login
+    for bot in ("github-actions[bot]", "claude[bot]", "dependabot[bot]"):
+        res, out, calls = bind(tmp_path, run=run_json(actor=bot), pulls=[pr(101)], perms={bot: "admin"})
+        refused(res, out, f"was started by '{bot}'")
+        assert lookups(calls) == [], bot
+
+
+def test_a_rerun_by_an_unauthorized_account_refuses_even_after_a_trusted_start(tmp_path):
+    # Both actors are judged when they differ: the writer's push started
+    # attempt 1; a read-only member re-ran it (attempt 2's event). Claude's
+    # action checks both too; Codex checks only the current actor — the
+    # gate now decides for both engines.
+    res, out, calls = bind(tmp_path, run=run_json(actor="alice", triggering_actor="read-only-member", attempt=2),
+                           event_attempt="2", pulls=[pr(101)], perms={"read-only-member": "read"})
+    refused(res, out, "was re-run by 'read-only-member'")
+    assert len(lookups(calls)) == 2
+    res, out, _ = bind(tmp_path, run=run_json(actor="alice", triggering_actor="bob", attempt=2),
+                       event_attempt="2", pulls=[pr(101)], perms={"bob": "write"})
+    assert res.returncode == 0 and out["ok"] == "1" and out["triggering_actor"] == "bob"
+
+
+def test_a_failed_or_missing_permission_lookup_refuses(tmp_path):
+    # No fixture: the endpoint 404s (a deleted account) through the retry.
+    res, out, calls = bind(tmp_path, run=run_json(actor="ghost"), pulls=[pr(101)])
+    refused(res, out, "was started by 'ghost'")
+    assert len(lookups(calls, "ghost")) == 1          # a definite Not Found is not retried
+    res, out, _ = bind(tmp_path, run=run_json(actor=""), pulls=[pr(101)])
+    refused(res, out, "records no actor")
+
+
+def test_the_actor_rule_is_not_a_pr_author_rule(tmp_path):
+    # A maintainer labelled a read-only member's PR on purpose; the runs
+    # that drive it come from the maintainer's or the machine account's
+    # pushes to the branch, and those actors pass. Nothing here reads the
+    # PR's author (`user.login` is in the fixture and is never consulted).
+    res, out, calls = bind(tmp_path, run=run_json(actor="alice"), pulls=[pr(101)])
     assert res.returncode == 0, res.stderr
-    assert out["ok"] == "1" and out["actor"] == "read-only-member" and out["triggering_actor"] == "a-writer"
-    assert "actor 'read-only-member', triggering actor 'a-writer'" in res.stdout
+    assert out["ok"] == "1" and lookups(calls) == ["api repos/o/r/collaborators/alice/permission"]
+
+
+# --- the base the run tested (B1: a retarget since the run refuses) ------------
+
+
+def test_a_pr_retargeted_after_the_run_was_created_refuses(tmp_path):
+    # The run tested a merge into `release`; the PR now targets `main` with
+    # the same head. The current base passes every current-metadata check —
+    # so the PR's timeline is the authority: a `base_ref_changed` event at
+    # or after the run's creation refuses, at the gate and at landing alike.
+    res, out, calls = bind(tmp_path, run=run_json(pull_requests=[(101, "release")]),
+                           pulls=[pr(101, base_ref="main")], timeline=[retarget(AFTER)])
+    refused(res, out, f"PR #101 was retargeted at {AFTER}, after run 9002 was created ({RUN_CREATED})")
+    assert timeline_reads(calls) == ["api repos/o/r/issues/101/timeline?per_page=100 --paginate"]
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101, base_ref="main")],
+                       timeline=[retarget(RUN_CREATED)])
+    refused(res, out, "was retargeted at " + RUN_CREATED)
+    # Revalidation: retargeted between the gate and the landing (the gate
+    # saw `main`; the PR was retargeted to `release` and back to `main`, or
+    # the base differs outright — either refuses).
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101, base_ref="main")],
+                       timeline=[retarget(AFTER)], revalidate=(SHA_A, "main", "1"))
+    refused(res, out, "was retargeted at " + AFTER)
+
+
+def test_a_retarget_before_the_run_does_not_matter_and_github_auto_retargets_count(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)], timeline=[retarget(BEFORE)])
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["base_ref"] == "main"
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)], timeline=[
+        {"event": "automatic_base_change_succeeded", "created_at": AFTER},
+        {"event": "labeled", "created_at": AFTER, "label": {"name": "auto"}}])
+    refused(res, out, "was retargeted at " + AFTER)
+
+
+def test_a_paginated_timeline_is_flattened_and_a_persistent_timeline_error_fails(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)],
+                       timeline=pages([{"event": "committed", "created_at": BEFORE}], [retarget(AFTER)]))
+    refused(res, out, "was retargeted at " + AFTER)
+    res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], fixtures={"timeline-fail": ""})
+    assert res.returncode != 0 and "ok" not in out
+    assert len(timeline_reads(calls)) == 4
+
+
+def test_a_run_without_a_workflow_id_refuses(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(workflow_id=None), pulls=[pr(101)])
+    refused(res, out, "records no workflow id")
+    res, out, _ = bind(tmp_path, run=run_json(workflow_id="abc"), pulls=[pr(101)])
+    refused(res, out, "records no workflow id")
 
 
 def test_the_association_list_is_logged_as_information_only(tmp_path):
@@ -439,6 +601,125 @@ def test_revalidation_refuses_a_gate_head_sha_the_run_does_not_carry(tmp_path):
     refused(res, out, f"head SHA read {SHA_B} at the gate and {SHA_A} now")
 
 
+# --- the fix job's launch signal (B2: not a file the PR can pre-create) --------
+
+LAUNCHED = step_script(WORKFLOW, "        id: launched", 10)
+
+
+def test_launched_believes_only_the_actions_own_output(tmp_path):
+    """The action sets `execution_file` after Claude ran and nothing when it
+    refused the actor or failed to start; a file at its default path is
+    forgeable by the PR's provisioning step, so it counts for nothing."""
+    out = tmp_path / "output"
+    real = tmp_path / "exec.json"
+    real.write_text("[]")
+    empty = tmp_path / "empty.json"
+    empty.write_text("")
+
+    def launched(exec_path):
+        out.write_text("")
+        res = sh("bash", "-e", "-c", LAUNCHED, check=False, env={"PATH": os.environ["PATH"], "EXEC": exec_path,
+                                                                  "GITHUB_OUTPUT": str(out)})
+        assert res.returncode == 0, res.stderr
+        return out.read_text().strip()
+
+    assert launched(str(real)) == "value=true"
+    assert launched(str(empty)) == "value=false"
+    assert launched("") == "value=false"                 # refused / never started: no output at all
+    code = "\n".join(l for l in LAUNCHED.splitlines() if not l.lstrip().startswith("#"))
+    assert "claude-execution-output.json" not in code   # no default-path fallback anywhere in the step
+
+
+# --- sync-branch pins the base the gate established (B1) -------------------------
+
+SYNC_ACTION = ROOT / ".github" / "actions" / "sync-branch" / "action.yml"
+SYNC = step_script(SYNC_ACTION, "    - id: sync", 8)
+
+
+def sync_repo(tmp_path):
+    """A local origin with `main`, `release` and the PR branch `shared`
+    (cut from main), and a checkout of `shared` with origin pointing at it —
+    the CI-fix loop's shape (checkout=false: the head is already checked out)."""
+    from test_land_helpers import git
+    origin = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    git("init", "-q", "--bare", str(origin), cwd=tmp_path)
+    git("init", "-q", "-b", "main", str(work), cwd=tmp_path)
+    git("config", "user.email", "a@b", cwd=work)
+    git("config", "user.name", "a", cwd=work)
+    (work / "f").write_text("1\n")
+    git("add", "f", cwd=work)
+    git("commit", "-qm", "base", cwd=work)
+    git("checkout", "-qb", "shared", cwd=work)
+    (work / "g").write_text("1\n")
+    git("add", "g", cwd=work)
+    git("commit", "-qm", "head", cwd=work)
+    git("checkout", "-q", "main", cwd=work)
+    (work / "f").write_text("2\n")
+    git("commit", "-qam", "main moved", cwd=work)
+    git("checkout", "-qb", "release", "main~1", cwd=work)
+    (work / "r").write_text("1\n")
+    git("add", "r", cwd=work)
+    git("commit", "-qm", "release moved", cwd=work)
+    git("remote", "add", "origin", str(origin), cwd=work)
+    git("push", "-q", "origin", "main", "release", "shared", cwd=work)
+    git("checkout", "-q", "shared", cwd=work)
+    return work
+
+
+def sync(tmp_path, *, live_base, pinned_base):
+    work = sync_repo(tmp_path)
+    binp = tmp_path / "bin"
+    binp.mkdir(exist_ok=True)
+    gh = binp / "gh"
+    gh.write_text(GH_STUB)
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+    stub = tmp_path / "stub"
+    stub.mkdir(exist_ok=True)
+    (stub / "calls").write_text("")
+    (stub / "pr").write_text(json.dumps({"headRefName": "shared", "baseRefName": live_base,
+                                         "isCrossRepository": False, "state": "OPEN"}))
+    (stub / "branch-sha").write_text(SHA_A)
+    out = tmp_path / "output"
+    out.write_text("")
+    env = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
+           "GH_TOKEN": "x", "REPO": "o/r", "NUM": "101", "ENGINE": "claude", "CHECKOUT": "false",
+           "USER_NAME": "a", "USER_EMAIL": "a@b", "PINNED_BASE": pinned_base, "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_ALLOW_PROTOCOL": "file"}
+    res = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", SYNC, cwd=work, check=False, env=env)
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    return res, outputs, work
+
+
+def test_sync_merges_the_pinned_base_when_the_pr_still_targets_it(tmp_path):
+    res, out, work = sync(tmp_path, live_base="main", pinned_base="main")
+    assert res.returncode == 0, res.stderr
+    assert out["base"] == "main" and out["merge_sha"]
+    assert (work / "f").read_text() == "2\n" and not (work / "r").exists()
+
+
+def test_sync_refuses_a_pr_retargeted_since_the_gate_before_fetching_or_merging(tmp_path):
+    # The gate bound the run to a merge into `main`; the PR now targets
+    # `release`. Nothing is fetched or merged: the step fails, the agent is
+    # skipped and the attempt refunded.
+    res, out, work = sync(tmp_path, live_base="release", pinned_base="main")
+    assert res.returncode != 0
+    assert "established 'main' (the base the failed run tested); refusing to merge a base the run never saw" in res.stdout
+    assert "base" not in out and "merge_sha" not in out
+    assert (work / "f").read_text() == "1\n" and not (work / "r").exists()
+    from test_land_helpers import git
+    assert git("rev-parse", "HEAD", cwd=work).stdout == git("rev-parse", "origin/shared", cwd=work).stdout
+    assert git("status", "--porcelain", cwd=work).stdout == ""
+
+
+def test_sync_without_a_pinned_base_keeps_the_live_base(tmp_path):
+    # The other callers (claude.yml, claude-auto-review.yml) pass no base:
+    # unchanged behaviour.
+    res, out, work = sync(tmp_path, live_base="release", pinned_base="")
+    assert res.returncode == 0, res.stderr
+    assert out["base"] == "release" and (work / "r").exists()
+
+
 # --- the wiring in claude-auto.yml and the example stub ------------------------
 
 
@@ -453,6 +734,13 @@ def test_gate_and_land_pass_the_events_own_run_to_the_binding():
         assert "event-run-attempt: ${{ github.event.workflow_run.run_attempt }}" in block
         assert "expect-head-branch: ${{ inputs.head_branch }}" in block
     assert "expect-pr: ${{ inputs.pr_number }}" in step_block(text, "bind")
+    for step_id in ("bind", "rebind"):
+        assert "trusted-logins: ${{ env.TRUSTED_LOGINS }}" in step_block(text, step_id)
+    # The base the gate established reaches the sync (B1) and the mints
+    # carry the run read's permission (B3; the exact sets are pinned in
+    # test_app_token_minting.py).
+    assert "base: ${{ needs.gate.outputs.base_ref }}" in step_block(text, "sync")
+    assert text.count("          permission-actions: read\n") == 2
     rebind = step_block(text, "rebind")
     assert 'revalidate: "true"' in rebind
     assert "expect-pr: ${{ needs.gate.outputs.pr }}" in rebind

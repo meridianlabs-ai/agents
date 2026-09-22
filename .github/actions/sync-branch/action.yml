@@ -71,6 +71,17 @@ inputs:
     description: The matching noreply address (see user-name).
     required: false
     default: i-am-marvin@users.noreply.github.com
+  base:
+    description: >-
+      The base branch the caller's trusted context established (the CI-fix
+      loop's gate: the base the failed run tested, `bind-ci-run`'s
+      `base_ref`). When set, the PR's live base must equal it or this step
+      FAILS before fetching or merging anything — a PR retargeted between
+      the gate and the sync would otherwise be merged with a base the
+      failing run never saw. Empty (the default, and the other callers) keeps
+      the live base as the merge target, as before.
+    required: false
+    default: ""
 
 outputs:
   base:
@@ -130,6 +141,7 @@ runs:
         CHECKOUT: ${{ inputs.checkout }}
         USER_NAME: ${{ inputs.user-name }}
         USER_EMAIL: ${{ inputs.user-email }}
+        PINNED_BASE: ${{ inputs.base }}
         # Step-scoped git credential for the fetches below (design/
         # architecture.md → "No persisted git credentials"): git reads
         # GIT_CONFIG_* from the environment with command-line precedence, so
@@ -167,6 +179,12 @@ runs:
         [ -n "$prj" ] || { echo "::error::could not read PR #$NUM after 3 attempts"; exit 1; }
         branch=$(jq -r '.headRefName' <<<"$prj")
         base=$(jq -r '.baseRefName' <<<"$prj")
+        # The caller's pinned base (see the `base` input): the live base
+        # must still be it, else nothing is fetched or merged.
+        if [ -n "${PINNED_BASE:-}" ] && [ "$base" != "$PINNED_BASE" ]; then
+          echo "::error::PR #$NUM's base is now '$base', but the caller's trusted context established '$PINNED_BASE' (the base the failed run tested); refusing to merge a base the run never saw."
+          exit 1
+        fi
         # Live head tip, stamped before the agent runs and BEFORE the
         # closed-PR skip below: claude.yml's "Ensure hand-back after agent
         # push" compares it to the live tip after the run, and the closed-PR

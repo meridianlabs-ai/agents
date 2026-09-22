@@ -80,15 +80,25 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   both association orders, same SHA / different base, a PR closed after the
   run started, fork and same-owner-fork heads in the listing, pagination;
   the bound PR must be the caller's number (an association from another
-  repository refuses), open, at the run's head SHA; `revalidate` reproduces
-  the gate's context before landing (a retargeted PR, a pushed branch, a
-  re-run, a reopened PR); actors are recorded, not judged; a persistent API
-  error fails the step. Every fixture is synthetic — GitHub's event
-  generation and association ordering are not reproduced. Also the
-  workflow's wiring (the event's own run id and attempt reach both bind
-  steps, Land waits for the revalidation, the fix job requires the tested
-  head and goes read-only on a Claude step that failed without launching)
-  and the example stub's forwarding of the event's own fields.
+  repository refuses), open, at the run's head SHA, with no retarget on its
+  timeline at or after the run's creation (a `base_ref_changed` or
+  `automatic_base_change_succeeded` event refuses); the run's actors (who
+  started it, who re-ran it) must be a trusted login or hold write access,
+  by a cached fail-closed lookup, other bots refused unlooked-up — not a
+  PR-author rule; `revalidate` reproduces the gate's context before landing
+  (a retargeted PR, a pushed branch, a re-run, a reopened PR, a missing
+  context); a persistent API error fails the step. Also `sync-branch`'s
+  `base` input against a local origin (the pinned base merges; a PR
+  retargeted since fails before any fetch or merge; no pin keeps the live
+  base), and the fix job's `launched` signal (the action's own
+  `execution_file` output only, never a file at the default path). Every
+  fixture is synthetic — GitHub's event generation and association ordering
+  are not reproduced. Also the workflow's wiring (the event's own run id and
+  attempt and `TRUSTED_LOGINS` reach both bind steps, the gate's base reaches
+  the sync, both mints carry `actions: read`, Land waits for the
+  revalidation, the fix job requires the tested head and goes read-only on a
+  Claude step that failed without launching) and the example stub's
+  forwarding of the event's own fields.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
   the auto label`, `Gate and count`), the escalation's reset (the
   `reset-auto-counters` composite's step, given the gate's `cid`) and the

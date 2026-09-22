@@ -270,9 +270,9 @@ repository mints:
 | `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read |
 | `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no contents: bundles are refused) |
-| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write |
+| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write; actions: read (the failed run's record, for the run-to-PR binding) |
 | `claude-auto-review.yml` gate | caller repo | contents: read; issues, pull requests, org projects: write |
-| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write |
+| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write; `claude-auto.yml` also actions: read (the binding's revalidation) |
 | `atlas-sync.yml`, fork token | `inspect_ai` | issues, pull requests, org projects: write; actions: read |
 | `atlas-sync.yml`, ts-mono token | `ts-mono` | metadata, pull requests: read |
 
@@ -449,10 +449,13 @@ only.
 first binds the failed run to its PR (`bind-ci-run`, design/auto-agent.md →
 Binding the failed run to its PR): the run is the workflow_run event's own,
 read back from the API as this repository's failed `pull_request` run on the
-named head branch, and it binds to the one same-repo PR from that branch
-open when the run was created, at the run's head SHA — which must be the
-caller's `pr_number`; none, several or a disagreement skips. The gate then
-requires that PR open, same-repo and
+named head branch, whose actors (who started it, who re-ran it) are the
+machine account or write-access accounts — the model actions' own actor
+rule, decided here before any write instead of after the counter and the
+base merge — and it binds to the one same-repo PR from that branch open
+when the run was created, at the run's head SHA, whose timeline shows no
+retarget since — which must be the caller's `pr_number`; none, several or a
+disagreement skips. The gate then requires that PR open, same-repo and
 on the named head branch, verifies who applied the `auto` label
 (`verify-auto-labeler`: the machine account under either login or a
 write-access account, from the PR timeline; a GitHub App labeler or a failed
@@ -462,9 +465,13 @@ the label), and reads the attempt counter only from a marker comment by a
 `Record attempt` is the gate's write. The fix job holds the read-only job
 token and `actions: read` for the failed run's logs; its manifest carries the
 fix commits with `handback: true` and no stage, or a relay of the agent's
-final message when it committed nothing; a Claude step that failed without
-launching the agent packages nothing, the runner's base merge included, as
-the codex refusal path does. The land job derives the run's context again
+final message when it committed nothing; its base sync merges only the base
+the gate established (`sync-branch`'s `base` input) and fails on a PR
+retargeted since; a Claude step that failed without launching the agent —
+known from the action's own `execution_file` output, never from a file at
+the default path, which the PR's provisioning step could pre-create —
+packages nothing, the runner's base merge included, as the codex refusal
+path does. The land job derives the run's context again
 (`bind-ci-run` with `revalidate`) and pushes only when the gate's PR, head
 SHA, base ref and run attempt are reproduced, posts exactly
 `@review`, and refunds the attempt when the agent did not run and nothing was
