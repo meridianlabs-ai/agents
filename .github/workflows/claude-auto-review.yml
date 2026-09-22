@@ -137,6 +137,31 @@ on:
         required: false
         type: string
         default: "high"
+      codex_provision:
+        description: >-
+          The caller's provisioning recipe for CODEX runs (bash), run as the
+          unprivileged codex user in the checkout after the codex user
+          exists and before codex starts — the codex-run counterpart of the
+          repository's `.github/actions/claude-setup` action, which the codex
+          job never runs (a composite action can only run as the runner, and
+          nothing from the checkout may run as the runner in that job:
+          Claude Security finding 4628446). Empty (the default) runs the
+          generic recipe — `uv venv` and `uv pip install -e .[dev]`
+          (`--group dev` when the project declares one) — where the checkout
+          has a pyproject.toml. Set it to keep what the repository's
+          claude-setup does: a Python pin (`uv venv --python 3.11`), a
+          lockfile sync (`uv sync --dev`), Node tooling (`corepack enable
+          --install-directory ~/.local/bin && pnpm install
+          --frozen-lockfile`). The recipe runs with uv bootstrapped on PATH
+          and network on; it has no sudo, HOME is /home/codex, PATH is
+          sudo's default plus ~/.local/bin, and it must create the project's
+          `.venv` for the prompts' tool discovery (which also looks in
+          `node_modules/.bin` and ~/.local/bin). It comes from the caller's
+          workflow file, so it is trusted like every other input here; keep
+          it free of anything derived from the run's event.
+        required: false
+        type: string
+        default: ""
       append_system_prompt:
         description: >-
           Repo-specific guidance (e.g. the fork's "a human promotes upstream
@@ -1849,7 +1874,7 @@ jobs:
       # provisioning failed before it started). No `agent_started`: the
       # execution file is Claude's, and the land job reads the Claude job's
       # output for it (empty when this job ran).
-      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexfeedback.outcome == 'failure' || steps.codexcompose.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || steps.codexfix.outcome }}
+      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexhome.outcome == 'failure' || steps.codexfeedback.outcome == 'failure' || steps.codexcompose.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || steps.codexfix.outcome }}
     steps:
       # Check out the PR head (the gate's lookup). persist-credentials:false
       # (issue #61): checkout otherwise writes its token into .git/config for
@@ -1963,6 +1988,19 @@ jobs:
           git config user.name "$GIT_USER_NAME"
           git config user.email "$GIT_USER_EMAIL"
           mkdir -p "$LANDING_DIR"
+          # The commit step stages with a blanket `git add -A` (new source
+          # files are legitimate output), so exclude the scratch that
+          # provisioning and codex's verification runs leave behind on repos
+          # whose .gitignore doesn't already cover it (caches, venvs, the
+          # egg-info a setuptools editable install writes into the source
+          # tree). Written HERE, before the codex user exists: after the
+          # workspace grant a process running as codex could have replaced
+          # .git/info/exclude with a symlink, and a runner-side append would
+          # follow it (finding 4628446, review round 1). The prompt file
+          # itself lives in RUNNER_TEMP for the same reason.
+          printf '%s\n' .venv/ venv/ '*.egg-info/' __pycache__/ \
+            .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
+            >>.git/info/exclude
 
       # codex-action's default safety-strategy (drop-sudo) chmods root-owned
       # service sockets under /run, breaking D-Bus -> systemd-resolved -> DNS;
@@ -2031,6 +2069,27 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
         with:
           user: codex
+          # The caller's own recipe for codex runs, if its stub set one (the
+          # trusted counterpart of its claude-setup); empty runs the generic
+          # dev-install.
+          recipe: ${{ inputs.codex_provision }}
+
+      # The boundary between provisioning-as-codex and codex-action (Claude
+      # Security finding 4628446, review round 1): kill every process still
+      # running as codex — a hostile build backend's survivor — and re-create
+      # the codex home from scratch. codex-action's runner-side bootstrap
+      # reads ~codex/.codex/config.toml (following a symlink) and writes the
+      # merged file back readable by codex, so a config.toml the provisioning
+      # had replaced with a link to /proc/self/environ would copy the action
+      # process's environment — the OIDC request token, the key input — into
+      # a file codex can read. After this step nothing runs as codex and the
+      # only files codex-action reads before launching codex are the ones the
+      # composite wrote. A failure skips codex (the Surface step names it).
+      - name: Reset codex home
+        id: codexhome
+        uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
+        with:
+          mode: reset-home
 
       # The PR-thread sections of the codex prompt (top-level comments
       # filtered and anchored on the newest review round, review threads by
@@ -2050,10 +2109,11 @@ jobs:
 
       # The prompt: the review feedback and the task, with the verification
       # instruction keyed on what the provisioning step (as codex, above) did.
-      # After provisioning, as the runner: the prompt file is written into
-      # the workspace codex already owns a group grant on (readable to it
-      # under the setgid directories and the runner's umask), and
-      # codex-action reads prompt-file runner-side anyway.
+      # After provisioning, as the runner, into RUNNER_TEMP (755
+      # runner:runner, readable by codex; codex-action reads prompt-file
+      # runner-side anyway) — never into the workspace: once the codex user
+      # has its grant, a runner-side write there could follow a symlink a
+      # process running as codex planted (finding 4628446, review round 1).
       - name: Compose codex prompt
         id: codexcompose
         env:
@@ -2085,8 +2145,11 @@ jobs:
           # reports.
           if [ "${SETUP_OUTCOME:-}" = "success" ]; then
             tools=""
-            for t in pytest ruff mypy pyright python3; do
-              [ -x "$BIN/$t" ] && tools="$tools$t=$BIN/$t "
+            IFS=: read -r -a dirs <<<"$BIN"
+            for t in pytest ruff mypy pyright python3 node pnpm npm; do
+              for d in "${dirs[@]}"; do
+                [ -x "$d/$t" ] && { tools="$tools$t=$d/$t "; break; }
+              done
             done
             verify="Verify your changes with the locally provisioned tools where relevant. Your process runs under sudo with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
           elif [ "${SETUP_OUTCOME:-}" = "failure" ]; then
@@ -2165,16 +2228,7 @@ jobs:
           head -c 120000 "$RUNNER_TEMP/codex-context.md" \
             | sed -E -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
                      -e 's/engine: codex/engine  codex/g' \
-                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >.codex-prompt.md
-          #
-          # The commit step stages with a blanket `git add -A`, so exclude
-          # the prompt file and the scratch codex's verification runs leave
-          # behind on repos whose .gitignore doesn't cover it (caches, venvs,
-          # the egg-info a setuptools editable install — claude-setup's or
-          # the fallback's — writes into the source tree).
-          printf '%s\n' .codex-prompt.md .venv/ venv/ '*.egg-info/' __pycache__/ \
-            .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
-            >>.git/info/exclude
+                     -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >"$RUNNER_TEMP/codex-prompt.md"
 
       - name: Run Codex fix
         id: codexfix
@@ -2189,7 +2243,7 @@ jobs:
           # As the Claude fix step's allowed_bots: the reviewer bot, or the
           # machine account's App login posting a codex verdict.
           allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
-          prompt-file: .codex-prompt.md
+          prompt-file: ${{ runner.temp }}/codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
       # FIRST step after codex had write access to the tree, on every path
@@ -2455,6 +2509,7 @@ jobs:
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXCOMPOSE_OUTCOME: ${{ steps.codexcompose.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
+          CODEXHOME_OUTCOME: ${{ steps.codexhome.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
           CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
@@ -2527,6 +2582,9 @@ jobs:
           fi
           # A failed codex-user setup SKIPS the codex step, so it needs its
           # own check or the failure is a silent red job.
+          if [ -z "$err" ] && [ "${CODEXHOME_OUTCOME:-}" = "failure" ]; then
+            err="resetting the codex home after provisioning failed before the agent started — processes were still running as codex after repeated kills (a provisioning survivor?) or the home could not be re-created (see the job logs); nothing was attempted."
+          fi
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
             err="the codex user setup failed before the agent started — no fix was attempted this round (a runner-image change breaking adduser/usermod? — see the job logs)."
           fi

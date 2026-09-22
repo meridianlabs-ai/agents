@@ -52,11 +52,28 @@ description: >-
   codex user) before the `sudo`, so it never depends on the permissions
   of the action's own checkout directory.
 
-  The `bin` output is the venv's bin directory as an absolute path,
-  `<workspace>/.venv/bin`, for the codex compose steps: codex starts under
-  `sudo -u codex` with a reset PATH, so its prompts name every tool by
-  absolute path, and with the recipe running as codex there is no runner
-  PATH to discover them from.
+  The `recipe` input (review round 1 of the same fix): a caller's own bash,
+  run in place of the default venv + dev-install after the uv bootstrap —
+  the reusable workflows' `codex_provision` input, which the caller's stub
+  (a trusted workflow file, resolved from its default branch) supplies as
+  the codex-run counterpart of its `claude-setup` action, since a composite
+  action can only run as the runner and is never run on the codex path. It
+  runs with the same environment as the default recipe (as `user` when
+  set: no sudo, HOME=/home/<user>, sudo's PATH plus `~/.local/bin` for uv,
+  cwd the checkout, network), so it can pin a Python (`uv venv --python
+  3.11`), sync a lockfile (`uv sync --dev`), or install Node tooling
+  (`corepack enable --install-directory ~/.local/bin && pnpm install
+  --frozen-lockfile`). The composite writes it to `$RUNNER_TEMP` (readable
+  by the user) and passes the path as the script's one argument. Empty (the
+  default) keeps the generic recipe.
+
+  The `bin` output is the directories the codex compose steps look the
+  tools up in, colon-separated and absolute — `<workspace>/.venv/bin`,
+  `<workspace>/node_modules/.bin` and, under `user`, `/home/<user>/.local/bin`
+  (where a recipe's `corepack enable --install-directory` or `uv tool
+  install` puts binaries): codex starts under `sudo -u codex` with a reset
+  PATH, so its prompts name every tool by absolute path, and with the recipe
+  running as codex there is no runner PATH to discover them from.
 
   The recipe (decision: Ransom, 2026-09-01), mirroring the fork's
   claude-setup: the uv installer curl is retried — its tarball download
@@ -108,6 +125,14 @@ description: >-
   `timeout`) only costs a slower first test.
 
 inputs:
+  recipe:
+    description: >-
+      A caller's own provisioning bash (the reusable workflows'
+      `codex_provision` input), run after the uv bootstrap in place of the
+      generic venv + dev-install; empty keeps the generic recipe. See the
+      description.
+    required: false
+    default: ""
   user:
     description: >-
       Run the recipe as this unprivileged user (`sudo -u <user> -H`) instead
@@ -121,9 +146,10 @@ inputs:
 outputs:
   bin:
     description: >-
-      The provisioned venv's bin directory, absolute (`<workspace>/.venv/bin`),
-      for prompts that must name the tools by absolute path.
-    value: ${{ github.workspace }}/.venv/bin
+      Where prompts that must name the tools by absolute path look them up:
+      colon-separated absolute directories — the venv's bin, node_modules'
+      bin and, under `user`, that user's `~/.local/bin`.
+    value: ${{ github.workspace }}/.venv/bin:${{ github.workspace }}/node_modules/.bin${{ inputs.user != '' && format(':/home/{0}/.local/bin', inputs.user) || '' }}
 
 runs:
   using: composite
@@ -132,10 +158,21 @@ runs:
       env:
         AS_USER: ${{ inputs.user }}
         RECIPE: ${{ github.action_path }}/provision.sh
+        CALLER_RECIPE: ${{ inputs.recipe }}
       run: |
         set -euo pipefail
+        # The caller's recipe, if any, as a file under RUNNER_TEMP (readable
+        # by the user); passed as the script's one argument, never as
+        # environment (sudo resets it) and never as shell text.
+        args=()
+        if [ -n "${CALLER_RECIPE:-}" ]; then
+          printf '%s\n' "$CALLER_RECIPE" >"$RUNNER_TEMP/provision-recipe.sh"
+          chmod 644 "$RUNNER_TEMP/provision-recipe.sh"
+          bash -n "$RUNNER_TEMP/provision-recipe.sh"
+          args=("$RUNNER_TEMP/provision-recipe.sh")
+        fi
         if [ -z "${AS_USER:-}" ]; then
-          bash "$RECIPE"
+          bash "$RECIPE" ${args[@]+"${args[@]}"}
         else
           # A copy under RUNNER_TEMP (755 runner:runner on the hosted image,
           # so readable by the user) rather than the action's own path, and
@@ -145,5 +182,5 @@ runs:
           # venv lands in the checkout as in the runner case.
           install -m 644 "$RECIPE" "$RUNNER_TEMP/provision-fallback.sh"
           echo "provisioning as $AS_USER"
-          sudo -u "$AS_USER" -H bash "$RUNNER_TEMP/provision-fallback.sh"
+          sudo -u "$AS_USER" -H bash "$RUNNER_TEMP/provision-fallback.sh" ${args[@]+"${args[@]}"}
         fi

@@ -1,0 +1,146 @@
+# Hosted-runner canary for the engine split (Claude Security findings 4628446
+# and 4629153; design/codex-engine.md → One job per engine). Not a caller
+# stub and not an agent run: no real secret, no model, no codex-action. Two
+# parts on the stock `ubuntu-latest` image:
+#
+#   probe                  the secret-delivery probe
+#                          (engine-isolation-canary-reusable.yml): a called
+#                          workflow, shaped like the agent workflows, given
+#                          two SYNTHETIC repository secrets — CANARY_SENTINEL_A
+#                          and CANARY_SENTINEL_B, values `CANARYA-<16 hex>` /
+#                          `CANARYB-<16 hex>` set by hand (`gh secret set`),
+#                          never a provider key. Its jobs show that a secret a
+#                          skipped step references IS delivered to that job's
+#                          runner (the positive control; the pre-fix Claude
+#                          job's shape), that a job referencing nothing gets
+#                          neither sentinel although the caller passed both
+#                          and sibling jobs reference them (the fixed Claude
+#                          job, and per-job scoping), and that a used secret
+#                          is found (the codex job's shape).
+#   provisioning-boundary  the codex-side boundary of THIS revision, with the
+#                          real codex user, real sudo and the composites
+#                          lifted from the checkout (not `@main`, so a branch
+#                          is tested as itself): `create-codex-user`, then
+#                          `provision-fallback` with `user: codex` over the
+#                          hostile checkout in tests/fixtures/hostile-checkout
+#                          (a setup.py that plants the review-round-1
+#                          primitive — `~codex/.codex/config.toml` as a
+#                          symlink to /proc/self/environ — leaves a survivor
+#                          process, and tries runner-only writes and reads),
+#                          then `create-codex-user` in `reset-home` mode.
+#                          Asserted: the hostile code ran as codex, not the
+#                          runner; it could plant the link and the survivor
+#                          (positive controls) but not touch the runner's
+#                          home or read the runner's process environment;
+#                          after the reset no process runs as codex and the
+#                          home holds exactly the composite's config.toml.
+#                          Then a caller recipe (`recipe:`) runs as codex
+#                          with uv on PATH and HOME=/home/codex.
+#
+# Runs on pushes that touch the composites, the harness or the scanner, and
+# by hand.
+
+name: engine isolation canary
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/actions/create-codex-user/**"
+      - ".github/actions/provision-fallback/**"
+      - ".github/workflows/engine-isolation-canary.yml"
+      - ".github/workflows/engine-isolation-canary-reusable.yml"
+      - "tests/secret_delivery_scan.py"
+      - "tests/fixtures/hostile-checkout/**"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    uses: ./.github/workflows/engine-isolation-canary-reusable.yml
+    secrets:
+      CANARY_A: ${{ secrets.CANARY_SENTINEL_A }}
+      CANARY_B: ${{ secrets.CANARY_SENTINEL_B }}
+
+  provisioning-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The hostile checkout takes the place of a caller's tree: its
+      # pyproject.toml and setup.py go to the workspace root, where the
+      # composites expect the project.
+      - name: Stage the hostile checkout
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/hostile-checkout/pyproject.toml tests/fixtures/hostile-checkout/setup.py .
+          echo "HOSTILE_REPORT=$GITHUB_WORKSPACE/hostile-report.txt" >>"$GITHUB_ENV"
+
+      - name: Create codex user (this revision)
+        uses: ./.github/actions/create-codex-user
+
+      - name: Provision as the codex user over the hostile checkout (this revision)
+        id: setup
+        timeout-minutes: 10
+        uses: ./.github/actions/provision-fallback
+        with:
+          user: codex
+
+      # Positive controls: the hostile build backend ran, as codex, and did
+      # what the finding describes — so the reset below has something to undo.
+      - name: What the hostile backend reached
+        run: |
+          set -euo pipefail
+          echo "--- hostile report"
+          cat hostile-report.txt
+          grep -q "^uid=$(id -u codex) user=codex$" hostile-report.txt || { echo "::error::the build backend did not run as codex"; exit 1; }
+          grep -q "^planted=config.toml->/proc/self/environ$" hostile-report.txt || { echo "::error::the backend could not plant the config.toml symlink — the positive control is missing"; exit 1; }
+          grep -q "^survivor=[0-9]" hostile-report.txt || { echo "::error::no survivor process was left — the positive control is missing"; exit 1; }
+          grep -q "^runner-home-write=refused" hostile-report.txt || { echo "::error::the backend could write the runner's home"; exit 1; }
+          grep -q "^runner-environ-read=refused" hostile-report.txt || { echo "::error::the backend could read the runner process's environment"; exit 1; }
+          [ -L /home/codex/.codex/config.toml ] || { echo "::error::config.toml is not the planted symlink before the reset"; exit 1; }
+          sudo pgrep -u codex -a || { echo "::error::no process running as codex before the reset"; exit 1; }
+          [ -d .venv ] && [ "$(stat -c %U .venv)" = codex ] || { echo "::error::no codex-owned .venv"; exit 1; }
+          [ ! -e /home/runner/HOSTILE ] || { echo "::error::runner-home marker exists"; exit 1; }
+          echo "positive controls hold: the backend ran as codex, planted the link and a survivor, and reached nothing of the runner's"
+
+      - name: Reset codex home (this revision)
+        uses: ./.github/actions/create-codex-user
+        with:
+          mode: reset-home
+
+      - name: The boundary after the reset
+        run: |
+          set -euo pipefail
+          if sudo pgrep -u codex -a; then echo "::error::a process still runs as codex after the reset"; exit 1; fi
+          cfg=/home/codex/.codex/config.toml
+          [ -f "$cfg" ] && [ ! -L "$cfg" ] || { echo "::error::config.toml is not a regular file after the reset"; exit 1; }
+          grep -q '^\[permissions.workspace_net\]$' "$cfg" || { echo "::error::config.toml does not carry the workspace_net profile"; exit 1; }
+          [ "$(stat -c %U "$cfg")" = codex ] || { echo "::error::config.toml is not codex-owned"; exit 1; }
+          si="/home/codex/.codex/$GITHUB_RUN_ID.json"
+          [ -f "$si" ] && [ "$(stat -c '%U %a' "$si")" = "root 666" ] || { echo "::error::server-info file missing or wrong"; exit 1; }
+          entries=$(find /home/codex/.codex -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')
+          [ "$entries" = "$GITHUB_RUN_ID.json config.toml " ] || { echo "::error::unexpected entries in the codex home: $entries"; exit 1; }
+          echo "boundary holds: no codex process, a pristine codex home"
+
+      # The caller-recipe path: the same composite with a `recipe`, run as
+      # codex after the reset — uv on PATH, HOME the codex user's, the
+      # checkout as cwd.
+      - name: Provision with a caller recipe (this revision)
+        uses: ./.github/actions/provision-fallback
+        with:
+          user: codex
+          recipe: |
+            printf 'recipe uid=%s home=%s cwd=%s uv=%s\n' "$(id -u)" "$HOME" "$(pwd)" "$(command -v uv)" >recipe-report.txt
+            uv venv --python 3.12 .venv-recipe
+      - name: The recipe ran as codex with uv
+        run: |
+          set -euo pipefail
+          cat recipe-report.txt
+          grep -q "^recipe uid=$(id -u codex) home=/home/codex cwd=$GITHUB_WORKSPACE uv=/home/codex/.local/bin/uv$" recipe-report.txt || { echo "::error::the recipe did not run as expected"; exit 1; }
+          [ -x .venv-recipe/bin/python ] || { echo "::error::the recipe's venv was not created"; exit 1; }
+          .venv-recipe/bin/python --version

@@ -62,11 +62,18 @@ text are checked by the tests under `tests/`.
 - In a codex job nothing from the checked-out tree executes as the runner:
   the caller's `claude-setup` action is not run there, and the shared
   provisioning recipe (uv and a dev-install of the checkout, the tree's own
-  build backend) runs as the unprivileged `codex` user after that user
-  exists and before the codex-action step, so a head the pipeline itself
-  produced from an outsider's issue text meets the same boundary as codex
-  itself: no sudo, no GitHub token, no OIDC request token, no view of the
-  runner's processes (finding 4628446).
+  build backend, or the caller stub's `codex_provision` recipe) runs as the
+  unprivileged `codex` user after that user exists and before the
+  codex-action step, so a head the pipeline itself produced from an
+  outsider's issue text meets the same boundary as codex itself: no sudo,
+  no GitHub token, no OIDC request token, no view of the runner's
+  processes (finding 4628446). Between that provisioning and the
+  codex-action step every process running as codex is killed and the codex
+  home is re-created, and the runner writes nothing into the workspace in
+  that interval, so nothing provisioning left behind reaches the action's
+  runner-side reads. A hosted canary exercises both this boundary and the
+  secret delivery against a hostile checkout and synthetic secrets
+  (design/credential-separation.md → section 6).
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The

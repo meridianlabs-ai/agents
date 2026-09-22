@@ -100,18 +100,57 @@ description: >-
      another file under `.codex` here should check what else the skipped
      bootstrap would have done.
 
+  Steps 5 and 6 are `codex-home.sh` next to this file, which the composite
+  runs again in its `reset-home` mode (the `mode` input): the codex jobs
+  provision the checkout AS the codex user between this composite and the
+  codex-action step (Claude Security finding 4628446), and a build backend
+  running as codex owns this home for that interval — it can replace
+  `config.toml` with a symlink to `/proc/self/environ` and let
+  codex-action's runner-side `writeProxyConfig` copy the action process's
+  environment (the OIDC request token, the key input) into a file codex
+  reads (review round 1 of the fix). So after provisioning the jobs run
+  this composite once more with `mode: reset-home`: kill every process
+  running as codex (the reclaim step's loop), delete `~codex/.codex`, and
+  re-create it exactly as above. codex-action then starts from a home no
+  codex process has touched, and the only files it reads before launching
+  codex are the ones this script wrote.
+
   Runs no git command against the checkout. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
   step (local composite actions with post steps break teardown on the
-  fork). No inputs: the user name, home and the snapshot paths
+  fork). One input, `mode`; the user name, home and the snapshot paths
   (`$RUNNER_TEMP/git-config.pre-codex`, `$RUNNER_TEMP/embedded-git.pre-codex`)
   are the convention the codex-action steps and `reclaim-codex-workspace`
   are written against.
+
+inputs:
+  mode:
+    description: >-
+      `create` (the default): everything below — snapshots, user, grants,
+      output dir, safe.directory, the codex home. `reset-home`: the
+      boundary step the codex jobs run AFTER provisioning as the codex user
+      and BEFORE the codex-action step (Claude Security finding 4628446,
+      review round 1): kill every process still running as codex (a
+      hostile build backend's survivor, exactly as the reclaim step kills
+      codex's own), then delete and re-create the codex home from scratch —
+      codex-action's runner-side bootstrap reads `~codex/.codex/config.toml`
+      (following a symlink) and writes the merged file back readable by
+      codex, so a `config.toml` a process running as codex had replaced with
+      a link to `/proc/self/environ` would copy the action process's
+      environment (the OIDC request token, the key input) into a file codex
+      can read. Nothing else the action reads before launching codex lives
+      in that home. The workspace, the venv provisioning created and codex's
+      own `.local` stay as codex left them: they are codex's to run.
+    required: false
+    default: create
 
 runs:
   using: composite
   steps:
     - shell: bash
+      if: inputs.mode == 'create'
+      env:
+        HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
       run: |
         set -euo pipefail
         # 1. Pre-codex snapshots (see description) — before any grant.
@@ -128,38 +167,42 @@ runs:
         sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
         # 4. Dubious-ownership exemption for the runner-owned checkout.
         sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        # 5. Network on: 755 home and .codex so the runner-side action can
-        #    read config.toml back before appending its provider block.
-        sudo chmod 755 /home/codex
-        sudo install -d -o codex -g codex -m 755 /home/codex/.codex
-        # 6. The server-info file the action's skipped bootstrap would have
-        #    pre-touched for the proxy (root-owned, 666 until the action
-        #    locks it down).
-        sudo touch "/home/codex/.codex/$GITHUB_RUN_ID.json"
-        sudo chmod 666 "/home/codex/.codex/$GITHUB_RUN_ID.json"
-        # A NAMED profile, not `[sandbox_workspace_write] network_access`:
-        # codex-action selects the profile explicitly (`-c
-        # default_permissions=":workspace"`), and codex deliberately ignores
-        # the legacy [sandbox_workspace_write] table for an explicit builtin
-        # selection (core/src/config/mod.rs: "explicitly selecting
-        # `:workspace` intentionally ignores those legacy settings") — the
-        # 2026-09-09 attempt wrote that key and changed nothing: trio still
-        # died on setsockopt in every 2026-09-10 round while the detector
-        # reported the key present. Named profiles may `extends` a builtin
-        # (core/src/config/permissions.rs, extensible_builtin_parent_profile)
-        # and their `[..network] enabled = true` compiles straight to
-        # NetworkSandboxPolicy::Enabled (compile_network_sandbox_policy), so
-        # this inherits :workspace's filesystem rules, pins the checkout as
-        # a workspace root, and turns the seccomp network filter off.
-        # codex-action accepts a custom profile name (only three unrelated
-        # config roots are restricted for custom profiles).
-        printf '%s\n' \
-          '# Added by the meridianlabs-ai/agents workflow (design/codex-engine.md → Network).' \
-          '[permissions.workspace_net]' \
-          'extends = ":workspace"' \
-          '[permissions.workspace_net.workspace_roots]' \
-          '"." = true' \
-          '[permissions.workspace_net.network]' \
-          'enabled = true' \
-          | sudo -u codex tee /home/codex/.codex/config.toml >/dev/null
-        sudo chmod 644 /home/codex/.codex/config.toml
+        # 5 + 6. The codex home: 755 home and .codex, the server-info file
+        #    and the network-on profile (codex-home.sh, shared with the
+        #    reset-home mode below).
+        bash "$HOME_SCRIPT" codex
+
+    - shell: bash
+      if: inputs.mode == 'reset-home'
+      env:
+        HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
+      run: |
+        set -euo pipefail
+        id codex >/dev/null 2>&1 || { echo "::error::no codex user — reset-home runs after the create mode of this composite"; exit 1; }
+        # First: nothing may still be running as codex — a background
+        # process a hostile build backend left behind during provisioning
+        # (`setsid nohup … &`) would otherwise outlive this step and could
+        # re-tamper the home below before codex-action reads it. pkill scans
+        # /proc once per call and exits 1 when it found nothing to kill (0 =
+        # killed something, 2/3 = pkill itself failed), so repeat until a
+        # pass comes up empty — bounded: a survivor that keeps forking
+        # faster than that is a red step, not a silent one. The same loop as
+        # reclaim-codex-workspace's.
+        clear=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          rc=0
+          sudo pkill -KILL -u codex || rc=$?
+          if [ "$rc" -eq 1 ]; then clear=1; break; fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::pkill -u codex failed (exit $rc) — cannot tell whether codex processes survive; refusing to hand the workspace to codex-action."
+            exit 1
+          fi
+          sleep 0.2
+        done
+        if [ "$clear" -ne 1 ]; then
+          echo "::error::processes were still running as codex after repeated kills (a provisioning survivor?) — refusing to hand the workspace to codex-action."
+          exit 1
+        fi
+        # Then the home, from scratch.
+        bash "$HOME_SCRIPT" codex
+        echo "codex home reset: no codex processes, ~codex/.codex re-created"

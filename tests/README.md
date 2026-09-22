@@ -214,17 +214,33 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   job references it only at its codex-action step, the two are selected by
   the gate's `engine` output at the job level and gate no step on it, the
   land job waits for both; the codex job `uses:` no action from the
-  checkout and provisions with `provision-fallback` `user: codex` between
-  `Create codex user` and the codex-action step, its prompts taking the
-  tool paths from the composite's `bin` output; the Claude job keeps the
-  runner-side `claude-setup` and fallback. Also the composite's dispatch
-  step (lifted and run against a stub `sudo`: a `$RUNNER_TEMP` copy under
-  `sudo -u codex -H` when `user` is set, the recipe directly otherwise, a
-  failing sudo fails the step) and `provision.sh` against stub `curl`/`uv`
-  (the venv and the `.[dev]` / `--group dev` install, the `.git/info/exclude`
-  lines, and the `GITHUB_PATH` appends made only when that file is there).
+  checkout, provisions with `provision-fallback` `user: codex` (and the
+  caller's `codex_provision` as `recipe`) after `Create codex user`, runs
+  `Reset codex home` (`create-codex-user` `mode: reset-home`) before the
+  codex-action step, writes nothing into the workspace after the codex user
+  exists (prompt files in RUNNER_TEMP, the exclude lines appended by the
+  prep step), and its prompts take the tool paths from the composite's
+  `bin` directories; the Claude job keeps the runner-side `claude-setup`
+  and fallback; `codex_provision` is declared with a type and reaches only
+  the codex job. Also the composites, lifted and run against stubs:
+  `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
+  codex -H` when `user` is set, the recipe directly otherwise, a caller
+  recipe handed over as a `$RUNNER_TEMP` file and refused when it is not
+  bash, a failing sudo fails the step), `provision.sh` against stub
+  `curl`/`uv` (the venv and the `.[dev]` / `--group dev` install, a caller
+  recipe replacing them after the uv bootstrap, the `.git/info/exclude`
+  lines, the `GITHUB_PATH` appends made only when that file is there),
+  `create-codex-user`'s `codex-home.sh` (a planted `config.toml` symlink
+  and a stray file are replaced by the profile and the server-info file;
+  the link's target is untouched) and its `reset-home` step (kills, then
+  the home script; refuses while `pkill` keeps finding codex processes).
   The four composer tests lift each engine's composer from its own job
   (`job_block` / `lift_run` in `test_land_helpers.py`).
+- `secret_delivery_scan.py` and `fixtures/hostile-checkout/` are not tests
+  but the hosted canary's pieces (`.github/workflows/engine-isolation-canary.yml`):
+  the root-run scanner that counts synthetic sentinel secrets in the
+  runner processes' memory, and the hostile `setup.py` build backend the
+  provisioning-boundary job installs as the codex user.
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc

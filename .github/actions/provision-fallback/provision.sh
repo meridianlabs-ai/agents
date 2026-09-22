@@ -7,8 +7,14 @@
 # below run only when the file is there to append to (the runner case,
 # where the Claude engine's bare `pytest`/`ruff`/`mypy` need it; codex
 # starts under its own reset PATH and is handed the venv's absolute paths
-# by the compose steps instead).
+# by the compose steps instead). One optional argument: a caller's own
+# recipe file (the reusable workflows' `codex_provision` input, written to
+# $RUNNER_TEMP by the composite), run in place of the default venv +
+# dev-install block after the uv bootstrap — the caller's trusted counterpart
+# of its `claude-setup` action for codex runs, where a composite action (which
+# can only run as the runner) is never run.
 set -euo pipefail
+recipe="${1:-}"
 for attempt in 1 2 3; do
   curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh && break
   if [ "$attempt" = 3 ]; then
@@ -19,11 +25,19 @@ for attempt in 1 2 3; do
 done
 export PATH="$HOME/.local/bin:$PATH"
 printf '%s\n' .venv/ '*.egg-info/' >>.git/info/exclude
-uv venv
-if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
-  uv pip install -e ".[dev]" --group dev
+if [ -n "$recipe" ]; then
+  # The caller's recipe: uv is on PATH, the cwd is the checkout, and the
+  # environment is whatever the composite's caller gave this script (sudo's
+  # reset environment under `user`).
+  echo "running the caller's codex provisioning recipe"
+  bash "$recipe"
 else
-  uv pip install -e ".[dev]"
+  uv venv
+  if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
+    uv pip install -e ".[dev]" --group dev
+  else
+    uv pip install -e ".[dev]"
+  fi
 fi
 if [ -n "${GITHUB_PATH:-}" ]; then
   echo "$HOME/.local/bin" >>"$GITHUB_PATH"

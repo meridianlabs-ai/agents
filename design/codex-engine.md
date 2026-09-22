@@ -677,20 +677,70 @@ which are empty when the codex job ran). Two Claude Security findings
   can only run as the runner, so the codex jobs never run the caller's
   `claude-setup`, even on callers that define one; the venv lands in the
   checkout as before, codex-owned, and the compose steps take the tool
-  paths from the composite's `bin` output. The reclaim step's process kill
-  covers anything provisioning left running as codex, and its embedded-
-  repository refusal covers a `.git` it planted.
+  paths from the composite's `bin` output (the venv's bin,
+  `node_modules/.bin`, `~codex/.local/bin`). The reclaim step's
+  embedded-repository refusal covers a `.git` provisioning planted.
+- **The boundary between provisioning and codex-action (review round 1 of
+  the fix).** Provisioning as codex runs BEFORE codex-action's runner-side
+  bootstrap, and that bootstrap reads `~codex/.codex/config.toml`
+  (`writeProxyConfig`, following a symlink) and writes the merged file back
+  readable by codex — so a build backend running as codex could replace
+  the file with a link to `/proc/self/environ` and have the action copy its
+  own process environment (the OIDC request token, the `INPUT_*` key) into
+  a file codex reads, or leave a background process to do it later. The
+  `Reset codex home` step (the `create-codex-user` composite in `mode:
+  reset-home`) therefore runs between provisioning and codex-action: it
+  kills every process running as codex (the reclaim step's loop; a
+  survivor fails the step and skips codex) and deletes and re-creates
+  `~codex/.codex` from the composite's `codex-home.sh` — the same script
+  the create mode runs — so the only files codex-action reads before
+  launching codex are the ones the composite just wrote. For the same
+  reason the runner writes nothing into the workspace once the codex user
+  exists: the codex prompt files live in `$RUNNER_TEMP` (755 runner:runner,
+  readable by codex), and the `.git/info/exclude` lines are appended by the
+  prep steps before `Create codex user` — a runner-side write into the
+  group-writable tree could otherwise follow a symlink a codex-uid process
+  planted (a prompt written through `.codex-prompt.md` → `$GITHUB_ENV`
+  would have handed later steps an environment composed from the issue
+  text). The hosted canary (below) exercises the whole sequence against a
+  hostile checkout.
+- **The caller's recipe (`codex_provision`).** The four reusable workflows
+  take a `codex_provision` input — bash the caller's stub supplies, run as
+  the codex user after the uv bootstrap in place of the generic venv +
+  dev-install (the `provision-fallback` composite's `recipe` input, written
+  to `$RUNNER_TEMP` and passed to `provision.sh` as its one argument). It
+  is the codex-run counterpart of the caller's `claude-setup`: a Python
+  pin (`uv venv --python 3.11`), a lockfile sync (`uv sync --dev`), Node
+  tooling (`corepack enable --install-directory ~/.local/bin && pnpm
+  install --frozen-lockfile`). It comes from the stub — a workflow file
+  resolved from the caller's default branch — so it is trusted like every
+  other input, and it runs with codex's boundary, never the runner's. The
+  known callers' recipes, for their stubs to adopt after this lands (the
+  task keeps caller stubs out of this change): the inspect_ai fork's
+  `meridian` claude-setup is `uv venv --python 3.11 && uv pip install -e
+  ".[dev]"`; inspect_flow's `setup` action is Python 3.11 plus `uv sync
+  --dev` (its `[tool.uv] default-groups = ["dev"]`); inspect_harbor's is
+  Python 3.12 plus `uv sync` (default groups `dev` and `doc`); ts-mono's is
+  Node 22 with `pnpm install --frozen-lockfile` (`packageManager:
+  pnpm@11.22.0` — `corepack enable --install-directory ~/.local/bin` then
+  `pnpm install --frozen-lockfile`; the hosted image's `node` is on codex's
+  PATH, and `~codex/.local/bin` is one of the tool directories the prompts
+  search). Until a stub sets the input, that caller's codex runs get the
+  generic recipe (or none, for a repository without a `pyproject.toml`).
 
 Caller-visible effects of the codex-side change (the Claude jobs are
 unchanged, minus the key): a codex run on a caller with a `claude-setup`
 action (the inspect_ai fork's `meridian` branch for dev-agent issue runs,
-inspect_flow, ts-mono) gets the generic recipe instead — the runner's
-default Python rather than the action's pin, no Actions cache, `.[dev]`
-plus a `dev` dependency group when one exists — and a caller whose
-project is not a Python project (ts-mono: pnpm) gets no provisioning on
-codex runs at all; codex's prompt says so and tells it that it may
-install what verification needs inside its sandbox, which has network.
-The Claude jobs still run the caller's `claude-setup` as the runner, which
+inspect_flow, inspect_harbor, ts-mono) gets the generic recipe until its
+stub sets `codex_provision` — the runner's default Python rather than the
+action's pin, no Actions cache, `.[dev]` plus a `dev` dependency group when
+one exists — and a caller whose project is not a Python project (ts-mono:
+pnpm) gets no provisioning on codex runs at all until then; codex's prompt
+says so and tells it that it may install what verification needs inside
+its sandbox, which has network. No caller is in a hurry: `engine:codex`
+exists as a label on the inspect_ai fork and inspect_flow only (one item
+each on 2026-09-22). The Claude jobs still run the caller's `claude-setup`
+as the runner, which
 is exactly how the Claude agent itself runs there (SECURITY.md → By
 design). The loops' prep steps split in two around the new order — the
 identity and landing-directory part before the codex user exists (the
@@ -700,7 +750,31 @@ prompt composition after provisioning — so their Surface steps name a
 
 The stubs are unchanged: every reusable workflow still declares
 `OPENAI_API_KEY` (a stub passing an undeclared secret fails to load) and
-the stubs keep passing it; only the codex job reads it.
+the stubs keep passing it; only the codex job reads it. The example stubs
+carry the `codex_provision` guidance as comments.
+
+**The hosted canary** (`.github/workflows/engine-isolation-canary.yml`,
+`workflow_dispatch` and pushes touching the composites or the harness) is
+the evidence for both findings on a real `ubuntu-latest` runner, with no
+real secret and no model. Its `probe` job calls a reusable workflow shaped
+like the agent workflows with two synthetic repository secrets
+(`CANARY_SENTINEL_A` / `CANARY_SENTINEL_B`, values `CANARYA-<16 hex>` and
+`CANARYB-<16 hex>`, set by hand) and runs `tests/secret_delivery_scan.py`
+as root over the memory of the runner processes in each of three jobs: one
+references sentinel A in a step whose `if:` is never true (the pre-fix
+Claude job's shape; expected present — the positive control), one
+references nothing (the fixed Claude job; expected neither sentinel,
+although the caller passed both and sibling jobs reference each — which
+also settles per-job scoping), one uses sentinel B in a step that runs
+(the codex job's shape; expected present). Its `provisioning-boundary` job
+runs this revision's `create-codex-user`, `provision-fallback` with `user:
+codex` over `tests/fixtures/hostile-checkout` (a `setup.py` build backend
+that plants the config.toml symlink, leaves a survivor process and tries
+runner-only reads and writes), then `create-codex-user` in `reset-home`
+mode, asserting the positive controls before the reset and the pristine
+boundary after it, then a caller `recipe` as codex. Results per run are in
+the run's logs; the round-2 run's are recorded in
+design/credential-separation.md → section 6.
 
 ## Network inside the codex sandbox
 

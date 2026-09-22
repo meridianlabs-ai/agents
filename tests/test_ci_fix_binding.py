@@ -637,8 +637,8 @@ def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_f
     assert "read-only: ${{ steps.codexguard.outcome != 'success' && 'true' || 'false' }}" in codex_job
     assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
     assert ("      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || "
-            "steps.codexcompose.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || "
-            "steps.codexfix.outcome }}\n") in codex_job
+            "steps.codexhome.outcome == 'failure' || steps.codexcompose.outcome == 'failure' || "
+            "steps.codexfix.outcome == 'failure') && 'failure' || steps.codexfix.outcome }}\n") in codex_job
     land = job_block(text, "land")
     assert ("      AGENT_OUTCOME: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_outcome "
             "|| needs.fix.outputs.agent_outcome }}\n") in land

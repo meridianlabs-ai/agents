@@ -20,14 +20,26 @@ job is dispatched, and a skipped job gets no job message at all.
 - 4628446: the codex job executes nothing from the checked-out tree as the
   runner — no `./.github/actions/claude-setup`, and provisioning runs the
   shared fallback recipe as the `codex` user (`user: codex`), after the
-  `create-codex-user` step and before the codex-action step.
+  `create-codex-user` step and before the codex-action step; between
+  provisioning and codex-action the `Reset codex home` step (the same
+  composite, `mode: reset-home`) kills every codex process and re-creates
+  the codex home, so nothing a hostile build backend left behind reaches
+  codex-action's runner-side reads of that home (review round 1); the
+  runner writes nothing into the workspace after the codex user exists
+  (the prompt file lives in RUNNER_TEMP, the exclude lines are appended
+  before the user is created); the caller's own recipe (`codex_provision`)
+  reaches the provisioning step as the composite's `recipe`.
 - The `provision-fallback` composite runs its recipe under `sudo -u <user>
   -H` from a copy in `$RUNNER_TEMP` when `user` is set, directly as the
-  runner otherwise; the recipe appends to `GITHUB_PATH` only when that file
-  is there (the runner case).
+  runner otherwise; a caller recipe replaces the default install after the
+  uv bootstrap; the recipe appends to `GITHUB_PATH` only when that file is
+  there (the runner case). `create-codex-user`'s `codex-home.sh` re-creates
+  the home over whatever is there, and its reset mode refuses to proceed
+  while codex processes survive the kill loop.
 """
 
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -138,10 +150,17 @@ def test_the_codex_job_provisions_as_the_codex_user_after_the_boundary(name):
     assert "claude-setup" not in "\n".join(code_lines(codex_job))
     provision = step_with(codex_job, "provision-fallback@main")
     assert "        with:\n          user: codex\n" in provision
+    assert "          recipe: ${{ inputs.codex_provision }}\n" in provision
     assert "        if: " in provision and "hashFiles('pyproject.toml') != ''" in provision
     order = [s for s in steps(codex_job) if any(k in s for k in ("create-codex-user@main", "provision-fallback@main", CODEX_ACTION))]
-    assert ["create-codex-user@main" in order[0], "provision-fallback@main" in order[1], CODEX_ACTION in order[2]] == [True, True, True]
+    assert [("create-codex-user@main" in order[0], "provision-fallback@main" in order[1],
+             "create-codex-user@main" in order[2], CODEX_ACTION in order[3])] == [(True, True, True, True)]
     assert "\n        id: codexuser\n" in order[0] and "\n        id: setup\n" in order[1]
+    assert "\n        id: codexhome\n" in order[2] and "        with:\n          mode: reset-home\n" in order[2]
+    assert "mode:" not in order[0]
+    surface = step_with(codex_job, "\n        id: surface\n")
+    assert "          CODEXHOME_OUTCOME: ${{ steps.codexhome.outcome }}\n" in surface
+    assert '[ "${CODEXHOME_OUTCOME:-}" = "failure" ]' in surface
     # Every step between the user boundary and codex is the provisioning
     # itself or a runner-side composition step (`run:` blocks and shared
     # composites from this repository): none of them `uses:` an action from
@@ -156,11 +175,46 @@ def test_the_codex_job_provisions_as_the_codex_user_after_the_boundary(name):
 @pytest.mark.parametrize("name", REUSABLE)
 def test_the_codex_prompts_take_tool_paths_from_the_provisioned_venv(name):
     codex_job = jobs(workflow_text(name))[AGENT_JOBS[name][1]]
-    compose = step_with(codex_job, 'for t in pytest ruff mypy pyright python3; do')
+    compose = step_with(codex_job, 'for t in pytest ruff mypy pyright python3 node pnpm npm; do')
     assert "          BIN: ${{ steps.setup.outputs.bin }}\n" in compose
     assert "          SETUP_OUTCOME: ${{ steps.setup.outcome }}\n" in compose
-    assert '[ -x "$BIN/$t" ] && tools="$tools$t=$BIN/$t "' in compose
+    assert 'IFS=: read -r -a dirs <<<"$BIN"' in compose
+    assert '[ -x "$d/$t" ] && { tools="$tools$t=$d/$t "; break; }' in compose
     assert "command -v" not in "\n".join(code_lines(compose))
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_runner_writes_nothing_into_the_workspace_after_the_codex_user_exists(name):
+    """After `Create codex user` a process running as codex may have planted
+    symlinks in the group-writable workspace, so every runner-side write
+    between that step and the reclaim goes to RUNNER_TEMP: the prompt file,
+    and the `.git/info/exclude` lines are appended before the user exists."""
+    codex_job = jobs(workflow_text(name))[AGENT_JOBS[name][1]]
+    all_steps = steps(codex_job)
+    user_at = next(i for i, s in enumerate(all_steps) if "\n        id: codexuser\n" in s)
+    codex_at = next(i for i, s in enumerate(all_steps) if CODEX_ACTION in s)
+    for s in all_steps[user_at + 1: codex_at]:
+        code = "\n".join(code_lines(s))
+        assert ".codex-prompt.md" not in code and ">>.git/info/exclude" not in code, s[:60]
+        # No redirection into a dot-relative path (the prompt file used to
+        # be `>.codex-prompt.md`; the exclude append `>>.git/info/exclude`).
+        assert not re.search(r'>>?\s*"?\.(git|codex|venv)', code), s[:60]
+    assert "prompt-file: ${{ runner.temp }}/" in all_steps[codex_at]
+    if name != "claude-review.yml":
+        prep = step_with(codex_job, "\n        id: codexprep\n")
+        assert ">>.git/info/exclude" in prep and ".codex-prompt.md" not in prep
+        assert all_steps.index(prep) < user_at
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_caller_recipe_input_is_declared_and_reaches_only_the_codex_job(name):
+    text = workflow_text(name)
+    decl = text[text.index("      codex_provision:\n"):]
+    decl = decl[:re.search(r"\n      [a-z_]+:\n", decl).start()]
+    assert "        required: false\n" in decl and "        type: string\n" in decl and decl.endswith('        default: ""')
+    for job, block in jobs(text).items():
+        uses = [l for l in code_lines(block) if "inputs.codex_provision" in l]
+        assert uses == (["          recipe: ${{ inputs.codex_provision }}"] if job == AGENT_JOBS[name][1] else []), job
 
 
 @pytest.mark.parametrize("name", REUSABLE)
@@ -178,7 +232,9 @@ def test_the_claude_job_keeps_the_runner_side_provisioning(name):
 def composite_step() -> str:
     text = (COMPOSITE / "action.yml").read_text()
     assert "\n  user:\n" in text[text.index("\ninputs:\n"):text.index("\nruns:\n")]
-    assert "    value: ${{ github.workspace }}/.venv/bin\n" in text
+    assert ("    value: ${{ github.workspace }}/.venv/bin:${{ github.workspace }}/node_modules/.bin"
+            "${{ inputs.user != '' && format(':/home/{0}/.local/bin', inputs.user) || '' }}\n") in text
+    assert "\n  recipe:\n" in text[text.index("\ninputs:\n"):text.index("\nruns:\n")]
     return lift_run(text, "    - shell: bash")
 
 
@@ -188,21 +244,21 @@ def write_exe(path: Path, body: str) -> Path:
     return path
 
 
-def dispatch(tmp_path: Path, user: str):
+def dispatch(tmp_path: Path, user: str, caller_recipe: str = ""):
     """Run the composite's step with a stub sudo and a stub recipe that
-    records who ran it and from where."""
+    records who ran it, from where and with which arguments."""
     bins = tmp_path / "bin"
     bins.mkdir()
     log = tmp_path / "log"
     write_exe(bins / "sudo", '#!/usr/bin/env bash\nprintf "sudo %s\\n" "$*" >>"$LOG"\n'
               'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H) shift ;; *) break ;; esac; done\nexec "$@"\n')
-    recipe = write_exe(tmp_path / "recipe.sh", '#!/usr/bin/env bash\nprintf "recipe %s %s\\n" "$0" "$(pwd)" >>"$LOG"\n')
+    recipe = write_exe(tmp_path / "recipe.sh", '#!/usr/bin/env bash\nprintf "recipe %s %s%s\\n" "$0" "$(pwd)" "${1:+ arg=$1}" >>"$LOG"\n')
     temp = tmp_path / "runner-temp"
     temp.mkdir()
     work = tmp_path / "work"
     work.mkdir()
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "LOG": str(log), "AS_USER": user, "RECIPE": str(recipe),
-           "RUNNER_TEMP": str(temp), "HOME": str(tmp_path)}
+           "RUNNER_TEMP": str(temp), "HOME": str(tmp_path), "CALLER_RECIPE": caller_recipe}
     r = sh("bash", "-eo", "pipefail", "-c", composite_step(), cwd=work, check=False, env=env)
     return r, log.read_text() if log.exists() else "", temp
 
@@ -224,6 +280,20 @@ def test_composite_runs_a_runner_temp_copy_under_sudo_for_the_user(tmp_path):
     assert "provisioning as codex" in r.stdout
 
 
+def test_composite_hands_the_caller_recipe_to_the_script_as_a_runner_temp_file(tmp_path):
+    r, log, temp = dispatch(tmp_path, "codex", caller_recipe="uv venv --python 3.11\nuv sync --dev\n")
+    assert r.returncode == 0, r.stderr
+    caller = temp / "provision-recipe.sh"
+    assert caller.read_text().rstrip("\n") == "uv venv --python 3.11\nuv sync --dev" and stat.S_IMODE(caller.stat().st_mode) == 0o644
+    copy = temp / "provision-fallback.sh"
+    assert log == f"sudo -u codex -H bash {copy} {caller}\nrecipe {copy} {tmp_path / 'work'} arg={caller}\n"
+
+
+def test_composite_refuses_a_caller_recipe_that_is_not_bash(tmp_path):
+    r, log, temp = dispatch(tmp_path, "codex", caller_recipe="if [ x; then\n")
+    assert r.returncode != 0 and log == ""
+
+
 def test_composite_fails_when_sudo_fails(tmp_path):
     bins = tmp_path / "bin"
     bins.mkdir()
@@ -236,7 +306,7 @@ def test_composite_fails_when_sudo_fails(tmp_path):
     assert r.returncode == 7
 
 
-def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str):
+def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str, caller_recipe: str = None):
     """Run provision.sh with the network and uv stubbed: the uv installer
     curl prints an empty script, `uv` records its arguments; `python3` is
     the interpreter running the tests (tomllib needs 3.11)."""
@@ -254,9 +324,23 @@ def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str):
     if github_path:
         gh_path.write_text("")
         env["GITHUB_PATH"] = str(gh_path)
-    r = sh("bash", str(COMPOSITE / "provision.sh"), cwd=work, check=False, env=env)
+    args = []
+    if caller_recipe is not None:
+        (tmp_path / "caller.sh").write_text(caller_recipe)
+        args = [str(tmp_path / "caller.sh")]
+    r = sh("bash", str(COMPOSITE / "provision.sh"), *args, cwd=work, check=False, env=env)
     assert r.returncode == 0, r.stderr
     return log.read_text(), gh_path, work
+
+
+def test_recipe_runs_the_caller_script_instead_of_the_default_install(tmp_path):
+    log, gh_path, work = recipe_run(tmp_path, github_path=False, pyproject='[project]\nname = "x"\n',
+                                    caller_recipe='uv venv --python 3.11\nuv sync --dev\necho "cwd=$(pwd) home=$HOME" >>"$UV_LOG"\n')
+    # uv is bootstrapped and on PATH first; the caller's commands replace
+    # the venv + dev-install; the exclude lines are written either way.
+    assert log == f"uv venv --python 3.11\nuv sync --dev\ncwd={work} home={tmp_path}\n"
+    assert (work / ".git" / "info" / "exclude").read_text() == ".venv/\n*.egg-info/\n"
+    assert not gh_path.exists()
 
 
 def test_recipe_installs_the_checkout_and_appends_path_only_as_the_runner(tmp_path):
@@ -275,3 +359,94 @@ def test_recipe_skips_the_path_append_under_sudo_and_adds_the_dev_group(tmp_path
 
 def workflow_text(name: str) -> str:
     return (WORKFLOWS / name).read_text()
+
+
+# --- create-codex-user: the home recipe and the reset-home boundary ---------
+
+CODEX_USER = ROOT / ".github" / "actions" / "create-codex-user"
+
+
+def fake_sudo(bins: Path, *, pkill_rc: str = "1") -> Path:
+    """A `sudo` that runs the command as the caller, records `pkill`
+    invocations and answers them with PKILL_RC (1 = nothing to kill), and
+    a `pkill` that does nothing else."""
+    write_exe(bins / "sudo", '#!/usr/bin/env bash\n'
+              'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H|--) shift ;; *) break ;; esac; done\n'
+              'if [ "$1" = pkill ]; then printf "pkill %s\\n" "$*" >>"$LOG"; exit "$PKILL_RC"; fi\n'
+              'exec "$@"\n')
+    # `install -d -o codex -g codex -m MODE dir` without the codex account:
+    # the ownership flags are dropped, the directory and mode are real.
+    write_exe(bins / "install", '#!/usr/bin/env bash\n'
+              'mode=755; while [ "$#" -gt 1 ]; do case "$1" in -d) shift ;; -o|-g) shift 2 ;; -m) mode=$2; shift 2 ;; *) break ;; esac; done\n'
+              'mkdir -p "$1" && chmod "$mode" "$1"\n')
+    return bins
+
+
+def home_env(tmp_path: Path, **extra):
+    bins = tmp_path / "bin"
+    bins.mkdir(exist_ok=True)
+    fake_sudo(bins)
+    return {"PATH": f"{bins}:{os.environ['PATH']}", "LOG": str(tmp_path / "log"), "PKILL_RC": "1",
+            "GITHUB_RUN_ID": "4242", "HOME_ROOT": str(tmp_path), **extra}
+
+
+def run_home_script(tmp_path: Path, env: dict):
+    """codex-home.sh addresses /home/<user>; the test rewrites that prefix to
+    a scratch root through a copy of the script (the logic is the point, not
+    the literal path)."""
+    script = (CODEX_USER / "codex-home.sh").read_text().replace('home="/home/$user"', 'home="$HOME_ROOT/home/$user"')
+    (tmp_path / "home" / "codex").mkdir(parents=True, exist_ok=True)
+    return sh("bash", "-c", script + "\n", "codex-home", "codex", check=False, env=env)
+
+
+def test_codex_home_script_replaces_a_planted_symlink_with_the_profile(tmp_path):
+    codex_home = tmp_path / "home" / "codex" / ".codex"
+    codex_home.mkdir(parents=True)
+    marker = tmp_path / "environ"
+    marker.write_text("SECRET=1\n")
+    (codex_home / "config.toml").symlink_to(marker)          # the B1 primitive
+    (codex_home / "planted").write_text("x")
+    r = run_home_script(tmp_path, home_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    cfg = codex_home / "config.toml"
+    assert cfg.is_file() and not cfg.is_symlink()
+    assert cfg.read_text().splitlines()[1:] == ['[permissions.workspace_net]', 'extends = ":workspace"',
+                                                '[permissions.workspace_net.workspace_roots]', '"." = true',
+                                                '[permissions.workspace_net.network]', 'enabled = true']
+    assert not (codex_home / "planted").exists()
+    assert (codex_home / "4242.json").exists() and stat.S_IMODE((codex_home / "4242.json").stat().st_mode) == 0o666
+    assert marker.read_text() == "SECRET=1\n"                 # rm -rf removed the link, not its target
+
+
+def reset_step() -> str:
+    text = (CODEX_USER / "action.yml").read_text()
+    return lift_run(text, "      if: inputs.mode == 'reset-home'")
+
+
+def test_reset_mode_kills_codex_processes_then_recreates_the_home(tmp_path):
+    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"))
+    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
+    bins = tmp_path / "bin"
+    write_exe(bins / "id", "#!/usr/bin/env bash\nexit 0\n")
+    r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert (tmp_path / "log").read_text() == "pkill pkill -KILL -u codex\nhome codex\n"
+
+
+def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):
+    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PKILL_RC="0")   # always "killed something"
+    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
+    write_exe(tmp_path / "bin" / "id", "#!/usr/bin/env bash\nexit 0\n")
+    r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
+    assert r.returncode != 0
+    log = (tmp_path / "log").read_text().splitlines()
+    assert log.count("pkill pkill -KILL -u codex") == 10 and "home codex" not in log
+    assert "still running as codex after repeated kills" in r.stdout + r.stderr
+
+
+def test_create_mode_runs_the_same_home_script_last():
+    text = (CODEX_USER / "action.yml").read_text()
+    create = lift_run(text, "      if: inputs.mode == 'create'")
+    assert create.rstrip().endswith('bash "$HOME_SCRIPT" codex')
+    assert "config.toml" not in create and "permissions.workspace_net" not in create
+    assert "\n  mode:\n" in text and "    default: create\n" in text

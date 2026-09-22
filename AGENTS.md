@@ -146,8 +146,14 @@ take effect on every repo's next run.
   job that runs the Claude agent: a referenced secret reaches the runner
   whatever the step's `if:` says. In a codex job nothing from the checkout
   runs as the runner: no `uses: ./...`, and provisioning is
-  `provision-fallback` with `user: codex`, placed after `Create codex user`
-  and before the codex-action step. A step that must exist on both engines
+  `provision-fallback` with `user: codex` (plus the caller's
+  `codex_provision` as `recipe`), placed after `Create codex user`, and
+  followed by `Reset codex home` (`create-codex-user` with `mode:
+  reset-home`: codex processes killed, `~codex/.codex` re-created) before
+  the codex-action step. Once the codex user exists the runner writes
+  nothing into the workspace until the reclaim: prompt files go to
+  `$RUNNER_TEMP`, and `.git/info/exclude` is appended by the prep step
+  before the user is created. A step that must exist on both engines
   is copied into both jobs (the checkout, assert, base and sync steps
   already are); the composers and Surface steps are per-engine.
   `tests/test_engine_job_isolation.py` enforces all of this.

@@ -1202,8 +1202,12 @@ out different things on the inspect_ai fork:
 Claude Security findings 4628446 and 4629153).** Each workflow runs the codex
 engine in its own job since then (design/codex-engine.md → One job per
 engine), and in that job the order is `create-codex-user` first, then the
-`provision-fallback` composite with `user: codex` — its recipe runs under
-`sudo -u codex -H` — then the prompt composition and codex. The shim is a
+`provision-fallback` composite with `user: codex` — its recipe, or the
+caller's `codex_provision` recipe, runs under `sudo -u codex -H` — then
+`create-codex-user` again in `reset-home` mode (every codex process killed,
+the codex home re-created, so nothing provisioning left behind reaches
+codex-action's runner-side reads), then the prompt composition (into
+`$RUNNER_TEMP`, never the workspace) and codex. The shim is a
 composite action and can only run as the runner, so the codex jobs never run
 it, even on callers that define one: the caller's tree — its `pyproject.toml`
 build hooks, its `claude-setup` — may be a branch the pipeline itself wrote
