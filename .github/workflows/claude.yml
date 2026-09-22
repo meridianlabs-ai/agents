@@ -690,9 +690,21 @@ jobs:
               # A labelled issue: the label is the opt-in only when a
               # write-access human applied it (the comment above). Same
               # timeline read as verify-auto-labeler, same lookup as the trig
-              # step, one retry, each attempt used only on success.
-              labeler=$(gh api "repos/$REPO/issues/$NUM/timeline?per_page=100" --paginate 2>/dev/null \
-                          | jq -rs '[.[][] | select(.event=="labeled" and .label.name=="auto")] | last | .actor.login // empty' 2>/dev/null || true)
+              # step, one retry each, every attempt used only on success. The
+              # timeline is captured whole and parsed only after `gh` exits 0:
+              # a paginated read that fails on a later page leaves the earlier
+              # pages' valid JSON on stdout, and parsing that would name the
+              # last labeler of the pages that arrived — a writer whose label
+              # a triage account has since removed and re-applied on the page
+              # that did not (review round 1 of this fix).
+              timeline=""
+              for i in 1 2; do
+                timeline=$(gh api "repos/$REPO/issues/$NUM/timeline?per_page=100" --paginate 2>/dev/null) && break
+                timeline=""
+                [ "$i" -lt 2 ] && sleep 5
+              done
+              labeler=""
+              [ -z "$timeline" ] || labeler=$(jq -rs '[.[][] | select(.event=="labeled" and .label.name=="auto")] | last | .actor.login // empty' <<<"$timeline" 2>/dev/null || true)
               if [ -z "$labeler" ]; then
                 echo "::warning::issue #$NUM carries 'auto', but who applied it could not be read from its timeline; not an opt-in — running one-shot."
               elif trusted_login "$labeler" || [[ "$labeler" == *"[bot]" ]]; then

@@ -32,6 +32,9 @@ gh() {
     "api repos/o/r/issues/12/labels --paginate --jq .[].name") cat "$STATE/labels" ;;
     "api repos/o/r/issues/12/timeline?per_page=100 --paginate")
       echo timeline >>"$STATE/reads"
+      # `gh api --paginate` prints each page's array as it arrives; a page
+      # that fails leaves the earlier pages on stdout and exits non-zero.
+      [ ! -f "$STATE/timeline-partial.json" ] || { cat "$STATE/timeline-partial.json"; echo '{"message":"Server Error"}'; return 1; }
       [ -f "$STATE/timeline.json" ] || { echo '{"message":"Server Error"}'; return 1; }
       cat "$STATE/timeline.json" ;;
     "api repos/o/r/collaborators/"*"/permission --jq .permission")
@@ -51,13 +54,20 @@ def labeled(login, name="auto"):
     return {"event": "labeled", "label": {"name": name}, "actor": {"login": login}}
 
 
+def pages(*events_per_page):
+    """What `gh api --paginate` prints without --slurp: one JSON array per
+    page, concatenated."""
+    return "".join(json.dumps(list(p)) + "\n" for p in events_per_page)
+
+
 def run_engine(tmp_path, *, labels=("auto",), timeline=(), perms=None, phrase="@claude", is_pr=False,
-               timeline_fails=False):
+               timeline_fails=False, timeline_text=None, partial_text=None):
     state = fresh_state(tmp_path)
     (state / "labels").write_text("".join(f"{x}\n" for x in labels))
-    if not timeline_fails:
-        # One page, as `gh api --paginate` prints it: an array per page.
-        (state / "timeline.json").write_text(json.dumps(list(timeline)))
+    if partial_text is not None:
+        (state / "timeline-partial.json").write_text(partial_text)
+    elif not timeline_fails:
+        (state / "timeline.json").write_text(pages(timeline) if timeline_text is None else timeline_text)
     (state / "perms").write_text("".join(f"{k} {v}\n" for k, v in (perms or {}).items()))
     out = tmp_path / "out"
     out.write_text("")
@@ -142,8 +152,35 @@ def test_an_unreadable_labeler_fails_closed(tmp_path):
     r, o, _ = run_engine(tmp_path, timeline=[])
     assert o["auto"] == "false" and o["pr_labels"] == []
     assert "who applied it could not be read from its timeline" in r.stdout
-    _, o, _ = run_engine(tmp_path, timeline_fails=True)
+    _, o, state = run_engine(tmp_path, timeline_fails=True)
     assert o["auto"] == "false" and o["pr_labels"] == []
+    assert timeline_reads(state) == ["timeline", "timeline"] and lookups(state) == []
+
+
+def test_a_timeline_read_that_fails_after_a_good_page_is_not_used(tmp_path):
+    # Review round 1 (B1): `gh api --paginate` prints each page as it
+    # arrives, so a transport failure on page two leaves page one's valid
+    # JSON on stdout. Parsing that would name the last labeler of the pages
+    # that arrived — a writer whose label a triage account removed and
+    # re-applied on the page that never came. The response is used only
+    # after a successful exit: here the failed read is retried once and the
+    # run stays one-shot, with no permission lookup at all.
+    r, o, state = run_engine(tmp_path, partial_text=pages([labeled("alice")]), perms={"alice": "write"})
+    assert o["auto"] == "false" and o["pr_labels"] == []
+    assert timeline_reads(state) == ["timeline", "timeline"] and lookups(state) == []
+    assert "who applied it could not be read from its timeline" in r.stdout
+
+
+def test_the_last_labeler_across_pages_wins(tmp_path):
+    # A complete multi-page read, in the shape `--paginate` prints (an
+    # array per page): the newest event is on the last page.
+    two_pages = pages([labeled("alice")], [{"event": "unlabeled", "label": {"name": "auto"}, "actor": {"login": "mallory"}},
+                                           labeled("mallory")])
+    _, o, state = run_engine(tmp_path, timeline_text=two_pages, perms={"alice": "write", "mallory": "read"})
+    assert o["auto"] == "false" and lookups(state) == ["mallory"]
+    two_pages = pages([labeled("mallory")], [labeled("alice")])
+    _, o, state = run_engine(tmp_path, timeline_text=two_pages, perms={"alice": "write", "mallory": "read"})
+    assert o["auto"] == "true" and lookups(state) == ["alice"] and timeline_reads(state) == ["timeline"]
 
 
 def test_a_failed_permission_lookup_fails_closed_after_one_retry(tmp_path):
