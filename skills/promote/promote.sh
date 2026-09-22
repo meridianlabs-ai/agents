@@ -13,7 +13,13 @@
 # makes the head-repository check the load-bearing one and the author check
 # defence in depth. The picked PR's title, body and head branch become the
 # upstream PR opened as the operator, so nothing an outsider wrote may reach
-# that step.
+# that step. The fork ISSUE's body is the other outsider-writable input to
+# that PR: its `Upstream issue:` line (which adds a bare `Fixes #<up>`
+# upstream) is believed only as /import's header — the body's first line —
+# and only from an author who passes the same trust rule. Every bare `#M`
+# in the fork PR body is qualified to the fork before the body is published
+# upstream, where bare refs resolve against upstream's tracker; the body is
+# printed as it will be published, in --dry-run and in the real run.
 #
 # Usage: promote.sh <issue-number> [--dry-run] [--pr <number>]
 #   --dry-run      print the candidates, each verdict, the decision and every
@@ -133,7 +139,7 @@ NORM='{number, state, isDraft, title, body, headRefName, headRefOid, author:{log
     then "\(.headRepositoryOwner.login)/\(.headRepository.name)" else null end)}}'
 
 # ---- one GraphQL round trip: chips (with PR bodies) + board item + fields
-JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state body
+JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai",name:"inspect_ai"){issue(number:$n){id title state body author{login __typename}
   closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft title body headRefName headRefOid author{login __typename} repository{nameWithOwner} headRepository{nameWithOwner}}}
   projectItems(first:5){nodes{id project{number}
     stage: fieldValueByName(name:"Stage"){... on ProjectV2ItemFieldSingleSelectValue{name}}
@@ -142,13 +148,30 @@ JSON=$(gh api graphql -f query='query($n:Int!){repository(owner:"meridianlabs-ai
 ISSUE_NODE=$(jq -r '.data.repository.issue.id' <<<"$JSON")
 ISSUE_TITLE=$(jq -r '.data.repository.issue.title' <<<"$JSON")
 ISSUE_STATE=$(jq -r '.data.repository.issue.state' <<<"$JSON")
-# Imported issues (skills/import) carry an "Upstream issue:" body line; the
-# upstream PR then gets a bare `Fixes #<up>` too, so the upstream issue links
-# and auto-closes on merge (bare refs resolve there — upstream PRs base on
-# upstream main).
-UP_ISSUE=$(jq -r '.data.repository.issue.body // ""' <<<"$JSON" \
-  | grep -oE 'Upstream issue: https://github.com/UKGovernmentBEIS/inspect_ai/issues/[0-9]+' \
-  | head -1 | grep -oE '[0-9]+$' || true)
+# Imported issues (skills/import) open with the machine-written header line
+# `Upstream issue: <url>`, a `---` rule, then the upstream author's text
+# verbatim; the upstream PR then gets a bare `Fixes #<up>` too, so the
+# upstream issue links and auto-closes on merge (bare refs resolve there —
+# upstream PRs base on upstream main). That line is free text on any other
+# issue, and an issue body stays editable by its author forever, so it is
+# believed ONLY when it is the header — the body's first line, above the
+# `---` rule and the snapshot — AND the issue's author passes the trust rule
+# (TRUSTED_LOGINS or write access on the fork; fail closed). Anything else
+# is ignored and said so on stderr: the fork is public, and the `Fixes #<up>`
+# would close whichever upstream issue the line names.
+ISSUE_AUTHOR=$(jq -r ".data.repository.issue.author | $NORM_LOGIN" <<<"$JSON")
+ISSUE_BODY=$(jq -r '.data.repository.issue.body // ""' <<<"$JSON" | tr -d '\r')
+UP_ISSUE=""
+if grep -qF 'Upstream issue:' <<<"$ISSUE_BODY"; then
+  UP_HEADER=$(grep -m1 -vE '^[[:space:]]*$' <<<"$ISSUE_BODY" || true)
+  if ! grep -qE "^Upstream issue: https://github\.com/$UPSTREAM/issues/[0-9]+[[:space:]]*$" <<<"$UP_HEADER"; then
+    echo "note: issue #$N's 'Upstream issue:' line ignored — it is not the body's first line (/import's header); no upstream Fixes ref will be added" >&2
+  elif ! trusted_login "$ISSUE_AUTHOR"; then
+    echo "note: issue #$N's 'Upstream issue:' header ignored — issue author '${ISSUE_AUTHOR:-unknown}' is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $FORK; no upstream Fixes ref will be added" >&2
+  else
+    UP_ISSUE=$(grep -oE '[0-9]+' <<<"$UP_HEADER" | tail -1)
+  fi
+fi
 
 # ---- resolve the fork PR: trust rule first, then the pick. Every fork-base
 # chip is judged by check_pr before its state or text is looked at. OPEN_OK /
@@ -175,9 +198,9 @@ while IFS= read -r chip; do
 done <<<"$(jq -c --arg repo "$FORK" '.data.repository.issue.closedByPullRequestsReferences.nodes[]
   | select(.repository.nameWithOwner==$repo)' <<<"$JSON")"
 
-# Closing reference to THIS issue (the same keyword set the body transform
-# below rewrites — a wider match here would let an unrewritten bare ref reach
-# upstream) or the agent branch convention. Read only after the rule passed.
+# Closing reference to THIS issue (the keyword set the fork's own PR bodies
+# use; the body transform below qualifies every bare ref regardless) or the
+# agent branch convention. Read only after the rule passed.
 REF_TEST='((.body // "") | test("(Fixes|Closes|Resolves)\\s+(meridianlabs-ai/inspect_ai)?#" + $n + "\\b"))
   or (.headRefName | test("^(claude/)?issue-" + $n + "-"))'
 ambiguous() {  # $1 = what, $2 = the qualifying candidates (one per line)
@@ -375,7 +398,7 @@ else
   VERDICT="verdict:unavailable (comment lookup failed)"
 fi
 CI=$(gh pr checks "$FPR" -R "$FORK" 2>&1 | awk -F'\t' '{print $2}' | sort | uniq -c | tr '\n' ' ' || true)
-echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}; reviewer: $REVIEWER"
+echo "ADVISORY: fork PR #$FPR review $VERDICT; CI: ${CI:-unknown}; reviewer: $REVIEWER; upstream issue: ${UP_ISSUE:+#}${UP_ISSUE:-none}"
 
 # ---- upstream PR: adopt (UP_PICK, looked up in preflight) or create.
 M=$(jq -r '.number // empty' <<<"$UP_PICK")
@@ -383,20 +406,28 @@ if [ -n "$M" ]; then
   UP_URL="https://github.com/$UPSTREAM/pull/$M"
   echo "ADOPTED existing upstream PR #$M ($(jq -r .state <<<"$UP_PICK"))"
 else
-  # Fully-qualified Fixes ref: qualify any bare same-repo ref, else prepend.
-  # For imported issues, also prepend the bare upstream `Fixes #<up>`.
+  # The fork PR body was written for the fork's tracker; republished on a PR
+  # based on upstream main, every bare `#M` rebinds to upstream issue M and a
+  # closing keyword before it (any case: close/fix/resolve and their forms)
+  # would close that issue on merge. Qualify every bare ref to the fork, as
+  # /import does in the other direction, then make sure a closing ref to THIS
+  # issue is present (prepend one otherwise). The only bare ref that may
+  # remain is the `Fixes #<up>` added from the validated import header.
   BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
 n = os.environ["ISSUE_N"]
-body = os.environ["FPR_BODY"]
-body = re.sub(r"\b(Fixes|Closes|Resolves)\s+#%s\b" % n,
-              r"\1 meridianlabs-ai/inspect_ai#%s" % n, body)
-if ("meridianlabs-ai/inspect_ai#%s" % n) not in body:
+body = re.sub(r"(?<![\w/&])#(\d+)\b", r"meridianlabs-ai/inspect_ai#\1", os.environ["FPR_BODY"])
+kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+if not re.search(kw + r"meridianlabs-ai/inspect_ai#%s\b" % n, body, re.I):
     body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body
 up = os.environ["UP_ISSUE"]
-if up and not re.search(r"\b(Fixes|Closes|Resolves)\s+#%s\b" % up, body):
+if up and not re.search(kw + r"UKGovernmentBEIS/inspect_ai#%s\b" % up, body, re.I):
     body = "Fixes #%s\n" % up + body
 print(body)')
+  # The operator sees the body as it will be published under their name —
+  # every closing reference included — before (dry-run) or as it is created.
+  echo "upstream PR body (as published):"
+  sed 's/^/  | /' <<<"$BODY"
   # Sync the branch with upstream main before opening the PR. Org-fork PR
   # heads take no maintainer edits, and these branches are cut from the fork's
   # main mirror (which trails upstream), so a fresh promotion usually opens a
@@ -435,7 +466,7 @@ print(body)')
   # an explicit head_repo, which `gh pr create` lacks (cli/cli#6462; see the
   # fork's AGENTS.md → "Opening an upstream PR from an org fork").
   if [ "$DRY" = "--dry-run" ]; then
-    echo "DRY-RUN: gh api repos/$UPSTREAM/pulls -X POST -f base=main -f head=$BRANCH -f head_repo=$FORK -f title=\"$FPR_TITLE\" -f body=<transformed fork-PR body>"
+    echo "DRY-RUN: gh api repos/$UPSTREAM/pulls -X POST -f base=main -f head=$BRANCH -f head_repo=$FORK -f title=\"$FPR_TITLE\" -f body=<the body printed above>"
     UP_URL="(dry-run)"; M=0
   else
     CREATED=$(gh api "repos/$UPSTREAM/pulls" -X POST \

@@ -14,6 +14,7 @@ is exercised through `--dry-run` only.
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -642,3 +643,168 @@ def test_promote_verdict_is_unavailable_when_the_comment_lookup_fails_part_way(t
     assert "review verdict:unavailable (comment lookup failed);" in advisory
     assert "clean" not in advisory
     assert "WARN: could not read fork PR #400's comments" in r.stderr
+
+
+# --- promote.sh: the upstream PR body (findings 4629156 and 4629152) ---------
+#
+# The body promote.sh publishes upstream under the operator's name has two
+# outsider-writable inputs: the fork ISSUE's `Upstream issue:` line (which
+# adds a bare `Fixes #<up>` that closes an upstream issue on merge) and the
+# fork PR body's bare `#M` refs (written for the fork's tracker, they rebind
+# to upstream's once republished on a PR based on upstream main). The line
+# is honoured only as /import's header — the body's first line — from an
+# author passing the trust rule; every bare ref is qualified to the fork; and
+# the body is printed as it will be published so the operator can see it.
+
+UP_N = 2615  # the upstream issue an import header names
+IMPORT_HEADER = f"Upstream issue: https://github.com/{UPSTREAM}/issues/{UP_N}"
+
+
+def import_body(header=IMPORT_HEADER, snapshot="Outsider's upstream text.\n"):
+    """A fork issue body as import.sh writes it: header, `---` rule, snapshot."""
+    return f"{header}\n\nImported from upstream so the agents can work it here.\n\n---\n\n{snapshot}"
+
+
+def published_body(stdout):
+    """The upstream PR body promote.sh printed (each line prefixed `  | `)."""
+    lines = stdout.splitlines()
+    start = lines.index("upstream PR body (as published):") + 1
+    out = []
+    for line in lines[start:]:
+        if not line.startswith("  | "):
+            break
+        out.append(line[4:])
+    return "\n".join(out)
+
+
+def advisory(stdout):
+    return [l for l in stdout.splitlines() if l.startswith("ADVISORY:")][0]
+
+
+def test_promote_honours_the_import_header_from_a_trusted_issue_author(tmp_path):
+    # A genuine import: the machine-written header from a trusted importer.
+    # The snapshot below the `---` rule is the upstream author's text and may
+    # itself carry the line — that copy names #999 and must not be believed.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")], author=MARVIN,
+                             body=import_body(snapshot=f"Upstream issue: https://github.com/{UPSTREAM}/issues/999\n")))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert f"upstream issue: #{UP_N}" in advisory(r.stdout)
+    body = published_body(r.stdout)
+    assert body.splitlines()[:2] == [f"Fixes #{UP_N}", f"Fixes meridianlabs-ai/inspect_ai#{N}"]
+    assert "#999" not in body
+    assert "Upstream issue:" not in r.stderr
+    # A write-access importer qualifies too, through the same lookup the PR rule uses.
+    s2 = Stub(tmp_path / "b", issue([chip(400, branch="claude/issue-42-a")], author="colleague",
+                                    body=import_body()), perms=[("colleague", "write")])
+    r2 = s2.run(PROMOTE, str(N), "--dry-run")
+    assert r2.returncode == 0, r2.stderr
+    assert published_body(r2.stdout).splitlines()[0] == f"Fixes #{UP_N}"
+    assert sum("collaborators/colleague/permission" in c for c in s2.calls()) == 1
+
+
+@pytest.mark.parametrize("perm", ["read", "none", "FAIL"])
+def test_promote_ignores_the_upstream_issue_header_from_an_untrusted_issue_author(tmp_path, perm):
+    # The scanner's scenario: any GitHub account files a fork issue whose body
+    # opens with a forged import header naming an upstream issue of their
+    # choosing. The agent's own PR qualifies; the header does not. A failed
+    # permission lookup fails closed.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")], author="outsider", body=import_body()),
+             perms=[("outsider", perm)])
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "note: issue #42's 'Upstream issue:' header ignored — issue author 'outsider' is not in TRUSTED_LOGINS" in r.stderr
+    assert "upstream issue: none" in advisory(r.stdout)
+    body = published_body(r.stdout)
+    assert f"#{UP_N}" not in body
+    assert not re.search(r"(?<![\w/])#\d+", body), body  # no bare ref at all
+    assert body.splitlines()[0] == f"Fixes meridianlabs-ai/inspect_ai#{N}"
+    assert sum("collaborators/outsider/permission" in c for c in s.calls()) == 1
+
+
+@pytest.mark.parametrize("body", [
+    # a trusted author's issue carrying the line only below the `---` rule
+    import_body(header="Mirror of an upstream report.", snapshot=f"{IMPORT_HEADER}\n"),
+    # hidden in an HTML comment GitHub renders invisibly
+    f"<!-- {IMPORT_HEADER} -->\nA plausible bug report.",
+    # not at the start of its line
+    f"See {IMPORT_HEADER}\n\n---\n\nsnapshot",
+    # preceded by prose, so not the header
+    f"Please look at this.\n{IMPORT_HEADER}\n",
+    # a URL under another repository
+    import_body(header=f"Upstream issue: https://github.com/outsider/inspect_ai/issues/{UP_N}"),
+], ids=["below-rule", "html-comment", "mid-line", "second-line", "other-repo"])
+def test_promote_ignores_an_upstream_issue_line_that_is_not_the_import_header(tmp_path, body):
+    # Even from a trusted author (marvin here), only the body's first line —
+    # what /import writes — counts; a deleted issue author is untrusted anyway.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")], author=MARVIN, body=body))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "note: issue #42's 'Upstream issue:' line ignored — it is not the body's first line" in r.stderr
+    assert "upstream issue: none" in advisory(r.stdout)
+    assert f"#{UP_N}" not in published_body(r.stdout)
+    assert not any("/permission" in c for c in s.calls())  # nothing to look up: the shape failed first
+
+
+def test_promote_issue_without_the_line_needs_no_author_lookup(tmp_path):
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")], author="outsider", body="A bug report."))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "upstream issue: none" in advisory(r.stdout)
+    assert "Upstream issue:" not in r.stderr
+    assert not any("/permission" in c for c in s.calls())
+
+
+def test_promote_qualifies_every_bare_ref_in_the_upstream_body(tmp_path):
+    # The scanner's body: closing keywords in other cases and for other
+    # issues, a bare mention, and refs that are already qualified (never
+    # double-qualified) — including an upstream ref the agent copied from an
+    # import snapshot and an HTML entity.
+    fork_body = (f"Summary.\n\nCloses #7\nfixes #{N}\nsee #8, UKGovernmentBEIS/inspect_ai#5, "
+                 f"meridianlabs-ai/inspect_ai#9 and &#123; in step #1.\n")
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    body = published_body(r.stdout)
+    assert not re.search(r"(?<![\w/&])#\d+", body), body  # no bare ref survives
+    assert "Closes meridianlabs-ai/inspect_ai#7" in body
+    assert f"fixes meridianlabs-ai/inspect_ai#{N}" in body
+    assert "see meridianlabs-ai/inspect_ai#8, UKGovernmentBEIS/inspect_ai#5, meridianlabs-ai/inspect_ai#9 and &#123; in step meridianlabs-ai/inspect_ai#1." in body
+    # `fixes #N` counts as the closing ref to this issue: no second one is prepended.
+    assert body.count(f"meridianlabs-ai/inspect_ai#{N}") == 1
+    assert not body.startswith("Fixes")
+    assert '-f body=<the body printed above>' in r.stdout
+    assert promote_calls_wrote_nothing(s.calls())
+
+
+@pytest.mark.parametrize("ref, prepended", [
+    (f"Fixed #{N}", False), (f"RESOLVED #{N}", False), (f"closed #{N}", False), (f"Close #{N}", False),
+    (f"Resolves meridianlabs-ai/inspect_ai#{N}", False),
+    (f"see #{N}", True),          # a mention is not a closing ref
+    (f"Fixes #{N}0", True),       # #420 is another issue
+    ("no ref at all", True),
+], ids=["Fixed", "RESOLVED", "closed", "Close", "qualified", "mention", "other-issue", "none"])
+def test_promote_prepends_the_fixes_ref_only_when_no_closing_keyword_variant_names_the_issue(tmp_path, ref, prepended):
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Summary.\n\n{ref}\n")]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    body = published_body(r.stdout)
+    assert body.startswith(f"Fixes meridianlabs-ai/inspect_ai#{N}\n\n") is prepended, body
+    assert not re.search(r"(?<![\w/&])#\d+", body), body
+
+
+def test_promote_real_run_prints_the_published_body_before_creating_anything(tmp_path):
+    # Not --dry-run: the body is logged before the branch merge and the PR
+    # creation, so the operator sees every closing reference at creation.
+    # The stub knows no merges endpoint, so the run aborts there — after the
+    # body was printed and before anything upstream was written.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body="Closes #7\n")], author="outsider",
+                             body=import_body()))
+    r = s.run(PROMOTE, str(N))
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "ABORT: could not merge upstream main" in r.stderr
+    assert f"upstream issue: none" in advisory(r.stdout)
+    body = published_body(r.stdout)
+    assert body == f"Fixes meridianlabs-ai/inspect_ai#{N}\n\nCloses meridianlabs-ai/inspect_ai#7"
+    assert f"#{UP_N}" not in body
+    assert not any(c.startswith("api repos/UKGovernmentBEIS/inspect_ai/pulls") for c in s.calls())

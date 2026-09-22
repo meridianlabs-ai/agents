@@ -22,8 +22,10 @@ bash <skill-base-dir>/promote.sh <N> [--dry-run] [--pr <number>]
 ```
 
 `--dry-run` prints every candidate with its verdict, the decision
-(`RESOLVED: fork PR #M (STATE) via <how>`) and each write that would happen;
-nothing is written.
+(`RESOLVED: fork PR #M (STATE) via <how>`), the upstream PR body exactly as
+it would be published (the `upstream PR body (as published):` block — the
+real run prints it too, before the PR is created) and each write that would
+happen; nothing is written.
 
 **Trust rule, applied before any PR text is read.** A fork PR qualifies only
 when its head repository is `meridianlabs-ai/inspect_ai` itself AND its
@@ -78,10 +80,24 @@ API — org-fork heads take no maintainer edits and these branches trail the
 fork's main mirror, so a fresh promotion usually opens behind; a conflict,
 commonly CHANGELOG, aborts with exit 5 BEFORE any upstream PR is opened, for
 a human to resolve on the branch) and creates it with the fully-qualified
-`Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
-would rebind to upstream's tracker), plus a bare `Fixes #<up>` when the
-fork issue was imported from upstream (its `Upstream issue:` body line —
-see the import skill; creation-time only, adopted PRs aren't edited); assigns +
+`Fixes meridianlabs-ai/inspect_ai#N` (EVERY bare `#M` in the fork PR body
+is rewritten to `meridianlabs-ai/inspect_ai#M`, closing keyword or not, in
+any case — republished on a PR based on upstream main they would rebind to
+upstream's tracker and a `Closes #M` would close upstream's issue M on
+merge; a closing keyword in any of GitHub's spellings before the qualified
+ref counts as the ref to the issue, else one is prepended), plus a bare
+`Fixes #<up>` when the fork issue was imported from upstream. That
+`Upstream issue:` line is believed ONLY as /import's machine-written header
+— the body's first line, above the `---` rule and the upstream author's
+snapshot — and ONLY when the fork issue's author passes the same trust rule
+as the PR (trusted login or write access on the fork; a failed lookup is
+untrusted): the fork is public and an issue body stays editable by its
+author, so the line is free text anywhere else and would close whichever
+upstream issue it names (findings 4629156 / 4629152, 2026-09-22). An ignored
+line is reported on stderr (`note: issue #N's 'Upstream issue:' … ignored`),
+and the `ADVISORY:` line ends with `upstream issue: #<up>` or `none` — relay
+it, and check the printed body's closing refs before confirming. Creation-time
+only, adopted PRs aren't edited; assigns +
 requests review from `dragonstyle` on open PRs (the default — `REVIEWER=<login>`
 overrides it, see Cautions); sets the board's `Upstream PR` field (the sync's
 join key — the #90 lesson), stage → Sign-off + Status → In progress (never
