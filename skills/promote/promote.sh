@@ -168,7 +168,10 @@ if grep -qF 'Upstream issue:' <<<"$ISSUE_BODY"; then
   UP_HEADER=$(head -n1 <<<"$ISSUE_BODY")
   if ! grep -qE "^Upstream issue: https://github\.com/$UPSTREAM/issues/[0-9]+[[:space:]]*$" <<<"$UP_HEADER"; then
     echo "note: issue #$N's 'Upstream issue:' line ignored — it is not the body's first line (/import's header); no upstream Fixes ref will be added" >&2
-  elif ! tail -n +2 <<<"$ISSUE_BODY" | grep -qE '^---[[:space:]]*$'; then
+  elif ! grep -qE '^---[[:space:]]*$' <<<"$ISSUE_BODY"; then
+    # (the header line itself can never match; no `tail | grep -q` here — with
+    # pipefail, grep closing early makes tail die of SIGPIPE on a long body and
+    # the whole pipeline read as "no rule")
     echo "note: issue #$N's 'Upstream issue:' header ignored — no \`---\` rule follows it (not /import's body); no upstream Fixes ref will be added" >&2
   elif ! trusted_login "$ISSUE_AUTHOR"; then
     echo "note: issue #$N's 'Upstream issue:' header ignored — issue author '${ISSUE_AUTHOR:-unknown}' is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $FORK; no upstream Fixes ref will be added" >&2
@@ -418,18 +421,26 @@ else
   # issue is present (prepend one otherwise). The only bare ref that may
   # remain is the `Fixes #<up>` added from the validated import header. A
   # bare ref is a `#M` GitHub would resolve against the tracker: preceded by
-  # nothing, whitespace or opening punctuation, not a Markdown link
-  # destination `](#…)` and not inside a URL token. A `#M` glued to a word
-  # character, `/`, `-`, `.`, `&`, `=` … is the tail of a qualified
-  # `owner/repo#M`, an HTML entity or a URL fragment and is left alone.
+  # nothing, whitespace or opening punctuation, not inside a URL token and
+  # not inside a link destination — a Markdown inline link or image
+  # (`](…)`, whitespace or a line break allowed after the paren), a
+  # reference definition (`[r]: …`) or an HTML href/src value, quoted or
+  # not. A `#M` glued to a word character, `/`, `-`, `.`, `&`, `=` … is the
+  # tail of a qualified `owner/repo#M`, an HTML entity or a URL fragment and
+  # is left alone.
   BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
 n = os.environ["ISSUE_N"]
 src = os.environ["FPR_BODY"]
+dest = []  # spans of link destinations: never issue references
+for pat in (r"\]\(\s*(<[^>\n]*>|[^\s)]*)",
+            r"^ {0,3}\[[^\]\n]+\]:[ \t]*\n?[ \t]*(<[^>\n]*>|\S+)",
+            r"\b(?:href|src)\s*=\s*(\"[^\"]*\"|\x27[^\x27]*\x27|[^\s>]+)"):
+    dest += [m.span(1) for m in re.finditer(pat, src, re.M | re.I)]
 def qualify(m):
     i = m.start()
     prev = src[i - 1] if i else " "
-    if prev not in " \t\r\n([{\"\x27*~>|,;" or src[i - 2:i] == "](":
+    if prev not in " \t\r\n([{\"\x27*~>|,;" or any(a <= i < b for a, b in dest):
         return m.group(0)
     if "://" in re.split(r"\s", src[:i])[-1]:
         return m.group(0)

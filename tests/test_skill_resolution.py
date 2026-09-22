@@ -703,6 +703,22 @@ def test_promote_honours_the_import_header_from_a_trusted_issue_author(tmp_path)
     assert sum("collaborators/colleague/permission" in c for c in s2.calls()) == 1
 
 
+@pytest.mark.parametrize("snapshot", ["x\n" * 24000, "ünïcödé log line\n" * 4000],
+                         ids=["48k-ascii", "64k-chars-96k-bytes"])
+def test_promote_honours_the_import_header_on_a_long_import(tmp_path, snapshot):
+    # Review round 2: `tail -n +2 | grep -q` under pipefail — grep stops at
+    # the early `---` rule, tail dies of SIGPIPE once the body exceeds the
+    # pipe buffer, and a genuine long import (an upstream report with logs)
+    # read as "no rule". Both bodies are within GitHub's 65536-character
+    # limit; the second is past 64 KiB in bytes on any platform.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")], author=MARVIN, body=import_body(snapshot=snapshot)))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "Upstream issue:" not in r.stderr
+    assert f"upstream issue: #{UP_N}" in advisory(r.stdout)
+    assert published_body(r.stdout).splitlines()[0] == f"Fixes #{UP_N}"
+
+
 @pytest.mark.parametrize("perm", ["read", "none", "FAIL"])
 def test_promote_ignores_the_upstream_issue_header_from_an_untrusted_issue_author(tmp_path, perm):
     # The scanner's scenario: any GitHub account files a fork issue whose body
@@ -808,6 +824,33 @@ def test_promote_leaves_qualified_refs_link_destinations_and_urls_alone(tmp_path
         assert f"meridianlabs-ai/inspect_ai#{m}" in body, (m, body)
     assert "Closes\tmeridianlabs-ai/inspect_ai#28" in body
     assert not re.search(r"(?<![\w/&.=-])#\d+", body.replace("](#1-", "")), body  # no bare ref left
+
+
+def test_promote_leaves_every_link_destination_form_alone(tmp_path):
+    # Review round 2: destinations are not issue references whatever their
+    # CommonMark / HTML spelling — inline links and images with whitespace
+    # or a line break after the paren, angle-enclosed, reference
+    # definitions, quoted and unquoted href/src — while a bare ref in the
+    # link TEXT, a reference label or ordinary prose is still qualified.
+    keep = [
+        "[a]( #1-a)", "[b](\n#2-b)", "[c](<#3-c>)", "[d](#4-d \"title\")", "![e]( #5-e)", "![f](\n  #6-f)",
+        "[r]: #7-r", "[s]:\n  <#8-s>", "  [t]: #9-t \"title\"",
+        "<a href=\"#10-h\">x</a>", "<a href=\x27#11-h\x27>y</a>", "<img src=\"#12-s\">", "<a href=#13-h>z</a>",
+        "<a HREF = \"#14-h\">w</a>",
+    ]
+    fork_body = "Summary.\n\n" + "\n".join(keep) + "\n\n[#21 in the text](#22-anchor)\n[#23]: #24-label\nsee #25\nCloses #26\n"
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    body = published_body(r.stdout)
+    for k in keep:
+        assert k in body, (k, body)
+    assert "[meridianlabs-ai/inspect_ai#21 in the text](#22-anchor)" in body
+    assert "[meridianlabs-ai/inspect_ai#23]: #24-label" in body
+    assert "see meridianlabs-ai/inspect_ai#25\nCloses meridianlabs-ai/inspect_ai#26" in body
+    assert body.splitlines()[0] == f"Fixes meridianlabs-ai/inspect_ai#{N}"
+    # Nothing in a destination was touched: the fork's name appears only where asserted above.
+    assert body.count("meridianlabs-ai/inspect_ai#") == 5, body
 
 
 @pytest.mark.parametrize("ref, prepended", [
