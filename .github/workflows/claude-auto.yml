@@ -988,6 +988,12 @@ jobs:
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
           user-email: ${{ needs.gate.outputs.git_user_email }}
+          # ...and the head the run tested, which "Record base SHA" above
+          # already required the checkout to be at: the same pin in the one
+          # shared copy, so the pre-merge start this step records is the
+          # gate's `head_sha` — the start the land job is pinned to
+          # (finding 4628444, criterion 2).
+          head-sha: ${{ needs.gate.outputs.head_sha }}
 
       # Provision the project environment BEFORE the fix agent starts, so its
       # pytest/ruff/pyright actually run — the same two steps the reviewer
@@ -2134,6 +2140,12 @@ jobs:
           # and the validator's pin for the manifest's branch — no lookup of
           # its own needed.
           pr-head-ref: ${{ inputs.head_branch }}
+          # The head the run tested (the gate's bind, reproduced by the
+          # revalidation above): the run's start, which "Record base SHA"
+          # required the fix job's checkout to be at — so a manifest that
+          # carries commits must name exactly it as start_sha, or the
+          # validator refuses it before the fetch (finding 4628444).
+          start-sha: ${{ needs.gate.outputs.head_sha }}
           # The CI-fix manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""

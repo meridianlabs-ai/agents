@@ -26,6 +26,18 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   unbundle into an empty bare repo; refuse a moved branch; push without
   `--force`), run against local repos — including `emit-landing`'s `write`
   step, lifted from the action and run against those repos.
+- `test_trusted_start.py` — the run's trusted start (Claude Security finding
+  4628444, criterion 2): the validator refuses a bundle whose `start_sha` is
+  not the land job's `start-sha`, or any bundle when that input is empty,
+  with the forged manifests run through the real script before any fetch
+  (a fork PR's head, an old base commit — both reachable on a local origin
+  and both refused); `sync-branch`'s `head-sha` pin and `claude.yml`'s
+  `Record base SHA`, lifted and run against local repos (a moved head fails
+  the sync before the merge; a base that advanced keeps the gate's tip, a
+  rewritten base refuses); `claude.yml`'s gate `Record run start` step
+  against a stub `gh`; and the wiring — every land job that pushes passes
+  its gate's read as `start-sha`, every sync-branch call the same value as
+  `head-sha`, the reviewer passes none.
 - `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
   step, lifted the same way: a landed fix or merge-only attempt owes the
   re-review request and sets no stage (a hand-back is mid-flight; Review is

@@ -92,6 +92,20 @@ inputs:
       fetched tip, as before.
     required: false
     default: ""
+  head-sha:
+    description: >-
+      The head branch's live tip the caller's trusted context read before
+      the agent job started (the gate's API read: claude.yml's `start_sha`,
+      the CI-fix gate's `head_sha`, the review-fix gate's `head`). When set,
+      the pre-merge tip this step records as `start_sha` — HEAD once the
+      head is checked out — must be exactly it or this step FAILS before
+      merging: the head moved between the gate's read and the checkout, so
+      the run would begin from code the gate never saw, and its landing
+      manifest could not name the start the land job is pinned to anyway
+      (`land`'s `start-sha`; Claude Security finding 4628444, criterion 2).
+      Empty (the default) records whatever tip was checked out, as before.
+    required: false
+    default: ""
 
 outputs:
   base:
@@ -104,7 +118,9 @@ outputs:
     description: >-
       The head's PRE-merge tip. Landing steps treat "HEAD moved past this" as
       landable work, so stamping it before the merge is what makes a
-      merge-only round push.
+      merge-only round push. Equal to `head-sha` whenever that pin is set
+      (the step fails otherwise), so the manifest built on it names the
+      start the land job is pinned to.
     value: ${{ steps.sync.outputs.start_sha }}
   head_sha:
     description: >-
@@ -153,6 +169,7 @@ runs:
         USER_EMAIL: ${{ inputs.user-email }}
         PINNED_BASE: ${{ inputs.base }}
         PINNED_BASE_SHA: ${{ inputs.base-sha }}
+        PINNED_HEAD_SHA: ${{ inputs.head-sha }}
         # Step-scoped git credential for the fetches below (design/
         # architecture.md → "No persisted git credentials"): git reads
         # GIT_CONFIG_* from the environment with command-line precedence, so
@@ -248,6 +265,14 @@ runs:
         # edits would read as "nothing to push" and die with the runner —
         # exactly the drift this step exists to end.
         start_sha=$(git rev-parse HEAD)
+        # The caller's pinned head tip (see the `head-sha` input): the tip
+        # checked out must be the one the gate read, else nothing is merged
+        # and the agent never starts — the run's start would not be the
+        # one the land job is pinned to, so nothing it did could land.
+        if [ -n "${PINNED_HEAD_SHA:-}" ] && [ "$start_sha" != "$PINNED_HEAD_SHA" ]; then
+          echo "::error::$branch is at $start_sha, but the caller's trusted context read $PINNED_HEAD_SHA as its tip; the head moved between the gate and this step — refusing to start from code the gate never saw. Re-trigger on the new tip."
+          exit 1
+        fi
         echo "start_sha=$start_sha" >>"$GITHUB_OUTPUT"
         # The caller's pinned base tip (see the `base-sha` input): what was
         # fetched must be exactly it, else nothing is merged.

@@ -99,6 +99,7 @@ def run(
     refused=None,
     event_pr=EVENT_PR,
     event_issue=EVENT_ISSUE,
+    start_sha=START,
     branch_prefix="",
     refuse_bundle=False,
     refuse_pr=False,
@@ -117,6 +118,7 @@ def run(
         refused_branches=REFUSED if refused is None else refused,
         event_pr_number=event_pr,
         event_issue_number=event_issue,
+        start_sha=start_sha,
         branch_prefix=branch_prefix,
         refuse_bundle=refuse_bundle,
         refuse_pr=refuse_pr,
@@ -424,6 +426,60 @@ def test_bundle_file_missing(tmp_path):
     (tmp_path / "commits.bundle").unlink()
     errs = run(tmp_path, m)
     assert any("commits.bundle is missing" in e for e in errs)
+
+
+# --- the trusted start (finding 4628444, criterion 2) -------------------------
+
+
+def test_bundle_start_sha_must_be_the_trusted_start(tmp_path):
+    # The agent job named another commit as where it began (a fork PR's
+    # head, an old base commit — anything origin serves by SHA).
+    errs = run(tmp_path, base_manifest(tmp_path), start_sha="c" * 40)
+    assert errs == [f"manifest: start_sha {START} is not the run's start the caller's trusted context recorded ({'c' * 40}); refusing the bundle"]
+
+
+def test_bundle_without_a_trusted_start_is_refused(tmp_path):
+    # A land job given no start (the gate's read failed, or a caller that
+    # passes none) refuses every bundle rather than trust the manifest's.
+    for value in ("", "  "):
+        errs = run(tmp_path, base_manifest(tmp_path), start_sha=value)
+        assert errs == ["manifest: the manifest carries commits but this land job was given no trusted start SHA (--start-sha); refusing the bundle"]
+
+
+@pytest.mark.parametrize("value", ["abc", "A" * 40, START[:-1], START + "0"])
+def test_malformed_trusted_start_refuses_the_bundle(tmp_path, value):
+    errs = run(tmp_path, base_manifest(tmp_path), start_sha=value)
+    assert any("(--start-sha) is not 40 lowercase hex" in e for e in errs), errs
+
+
+def test_trusted_start_is_trimmed(tmp_path):
+    assert run(tmp_path, base_manifest(tmp_path), start_sha=f" {START}\n") == []
+
+
+def test_manifest_without_commits_is_not_held_to_the_trusted_start(tmp_path):
+    # Nothing is pushed, so the start is irrelevant — and the callers fill
+    # in `github.sha` there when their own start step failed, so the error
+    # report still validates.
+    m = base_manifest(tmp_path, head_sha=START, has_bundle=False)
+    (tmp_path / "commits.bundle").unlink()
+    assert run(tmp_path, m, start_sha="") == []
+    assert run(tmp_path, m, start_sha="c" * 40) == []
+
+
+def test_commit_claim_without_the_bundle_flag_is_still_pinned(tmp_path):
+    # `head_sha != start_sha` with has_bundle false is already a violation;
+    # the pin does not depend on the flag the agent job set.
+    errs = run(tmp_path, base_manifest(tmp_path, has_bundle=False), start_sha="c" * 40)
+    assert any("has_bundle is false but head_sha differs" in e for e in errs)
+    assert any("is not the run's start" in e for e in errs)
+
+
+def test_refuse_bundle_reports_the_commit_claim_as_its_own(tmp_path):
+    # The reviewer's land job passes no start: its refusal of any commit
+    # claim stands alone, without a second violation about the pin.
+    errs = run(tmp_path, base_manifest(tmp_path), refuse_bundle=True, start_sha="")
+    assert any("refuses bundles (--refuse-bundle)" in e for e in errs)
+    assert not any("--start-sha" in e or "is not the run's start" in e for e in errs)
 
 
 # --- file references ---------------------------------------------------------
@@ -1103,7 +1159,7 @@ def test_refuse_bundle_external_mode_keeps_the_branch_prefix(tmp_path):
 # --- CLI ---------------------------------------------------------------------
 
 
-def cli(d: Path, *extra, pr_head_ref=BRANCH, event_pr=EVENT_PR, event_issue=EVENT_ISSUE):
+def cli(d: Path, *extra, pr_head_ref=BRANCH, event_pr=EVENT_PR, event_issue=EVENT_ISSUE, start_sha=START):
     argv = [
         "--dir", str(d),
         "--repo", REPO,
@@ -1112,11 +1168,27 @@ def cli(d: Path, *extra, pr_head_ref=BRANCH, event_pr=EVENT_PR, event_issue=EVEN
         "--refused-branches", ",".join(REFUSED),
         "--allowed-issue-repos", ",".join(ALLOWED),
         "--pr-head-ref", pr_head_ref,
+        "--start-sha", start_sha,
         "--event-pr-number", event_pr,
         "--event-issue-number", event_issue,
         *extra,
     ]
     return vm.main(argv)
+
+
+def test_cli_start_sha_pins_a_bundle_and_defaults_to_none(tmp_path, capsys):
+    # The land composite passes its `start-sha` input here; the flag's own
+    # default (empty) refuses every bundle, as a caller that omits it must.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path, start_sha="c" * 40) == 1
+    assert f"start_sha {START} is not the run's start the caller's trusted context recorded ({'c' * 40})" in capsys.readouterr().out
+    argv = [
+        "--dir", str(tmp_path), "--repo", REPO, "--run-id", RUN_ID, "--default-branch", DEFAULT_BRANCH,
+        "--allowed-issue-repos", ",".join(ALLOWED), "--pr-head-ref", BRANCH,
+        "--event-pr-number", EVENT_PR, "--event-issue-number", EVENT_ISSUE,
+    ]
+    assert vm.main(argv) == 1
+    assert "was given no trusted start SHA (--start-sha)" in capsys.readouterr().out
 
 
 def test_cli_valid(tmp_path, capsys):

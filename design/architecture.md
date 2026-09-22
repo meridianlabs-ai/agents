@@ -414,7 +414,14 @@ Three rules define the shape:
   the agent job could fast-forward another issue's open PR branch and have
   `pr.open` adopt that PR; a still-open PR from an earlier run on the same
   issue carries the prefix, and adopting it is intended), the SHAs to 40 hex with `has_bundle` ⇔
-  `head_sha != start_sha`, every `*_file` reference to a regular,
+  `head_sha != start_sha`, a bundle's `start_sha` to the land job's
+  `start-sha` input (the run's start as the caller's gate read it before the
+  agent ran — the base tip on an issue run, the PR head's live tip on a PR
+  run — which the agent job's own start step pinned itself to: `Record
+  base SHA`, `sync-branch`'s `head-sha`; without it the fetch below would
+  accept any commit reachable on origin as the start, a fork PR's head or an
+  old base commit included — Claude Security finding 4628444, criterion 2;
+  an empty input refuses every bundle), every `*_file` reference to a regular,
   non-symlinked file inside the artifact under 64 KiB, `issues[].repo` to
   an allow-list, thread IDs and numbers to their shapes, `stage` to the
   Atlas options — and rejects unknown keys at every level, so schema drift
@@ -423,7 +430,8 @@ Three rules define the shape:
   covers one failing case per rule.
 - **The land job never checks out third-party code and installs nothing.**
   The `land` composite is its whole body. The push materializes the bundle
-  in an *empty* bare repo: fetch the start SHA from origin by SHA (read
+  in an *empty* bare repo: fetch the start SHA — the trusted one the
+  validator just pinned it to — from origin by SHA (read
   token), `git bundle verify`, unbundle, assert the tip is `head_sha` and
   descends from `start_sha`, `ls-remote` the branch's live tip and refuse
   unless it is an ancestor of `head_sha` ("moved during the run", as
