@@ -203,13 +203,26 @@ workflow) the validator additionally refuses any manifest that carries
 commits, claims HEAD moved or ships a bundle, whatever the agent job
 uploaded, and the push-side branch rules are off because nothing is pushed.
 `emit-landing`'s `read-only` input is the producing side of the same pair:
-no git runs, `head_sha` equals `start_sha`, no bundle. Refusing bundles does
-not refuse pull requests: `pr.open` adopts or opens a PR for a branch that
-already exists on origin and labels it, with no push. Under `refuse-pr` (the
-triage workflow, since 2026-09-22) the validator also refuses a manifest
-carrying `pr` or `handback: true`, so a caller whose token reaches the
-repository's pull requests (the `MARVIN_TOKEN` fallback) cannot be made to
-label an existing PR `auto` or post `@review` by a forged artifact.
+no git runs, `head_sha` equals `start_sha`, no bundle. Since 2026-09-22
+`refuse-bundle` also refuses every field only a landed commit or a loop's fix
+agent owes — `pr`, `replies`, `resolve_threads`, `handoff_body_file` and
+`handback: true` — because nothing lands there to owe them: a forged review
+manifest could otherwise make the land job post the live `@review` as the
+machine account and start another review of the same PR without bound, post
+the `auto-handoff` stop marker, or resolve a human's review threads (Claude
+Security finding 4628439). Under `refuse-pr` (the triage workflow, since
+2026-09-22) the validator refuses a manifest carrying `pr` or `handback:
+true` on its own, so a caller whose token reaches the repository's pull
+requests (the `MARVIN_TOKEN` fallback) cannot be made to label an existing
+PR `auto` or post `@review` by a forged artifact.
+
+The review fields — `review_verdict`, `comments[].review` and
+`review_comments` — are accepted only on a land job whose caller passes
+`allow-review`, which claude-review.yml alone does (Claude Security finding
+4628442, 2026-09-22). On every other caller the validator refuses a manifest
+carrying any of them: they make `land` post a review as the machine account,
+byte-identical to the reviewer's, and the compose steps that keep the other
+callers' manifests free of them run in the agent job.
 
 Every agent-authored body the land job posts passes through a de-fang step
 first (trigger tokens lose their `@`, loop markers are split,
@@ -466,8 +479,9 @@ files (it runs tests and Python, unsandboxed on same-repo heads, and its
 `gh` runs outside the sandbox on the sandboxed paths), and under
 `refuse-bundle` the validator still accepts `comments[]` on any thread of
 the caller repository, `issues[]` in the caller repository (create,
-comment, reopen, assign), a `stage` move and a `pr.open` for a branch that
-already exists on origin. A compromised review job can therefore have the
+comment, reopen, assign) and a `stage` move (since 2026-09-22 it refuses
+`pr`, `replies`, `resolve_threads`, `handoff_body_file` and `handback`
+there). A compromised review job can therefore have the
 machine account post those, de-fanged, on the caller repository; it cannot
 push through its landing job, and its manifest cannot reach another
 repository. The Claude action's own installation token in the review job is
@@ -717,9 +731,10 @@ results against the invariant each one tests.
   the sandbox there, and the landing manifest it uploads is data the
   validator checks for shape, not intent. Under `refuse-bundle` the
   validator accepts `comments[]` on any thread of the caller repository,
-  `issues[]` in the caller repository (create, comment, reopen, assign), a
-  `stage` move and a `pr.open` for a branch that already exists on origin,
-  all of which the land job would post as the machine account. So what a
+  `issues[]` in the caller repository (create, comment, reopen, assign) and
+  a `stage` move (since 2026-09-22 no `pr`, `replies`, `resolve_threads`,
+  `handoff_body_file` or `handback`), all of which the land job would post
+  as the machine account. So what a
   steered reviewer can cause through the landing is a wrong review and
   manifest-authorized writes on the caller repository, never a
   machine-account push and never a machine-account write outside it; a

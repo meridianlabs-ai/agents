@@ -1997,6 +1997,13 @@ jobs:
           # github-actions[bot].
           token: ${{ steps.mint.outputs.token }}
           refuse-bundle: "true"
+          # The one land job that may carry review fields: the validator
+          # refuses review_verdict, comments[].review and review_comments
+          # on every other caller (Claude Security finding 4628442), and
+          # under refuse-bundle it refuses the fix-agent fields — pr,
+          # replies, resolve_threads, handoff_body_file, handback — a
+          # read-only reviewer never owes (finding 4628439).
+          allow-review: "true"
           # The same expressions emit-landing got above: the validator pins
           # the manifest's pr_number / issue_number to them, and they are
           # the trusted fallback target for the final report when the

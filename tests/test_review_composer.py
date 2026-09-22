@@ -84,7 +84,7 @@ def validate(landing: Path, *, branch="claude/issue-81-review", pr="456", issue=
     return vm.validate(
         manifest, artifact_dir=landing, repo="meridianlabs-ai/agents", run_id="123", default_branch="main",
         allowed_issue_repos=["meridianlabs-ai/agents"], pr_head_ref=branch if pr else "", refused_branches=["main"],
-        event_pr_number=pr, event_issue_number=issue, branch_prefix=prefix, refuse_bundle=True,
+        event_pr_number=pr, event_issue_number=issue, branch_prefix=prefix, refuse_bundle=True, allow_review=True,
     )
 
 
