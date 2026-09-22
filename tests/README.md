@@ -178,6 +178,21 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   refuses ambiguity without `--pr`, resolves with it, and falls back to
   closing refs / the branch convention when no chip exists. Acceptance paths
   run through `--dry-run` only; the test clone's remote is non-routable.
+  Except checkout's External path (Claude Security 4629158, 4629155), run
+  for real against local repos: an outsider's upstream PR head named
+  `meridian`, carrying `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, a `post-checkout` hook the clone's
+  `core.hooksPath` would resolve, and a `.gitmodules` adding a submodule
+  and an out-of-tree "ts-mono" path, lands detached in a worktree outside
+  the clone at the SHA the API reported — the local `meridian`, HEAD,
+  branch config and `.git/config` unchanged, nothing of the tree in the
+  clone, the hook never run, the submodule never initialised, the ts-mono
+  companion never looked up (the stub's `gh pr checkout` emulation shows
+  the unfixed behaviour fast-forwarding `meridian` and running the hook);
+  a head that moved since the read, a non-SHA `headRefOid` and a worktree
+  root inside the clone are refused; a rerun reuses a clean worktree and
+  refuses a dirty one or a stranger's directory. Promotions keep
+  `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from

@@ -4,8 +4,19 @@
 #
 # Chip selection: an OPEN same-repo chip wins; otherwise a single OPEN
 # cross-repo chip (an External proxy's upstream PR, or a promotion) is
-# checked out against ITS repo — gh pr checkout handles personal-fork heads
-# and wires the push remote when maintainerCanModify.
+# checked out against ITS repo. A promotion (our own fork branch, trusted
+# author) goes through gh pr checkout like a same-repo chip. An External
+# pick is an OUTSIDER'S tree and never enters this clone's working tree:
+# its head is fetched by PR number, refused unless it is exactly the
+# headRefOid the API reported, and that literal commit is checked out
+# detached — hooks and submodule recursion off — in a worktree OUTSIDE the
+# clone ($CHECKOUT_WORKTREES, default ~/.local/state/checkout/<owner>--<repo>/
+# pr-<M>). Nothing of it is loadable from the session's project directory
+# (.claude/, .mcp.json, CLAUDE.md, AGENTS.md), no local branch is created or
+# moved (the contributor names the head: `meridian` or an existing branch
+# would otherwise be fast-forwarded by gh pr checkout), no submodule is
+# initialised from its .gitmodules and no ts-mono companion switch runs
+# (findings 4629158, 4629155).
 #
 # Trust rule (applied BEFORE any PR text — title, body, branch name — is
 # consulted): a linked PR qualifies only when its head repository is this
@@ -23,9 +34,12 @@
 # Usage: checkout.sh <issue-number> [--dry-run]
 #   --dry-run  print the candidates, each verdict and the decision; exit
 #              before any write (no branch config, no fetch, no checkout).
-# Exit codes: 0 ok; 2 dirty tree (never switch over uncommitted work);
-# 3 no qualifying open chip (stderr lists every candidate and why it was
-# refused; fall back to the slow path); 4 repo unresolvable.
+# Exit codes: 0 ok; 2 dirty tree (never switch over uncommitted work — the
+# External worktree's tree included); 3 no qualifying open chip (stderr
+# lists every candidate and why it was refused; fall back to the slow
+# path); 4 repo unresolvable; 5 External head unusable (the upstream PR's
+# head moved between the API read and the fetch, or no headRefOid) —
+# nothing was checked out, rerun.
 set -euo pipefail
 
 # Trusted identities (comma-separated), in REST form: the machine account's
@@ -104,7 +118,7 @@ check_pr() {
 # head/base refs, author and head repository, so no separate `gh pr view`
 # or `gh issue view` is needed.
 JSON=$(gh api graphql \
-  -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){title body author{login __typename} labels(first:20){nodes{name}} closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state headRefName baseRefName author{login __typename} repository{nameWithOwner} headRepository{nameWithOwner}}}}}}' \
+  -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){title body author{login __typename} labels(first:20){nodes{name}} closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state headRefName headRefOid baseRefName author{login __typename} repository{nameWithOwner} headRepository{nameWithOwner}}}}}}' \
   -F o="${REPO%%/*}" -F r="${REPO##*/}" -F n="$N")
 
 TITLE=$(jq -r '.data.repository.issue.title' <<<"$JSON")
@@ -144,7 +158,9 @@ while IFS= read -r chip; do
     CROSS_OK="$CROSS_OK$chip"$'\n'
     LISTING="$LISTING$line — qualifies (promotion: head is $REPO)"$'\n'
   elif [ -n "$PROXY" ] && [ "$(jq -r .repository.nameWithOwner <<<"$chip")" = "$UPSTREAM" ]; then
-    CROSS_OK="$CROSS_OK$chip"$'\n'
+    # Tagged: the pick is an outsider's tree (it failed check_pr) and takes
+    # the isolated External path below, never gh pr checkout.
+    CROSS_OK="$CROSS_OK$(jq -c '. + {external:true}' <<<"$chip")"$'\n'
     LISTING="$LISTING$line — qualifies (External proxy: issue by $ISSUE_AUTHOR, label External)"$'\n'
   else
     LISTING="$LISTING$line — REFUSED: $REASON; issue is not an External proxy (author=${ISSUE_AUTHOR:-?} labels=${ISSUE_LABELS:-none})"$'\n'
@@ -183,10 +199,12 @@ if [ -z "$PICK" ]; then
       LISTING="$LISTING  body line '$UP_LINE' — REFUSED: not under $UPSTREAM"$'\n'
     else
       UP_NUM=$(grep -oE '[0-9]+$' <<<"$UP_URL")
+      # Always External: a proxy's Upstream PR is the contributor's PR, and
+      # this read carries no author/head repository to prove otherwise.
       PICK=$(gh pr view "$UP_NUM" --repo "$UPSTREAM" \
-          --json number,state,headRefName,baseRefName 2>/dev/null \
+          --json number,state,headRefName,headRefOid,baseRefName 2>/dev/null \
         | jq -c --arg r "$UPSTREAM" 'select(.state=="OPEN")
-          | {number, state, headRefName, baseRefName, repository:{nameWithOwner:$r}}' || true)
+          | {number, state, headRefName, headRefOid, baseRefName, repository:{nameWithOwner:$r}, external:true}' || true)
       if [ -n "$PICK" ]; then
         CROSS=1
         HOW="proxy body's Upstream PR line"
@@ -208,23 +226,98 @@ M=$(jq -r .number <<<"$PICK")
 BRANCH=$(jq -r .headRefName <<<"$PICK")
 BASE_REF=$(jq -r .baseRefName <<<"$PICK")
 PR_REPO=$(jq -r .repository.nameWithOwner <<<"$PICK")
+EXTERNAL=$(jq -r '.external // empty' <<<"$PICK")
 
 # Merge base = the PR's base branch on the BASE repo's remote (origin is
 # upstream in fork clones — wrong diff), and baseRefName, not the default
 # branch (fork PRs base on meridian).
-BASE_REMOTE=$(git remote -v | grep -im1 "github.com[:/]${PR_REPO}" | cut -f1 || true)
-[ -n "$BASE_REMOTE" ] || BASE_REMOTE=origin
+PR_REMOTE=$(git remote -v | grep -im1 "github.com[:/]${PR_REPO}" | cut -f1 || true)
+BASE_REMOTE=${PR_REMOTE:-origin}
+
+if [ -n "$EXTERNAL" ]; then
+  # The External path's inputs, resolved before anything is written so a
+  # refusal (and --dry-run) can name them. SHA is the head the API reported
+  # at read time; the checkout is bound to it, never to "the PR's current
+  # tip". It is spliced into git commands, so it must be a full hex SHA.
+  SHA=$(jq -r '.headRefOid // ""' <<<"$PICK")
+  grep -qE '^[0-9a-f]{40}$' <<<"$SHA" ||
+    { echo "REFUSED: $PR_REPO#$M has no usable headRefOid ('${SHA:-none}') — rerun" >&2; exit 5; }
+  # The PR head is fetched from the remote that serves $PR_REPO, else its
+  # https URL — never from `origin` by default, which is the fork in some
+  # clone layouts and would answer refs/pull/$M/head with an unrelated PR.
+  FETCH_FROM=${PR_REMOTE:-https://github.com/$PR_REPO.git}
+  # Outside the clone, so nothing in the tree is under the session's
+  # project directory. CHECKOUT_WORKTREES overrides the root.
+  WT_ROOT=${CHECKOUT_WORKTREES:-${XDG_STATE_HOME:-$HOME/.local/state}/checkout}
+  WT="$WT_ROOT/${PR_REPO%%/*}--${PR_REPO##*/}/pr-$M"
+  TOP=$(git rev-parse --show-toplevel)
+  case "$WT/" in "$TOP"/*)
+    echo "REFUSED: External worktree $WT would be inside this clone ($TOP) — set CHECKOUT_WORKTREES outside it" >&2; exit 1 ;;
+  esac
+fi
 
 if [ -n "$DRY" ]; then
   echo "DRY-RUN: issue #$N in $REPO ($TITLE) author=${ISSUE_AUTHOR:-?} labels=${ISSUE_LABELS:-none} proxy=${PROXY:-no}; TRUSTED_LOGINS=$TRUSTED_LOGINS"
   printf '%s' "$LISTING"
-  echo "DRY-RUN: DECISION — check out $PR_REPO#$M via $HOW: branch=$BRANCH base=$BASE_REMOTE/$BASE_REF${CROSS:+ [cross-repo]}"
-  echo "DRY-RUN: would run: git config branch.$BRANCH.github-pr-owner-number ${PR_REPO%%/*}#${PR_REPO##*/}#$M; git config branch.$BRANCH.vscode-merge-base $BASE_REMOTE/$BASE_REF; git fetch $BASE_REMOTE $BASE_REF; gh pr checkout $M -R $PR_REPO"
+  if [ -n "$EXTERNAL" ]; then
+    echo "DRY-RUN: DECISION — check out $PR_REPO#$M via $HOW: UNTRUSTED external head '$BRANCH' at $SHA, detached in worktree $WT [external]"
+    echo "DRY-RUN: would run: git fetch $FETCH_FROM refs/pull/$M/head (refused unless FETCH_HEAD = $SHA); git worktree add --detach --no-checkout $WT $SHA; git -C $WT checkout --detach $SHA (hooks and submodule recursion off). No branch, no branch config, no submodule init and no ts-mono switch in this clone."
+  else
+    echo "DRY-RUN: DECISION — check out $PR_REPO#$M via $HOW: branch=$BRANCH base=$BASE_REMOTE/$BASE_REF${CROSS:+ [cross-repo]}"
+    echo "DRY-RUN: would run: git config branch.$BRANCH.github-pr-owner-number ${PR_REPO%%/*}#${PR_REPO##*/}#$M; git config branch.$BRANCH.vscode-merge-base $BASE_REMOTE/$BASE_REF; git fetch $BASE_REMOTE $BASE_REF; gh pr checkout $M -R $PR_REPO"
+  fi
   exit 0
 fi
 # A refused candidate sat next to the one we took — say so, the operator
 # may want to look at it.
 grep -F -- '— REFUSED' <<<"$LISTING" | sed 's/^ */note: refused /' >&2 || true
+
+if [ -n "$EXTERNAL" ]; then
+  # An outsider's tree. Not `gh pr checkout`: it names the local branch after
+  # the contributor's headRefName (fast-forwarding an existing `meridian` or
+  # agent branch of that name, whose push tracking then publishes the
+  # commits), takes no SHA, and materialises the tree — .claude/ hooks,
+  # .mcp.json, CLAUDE.md, AGENTS.md, .gitmodules — where this session loads
+  # project configuration. Instead: fetch the head WITHOUT checking it out,
+  # refuse unless it is the commit the API reported, and check that literal
+  # commit out detached in a worktree outside the clone. Every git call here
+  # runs with hooks pointed at an empty directory (a relative core.hooksPath
+  # such as `.githooks` resolves INSIDE the worktree, i.e. to the
+  # contributor's files) and submodule recursion off, so nothing from the
+  # tree executes and nothing is cloned from its .gitmodules.
+  NOHOOKS=$(mktemp -d)
+  trap 'rm -rf "$NOHOOKS"' EXIT
+  export GIT_CONFIG_COUNT=3 \
+    GIT_CONFIG_KEY_0=fetch.recurseSubmodules GIT_CONFIG_VALUE_0=false \
+    GIT_CONFIG_KEY_1=submodule.recurse GIT_CONFIG_VALUE_1=false \
+    GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2="$NOHOOKS"
+  git fetch -q --no-tags --no-recurse-submodules "$FETCH_FROM" "refs/pull/$M/head"
+  GOT=$(git rev-parse FETCH_HEAD)
+  if [ "$GOT" != "$SHA" ]; then
+    echo "REFUSED: $PR_REPO#$M head is $GOT, not the $SHA read from the API — the contributor pushed meanwhile; nothing checked out, rerun" >&2
+    exit 5
+  fi
+  if [ -e "$WT" ]; then
+    # A previous run's worktree: reuse it only if it is ours and clean.
+    COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+    WT_COMMON=$(cd "$WT" 2>/dev/null && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -z "$WT_COMMON" ] || [ "$(cd "$WT_COMMON" && pwd -P)" != "$COMMON" ]; then
+      echo "REFUSED: $WT exists and is not a worktree of this clone — move it aside" >&2; exit 1
+    fi
+    if [ -n "$(git -C "$WT" status --porcelain --ignore-submodules=dirty)" ]; then
+      echo "DIRTY TREE in External worktree $WT — not switching:" >&2
+      git -C "$WT" status --short --ignore-submodules=dirty >&2
+      exit 2
+    fi
+    git -C "$WT" checkout -q --detach "$SHA"
+  else
+    mkdir -p "$(dirname "$WT")"
+    git worktree add -q --detach --no-checkout "$WT" "$SHA"
+    git -C "$WT" checkout -q --detach "$SHA"
+  fi
+  echo "OK worktree=$WT detached=$SHA pr=$PR_REPO#$M issue=#$N ($TITLE) [UNTRUSTED external tree: contributor head '$BRANCH', checked out OUTSIDE this clone (HEAD and local branches untouched); nothing from it runs here — do not start an agent session, install or run tests inside it]"
+  exit 0
+fi
 
 # Config BEFORE the checkout: the PR extension re-reads branch config on the
 # HEAD-change event; written after, it is only noticed on the NEXT switch.
@@ -257,11 +350,12 @@ if [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then
   # If an open companion PR exists, put the submodule on its branch so both
   # halves of the issue are editable together.
   TSMONO=$(git config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null              | awk '$2 ~ /ts-mono/ {print $2; exit}' || true)
-  # Companions exist for fork branches AND External contributors' upstream
-  # branches (the agent names its ts-mono half after the primary branch), so
-  # no cross-repo gate. Guard instead on authorship: contributor branch
-  # names are arbitrary, and an unrelated ts-mono PR sharing a generic name
-  # must not be treated as a companion.
+  # Only trusted picks reach here (an External pick exited above with its
+  # worktree: its .gitmodules and branch name are the contributor's, so no
+  # submodule init and no companion switch for it), so no cross-repo gate:
+  # a promotion's companion is named after the fork branch. Guard on
+  # authorship anyway — an unrelated ts-mono PR sharing a generic name must
+  # not be treated as a companion.
   if [ -n "$TSMONO" ]; then
     COMP=$(gh pr list --repo meridianlabs-ai/ts-mono --head "$BRANCH" --state open              --json number,author,headRefName --jq '[.[] | select((.author.login == "i-am-marvin") or (.author.login == "app/meridian-marvin") or (.author.login == "app/claude") or (.headRefName | startswith("claude/issue-")))][0].number // empty' 2>/dev/null || true)
     if [ -n "$COMP" ]; then

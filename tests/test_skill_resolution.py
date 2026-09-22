@@ -9,7 +9,11 @@ answers from fixtures and logs every call: refusals must exit non-zero
 naming the candidate and the reason before any write, the agent's own PR
 must still resolve, and promote must refuse ambiguity without `--pr` and
 resolve with it (agents #32) or fall back to closing refs (#33). Acceptance
-is exercised through `--dry-run` only.
+is exercised through `--dry-run` only — except checkout's External path
+(findings 4629158, 4629155), which is run for real against local repos: an
+outsider's PR head, named `meridian` and carrying agent configuration, hooks
+and a `.gitmodules`, must land detached in a worktree outside the clone at
+the SHA the API reported, touching no local branch and running nothing.
 """
 
 import json
@@ -43,7 +47,21 @@ case "$args" in
   "pr list --repo meridianlabs-ai/inspect_ai --state open "*)
     if [ -f "$STUB/prlist_fail" ]; then echo "gh: HTTP 500" >&2; exit 1; fi
     cat "$STUB/open_prs.json" 2>/dev/null || echo '[]' ;;
-  "pr list --repo meridianlabs-ai/ts-mono "*) ;;
+  "pr list --repo meridianlabs-ai/ts-mono "*) cat "$STUB/tsmono_prs.json" 2>/dev/null || true ;;
+  "pr checkout "*)
+    # What gh does for a head repository that is not a configured remote
+    # (the finding's layout): fetch refs/pull/M/head into the local branch
+    # named after the PR's headRefName (a fast-forward when it exists) and
+    # check it out — or, when that branch is the current one, ff-merge
+    # FETCH_HEAD into it. Only when a test provides the branch and URL; the
+    # fixed script must never get here for an External pick.
+    [ -f "$STUB/pr_checkout_branch" ] || { echo "stub gh: unexpected call: $args" >&2; exit 97; }
+    n=$(awk '{print $3}' <<<"$args"); b=$(cat "$STUB/pr_checkout_branch"); url=$(cat "$STUB/pr_checkout_url")
+    if [ "$(git branch --show-current)" = "$b" ]; then
+      git fetch -q "$url" "refs/pull/$n/head" && git merge -q --ff-only FETCH_HEAD
+    else
+      git fetch -q "$url" "refs/pull/$n/head:$b" && git checkout -q "$b"
+    fi ;;
   "pr view "*)
     n=$(awk '{print $3}' <<<"$args"); repo=$(sed -E 's#.*--repo ([^ ]+).*#\1#' <<<"$args")
     f="$STUB/pr_view_${repo//\//_}_$n.json"
@@ -116,9 +134,19 @@ def open_pr(number, *, author=MARVIN, head_repo=FORK, branch, body="", title=Non
     }
 
 
+GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+}
+# A full hex SHA for dry-run fixtures: the script refuses to plan an External
+# checkout around anything else (the value is spliced into git commands).
+HEX = "0123456789abcdef" * 2 + "01234567"
+
+
 class Stub:
     def __init__(self, tmp_path, issue_json, *, perms=(), open_prs=(), pr_views=(), comments=None,
-                 branches=(), prlist_fail=False, comments_fail=()):
+                 branches=(), prlist_fail=False, comments_fail=(), tsmono_prs=None):
         self.dir = tmp_path / "stub"
         self.dir.mkdir(parents=True)
         gh = tmp_path / "bin" / "gh"
@@ -134,6 +162,8 @@ class Stub:
             (self.dir / f"comments_{number}.json").write_text(
                 json.dumps([{"user": {"login": login}, "body": body} for login, body in items]))
         (self.dir / "branches").write_text("".join(f"{b}={sha}\n" for b, sha in branches))
+        if tsmono_prs is not None:
+            (self.dir / "tsmono_prs.json").write_text(json.dumps(tsmono_prs))
         if prlist_fail:
             (self.dir / "prlist_fail").touch()
         for number in comments_fail:
@@ -153,13 +183,13 @@ class Stub:
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
         }
 
-    def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.clone, check=True, text=True, capture_output=True,
-                              env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", *args], cwd=cwd or self.clone, check=True, text=True, capture_output=True,
+                              env={**os.environ, **GIT_ENV})
 
-    def run(self, script, *args):
+    def run(self, script, *args, env=None):
         return subprocess.run(["bash", str(script), *args], cwd=self.clone, text=True,
-                              capture_output=True, env=self.env)
+                              capture_output=True, env={**self.env, **(env or {})})
 
     def calls(self):
         p = self.dir / "calls"
@@ -260,7 +290,7 @@ def test_checkout_refuses_another_app_and_a_user_who_took_the_apps_slug(tmp_path
 def test_checkout_external_proxy_written_by_the_apps_login_is_genuine(tmp_path):
     # The sync files External proxies as the machine account: under Phase 2
     # that is the App login, bare in GraphQL.
-    theirs = chip(5001, repo=UPSTREAM, head_repo="outsider/inspect_ai", author="outsider", branch="fix")
+    theirs = chip(5001, repo=UPSTREAM, head_repo="outsider/inspect_ai", author="outsider", branch="fix", head_sha=HEX)
     s = Stub(tmp_path, issue([theirs], author=BOT_AUTHOR, labels=["External"]))
     r = s.run(CHECKOUT, str(N), "--dry-run")
     assert r.returncode == 0, r.stderr
@@ -274,6 +304,9 @@ def test_checkout_cross_repo_chip_qualifies_as_a_promotion_only_with_fork_head(t
     r = s.run(CHECKOUT, str(N), "--dry-run")
     assert r.returncode == 0, r.stderr
     assert f"check out {UPSTREAM}#5000 via open cross-repo chip" in r.stdout and "[cross-repo]" in r.stdout
+    # A promotion is our own branch by a trusted author: the ordinary
+    # gh pr checkout into this clone, unchanged by the External isolation.
+    assert f"gh pr checkout 5000 -R {UPSTREAM}" in r.stdout and "[external]" not in r.stdout
 
     theirs = chip(5001, repo=UPSTREAM, head_repo="outsider/inspect_ai", author="outsider", branch="fix")
     s2 = Stub(tmp_path / "b", issue([theirs]))
@@ -285,12 +318,17 @@ def test_checkout_cross_repo_chip_qualifies_as_a_promotion_only_with_fork_head(t
 def test_checkout_external_proxy_admits_the_contributors_upstream_pr(tmp_path):
     # A genuine proxy: written by a trusted login, labelled External. Its
     # single open upstream chip is the contributor's PR from a personal fork.
-    theirs = chip(5001, repo=UPSTREAM, head_repo="outsider/inspect_ai", author="outsider", branch="fix")
+    theirs = chip(5001, repo=UPSTREAM, head_repo="outsider/inspect_ai", author="outsider", branch="fix", head_sha=HEX)
     s = Stub(tmp_path, issue([theirs], author=MARVIN, labels=["External"]))
     r = s.run(CHECKOUT, str(N), "--dry-run")
     assert r.returncode == 0, r.stderr
     assert f"check out {UPSTREAM}#5001 via open cross-repo chip" in r.stdout
     assert "qualifies (External proxy" in r.stdout
+    # ...and it is planned as an outsider's tree: pinned to the SHA the API
+    # reported, detached in a worktree outside the clone, never gh pr checkout.
+    assert f"UNTRUSTED external head 'fix' at {HEX}, detached in worktree" in r.stdout and "[external]" in r.stdout
+    assert f"refs/pull/5001/head (refused unless FETCH_HEAD = {HEX})" in r.stdout
+    assert "gh pr checkout" not in r.stdout and not any(c.startswith("pr checkout") for c in s.calls())
 
 
 def test_checkout_external_label_alone_does_not_make_a_proxy(tmp_path):
@@ -305,7 +343,7 @@ def test_checkout_external_label_alone_does_not_make_a_proxy(tmp_path):
 
 
 def test_checkout_body_line_fallback_on_a_genuine_proxy(tmp_path):
-    up = {"number": 5336, "state": "OPEN", "headRefName": "their-fix", "baseRefName": "main"}
+    up = {"number": 5336, "state": "OPEN", "headRefName": "their-fix", "headRefOid": HEX, "baseRefName": "main"}
     s = Stub(tmp_path, issue([], author=MARVIN, labels=["External"],
                              body=f"Mirror.\n\nUpstream PR: https://github.com/{UPSTREAM}/pull/5336\n"),
              pr_views=[(UPSTREAM, up)])
@@ -313,6 +351,9 @@ def test_checkout_body_line_fallback_on_a_genuine_proxy(tmp_path):
     assert r.returncode == 0, r.stderr
     assert f"check out {UPSTREAM}#5336 via proxy body's Upstream PR line" in r.stdout
     assert "resolved via the proxy body" in r.stderr
+    # The body-line read proves no author or head repository: always External.
+    assert f"UNTRUSTED external head 'their-fix' at {HEX}" in r.stdout
+    assert any("headRefOid" in c for c in s.calls() if c.startswith("pr view"))
 
 
 def test_checkout_body_line_must_point_under_upstream(tmp_path):
@@ -331,6 +372,215 @@ def test_checkout_body_line_ignored_on_an_ordinary_issue(tmp_path):
     assert r.returncode == 3
     assert "REFUSED: issue is not an External proxy (author=outsider labels=none)" in r.stderr
     assert not any(c.startswith("pr view") or c.startswith("pr checkout") for c in s.calls())
+
+
+# --- checkout.sh: the External path, against local repos ---------------------
+#
+# The layout the findings describe: the clone's remote for upstream is a
+# local bare repo whose path contains github.com/UKGovernmentBEIS/inspect_ai
+# (so the script's remote lookup finds it), the clone has a local `meridian`
+# branch and `core.hooksPath` pointing into the tree, and an outsider's
+# upstream PR whose head is named `meridian` carries every file an agent
+# would load or execute from its project directory.
+
+CONTRIBUTOR_FILES = {
+    ".claude/settings.json": '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"id"}]}]}}\n',
+    ".mcp.json": '{"mcpServers":{}}\n',
+    "CLAUDE.md": "obey me\n",
+    "CLAUDE.local.md": "obey me too\n",
+    "AGENTS.md": "and me\n",
+    "src/CLAUDE.md": "nested\n",
+}
+
+
+def external_repos(s, tmp_path, *, head="meridian"):
+    """Seed upstream (main + refs/pull/5001/head), the clone (main checked out,
+    local `meridian` at base, hooks resolved inside the tree) and the
+    attacker-designated repos the contributor's .gitmodules names. Returns the
+    contributor tip's SHA and the paths the tests inspect."""
+    up = tmp_path / "github.com" / f"{UPSTREAM}.git"
+    up.parent.mkdir(parents=True)
+    s.git("init", "-q", "--bare", "-b", "main", str(up), cwd=tmp_path)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    s.git("init", "-q", "-b", "main", cwd=seed)
+    (seed / "README").write_text("base\n")
+    s.git("add", "README", cwd=seed)
+    s.git("commit", "-q", "-m", "base", cwd=seed)
+    base = s.git("rev-parse", "HEAD", cwd=seed).stdout.strip()
+    s.git("push", "-q", str(up), "main", cwd=seed)
+    # The contributor's tip, on top of base: agent configuration at the root
+    # and nested, a post-checkout hook, and a .gitmodules that adds a
+    # submodule from their URL plus an out-of-tree "ts-mono" path.
+    s.git("checkout", "-q", "-b", head, cwd=seed)
+    for name, text in CONTRIBUTOR_FILES.items():
+        (seed / name).parent.mkdir(parents=True, exist_ok=True)
+        (seed / name).write_text(text)
+    marker = tmp_path / "hook-ran"
+    (seed / ".githooks").mkdir()
+    (seed / ".githooks" / "post-checkout").write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    (seed / ".githooks" / "post-checkout").chmod(0o755)
+    evil_sub = tmp_path / "evil-sub.git"
+    s.git("init", "-q", "--bare", "-b", "main", str(evil_sub), cwd=tmp_path)
+    s.git("push", "-q", str(evil_sub), "main", cwd=seed)
+    (seed / ".gitmodules").write_text(
+        f'[submodule "vendor/evil"]\n\tpath = vendor/evil\n\turl = {evil_sub}\n'
+        '[submodule "tsm"]\n\tpath = ../evil-ts-mono\n\turl = https://127.0.0.1:9/x.git\n')
+    s.git("update-index", "--add", "--cacheinfo", f"160000,{base},vendor/evil", cwd=seed)
+    s.git("add", "-A", cwd=seed)
+    s.git("commit", "-q", "-m", "the contributor's tip", cwd=seed)
+    tip = s.git("rev-parse", "HEAD", cwd=seed).stdout.strip()
+    s.git("push", "-q", str(up), f"{head}:refs/pull/5001/head", cwd=seed)
+    # The clone: main checked out, a local branch of the contributor's chosen
+    # name at base (a fast-forward away from their tip), hooks in the tree.
+    s.git("remote", "add", "upstream", str(up))
+    s.git("fetch", "-q", "upstream", "main")
+    s.git("checkout", "-q", "-b", "main", "FETCH_HEAD")
+    s.git("branch", head, "main")
+    s.git("config", "core.hooksPath", ".githooks")
+    # The attacker-designated repo the .gitmodules "ts-mono" path points at,
+    # as a sibling of the clone: its `origin` serves a `meridian` branch.
+    evil_ts = tmp_path / "evil-ts-mono"
+    s.git("clone", "-q", str(evil_sub), str(evil_ts), cwd=tmp_path)
+    s.git("push", "-q", "origin", "main:meridian", cwd=evil_ts)
+    # What the unfixed script would have handed to gh.
+    (s.dir / "pr_checkout_branch").write_text(head)
+    (s.dir / "pr_checkout_url").write_text(str(up))
+    return {"tip": tip, "base": base, "upstream": up, "marker": marker, "evil_ts": evil_ts,
+            "wts": tmp_path / "wts", "wt": tmp_path / "wts" / "UKGovernmentBEIS--inspect_ai" / "pr-5001"}
+
+
+def external_issue(head_sha, *, head="meridian"):
+    theirs = chip(5001, repo=UPSTREAM, head_repo="outsider/inspect_ai", author="outsider",
+                  branch=head, head_sha=head_sha)
+    return issue([theirs], author=MARVIN, labels=["External"])
+
+
+def external_stub(tmp_path, head_sha, *, head="meridian"):
+    # An agent-authored ts-mono PR of the same head name exists: the unfixed
+    # script would have switched the .gitmodules "ts-mono" path onto it.
+    companion = [{"number": 77, "author": {"login": MARVIN}, "headRefName": head}]
+    return Stub(tmp_path, external_issue(head_sha, head=head), tsmono_prs=companion)
+
+
+def clone_state(s):
+    return {
+        "HEAD": s.git("rev-parse", "HEAD").stdout.strip(),
+        "branch": s.git("branch", "--show-current").stdout.strip(),
+        "meridian": s.git("rev-parse", "meridian").stdout.strip(),
+        "config": subprocess.run(["git", "config", "--get-regexp", r"^branch\.|^submodule\."], cwd=s.clone,
+                                 text=True, capture_output=True, env={**os.environ, **GIT_ENV}).stdout,
+    }
+
+
+def test_checkout_external_head_named_meridian_lands_detached_outside_the_clone(tmp_path):
+    s = external_stub(tmp_path, head_sha=None)
+    q = external_repos(s, tmp_path)
+    (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
+    before = clone_state(s)
+    evil_ts_before = s.git("rev-parse", "HEAD", cwd=q["evil_ts"]).stdout.strip()
+    assert s.git("worktree", "list", "--porcelain").stdout.count("worktree ") == 1
+
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith(f"OK worktree={q['wt']} detached={q['tip']} pr={UPSTREAM}#5001 issue=#{N}")
+    assert "UNTRUSTED external tree: contributor head 'meridian'" in r.stdout
+
+    # The clone: HEAD, the checked-out branch and the local `meridian` the
+    # contributor named are exactly as before; no branch config, no
+    # submodule URL in .git/config; nothing of the tree under the project
+    # directory, and its hook never ran; the .gitmodules "ts-mono" repo and
+    # the companion lookup were never touched.
+    assert clone_state(s) == before
+    assert before["meridian"] == q["base"] and before["branch"] == "main"
+    for name in list(CONTRIBUTOR_FILES) + [".githooks", ".gitmodules", "vendor"]:
+        assert not (s.clone / name).exists(), name
+    assert not q["marker"].exists()
+    assert s.git("rev-parse", "HEAD", cwd=q["evil_ts"]).stdout.strip() == evil_ts_before
+    assert not any(c.startswith("pr checkout") or "ts-mono" in c for c in s.calls())
+
+    # The worktree: the literal tip, detached, clean, outside the clone, the
+    # files present as data — the submodule not initialised.
+    wt = q["wt"]
+    assert f"worktree {wt}" in s.git("worktree", "list", "--porcelain").stdout
+    assert s.git("rev-parse", "HEAD", cwd=wt).stdout.strip() == q["tip"]
+    assert subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=wt, capture_output=True,
+                          env={**os.environ, **GIT_ENV}).returncode != 0  # detached
+    assert s.git("status", "--porcelain", cwd=wt).stdout == ""
+    assert (wt / ".claude" / "settings.json").exists() and (wt / "CLAUDE.md").exists()
+    assert not (wt / "vendor" / "evil" / ".git").exists()
+
+    # The fixture is potent: what the unfixed script ran (`gh pr checkout`,
+    # emulated by the stub) fast-forwards the local `meridian` to the
+    # contributor's tip, checks it out into the clone and runs their hook.
+    naive = subprocess.run(["gh", "pr", "checkout", "5001", "-R", UPSTREAM], cwd=s.clone, text=True,
+                           capture_output=True, env=s.env)
+    assert naive.returncode == 0, naive.stderr
+    assert s.git("rev-parse", "meridian").stdout.strip() == q["tip"]
+    assert (s.clone / ".claude" / "settings.json").exists() and q["marker"].exists()
+
+
+def test_checkout_external_refuses_a_head_that_moved_since_the_read(tmp_path):
+    s = external_stub(tmp_path, head_sha=None)
+    q = external_repos(s, tmp_path)
+    # The API said `base`; the contributor pushed since, refs/pull/5001/head is the tip.
+    (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["base"])))
+    before = clone_state(s)
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})
+    assert r.returncode == 5
+    assert f"head is {q['tip']}, not the {q['base']} read from the API" in r.stderr
+    assert clone_state(s) == before and not q["wts"].exists() and not q["marker"].exists()
+    assert s.git("worktree", "list", "--porcelain").stdout.count("worktree ") == 1
+    assert not any(c.startswith("pr checkout") for c in s.calls())
+
+
+def test_checkout_external_refuses_an_unusable_head_sha_or_a_worktree_inside_the_clone(tmp_path):
+    # chip()'s default headRefOid is not a SHA: refused before any plan is printed.
+    s = external_stub(tmp_path, head_sha=None)
+    r = s.run(CHECKOUT, str(N), "--dry-run")
+    assert r.returncode == 5 and "no usable headRefOid ('sha-meridian')" in r.stderr and r.stdout == ""
+    # A worktree root under the clone would put the tree back in the project directory.
+    s2 = external_stub(tmp_path / "b", head_sha=HEX)
+    r2 = s2.run(CHECKOUT, str(N), "--dry-run", env={"CHECKOUT_WORKTREES": str(s2.clone / "ext")})
+    assert r2.returncode == 1 and "would be inside this clone" in r2.stderr
+    assert not (s2.clone / "ext").exists()
+
+
+def test_checkout_external_rerun_reuses_a_clean_worktree_and_refuses_a_dirty_one(tmp_path):
+    s = external_stub(tmp_path, head_sha=None)
+    q = external_repos(s, tmp_path)
+
+    def contributor_pushes(text):
+        seed = tmp_path / "seed"
+        (seed / "more.txt").write_text(text)
+        s.git("add", "more.txt", cwd=seed)
+        s.git("commit", "-q", "-m", text, cwd=seed)
+        sha = s.git("rev-parse", "HEAD", cwd=seed).stdout.strip()
+        s.git("push", "-q", "-f", str(q["upstream"]), "meridian:refs/pull/5001/head", cwd=seed)
+        (s.dir / "graphql.json").write_text(json.dumps(external_issue(sha)))
+        return sha
+
+    env = {"CHECKOUT_WORKTREES": str(q["wts"])}
+    (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
+    assert s.run(CHECKOUT, str(N), env=env).returncode == 0
+    # The contributor pushes; a rerun moves the existing, clean worktree to the new tip.
+    b = contributor_pushes("B")
+    r = s.run(CHECKOUT, str(N), env=env)
+    assert r.returncode == 0, r.stderr
+    assert s.git("rev-parse", "HEAD", cwd=q["wt"]).stdout.strip() == b and (q["wt"] / "more.txt").exists()
+    assert not q["marker"].exists()
+    # Uncommitted work in the worktree is never switched over, as in the clone.
+    (q["wt"] / "more.txt").write_text("edited locally\n")
+    contributor_pushes("C")
+    r = s.run(CHECKOUT, str(N), env=env)
+    assert r.returncode == 2 and "DIRTY TREE in External worktree" in r.stderr and " M more.txt" in r.stderr
+    assert s.git("rev-parse", "HEAD", cwd=q["wt"]).stdout.strip() == b
+    assert (q["wt"] / "more.txt").read_text() == "edited locally\n"
+    # A stranger's directory at the path is never adopted.
+    other = tmp_path / "wts2" / "UKGovernmentBEIS--inspect_ai" / "pr-5001"
+    other.mkdir(parents=True)
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(tmp_path / "wts2")})
+    assert r.returncode == 1 and "is not a worktree of this clone" in r.stderr
 
 
 # --- promote.sh -------------------------------------------------------------
