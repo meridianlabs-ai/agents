@@ -297,12 +297,15 @@ reads and refuses everything else:
    PR open/reopen started the run) and `triggering_actor` (who re-ran it,
    when different) must each be one of `TRUSTED_LOGINS` or hold write
    access, by the same cached, fail-closed collaborators lookup the loops'
-   author checks use; any other `[bot]` is refused without a lookup. This
-   is the model actions' own actor policy — Claude checks the workflow's
-   and the original run's actor, Codex the current one — moved to where
-   the gate's writes have not yet happened (they ran *after* the counter,
-   the stage move and the base merge; the investigation measured exactly
-   that), applied to both engines, and re-applied by the land job. It is
+   author checks use; any other `[bot]` is refused without a lookup. It
+   does the job the model actions' own actor checks did too late — Claude
+   checks the workflow's and the original run's actor, Codex the current
+   one, both *after* the counter, the stage move and the base merge (the
+   investigation measured exactly that) — but it is stricter than either:
+   the Claude action's checker admits any `[bot]` actor and the Codex step
+   named `claude`, and this gate admits no bot but the machine account
+   (decision: Ransom, 2026-09-22; Decisions, below). Applied to both
+   engines, and re-applied by the land job. It is
    **not** a PR-author rule: a maintainer may deliberately label another
    author's PR, and the runs that then drive it come from whoever pushes
    to the branch — a writer or the machine account — who is the actor
@@ -381,9 +384,11 @@ scope stop).**
    `claude[bot]` is not added to the run-actor trusted logins. A push the
    Claude App made itself therefore ends the automatic continuation for
    that branch until the machine account or a write-access human pushes;
-   SECURITY.md and credential-separation.md disclose it. (Before this, the
-   Codex step's own allow-list admitted `claude` and the Claude step
-   refused it; the gate now decides first, strictly.)
+   SECURITY.md and credential-separation.md disclose it. This is stricter
+   than either engine's own actor check — the Claude action's checker
+   admits any `[bot]` actor and the Codex step's allow-list named `claude`
+   — so it is Ransom's chosen restriction, not the engines' rule moved
+   earlier; a later maintainer loosening it would be reversing a decision.
 3. *Two PRs sharing a head: no manual binding route.* While the pair exists
    neither PR's failing runs drive a round; the way out is the recovery
    above (close the extra PR, push a new commit). No maintainer-triggered

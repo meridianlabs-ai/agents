@@ -426,10 +426,10 @@ def test_a_run_without_a_usable_head_sha_or_creation_time_refuses(tmp_path):
 def test_a_run_started_by_a_read_only_account_refuses_before_any_pr_read(tmp_path):
     # The reduced-privilege case the investigation kept open: an organization
     # member with read access opens a same-repo PR from a writer's branch;
-    # the `opened` run's actor is that member. The Claude engine refused it
-    # later — after the counter, the stage move and the base merge. Now the
-    # gate refuses it first, and the land job would again. The PR is never
-    # even enumerated.
+    # the `opened` run's actor is that member. The engines' own actor
+    # checks refused a read-only human later — after the counter, the stage
+    # move and the base merge. Now the gate refuses it first, and the land
+    # job would again. The PR is never even enumerated.
     res, out, calls = bind(tmp_path, run=run_json(actor="read-only-member"), pulls=[pr(101)],
                            perms={"read-only-member": "read"})
     refused(res, out, "was started by 'read-only-member', who is not a trusted login and holds no write access")
@@ -450,8 +450,9 @@ def test_a_trusted_login_passes_without_a_lookup_and_other_bots_are_refused(tmp_
     # The machine account's pushes (the land job's) re-run CI as its bot
     # login; that is the loop's own next round. Any other App is refused
     # without a lookup (the endpoint 404s for Apps; github-actions[bot] is
-    # every repository's workflow) — the Claude engine step's allowed_bots
-    # rule, now applied to both engines before any write.
+    # every repository's workflow) — stricter than either engine's own check
+    # (the Claude action admits any [bot]; the Codex step named claude), by
+    # decision (Ransom, 2026-09-22), applied to both engines before any write.
     for login in TRUSTED_LOGINS.split(","):
         res, out, calls = bind(tmp_path, run=run_json(actor=login), pulls=[pr(101)])
         assert res.returncode == 0, res.stderr

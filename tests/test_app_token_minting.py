@@ -69,8 +69,12 @@ WRITE_SETS = {
     # (`actions/runs/<id>`, in the gate and again in the land job's
     # revalidation) — a permission of its own that pull requests does not
     # imply; a private caller 404s without it (finding 4628657, round 1).
+    # contents: read is the binding's read of the base branch's tip
+    # (`branches/<base>`, the commit the sync is pinned to) — a 404 on a
+    # private caller without it, as the review-fix gate's branch read.
     ("claude-auto.yml", "gate"): (CALLER_REPO, {"issues": "write", "pull-requests": "write",
-                                                "organization-projects": "write", "actions": "read"}),
+                                                "organization-projects": "write", "actions": "read",
+                                                "contents": "read"}),
     ("claude-auto.yml", "land"): (CALLER_REPO, {"contents": "write", "issues": "write",
                                                 "pull-requests": "write", "organization-projects": "write",
                                                 "actions": "read"}),

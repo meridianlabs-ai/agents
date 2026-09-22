@@ -328,6 +328,10 @@ jobs:
           # a permission of its own, which pull requests does not imply —
           # only a public caller would answer the read without it.
           permission-actions: read
+          # ...and the base branch's tip (`branches/<base>`, the commit the
+          # sync is pinned to), which needs contents: read on a private
+          # caller (the review-fix gate documents the same read).
+          permission-contents: read
 
       # The gate is four steps (deterministic, in shell — it decides whether
       # the agent runs): bind the failed run to its PR (shared composite,
@@ -1777,15 +1781,19 @@ jobs:
       #               converse holds too: emit-landing drops handback and
       #               stage when it drops the bundle (HEAD moved, no bundle
       #               written), so no bare `@review` posts for a round whose
-      #               work was lost. Owed on ancestry ALONE, whatever the
-      #               agent step's outcome: a Claude step that ended
-      #               `failure` after committing (max-turns, an is_error
-      #               result mid-fix) lands those commits and requests the
-      #               re-review, with the Surface step's error posted
-      #               alongside — before the split only the agent's own
-      #               push landed and a failed step landed nothing.
-      #               Deliberate: dropping committed work is worse, the push
-      #               is what re-runs CI, and the ⚠️ says the round failed.
+      #               work was lost. Owed on ancestry — but only for a round
+      #               whose agent step did not FAIL: a Claude step that
+      #               ended `failure` (the action's actor refusal, a
+      #               bootstrap failure, max-turns or an is_error result
+      #               mid-fix — indistinguishable from outside the action)
+      #               lands nothing and owes nothing, its commits included,
+      #               and its attempt is refunded (finding 4628657, review
+      #               rounds 1–3; the rule and its cost are on the composer
+      #               step below and in design/auto-agent.md). From #82 to
+      #               2026-09-22 such a step landed its commits with the ⚠️
+      #               alongside; that was dropped because the only evidence
+      #               that the agent had run at all — the action's
+      #               execution-file output — is one a PR file can forge.
       #   stage     — never set here. A hand-back is mid-flight (the
       #               reviewer runs next), and a card stays at Agent while
       #               any agent of the loop is still to run; Review is the

@@ -54,14 +54,15 @@ description: >-
      re-ran it, when different) must each be one of `trusted-logins` or an
      account with admin/maintain/write on the repository, looked up on the
      collaborators endpoint (cached per login, fail closed: a failed lookup
-     refuses; an unlisted `[bot]` login is never looked up and refuses —
-     the same rule the Claude engine step applies through `allowed_bots`,
-     now enforced for both engines here, in trusted control flow, before
-     any counter, stage, sync or model work, and again before landing; the
-     Claude App's own login is deliberately not admitted — decision:
-     Ransom, 2026-09-22).
-     This is the model actions' own actor policy moved early, not a PR-
-     author rule: the `auto` label, verified by who applied it, remains the
+     refuses; an unlisted `[bot]` login is never looked up and refuses).
+     Enforced for both engines here, in trusted control flow, before any
+     counter, stage, sync or model work, and again before landing. This is
+     STRICTER than the engines' own checks, by decision (Ransom,
+     2026-09-22): the Claude action's checker admits any `[bot]` actor and
+     the Codex step's allow-list named `claude`, so the Claude App's own
+     pushes used to start rounds; here no bot but the machine account does.
+     It is an actor rule, not a PR-author rule: the `auto` label, verified
+     by who applied it, remains the
      authorization of the PR, and a maintainer may deliberately label
      another author's PR — its runs are then driven by whoever pushes to
      the branch (a writer, or the machine account), who is the actor judged.
@@ -112,9 +113,12 @@ inputs:
       Token that can read the repository's workflow runs (`actions: read` —
       a permission of its own, which the gate and land jobs' mints request
       explicitly; pull-requests does not imply it, and only a public
-      repository answers the run read without it), its pull requests and
-      their timelines, and collaborator permissions (the machine account's
-      minted token in the gate and land jobs).
+      repository answers the run read without it), its branches
+      (`contents: read`, for the base tip — the gate mint requests it, the
+      land mint's contents: write covers it; likewise answered without it
+      only on a public repository), its pull requests and their timelines,
+      and collaborator permissions (the machine account's minted token in
+      the gate and land jobs).
     required: true
   trusted-logins:
     description: >-
@@ -327,8 +331,10 @@ runs:
         echo "bind: the run's associated PRs (informational — GitHub lists the open PRs matching the head, not the trigger): $(j '[.pull_requests[]? | "\(.base.repo.name // "?")#\(.number) (base \(.base.ref // "?"))"] | join(", ") | if . == "" then "none" else . end')."
 
         # 2b. The run's actors. The same rule the loops' author checks use
-        #     (finding 4121987's trusted_author, and the Claude engine step's
-        #     allowed_bots): a TRUSTED_LOGINS login passes by name; any other
+        #     (finding 4121987's trusted_author), stricter than either
+        #     engine's own actor check (decision: Ransom, 2026-09-22 — the
+        #     Claude action admits any [bot], the Codex step named claude): a
+        #     TRUSTED_LOGINS login passes by name; any other
         #     `[bot]` is refused without a lookup (the collaborators endpoint
         #     404s for Apps, and github-actions[bot] is any repository's
         #     workflow); a human needs admin/maintain/write, looked up once

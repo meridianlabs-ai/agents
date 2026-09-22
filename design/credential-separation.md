@@ -270,7 +270,7 @@ repository mints:
 | `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read |
 | `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no contents: bundles are refused) |
-| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write; actions: read (the failed run's record, for the run-to-PR binding) |
+| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write; actions: read (the failed run's record) and contents: read (the base branch's tip), for the run-to-PR binding |
 | `claude-auto-review.yml` gate | caller repo | contents: read; issues, pull requests, org projects: write |
 | `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write; `claude-auto.yml` also actions: read (the binding's revalidation) |
 | `atlas-sync.yml`, fork token | `inspect_ai` | issues, pull requests, org projects: write; actions: read |
