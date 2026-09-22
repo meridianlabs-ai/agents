@@ -181,6 +181,9 @@ runs:
         list_dir() { # <directory>
           set_has "$listed" "$1" && return 0
           local ex ow wr
+          # A directory that does not exist (an entry added before its tool
+          # is installed) has no entries: listed as empty.
+          if ! sudo test -d "$1"; then listed="$listed$1"$'\n'; listed_w="$listed_w$1"$'\n'; return 0; fi
           ex=$(sudo find "$1" -mindepth 1 -maxdepth 1 2>&1) || { echo "::error::assert-runner-only-path: could not list $1 ($ex)"; exit 1; }
           ow=$(sudo find "$1" -mindepth 1 -maxdepth 1 -user "$USER_NAME" 2>&1) || { echo "::error::assert-runner-only-path: could not list the $USER_NAME-owned entries of $1 ($ow)"; exit 1; }
           listed="$listed$1"$'\n'

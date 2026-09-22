@@ -146,7 +146,7 @@ if [ "$1" = find ] && [ "$3" = -mindepth ]; then
     if [ -n "$skip" ]; then skip=""; continue; fi
     if [ "$a" = -user ]; then args+=(-false); skip=1; else args+=("$a"); fi
   done
-  find "${args[@]}"
+  find "${args[@]}" || exit $?   # a missing directory fails, as the real one does
   while IFS= read -r o; do
     [ -n "$o" ] && [ "$(dirname "$o")" = "$dir" ] && owned "$o" && printf '%s\n' "$o"
   done <<<"${FAKE_CODEX_OWNED:-}"
@@ -378,9 +378,13 @@ def test_refuses_a_not_yet_existing_entry_the_user_could_create(world):
     writable(parent)
     r = check(w, job, user=ME)
     assert r.returncode == 1 and f"'{missing}' is writable by the {ME} user (at {parent})" in r.stdout
-    # Nobody can create it: accepted (the runner's own later addition).
+    # Nobody can create it: accepted (the runner's own later addition) —
+    # also when more than one level is missing (`~/.local/bin` before uv
+    # is installed: nothing to list at `~/.local`).
     parent.chmod(0o755)
     r = check(w, job, user=ME)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = check(w, f"{parent / 'deeper' / 'bin'}:{w['tail']}", user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
     # A missing entry under the workspace is refused by path, user or not.
     r = check(w, f"{w['ws'] / 'nope' / 'bin'}:{w['tail']}")
