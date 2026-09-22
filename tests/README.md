@@ -7,7 +7,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   (`.github/scripts/validate_manifest.py`): one valid manifest, one failing
   case per rule — including the per-caller issue policy (`allowed-issue-labels`
   / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
-  workflow's actual land inputs, against forged manifests.
+  workflow's actual land inputs, against forged manifests, and the PR-label
+  policy (`allowed-pr-labels`: the dev gate's read, which a manifest's
+  `pr.labels` may not exceed — Claude Security 4628441).
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
   retry, open-or-adopt PR and the branch-existence probe against a stub
   `gh`, the landing-failure hint) and
@@ -200,6 +202,15 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   head admitted sandboxed and a failed lookup refused (Claude Security
   4085111). Also that the review step's `allowed_bots` is the caller's list
   plus `TRUSTED_LOGINS`.
+- `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
+  the same way against a stub `gh`: an issue's `auto` label is the run's
+  opt-in only when the account that applied it most recently is a human
+  with write access (Claude Security 4628438) — a triage account's, a
+  bot's or the machine account's own label, a timeline that names no
+  labeler and a failed permission lookup all leave the run one-shot with
+  no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; an
+  `@auto` comment opts in without a label read; a PR's label is left to the
+  loop gates. Also that the land job pins the PR labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,
   from text or from an `auto`/`claude` label (Claude Security finding

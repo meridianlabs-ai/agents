@@ -23,7 +23,7 @@ manifest. Usage:
         [--pr-head-ref <headRefName of that PR, from the API>] \
         [--branch-prefix "claude/issue-$EVENT_ISSUE-"] [--refuse-bundle] \
         [--allowed-issue-labels ""] [--allowed-issue-assignees ransomr] \
-        [--max-issues 1] [--refuse-pr]
+        [--max-issues 1] [--refuse-pr] [--allowed-pr-labels '["auto","engine:codex"]']
 
 `--refuse-bundle` is for callers whose agent never commits (the reviewer):
 a manifest that carries commits, claims HEAD moved, or ships a
@@ -72,14 +72,22 @@ separate flag from `--refuse-bundle` because refusing bundles does not
 prevent using a branch that already exists on origin: `pr.open` adopts or
 opens a PR for `branch` whether or not this run pushed to it, so a
 read-only caller with a token that reaches the caller repository's pull
-requests would otherwise let a forged manifest label an existing PR. The
-issue-label policy above does not cover `pr.labels`, and nothing here
-verifies where a manifest's `pr.labels` came from: for the callers that do
-open PRs they are whatever the agent job's composing step wrote (the dev
-workflows copy the gate's trusted labels there; inspect_flow's scheduled
-workflows set `auto` as their own standing policy), which the land job
-accepts as that caller's policy, not as an independently trusted value.
+requests would otherwise let a forged manifest label an existing PR.
 Callers that open PRs keep the default (accept `pr`).
+
+`--allowed-pr-labels` is the PR-side label policy: a JSON array of the
+labels `pr.labels` may carry (`*`, the default, leaves them unrestricted;
+`[]` or an empty value allows none), compared case-insensitively like the
+issue labels. The land job applies `pr.labels` as the machine account, and
+the loop gates accept that account's `auto` as a trusted decider's opt-in,
+so the list is an authorization the trusted side must choose: claude.yml
+passes its gate job's label read verbatim (the same JSON array the agent
+job's composer copies into `pr.labels`, made before the agent ran), and a
+manifest rewritten in the agent job after the composing step is refused
+rather than landed with an `auto` or `engine:*` label the gate never read
+(Claude Security finding 4628441). inspect_flow's scheduled workflows set
+`auto` as their own standing policy and pass nothing, so the default keeps
+them unchanged. A malformed list refuses the manifest (usage error).
 
 The schema is documented in .github/actions/emit-landing/README.md; keep
 the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
@@ -212,6 +220,7 @@ class Validator:
         allowed_issue_labels=None,
         allowed_issue_assignees=None,
         max_issues: int | None = None,
+        allowed_pr_labels=None,
     ) -> None:
         self.m = manifest
         self.dir = Path(artifact_dir)
@@ -235,6 +244,9 @@ class Validator:
             None if allowed_issue_assignees is None else {x.lower() for x in allowed_issue_assignees}
         )
         self.max_issues = max_issues
+        # The same shape for `pr.labels`: None unrestricted, a set (possibly
+        # empty) the only labels the land job may apply to the PR.
+        self.allowed_pr_labels = None if allowed_pr_labels is None else {x.lower() for x in allowed_pr_labels}
         self.errors: list[str] = []
 
     def err(self, msg: str) -> None:
@@ -360,7 +372,7 @@ class Validator:
         elif str(value) != event:
             self.err(f"manifest: {key} {value} is not the {what} this run's event names (#{event})")
 
-    def _labels(self, obj: dict, where: str, allowed=None) -> None:
+    def _labels(self, obj: dict, where: str, allowed=None, what: str = "issue") -> None:
         if "labels" not in obj or obj["labels"] is None:
             return
         labels = obj["labels"]
@@ -370,7 +382,7 @@ class Validator:
         if allowed is not None:
             for x in labels:
                 if x.lower() not in allowed:
-                    self.err(f"{where}: label {x!r} is not in the allowed issue labels ({', '.join(sorted(allowed)) or 'none'})")
+                    self.err(f"{where}: label {x!r} is not in the allowed {what} labels ({', '.join(sorted(allowed)) or 'none'})")
 
     def _assignees(self, obj: dict, where: str, allowed=None) -> None:
         if "assignees" not in obj or obj["assignees"] is None:
@@ -525,7 +537,11 @@ class Validator:
                     self.err("pr: base has characters outside [A-Za-z0-9._/-] or is longer than 200")
                 if branch is not None and pr_base == branch:
                     self.err("manifest: branch must not equal pr.base")
-            self._labels(pr, "pr")
+            # The caller's PR-label policy (--allowed-pr-labels): under
+            # claude.yml the gate's own read, so a `pr.labels` the agent job
+            # grew after the composer ran is refused here, not applied by
+            # the machine account.
+            self._labels(pr, "pr", self.allowed_pr_labels, what="pull-request")
             self._positive_int(pr, "issue", "pr", required=False)
 
         comments = m.get("comments")
@@ -742,6 +758,11 @@ def main(argv=None) -> int:
         help="most issues[] entries the manifest may carry; empty (the default) is no cap",
     )
     ap.add_argument(
+        "--allowed-pr-labels",
+        default="*",
+        help="JSON array of the labels pr.labels may carry (claude.yml passes its gate job's label read verbatim); `*` (the default) leaves them unrestricted, `[]` or an empty value allows none",
+    )
+    ap.add_argument(
         "--refuse-pr",
         action="store_true",
         help="refuse a manifest that carries `pr` (open/adopt/label a PR) or `handback: true` (the caller's agent may not touch pull requests — the triage workflow); a `pr.open` needs no bundle, so --refuse-bundle alone does not close it",
@@ -756,6 +777,22 @@ def main(argv=None) -> int:
     def allow_list(value: str):
         # `*` is unrestricted (None); anything else is the list, empty included.
         return None if value.strip() == "*" else [x for x in value.split(",") if x.strip()]
+
+    def json_allow_list(value: str, flag: str):
+        # `*` is unrestricted (None); empty allows none; anything else must
+        # be a JSON array of strings — a malformed list is a usage error
+        # (exit 2), which the land job treats as a refused manifest.
+        if value.strip() == "*":
+            return None
+        if value.strip() == "":
+            return []
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+            ap.error(f"{flag} must be `*` or a JSON array of strings, not {value!r}")
+        return parsed
 
     max_issues = None
     if args.max_issues.strip():
@@ -782,6 +819,7 @@ def main(argv=None) -> int:
             allowed_issue_labels=allow_list(args.allowed_issue_labels),
             allowed_issue_assignees=allow_list(args.allowed_issue_assignees),
             max_issues=max_issues,
+            allowed_pr_labels=json_allow_list(args.allowed_pr_labels, "--allowed-pr-labels"),
         )
     for line in errors:
         print(f"manifest violation: {line}")

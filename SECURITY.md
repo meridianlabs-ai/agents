@@ -68,7 +68,17 @@ text are checked by the tests under `tests/`.
   issue or in a comment, verified before the label was written, or a
   trusted caller workflow's standing policy (a maintainer's decision in a
   workflow file, such as inspect_flow's scheduled PRs), never a per-item
-  decision from untrusted input. Where a caller's agent job is untrusted
+  decision from untrusted input. Two checks keep that true for the PR the
+  dev agent opens for an issue: the gate counts the issue's `auto` label as
+  the opt-in only after reading who applied it most recently — a human
+  account holding write access, looked up fail-closed; a triage account's
+  label, a bot's or the machine account's own is not an opt-in and the run
+  stays one-shot — and the land job's validator refuses a manifest whose
+  `pr.labels` names a label the gate did not read (`allowed-pr-labels`, the
+  gate's read passed verbatim), so a manifest rewritten in the agent job
+  after the composing step cannot have the machine account label the PR
+  `auto` or switch its engine (Claude Security findings 4628438 and
+  4628441, 2026-09-22). Where a caller's agent job is untrusted
   after it has read third-party input (the triage workflow in
   `meridianlabs-ai/actions`), the land job's `allowed-issue-labels`,
   `allowed-issue-assignees`, `max-issues` and `refuse-pr` inputs are

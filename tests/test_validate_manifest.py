@@ -105,6 +105,7 @@ def run(
     allowed_labels=None,
     allowed_assignees=None,
     max_issues=None,
+    allowed_pr_labels=None,
 ):
     return vm.validate(
         manifest,
@@ -123,6 +124,7 @@ def run(
         allowed_issue_labels=allowed_labels,
         allowed_issue_assignees=allowed_assignees,
         max_issues=max_issues,
+        allowed_pr_labels=allowed_pr_labels,
     )
 
 
@@ -736,6 +738,62 @@ def test_issue_count_capped_by_the_caller(tmp_path):
     assert any("allows at most 0" in e for e in errs), errs
 
 
+# --- per-caller PR-label policy (Claude Security finding 4628441) ------------
+#
+# `land` applies `pr.labels` as the machine account, and the loop gates accept
+# that account's `auto` as a trusted decider's opt-in. The dev workflow's
+# composer copies the gate's trusted label read into the field — but it runs
+# in the agent job, after the agent, whose allow-list has arbitrary execution;
+# a manifest rewritten there would have the land job arm the loop (or switch
+# the engine) on a PR nobody with write access opted in. claude.yml now passes
+# the gate's read as `allowed-pr-labels`, enforced here on the fresh runner.
+
+
+@pytest.mark.parametrize("labels, allowed, refused", [
+    (["auto"], [], "auto"),                                  # the gate read no labels: nothing may be applied
+    (["auto"], ["engine:codex"], "auto"),                    # the gate read an engine label only
+    (["engine:codex"], ["auto"], "engine:codex"),            # an engine switch the gate never read
+    (["auto", "engine:codex"], ["auto"], "engine:codex"),    # one excess label refuses the manifest
+    (["Auto"], ["engine:codex"], "Auto"),                    # GitHub labels are case-insensitive
+])
+def test_pr_labels_outside_the_gates_read_are_refused(tmp_path, labels, allowed, refused):
+    m = base_manifest(tmp_path)
+    m["pr"]["labels"] = labels
+    errs = run(tmp_path, m, allowed_pr_labels=allowed)
+    shown = ", ".join(sorted(allowed)) or "none"
+    assert any(f"pr: label {refused!r} is not in the allowed pull-request labels ({shown})" in e for e in errs), errs
+
+
+def test_pr_labels_on_the_gates_read_pass_case_insensitively(tmp_path):
+    m = base_manifest(tmp_path)
+    m["pr"]["labels"] = ["AUTO", "engine:codex"]
+    assert run(tmp_path, m, allowed_pr_labels=["auto", "engine:codex"]) == []
+    # A subset passes (the composer's list is the gate's, so it is normally
+    # equal; a manifest that drops a label lands with fewer, never more).
+    m["pr"]["labels"] = ["engine:codex"]
+    assert run(tmp_path, m, allowed_pr_labels=["auto", "engine:codex"]) == []
+    m["pr"]["labels"] = []
+    assert run(tmp_path, m, allowed_pr_labels=[]) == []
+    del m["pr"]["labels"]
+    assert run(tmp_path, m, allowed_pr_labels=[]) == []
+
+
+def test_pr_labels_unrestricted_when_the_caller_sets_no_policy(tmp_path):
+    # inspect_flow's scheduled workflows put `auto` on the PRs they open as
+    # their own standing policy and pass nothing: unchanged.
+    m = base_manifest(tmp_path)
+    m["pr"]["labels"] = ["auto", "anything"]
+    assert run(tmp_path, m) == []
+
+
+def test_pr_label_policy_does_not_reach_issue_labels_and_vice_versa(tmp_path):
+    m = base_manifest(tmp_path)
+    m["pr"]["labels"] = ["engine:codex"]
+    m["issues"][0]["labels"] = ["auto"]
+    assert run(tmp_path, m, allowed_pr_labels=["engine:codex"]) == []
+    assert run(tmp_path, m, allowed_labels=["auto"]) == []
+
+
 def triage_manifest(d: Path, **overrides) -> dict:
     """What the triage workflow's land job sees: no bundle, no event PR or
     issue, `branch` under its prefix — plus whatever a forged artifact adds."""
@@ -1137,6 +1195,33 @@ def test_cli_event_numbers_default_to_none_named(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "pr_number is set (456) but this run's event names no PR" in out
     assert "issue_number is set (79) but this run's event names no issue" in out
+
+
+def test_cli_allowed_pr_labels_is_the_gates_json_array(tmp_path, capsys):
+    # The flag takes the gate's `pr_labels` output verbatim — a JSON array —
+    # so nothing re-encodes it on the trusted side; `*` (the default) is
+    # unrestricted and an empty value allows none.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))     # pr.labels: ["auto"]
+    assert cli(tmp_path) == 0
+    assert cli(tmp_path, "--allowed-pr-labels", "*") == 0
+    assert cli(tmp_path, "--allowed-pr-labels", '["auto","engine:codex"]') == 0
+    assert cli(tmp_path, "--allowed-pr-labels", '["engine:codex"]') == 1
+    assert "pr: label 'auto' is not in the allowed pull-request labels (engine:codex)" in capsys.readouterr().out
+    assert cli(tmp_path, "--allowed-pr-labels", "") == 1
+    assert "pr: label 'auto' is not in the allowed pull-request labels (none)" in capsys.readouterr().out
+    assert cli(tmp_path, "--allowed-pr-labels", "[]") == 1
+
+
+@pytest.mark.parametrize("value", ["auto", "auto,engine:codex", "{}", "[1]", '["auto", 2]', "[", "null"])
+def test_cli_malformed_allowed_pr_labels_is_a_usage_error(tmp_path, capsys, value):
+    # Not a JSON array of strings (a comma list, say, by analogy with the
+    # issue flag): argparse exits 2 before anything is validated, and the
+    # land job's validate step treats a non-zero exit as a refused manifest.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    with pytest.raises(SystemExit) as exc:
+        cli(tmp_path, "--allowed-pr-labels", value)
+    assert exc.value.code == 2
+    assert "--allowed-pr-labels must be `*` or a JSON array of strings" in capsys.readouterr().err
 
 
 def test_cli_event_pr_mismatch(tmp_path, capsys):

@@ -744,9 +744,12 @@ the agent push mid-run:
   description; codex's subject is its final message's first line as
   before), a body of `Fixes #N`, the commit body and the run link,
   `pr.base` from `base_branch`, `pr.labels` from the gate's label read
-  (`auto` on an `@auto` run or an `auto`-labelled issue, plus the issue's
-  `engine:*` labels — read in the trusted job, not after the agent ran)
-  and `pr.issue` for the link comment. `land` adopts an open PR for the
+  (`auto` on an `@auto` run or an `auto`-labelled issue — the issue's label
+  counting only when a write-access human applied it, finding 4628438 —
+  plus the issue's `engine:*` labels — read in the trusted job, not after
+  the agent ran; the land job passes that same read to the validator as
+  `allowed-pr-labels`, so the manifest may not name a label the gate did
+  not, finding 4628441) and `pr.issue` for the link comment. `land` adopts an open PR for the
   branch instead of duplicating it, labels on both paths, and `handback:
   true` rides on that manifest whenever those labels carry `auto` — the
   dev agent is the third hand-back writer, next to the two fix loops, and

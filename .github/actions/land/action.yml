@@ -121,6 +121,25 @@ inputs:
       step would be enforced on the runner whose compromise is assumed.
     required: false
     default: "*"
+  allowed-pr-labels:
+    description: >-
+      JSON array of the labels `pr.labels` may carry, enforced by the
+      validator on this fresh runner: a manifest naming any other label is
+      refused whole. `*` (the default) leaves them unrestricted, so callers
+      that set nothing keep their behaviour (inspect_flow's scheduled
+      workflows put `auto` on the PRs they open as their own standing
+      policy); `[]` or an empty value allows none. A PR label this action
+      applies is written by the machine account, and the loop gates accept
+      that account's `auto` as a trusted decider's opt-in
+      (verify-auto-labeler), so which labels reach the PR is an
+      authorization, not data: claude.yml passes its gate job's label read
+      verbatim (a JSON array, hence the shape — the gate emits it and the
+      agent job's composer copies it, so nothing re-encodes it on the
+      trusted side), made before the agent ran, and a manifest rewritten in
+      the agent job after the composing step can neither arm the loop nor
+      switch the engine (Claude Security finding 4628441).
+    required: false
+    default: "*"
   allowed-issue-assignees:
     description: >-
       Comma-separated logins `issues[].assignees` may name, the same way:
@@ -328,6 +347,7 @@ runs:
         ALLOWED_LABELS: ${{ inputs.allowed-issue-labels }}
         ALLOWED_ASSIGNEES: ${{ inputs.allowed-issue-assignees }}
         MAX_ISSUES: ${{ inputs.max-issues }}
+        ALLOWED_PR_LABELS: ${{ inputs.allowed-pr-labels }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
@@ -337,7 +357,7 @@ runs:
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
           --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} \
           --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
-          --max-issues "$MAX_ISSUES" \
+          --max-issues "$MAX_ISSUES" --allowed-pr-labels "$ALLOWED_PR_LABELS" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.
@@ -648,6 +668,10 @@ runs:
           # agent-opened (adopted) PR would otherwise never get them — the
           # loop never engages, an issue-selected engine reverts to Claude.
           # Before the hand-back below, so the reviewer's first run sees them.
+          # Every label here passed the validator's `allowed-pr-labels`
+          # check, so under a caller that pins the list (claude.yml: the
+          # gate's read) these are the trusted side's labels, not the
+          # manifest's choice.
           while IFS= read -r lbl; do
             [ -n "$lbl" ] || continue
             gh pr edit "$number" --repo "$REPO" --add-label "$lbl" \
