@@ -73,7 +73,6 @@ MACHINE_BOT = "meridian-marvin[bot]"
 # trusted_author. `github-actions[bot]` is never trusted: any repository's
 # workflow run posts as it.
 TRUSTED_LOGINS = frozenset({MACHINE_ACCOUNT, MACHINE_BOT})
-TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 TRUSTED_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 NEVER_TRUSTED = frozenset({"github-actions[bot]"})
 
@@ -174,23 +173,26 @@ def graphql_login(author) -> str:
     return login
 
 
-def trusted_author(login: str, repo: str, association: str | None = None) -> bool:
+def trusted_author(login: str, repo: str) -> bool:
     """Whether text written by `login` may drive this sync (fails closed).
 
     Comments and issue bodies on the public fork are writable by any GitHub
     account, so a hand-back signal or a `Companion PR:` line counts only
-    from a trusted identity or a write-access author: TRUSTED_LOGINS, an
-    `author_association` the payload already carries (OWNER / MEMBER /
-    COLLABORATOR short-circuit the lookup), or a collaborator permission of
-    admin / maintain / write on `repo`, looked up once per login per run
-    (the same few logins recur). An empty login, a never-trusted bot, a
-    lookup that fails or a permission below write is untrusted — the
-    endpoint answers `none`/`read` for bots and outsiders on a public repo,
-    so the VALUE decides, not the call succeeding.
+    from a trusted identity or a write-access author: TRUSTED_LOGINS, or a
+    collaborator permission of admin / maintain / write on `repo`, looked
+    up once per login per run (the same few logins recur). This is the
+    reviewer gate's own rule (claude-review.yml), so the sync never believes
+    a trigger the gate refused. The payload's `author_association` is not
+    consulted: MEMBER means org membership at any repository permission and
+    COLLABORATOR an invitation at any level, read and triage included, so
+    neither proves write access (finding 4628443). An empty login, a
+    never-trusted bot, a lookup that fails or a permission below write is
+    untrusted — the endpoint answers `none`/`read` for bots and outsiders on
+    a public repo, so the VALUE decides, not the call succeeding.
     """
     if not login or login in NEVER_TRUSTED:
         return False
-    if login in TRUSTED_LOGINS or association in TRUSTED_ASSOCIATIONS:
+    if login in TRUSTED_LOGINS:
         return True
     key = (repo, login)
     if key not in _permission_cache:
@@ -535,7 +537,7 @@ def companion_pr(issue: int, head_ref: str):
         "api",
         f"repos/{FORK}/issues/{issue}",
         "--jq",
-        "{body: .body, login: .user.login, association: .author_association}",
+        "{body: .body, login: .user.login}",
     )
     body, login = iss.get("body") or "", iss.get("login") or ""
     if re.search(r"^Upstream issue:\s*https?://", body, re.M):
@@ -548,9 +550,7 @@ def companion_pr(issue: int, head_ref: str):
                 "ignored — only the import header counts"
             )
         body = parts[0]
-    if re.search(r"Companion PR:", body, re.I) and not trusted_author(
-        login, FORK, iss.get("association")
-    ):
+    if re.search(r"Companion PR:", body, re.I) and not trusted_author(login, FORK):
         actions.append(
             f"#{issue}: `Companion PR:` line ignored — issue author {login} is "
             "not a trusted author; using the branch-name convention"
@@ -1262,7 +1262,7 @@ def retrigger_stale_handbacks() -> None:
         for c in reversed(comments):
             body = c.get("body") or ""
             login = (c.get("user") or {}).get("login") or ""
-            trusted = trusted_author(login, FORK, c.get("author_association"))
+            trusted = trusted_author(login, FORK)
             if trusted and (
                 "auto-fix-attempts" in body or "auto-review-rounds" in body
             ):
