@@ -58,7 +58,11 @@ text are checked by the tests under `tests/`.
   `if:` ends up true (the runner builds its `secrets` context from the job
   message before any step runs), so the codex key is referenced only in the
   codex job's codex-action step and a Claude-engine run's job message never
-  carries it (Claude Security finding 4629153).
+  carries it (Claude Security finding 4629153). Measured, not assumed: the
+  hosted canary (design/credential-separation.md → section 6) shows a
+  referenced-but-skipped secret in the runner's memory and none in a job
+  that references nothing, although the caller passed it and a sibling job
+  referenced it — delivery is scoped per job.
 - In a codex job nothing from the checked-out tree executes as the runner:
   the caller's `claude-setup` action is not run there, and the shared
   provisioning recipe (uv and a dev-install of the checkout, the tree's own

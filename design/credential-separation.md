@@ -123,11 +123,13 @@ gate   (trusted)    trigger check by login or permission lookup; the pre-agent
                     emit-landing runs last, if: always(), with no token.
   -> agent-codex/fix-codex/review-codex (untrusted, codex; if: engine == 'codex')
                     the same checkout and sync; the codex user boundary;
-                    provisioning AS the codex user (the fallback recipe,
-                    never the caller's action); codex, the reclaim and the
-                    deterministic commit; the read-only job token and
-                    OPENAI_API_KEY at the codex-action step — the one job
-                    of the workflow that references it.
+                    provisioning AS the codex user (the fallback recipe or
+                    the caller's `codex_provision`, never the caller's
+                    action); the codex-home reset (every codex process
+                    killed, ~codex/.codex re-created); codex, the reclaim
+                    and the deterministic commit; the read-only job token
+                    and OPENAI_API_KEY at the codex-action step — the one
+                    job of the workflow that references it.
   -> land  (trusted, fresh runner; needs both agent jobs)
                     mints its own token; downloads the artifact; validates
                     the manifest; pushes the bundle; opens or adopts the PR;
@@ -720,17 +722,42 @@ results against the invariant each one tests.
   `.claude/settings.json` leaves no marker file after a maintainer's
   `@review`, and a no-role account's `@review`, `@auto` or forged marker
   comment produces no run past the gate (I4); the run's only artifact is the
-  landing directory (I6). For the engine split (not yet run as of
-  2026-09-22): a canary Claude-engine run on a caller whose stub passes
-  `OPENAI_API_KEY` dumps the Runner.Worker process memory as root from
-  inside the agent step (`sudo gcore` or `/proc/<pid>/mem`) and finds no
-  `sk-` value and no App private key — the first settles that the split
-  keeps the key out of the Claude job's message, the second whether the
-  service scopes referenced secrets per job or per called workflow
-  (section 7); and a `claude/issue-N-*` branch carrying a hostile
-  `claude-setup/action.yml` and a `pyproject.toml` build hook that each
-  write a marker file as the invoking uid triggers, on a codex run, no
-  marker owned by `runner` — only `codex`-owned ones, if any.
+  landing directory (I6).
+- The engine split's hosted canary, `.github/workflows/engine-isolation-canary.yml`
+  (`gh workflow run engine-isolation-canary.yml --repo meridianlabs-ai/agents
+  --ref <branch>`, or a push touching the composites or the harness): the
+  `probe` job passes two synthetic repository secrets to a called workflow
+  shaped like the agent workflows and scans the runner processes' memory
+  as root in three jobs — a secret referenced in a never-run step is
+  delivered to that job's runner (the positive control, and the finding's
+  platform claim), a job referencing nothing receives neither sentinel
+  although the caller passed both and sibling jobs reference each (the
+  fixed Claude job; per-job scoping), a used secret is found (the codex
+  job); the `provisioning-boundary` job runs this revision's composites
+  over a hostile checkout whose build backend plants the config.toml
+  symlink and a survivor process, and checks that it ran as codex, could
+  not touch the runner's home or read the runner process's environment,
+  and that the `reset-home` step left no codex process and a pristine home
+  (I4). Run on 2026-09-22 against `06ce67a` (the round-2 head), run
+  35796259846, all four jobs green: the referenced-but-skipped job found
+  sentinel A 9 times in Runner.Listener and 16 times in Runner.Worker and
+  sentinel B not at all; the unreferencing job found neither (Listener 709
+  and Worker 851 readable regions scanned); the used-secret job found B (8
+  and 14) and not A. So a secret a never-run step references IS delivered
+  to that job's runner (finding 4629153's claim, confirmed), and the
+  service scopes referenced secrets per job — a sibling job's reference
+  delivers nothing to a job that references none. The provisioning
+  boundary: the hostile backend ran as `codex` (uid 113), planted the
+  `config.toml` symlink and a survivor (pid 2343), and was refused the
+  runner's home (`PermissionError`) and the runner processes' environment
+  (`PermissionError`); after `reset-home` no process ran as codex and the
+  home held exactly the profile and the server-info file; the caller
+  recipe ran as codex with `uv` at `/home/codex/.local/bin/uv`, HOME
+  `/home/codex`, the checkout as cwd. The first run on the round-2 code
+  (35796037163) failed its boundary job before the backend ran — the uv
+  installer under `sudo -u codex -H` tried to write the runner's
+  `$XDG_CONFIG_HOME/uv` (the hosted sudoers keeps XDG_*) — which is why the
+  composite now runs the recipe under `env -i`.
 
 ## 7. Costs and residual risks
 
@@ -807,17 +834,23 @@ results against the invariant each one tests.
   before the push with a plain report line, and the agent prompts say not
   to edit them (section 3.4). A run that needs a workflow change still
   spends itself before the refusal is posted.
-- **Secret delivery is per job by GitHub's documented condition, not by a
-  documented rule.** GitHub says a referenced secret can be harvested by
-  code running in the job and that unreferenced ones are scrubbed; it does
-  not say whether "referenced" is decided per job or per called workflow.
-  The engine split gives the Claude job a YAML that references no
-  `OPENAI_API_KEY`, and the stubs keep passing the key to every reusable
-  workflow (the declaration is kept for backward compatibility: a stub
-  naming an undeclared secret fails to load). If delivery were per called
-  workflow, the Claude job's message would still carry the key, and the
-  App secrets the gate and land jobs reference with it; the canary in
-  section 6 is the check. Nothing in this repository can settle it.
+- **Secret delivery is per job — measured, not documented.** GitHub says a
+  referenced secret can be harvested by code running in the job and that
+  unreferenced ones are scrubbed; it does not say whether "referenced" is
+  decided per job or per called workflow. The canary in section 6 measured
+  it on 2026-09-22: a job that references nothing received neither
+  sentinel although the caller passed both to the called workflow and
+  sibling jobs referenced each, and a job whose only reference sat in a
+  never-run step received its sentinel. So the engine split — a Claude job
+  whose YAML references no `OPENAI_API_KEY` — keeps the key out of that
+  job's message today, and the App secrets the gate and land jobs reference
+  stay out of the agent jobs' messages the same way. The stubs keep passing
+  the key to every reusable workflow (the declaration is kept for backward
+  compatibility: a stub naming an undeclared secret fails to load). What
+  remains is that this is the platform's current behaviour, not a contract:
+  the canary runs on every push that touches the composites or the harness
+  and by hand, and a change in delivery scoping would turn its
+  `unreferencing` job red.
 - **The Claude job still executes the checkout as the runner.** Its
   provisioning (the caller's `claude-setup`, the fallback dev-install) and
   the agent's own test runs execute the tree's code unsandboxed, as the
