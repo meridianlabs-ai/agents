@@ -35,8 +35,9 @@ nothing outside FAKE_ROOT is ever "writable", whatever the host's own
 quirks) or from FAKE_CODEX_OWNED (paths the user "owns": `find -user`
 positive, and writable when the owner write bit is set, as for a real
 owner); `chown` moves a path out of that list (logged to CHOWN_LOG) so
-protection of an owned path is observable too; the candidate `find` gets
-`-user` answered from the list; `pkill` finds nothing. On macOS the same
+protection of an owned path is observable too; the candidate and
+per-directory `find` passes get `-user` answered from the list and
+`-writable` (GNU-only) emulated the same way; `pkill` finds nothing. On macOS the same
 directory carries a `cp` shim for GNU's `--remove-destination`. The job
 PATH under test ends in the stub directory and `/bin` (`tail`), not this
 process's whole PATH: the check now follows every symlink in every entry,
@@ -120,6 +121,16 @@ if [ "$1" = -u ]; then
     if [ ! -L "$3" ] && owned "$3"; then [ -n "$(find "$3" -maxdepth 0 -perm -0200 2>/dev/null)" ]; exit; fi
     case "$3" in "${FAKE_ROOT:?}"/*) ;; *) exit 1 ;; esac
     [ -n "$(find -L "$3" -maxdepth 0 -perm -0002 2>/dev/null)" ]; exit
+  fi
+  if [ "$1" = find ] && [ "$3" = -mindepth ] && [ "$7" = -writable ]; then
+    # The batched writability listing (GNU find -writable, absent on macOS):
+    # the same answers as the single probe, for every entry of the directory.
+    dir=$2
+    case "$dir" in "${FAKE_ROOT:?}"/*|"${FAKE_ROOT:?}") find -L "$dir" -mindepth 1 -maxdepth 1 -perm -0002 2>/dev/null ;; esac
+    while IFS= read -r o; do
+      [ -n "$o" ] && [ "$(dirname "$o")" = "$dir" ] && [ ! -L "$o" ] && owned "$o" && [ -n "$(find "$o" -maxdepth 0 -perm -0200 2>/dev/null)" ] && printf '%s\n' "$o"
+    done <<<"${FAKE_CODEX_OWNED:-}"
+    exit 0
   fi
   exec "$@"
 fi
@@ -319,9 +330,12 @@ def test_a_clean_path_passes_and_the_system_directories_are_checked_too(world):
     assert r.returncode == 0, r.stdout + r.stderr
     assert f"or owned or writable by {ME}" in r.stdout
     probes = w["sudo_log"].read_text().splitlines()
-    for d in (os.path.dirname(shutil.which("cat")), "/"):
-        assert f"-u {ME} test -w {d}" in probes
-    assert f"-u {ME} test -w {w['system']}" in probes and f"-u {ME} test -w {w['tmp']}" in probes
+    # `/` is probed on its own; everything below it is answered from a
+    # per-directory listing (three sudo passes per directory, not three per
+    # path).
+    assert f"-u {ME} test -w /" in probes
+    assert f"-u {ME} find / -mindepth 1 -maxdepth 1 -writable" in probes
+    assert f"-u {ME} test -w {os.path.dirname(shutil.which('cat'))}" not in probes
 
 
 def test_refuses_an_entry_or_ancestor_the_user_can_write(world):
@@ -410,6 +424,44 @@ def test_sticky_directory_allows_only_an_existing_child_the_user_does_not_own(wo
     sticky.chmod(0o777)
     r = check(w, job, user=ME)
     assert r.returncode == 1 and f"(at {sticky})" in r.stdout
+
+
+def test_a_sticky_directory_accepted_for_one_child_vouches_for_no_other(world):
+    # Review round 3 of #131: the cache remembered a writable sticky
+    # directory as safe after a safe child, so a later entry through it —
+    # a missing child codex could create, the directory itself, a dangling
+    # link into it — was waved through with the planted interpreter to
+    # follow.
+    w = world
+    sticky = w["tmp"] / "tmp"
+    sticky.mkdir()
+    sticky.chmod(0o1777)
+    good = sticky / "runner-bin"
+    good.mkdir()
+    # The safe child alone, and ahead of the unsafe uses: accepted on its own.
+    r = check(w, f"{good}:{w['tail']}", user=ME)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # 1. a missing child after the safe sibling.
+    missing = sticky / "not-yet" / "bin"
+    for protect in ("false",):
+        r = check(w, f"{good}:{missing}:{w['tail']}", user=ME, protect=protect)
+        assert r.returncode == 1 and f"'{missing}' is writable by the {ME} user (at {sticky})" in r.stdout
+    # 2. the sticky directory itself as an entry, after the safe sibling.
+    r = check(w, f"{good}:{sticky}:{w['tail']}", user=ME)
+    assert r.returncode == 1 and f"'{sticky}' is writable by the {ME} user (at {sticky})" in r.stdout
+    # 3. a runner-only directory whose `bash` dangles into it.
+    links = w["tmp"] / "runner-links"
+    links.mkdir()
+    (links / "bash").symlink_to(sticky / "not-yet" / "bash")
+    r = check(w, f"{good}:{links}:{w['tail']}", user=ME)
+    assert r.returncode == 1 and f"'{links}' is writable by the {ME} user (at {sticky})" in r.stdout
+    assert sticky.stat().st_mode & 0o1777 == 0o1777  # nothing touched without protect
+    # With protect the sticky directory is made runner-only for the unsafe
+    # use, and the safe sibling keeps working.
+    r = check(w, f"{good}:{missing}:{w['tail']}", user=ME, protect="true")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"protected job PATH hop {sticky}" in r.stdout
+    assert not sticky.stat().st_mode & 0o002 and sticky.stat().st_mode & 0o1000
 
 
 def test_symlink_hops_are_checked_where_they_live_not_only_where_they_point(world):
@@ -592,7 +644,8 @@ def test_executables_inside_an_entry_are_checked_through_their_symlinks_and_owne
     r = check(w, job, user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
     probes = w["sudo_log"].read_text().splitlines()
-    assert probes.count(f"-u {ME} test -w {rep}") == 1
+    assert probes.count(f"-u {ME} find {w['tmp']} -mindepth 1 -maxdepth 1 -writable") == 1
+    assert probes.count(f"-u {ME} find {rep} -mindepth 1 -maxdepth 1 -writable") == 1
 
 
 def test_an_owned_read_only_directory_on_the_path_is_refused_or_protected(world):

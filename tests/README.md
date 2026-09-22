@@ -211,7 +211,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   directory, an owned sticky parent, an owned 0755 executable — the files
   inside an entry followed through their symlinks (into the workspace, to a
   writable file, to a file in a replaceable directory, a chain, a shared
-  chain probed once), `protect` making a writable or owned image hop or
+  chain probed once), a sticky directory accepted for one child vouching for
+  no other use (a missing sibling, the directory itself, a dangling link into
+  it — each after the safe child), `protect` making a writable or owned image hop or
   file runner-only instead of refusing and never touching the workspace,
   and the check's own probes resolving through the pinned system PATH —
   `sudo` is a stub answering the ownership and writability probes from a

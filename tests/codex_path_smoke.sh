@@ -27,7 +27,10 @@
 #      them back; a runner-only directory holding `bash -> <workspace
 #      venv>/bash` is refused in both modes; one holding `bash -> <a
 #      codex-owned 0755 file>` is refused without protect and the file
-#      protected with it.
+#      protected with it; and (review round 3) a safe child of a
+#      runner-owned sticky directory does not vouch for a missing sibling,
+#      the directory itself or a dangling link into it — each refused after
+#      the safe child, the directory protected with protect on.
 #   4. `create-codex-user` step 3 (the grant and the rest) runs.
 #   5. As the codex user: plant `sudo`, `bash`, `git`, `find`, `jq` in the
 #      workspace venv, tamper with .git/config, and try to plant into the
@@ -91,12 +94,14 @@ test -f "$RUNNER_TEMP/git-config.pre-codex" || fail "no config snapshot"
 
 say "2. pre-grant check with protect on, stock job PATH — must pass"
 job_path="$PATH"
+t0=$(date +%s)
 before=$(for d in /opt /opt/pipx_bin /usr/local/bin; do [ -d "$d" ] && stat -c '%A %U %n' "$d"; done || true)
 echo "before: $before"
 run_assert "$job_path" true | tee "$RUNNER_TEMP/smoke-assert-stock.log"
 after=$(for d in /opt /opt/pipx_bin /usr/local/bin; do [ -d "$d" ] && stat -c '%A %U %n' "$d"; done || true)
 echo "after: $after"
 grep -q 'none inside the workspace or owned or writable by codex' "$RUNNER_TEMP/smoke-assert-stock.log" || fail "stock PATH did not pass"
+echo "pre-grant check took $(( $(date +%s) - t0 )) s"
 say "2b. the protected hops: codex cannot create in them, runner can"
 for d in /opt/pipx_bin /usr/local/bin; do
   [ -d "$d" ] || continue
@@ -155,9 +160,25 @@ expect_pass linkowned "$T/linkowned:$job_path" true "protected job PATH file $T/
 stat -c '%A %U:%G %n' "$T/ownedfile/bash"
 if sudo -u codex sh -c "echo x >>'$T/ownedfile/bash'" 2>/dev/null; then fail "codex could still write the protected file"; fi
 echo "codex cannot write $T/ownedfile/bash after protection: ok"
+# Review round 3: a sticky directory accepted for one child must not be
+# remembered as safe for a missing sibling, for itself, or for a dangling
+# link into it.
+install -d -m 1777 "$T/sticky"
+install -d -m 755 "$T/sticky/runner-bin" "$T/danglers"
+ln -s "$T/sticky/not-yet/bash" "$T/danglers/bash"
+expect_pass sticky-safe "$T/sticky/runner-bin:$job_path" false "job PATH:"
+expect_refusal sticky-missing "$T/sticky/runner-bin:$T/sticky/not-yet/bin:$job_path" false "is writable by the codex user (at $T/sticky)"
+expect_refusal sticky-itself "$T/sticky/runner-bin:$T/sticky:$job_path" false "is writable by the codex user (at $T/sticky)"
+expect_refusal sticky-dangling "$T/sticky/runner-bin:$T/danglers:$job_path" false "is writable by the codex user (at $T/sticky)"
+stat -c '%A %U:%G %n' "$T/sticky"
+expect_pass sticky-missing "$T/sticky/runner-bin:$T/sticky/not-yet/bin:$job_path" true "protected job PATH hop $T/sticky"
+if sudo -u codex mkdir "$T/sticky/not-yet" 2>/dev/null; then fail "codex could still create in the protected sticky directory"; fi
+echo "codex cannot create $T/sticky/not-yet after protection: ok"
 # The stock PATH passes again with nothing left to protect.
+t0=$(date +%s)
 run_assert "$job_path" false >"$RUNNER_TEMP/smoke-r2-stock-again.log" || { cat "$RUNNER_TEMP/smoke-r2-stock-again.log"; fail "stock PATH no longer passes"; }
 grep -o 'job PATH: .*' "$RUNNER_TEMP/smoke-r2-stock-again.log"
+echo "check without protect took $(( $(date +%s) - t0 )) s"
 
 say "4. create-codex-user, step 3 (its second run block): the grant and the rest"
 /bin/bash -c "$(lift create-codex-user 2)"

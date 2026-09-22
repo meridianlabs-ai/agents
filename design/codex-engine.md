@@ -468,9 +468,16 @@ three layers:
   write or replace is protected or refused (round 2 of #131: the first cut
   scanned regular files by mode bits and skipped symlinks — a link from a
   runner-only directory to a codex-writable target was the planted
-  interpreter by another name). Hops and files found safe are remembered,
-  so a chain many links share (`/etc/alternatives`, a toolcache) is probed
-  once. On the stock image that protects `/opt`, `/opt/pipx_bin`, the
+  interpreter by another name). Hops and files found unconditionally safe
+  are remembered, so a chain many links share (`/etc/alternatives`, a
+  toolcache) is probed once — but a sticky directory accepted for one child
+  is not: that acceptance is the child's, and round 3 of #131 showed a safe
+  `T/runner-bin` vouching for a later `T/not-yet/bin`, for `T` itself and
+  for a dangling `bash -> T/not-yet/bash`. The probes are batched per
+  directory (three privileged `find` passes: what exists, what codex owns,
+  what codex can write via `-writable`), so the whole job PATH costs seconds
+  rather than the ~55 s the per-path probes took in round 3. On the stock
+  image that protects `/opt`, `/opt/pipx_bin`, the
   toolcache chain, `/usr/local/bin` and `/usr/local/.ghcup`, the
   world-writable files in them and the targets their links reach, and
   keeps the runner user's own writes — npm's global bin, which
