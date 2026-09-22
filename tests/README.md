@@ -45,14 +45,20 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   preparation and post-agent check (Claude Security 4628445), lifted the
   same way and run against local repos: the strip renames `CLAUDE.md` /
   `CLAUDE.local.md` / `AGENTS.md` to `*.untrusted` and deletes `.claude` /
-  `.mcp.json` at every depth; the scratch step copies the stripped tree with
-  its credential-free `.git`; the re-plant check passes on a clean tree,
+  `.mcp.json` at every depth and writes a raw snapshot tree of the stripped
+  checkout; the scratch step copies the stripped tree with its
+  credential-free `.git`; the re-plant check passes on a clean tree,
   exempts exactly the root paths claude-code-action restores from
-  `origin/<base>` when byte-identical (tracked content and untracked files,
-  ignore rules not honoured), and fails on a nested entry, a changed or
-  added root entry, a root `AGENTS.md`, a missing base ref (fail-closed, a
-  hostile `BASE_REF` included) — with the checkout's hooks, fsmonitor and
-  external diff never run. Also the wiring: `--setting-sources user` on the
+  `origin/<base>` when byte-identical (raw type/mode/bytes against the base
+  blobs, untracked files, ignore rules and the head's `.gitattributes` not
+  honoured; a restored `.claude/` verified as a subtree; the content behind
+  a trusted symlink compared against the strip snapshot, links recursed,
+  out-of-tree targets refused, dangling links passing on their bytes), and
+  fails on a nested entry, a changed or added root entry or descendant, an
+  attribute-normalised change, a retargeted or newline-retargeted link, a
+  changed or added file behind a link, a root `AGENTS.md`, a missing base
+  ref or snapshot (fail-closed, a hostile `BASE_REF` included) — with the
+  checkout's hooks, fsmonitor and external diff never run. Also the wiring: `--setting-sources user` on the
   agent step after the caller's args, the three steps gated on the sandboxed
   paths, the landing prep gated on the check, the 2.1.246 version floor, the
   Surface step's outcomes and note, and the prompt's scratch-copy guidance.

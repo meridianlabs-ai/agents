@@ -821,6 +821,28 @@ jobs:
             exit 1
           fi
           echo "stripped project-scope Claude Code configuration from the untrusted checkout (.claude/, .mcp.json deleted; CLAUDE.md / CLAUDE.local.md / AGENTS.md moved to *.untrusted)."
+          # Snapshot of the stripped tree, RAW, for the post-agent check: the
+          # content a trusted symlink points at (ts-mono's `.claude ->
+          # .agents`, the `.claude/skills -> ../skills` several callers keep)
+          # is ordinary PR content the action's base restore does not cover,
+          # so "unchanged since the run started" is the only meaningful test
+          # for it (review round 4). Every file goes into a temporary index
+          # with the head's attributes switched off through the
+          # highest-precedence attributes file — `git add` would otherwise
+          # store clean-filtered, eol- or ident-normalised blobs, and the
+          # check compares raw bytes — and the resulting tree object lives in
+          # the checkout's object store, which sandboxed code cannot write.
+          # The override is removed again so the action's restore and the
+          # reviewer's git see the checkout as before.
+          attrs=$(git rev-parse --git-path info/attributes)
+          mkdir -p "$(dirname "$attrs")"
+          printf '* -text -ident -filter -eol -working-tree-encoding\n' >"$attrs"
+          snapidx=$(mktemp); rm -f "$snapidx"
+          GIT_INDEX_FILE="$snapidx" git -c core.autocrlf=false -c core.safecrlf=false -c core.fsmonitor=false add -A -f -- .
+          tree=$(GIT_INDEX_FILE="$snapidx" git write-tree)
+          rm -f "$snapidx" "$attrs"
+          echo "tree=$tree" >>"$GITHUB_OUTPUT"
+          echo "snapshot of the stripped tree: $tree"
 
       # The writable place for the reviewer's installs and tests (Claude
       # Security 4628445). The sandbox overlay below makes the checkout —
@@ -1426,6 +1448,7 @@ jobs:
           (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true')
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          STRIP_TREE: ${{ steps.strip.outputs.tree }}
           GIT_DIR: ${{ github.workspace }}/.git
           GIT_WORK_TREE: ${{ github.workspace }}
           GIT_CONFIG_GLOBAL: /dev/null
@@ -1439,40 +1462,85 @@ jobs:
           if [[ "$BASE_REF" =~ ^[^[:space:]-][^[:space:]]*$ ]] && git rev-parse -q --verify "refs/remotes/origin/$BASE_REF^{commit}" >/dev/null 2>&1; then
             base="refs/remotes/origin/$BASE_REF"
           fi
-          # The base tree in a temporary index (never the PR's index).
-          tmpidx=$(mktemp)
-          trap 'rm -f "$tmpidx"' EXIT
+          # The base tree in a temporary index (never the PR's index), and the
+          # strip step's raw snapshot of the checkout in another — what a
+          # trusted symlink's referent is compared against. Either missing
+          # fails closed (the roots stay survivors; a link with a live
+          # referent stays a survivor).
+          tmpidx=$(mktemp); snapidx=$(mktemp)
+          trap 'rm -f "$tmpidx" "$snapidx"' EXIT
           if [ -n "$base" ] && ! GIT_INDEX_FILE="$tmpidx" git read-tree "$base" 2>/dev/null; then
             base=""
           fi
-          # Raw comparison of one root entry against the base tree: every
-          # path the base tracks under it must be present with the same
-          # type, mode and BYTES (the blob via `git cat-file`, the file via
-          # `cmp`; no attribute conversion is involved on either side — `git
-          # diff` would apply the head's .gitattributes, review round 2), a
-          # symlink's target must be the base blob's exact bytes (hashed from
+          if ! [[ "$STRIP_TREE" =~ ^[0-9a-f]{40,64}$ ]] || ! GIT_INDEX_FILE="$snapidx" git read-tree "$STRIP_TREE" 2>/dev/null; then
+            snapidx=""
+          fi
+          # A path relative to the work tree with `.` and `..` resolved
+          # lexically; fails when it would leave the tree or name its root.
+          normalize_rel() {
+            local IFS=/ c; local -a out=()
+            for c in $1; do
+              case "$c" in
+                ''|.) ;;
+                ..) [ "${#out[@]}" -gt 0 ] || return 1; unset 'out[${#out[@]}-1]' ;;
+                *) out+=("$c") ;;
+              esac
+            done
+            [ "${#out[@]}" -gt 0 ] || return 1
+            printf '%s' "${out[*]}"
+          }
+          # Raw comparison of one entry against an index: every path the
+          # index tracks under it must be present with the same type, mode
+          # and BYTES (the blob via `git cat-file`, the file via `cmp`; no
+          # attribute conversion is involved on either side — `git diff`
+          # would apply the head's .gitattributes, review round 2), a
+          # symlink's target must be the blob's exact bytes (hashed from
           # `readlink -n` with `--no-filters`, so no command substitution
           # strips a trailing newline that would let `target` and
-          # `target<LF>` compare equal — review round 3; several callers keep
-          # a symlinked root CLAUDE.md or .claude), a gitlink is never exempt,
-          # and nothing the base does not track may be there.
-          identical_to_base() {
-            local entry=$1 rec mode sha rest path tracked=0
+          # `target<LF>` compare equal — review round 3) AND what it reaches
+          # must be unchanged since the strip (review round 4: the link blob
+          # authenticates a pathname, not the content behind it — ts-mono's
+          # `.claude -> .agents`, the `.claude/skills -> ../skills` of
+          # several callers): the referent, resolved lexically from the
+          # link's directory, is compared the same way against the strip
+          # snapshot, links inside it recursively (depth-capped); an absolute
+          # target, one that leaves the tree or names `.git`, an unresolved
+          # or over-deep chain, or a missing snapshot is never exempt; a link
+          # that resolves to nothing (dangling, cyclic) reaches nothing and
+          # passes on its bytes alone — the callers' `CLAUDE.md -> AGENTS.md`
+          # dangles after the strip's rename. A gitlink is never exempt, and
+          # nothing the index does not track may be there.
+          identical_to_index() {
+            local idx=$1 entry=$2 depth=$3 rec mode sha rest path tracked=0
             while IFS= read -r -d '' rec; do
               tracked=1
               mode=${rec%% *}; rest=${rec#* }; sha=${rest%% *}; rest=${rest#* }; path=${rest#*$'\t'}
               case "$mode" in
                 120000)
-                  [ -L "$path" ] && [ "$(readlink -n "$path" | git hash-object --no-filters --stdin)" = "$sha" ] || return 1 ;;
+                  [ -L "$path" ] && [ "$(readlink -n "$path" | git hash-object --no-filters --stdin)" = "$sha" ] || return 1
+                  referent_unchanged "$path" "$depth" || return 1 ;;
                 100644|100755)
                   [ -f "$path" ] && ! [ -L "$path" ] || return 1
                   git cat-file blob "$sha" | cmp -s - "$path" || return 1
                   if [ "$mode" = 100755 ]; then [ -x "$path" ] || return 1; else ! [ -x "$path" ] || return 1; fi ;;
                 *) return 1 ;;
               esac
-            done < <(GIT_INDEX_FILE="$tmpidx" git ls-files -s -z -- "$entry")
+            done < <(GIT_INDEX_FILE="$idx" git ls-files -s -z -- "$entry")
             [ "$tracked" = 1 ] || return 1
-            [ -z "$(GIT_INDEX_FILE="$tmpidx" git ls-files --others -z -- "$entry")" ]
+            [ -z "$(GIT_INDEX_FILE="$idx" git ls-files --others -z -- "$entry")" ]
+          }
+          referent_unchanged() {
+            local link=$1 depth=$2 target rel
+            [ -e "$link" ] || return 0
+            [ -n "$snapidx" ] && [ "$depth" -lt 8 ] || return 1
+            target=$(readlink -n "$link")
+            # The substitution drops a trailing newline; a target that ends
+            # in one would resolve to a different name, so refuse it.
+            [ "$(readlink -n "$link" | wc -c)" -eq "${#target}" ] || return 1
+            case "$target" in /*) return 1 ;; esac
+            rel=$(normalize_rel "${link#./}/../$target") || return 1
+            case "$rel" in .git|.git/*) return 1 ;; esac
+            identical_to_index "$snapidx" "./$rel" "$((depth + 1))"
           }
           # First pass, root entries: verified (identical to base) or survivor.
           verified=""
@@ -1483,7 +1551,7 @@ jobs:
               ./*/*) continue ;;
               ./AGENTS.md) survivors="$survivors $p"; continue ;;
             esac
-            if [ -n "$base" ] && identical_to_base "$p"; then
+            if [ -n "$base" ] && identical_to_index "$tmpidx" "$p" 0; then
               echo "root $p matches origin/$BASE_REF byte for byte: claude-code-action's base-branch restore, not a re-plant"
               verified="$verified$p"$'\n'
             else

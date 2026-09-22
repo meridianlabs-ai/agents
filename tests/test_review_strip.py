@@ -98,15 +98,24 @@ def config_entries(root: Path):
     )
 
 
+STRIP_TREES: dict = {}  # workspace -> the strip step's snapshot tree (its `tree` output)
+
+
 def strip(ws: Path):
-    r = sh("bash", "-c", STRIP, cwd=ws, check=False)
+    out = ws.parent / f"strip-output-{ws.name}.txt"
+    out.write_text("")
+    r = sh("bash", "-c", STRIP, cwd=ws, check=False, env={"GITHUB_OUTPUT": str(out)})
     assert r.returncode == 0, r.stderr + r.stdout
+    trees = [l[len("tree="):] for l in out.read_text().splitlines() if l.startswith("tree=")]
+    assert len(trees) == 1 and re.fullmatch(r"[0-9a-f]{40,64}", trees[0]), out.read_text()
+    STRIP_TREES[ws] = trees[0]
     return r
 
 
-def replant(ws: Path, *, base_ref="main"):
+def replant(ws: Path, *, base_ref="main", strip_tree=None):
+    tree = STRIP_TREES.get(ws, "") if strip_tree is None else strip_tree
     return sh("bash", "-c", REPLANT, cwd=ws, check=False, env={
-        "BASE_REF": base_ref, "GIT_DIR": str(ws / ".git"), "GIT_WORK_TREE": str(ws)})
+        "BASE_REF": base_ref, "STRIP_TREE": tree, "GIT_DIR": str(ws / ".git"), "GIT_WORK_TREE": str(ws)})
 
 
 def restore_from_base(ws: Path):
@@ -363,15 +372,121 @@ def test_replant_check_compares_symlink_targets_byte_for_byte(tmp_path):
     r = replant(ws)
     assert r.returncode == 1 and "./.claude" in r.stdout and "./CLAUDE.md" in r.stdout
     # Retargeted to an entirely different name, or the newline dropped from a
-    # base target that has one: survivor too.
-    ws2 = make_checkout(tmp_path / "two", base_files=base, base_links={"CLAUDE.md": "README.md\n"}, head_files=head)
+    # base target that has one: survivor too. (The head carries no CLAUDE.md
+    # here: writing one through the base's dangling link would create the
+    # newline-named target.)
+    head2 = {k: v for k, v in head.items() if k != "CLAUDE.md"}
+    ws2 = make_checkout(tmp_path / "two", base_files=base, base_links={"CLAUDE.md": "README.md\n"}, head_files=head2)
     strip(ws2)
     restore_from_base(ws2)
-    assert replant(ws2).returncode == 0
+    assert not (ws2 / "CLAUDE.md").exists() and replant(ws2).returncode == 0  # dangling: bytes alone
     (ws2 / "CLAUDE.md").unlink()
     (ws2 / "CLAUDE.md").symlink_to("README.md")
     r = replant(ws2)
     assert r.returncode == 1 and "./CLAUDE.md" in r.stdout
+    # The original link with its newline-ending target made live: the
+    # referent name cannot be resolved without dropping the newline, so the
+    # check refuses it (conservative) rather than compare the wrong file.
+    (ws2 / "CLAUDE.md").unlink()
+    (ws2 / "CLAUDE.md").symlink_to("README.md\n")
+    (ws2 / "README.md\n").write_text("base\n")
+    r = replant(ws2)
+    assert r.returncode == 1 and "./CLAUDE.md" in r.stdout
+
+
+def test_replant_check_verifies_the_content_behind_a_trusted_link(tmp_path):
+    # Review round 4 (B7): a link blob authenticates a pathname, not what it
+    # reaches. The referent is compared against the strip step's raw
+    # snapshot of the checkout — "unchanged since the run started" — so the
+    # PR's own content behind a trusted link passes and anything changed or
+    # added during the run does not.
+    base = {k: v for k, v in BASE_FILES.items() if k != "CLAUDE.md"}
+    base.update({".agents/settings.json": '{"permissions": {"allow": ["Bash(pytest:*)"]}}\n',
+                 "skills/example/SKILL.md": "base skill\n", "config": "trusted instructions\n"})
+    base.pop(".claude/settings.json")  # `.claude` is a link in this layout
+    for k in list(base):
+        if k.startswith(".claude/"):
+            del base[k]
+    base[".claude-real/settings.json"] = "{}\n"
+    links = {"CLAUDE.md": "config", ".claude": ".agents", ".agents/skills": "../skills"}
+    # The PR changes the skill behind the link: legitimate head content. (No
+    # head CLAUDE.md: writing one through the base's link would rewrite
+    # `config`.)
+    head = {k: v for k, v in HEAD_FILES.items() if not k.startswith(".claude/") and k != "CLAUDE.md"}
+    head["skills/example/SKILL.md"] = "the PR's skill\n"
+    ws = make_checkout(tmp_path, base_files=base, base_links=links, head_files=head)
+    strip(ws)
+    restore_from_base(ws)
+    assert (ws / ".claude").is_symlink() and (ws / ".claude/skills").is_symlink()
+    assert (ws / ".claude/skills/example/SKILL.md").read_text() == "the PR's skill\n"
+    r = replant(ws)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "root ./CLAUDE.md matches" in r.stdout and "root ./.claude matches" in r.stdout
+    # Changed settings behind the directory link: survivor.
+    (ws / ".agents/settings.json").write_text('{"sandbox": {"enabled": false}}\n')
+    r = replant(ws)
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./.claude — the review is withheld")
+    (ws / ".agents/settings.json").write_text('{"permissions": {"allow": ["Bash(pytest:*)"]}}\n')
+    assert replant(ws).returncode == 0
+    # An added file behind it: survivor.
+    (ws / ".agents/settings.local.json").write_text('{"sandbox": {"enabled": false}}\n')
+    r = replant(ws)
+    assert r.returncode == 1 and "./.claude" in r.stdout
+    (ws / ".agents/settings.local.json").unlink()
+    # A changed skill behind the nested link, two links deep: survivor.
+    (ws / "skills/example/SKILL.md").write_text("planted skill\n")
+    r = replant(ws)
+    assert r.returncode == 1 and "./.claude" in r.stdout
+    (ws / "skills/example/SKILL.md").write_text("the PR's skill\n")
+    # Changed instructions behind the file link: survivor.
+    (ws / "config").write_text("planted instructions\n")
+    r = replant(ws)
+    assert r.returncode == 1 and "./CLAUDE.md" in r.stdout
+    (ws / "config").write_text("trusted instructions\n")
+    assert replant(ws).returncode == 0
+    # Without the strip's snapshot a link with a live referent fails closed;
+    # a dangling one still passes on its bytes (it reaches nothing).
+    r = replant(ws, strip_tree="")
+    assert r.returncode == 1 and "./.claude" in r.stdout and "./CLAUDE.md" in r.stdout
+    (ws / "config").unlink()
+    r = replant(ws, strip_tree="")
+    assert r.returncode == 1 and "root ./CLAUDE.md matches" in r.stdout and "./.claude" in r.stdout
+
+
+def test_replant_check_refuses_links_that_leave_the_tree(tmp_path):
+    base = {k: v for k, v in BASE_FILES.items() if k != "CLAUDE.md" and k != "CLAUDE.local.md"}
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n")
+    links = {"CLAUDE.md": str(outside), "CLAUDE.local.md": "../outside.md"}
+    ws = make_checkout(tmp_path, base_files=base, base_links=links)
+    strip(ws)
+    restore_from_base(ws)
+    assert (ws / "CLAUDE.md").is_symlink() and (ws / "CLAUDE.md").exists()
+    r = replant(ws)
+    assert r.returncode == 1 and "./CLAUDE.md" in r.stdout and "./CLAUDE.local.md" in r.stdout
+    # A link into .git is never exempt either.
+    ws2 = make_checkout(tmp_path / "two", base_files=base, base_links={"CLAUDE.md": ".git/description"})
+    strip(ws2)
+    restore_from_base(ws2)
+    r = replant(ws2)
+    assert r.returncode == 1 and "./CLAUDE.md" in r.stdout
+
+
+def test_strip_snapshot_is_raw_and_leaves_the_checkout_as_it_was(tmp_path):
+    # The snapshot stores the stripped tree's bytes with the head's
+    # attributes switched off (an `ident` file keeps its `$Id: x $`), and the
+    # temporary attributes override is gone afterwards.
+    head = dict(HEAD_FILES, **{".gitattributes": "pkg/x.py ident\n", "pkg/x.py": "# $Id: keep-me $\n"})
+    ws = make_checkout(tmp_path, head_files=head)
+    strip(ws)
+    tree = STRIP_TREES[ws]
+    blob = git("rev-parse", f"{tree}:pkg/x.py", cwd=ws).stdout.strip()
+    assert git("cat-file", "blob", blob, cwd=ws).stdout == "# $Id: keep-me $\n"
+    assert git("rev-parse", f"{tree}:CLAUDE.md.untrusted", cwd=ws).returncode == 0
+    assert git("rev-parse", f"{tree}:CLAUDE.md", cwd=ws, check=False).returncode != 0
+    assert not (ws / ".git/info/attributes").exists()
+    assert git("status", "--porcelain", cwd=ws).stdout.count("\n") > 0  # the renames, nothing staged
+    assert git("diff", "--cached", "--quiet", cwd=ws, check=False).returncode == 0
 
 
 def test_replant_check_never_exempts_a_root_agents_md(tmp_path):

@@ -1349,9 +1349,22 @@ now compose, each holding on its own:
   contributor's and is not honoured). Fail-closed corollary: a head
   `.gitattributes` that makes `git checkout` transform one of these paths
   leaves the action's own restore differing from the blob and the review
-  is withheld — no caller carries such an attribute. A root that passes is
-  verified as a whole subtree, so the configuration names inside a
-  restored `.claude/` are exempt with it, and every other nested entry is
+  is withheld — no caller carries such an attribute. A symlink's blob
+  authenticates only a pathname (review round 4), so what a trusted link
+  reaches — ts-mono's `.claude -> .agents`, the `.claude/skills ->
+  ../skills` of agents, inspect_harbor, inspect_scout and the inspect_ai
+  fork — is compared the same way against a **raw snapshot tree of the
+  stripped checkout** that the strip step writes into the object store
+  (`git add -A -f` under an attributes override, so the blobs are the
+  files' bytes), the only meaningful reference for content the PR itself
+  supplies: unchanged since the run started passes, a changed or added
+  file behind the link does not; links inside the referent recurse
+  (lexical resolution from the link's directory, depth-capped), an
+  absolute, out-of-tree or `.git` target never passes, and a dangling
+  link reaches nothing and passes on its bytes (the callers'
+  `CLAUDE.md -> AGENTS.md` dangles after the strip's rename). A root that
+  passes is verified as a whole subtree, so the configuration names inside
+  a restored `.claude/` are exempt with it, and every other nested entry is
   a survivor. The step's git runs pinned (`GIT_DIR`, `GIT_WORK_TREE`, no
   global or system config, hooks path and fsmonitor off): the checkout's
   config is the contributor's.
