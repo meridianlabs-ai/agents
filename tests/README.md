@@ -5,7 +5,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
 
 - `test_validate_manifest.py` — the land job's manifest validator
   (`.github/scripts/validate_manifest.py`): one valid manifest, one failing
-  case per rule.
+  case per rule — including the per-caller issue policy (`allowed-issue-labels`
+  / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
+  workflow's actual land inputs, against forged manifests.
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
   retry, open-or-adopt PR and the branch-existence probe against a stub
   `gh`, the landing-failure hint) and

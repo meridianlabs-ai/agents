@@ -1140,6 +1140,25 @@ def test_verdict_bodies_would_not_survive_the_defang(tmp_path):
     assert "claude-review-summary" not in dst.read_text()
 
 
+def test_pr_and_handback_steps_run_only_after_the_validator_passed():
+    # `refuse-pr` (and every other refusal) is enforced by the validate step:
+    # a violation fails it, and the steps that would open/adopt/label a PR or
+    # post the `@review` hand-back carry no `always()`, so they are skipped
+    # like everything after a failed step. The flag reaches the validator
+    # from the input, quoted through env like `refuse-bundle`.
+    text = LAND.read_text()
+    assert text.index("    - id: validate\n") < text.index("    - id: plan\n") < text.index("    - id: pr\n") < text.index("    - id: handback\n")
+    validate = step_block(text, "validate", indent=4)
+    assert "REFUSE_PR: ${{ inputs.refuse-pr == 'true' && '1' || '' }}" in validate
+    assert "${REFUSE_PR:+--refuse-pr}" in validate
+    pr = step_block(text, "pr", indent=4)
+    assert pr.splitlines()[1].strip() == "shell: bash"          # no `if:` at all: runs on success only
+    assert "always()" not in pr
+    handback = step_block(text, "handback", indent=4)
+    assert handback.splitlines()[1].strip() == "if: steps.plan.outputs.handback == 'true'"
+    assert "always()" not in handback
+
+
 def test_workflows_step_gates_the_push_and_reaches_the_report():
     # The refusal runs after the bundle is verified and before the push, in
     # the same empty bare repo; the push has no always(), so a refusal skips

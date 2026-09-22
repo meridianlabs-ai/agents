@@ -23,7 +23,7 @@ manifest. Usage:
         [--pr-head-ref <headRefName of that PR, from the API>] \
         [--branch-prefix "claude/issue-$EVENT_ISSUE-"] [--refuse-bundle] \
         [--allowed-issue-labels ""] [--allowed-issue-assignees ransomr] \
-        [--max-issues 1]
+        [--max-issues 1] [--refuse-pr]
 
 `--refuse-bundle` is for callers whose agent never commits (the reviewer):
 a manifest that carries commits, claims HEAD moved, or ships a
@@ -61,9 +61,25 @@ label list: nothing its manifest names may commission anything, and a human
 who reads the issue applies the label. The lists are comma-separated; `*`
 (the default) leaves the field unrestricted, so callers that never set them
 keep their behaviour; an empty list allows none. `--max-issues` caps the
-number of `issues[]` entries (empty, the default, is no cap). `pr.labels`
-are not covered: they are composed by the trusted gate job of the workflows
-that open PRs, and a `--refuse-bundle` caller pushes nothing to open a PR on.
+number of `issues[]` entries (empty, the default, is no cap).
+
+`--refuse-pr` is the PR-side counterpart for a caller whose agent may not
+touch pull requests at all (the triage workflow): a manifest that carries
+`pr` (open or adopt a PR, label it — `auto` opts a PR into the autonomous
+loops, and the loop gates accept the machine account as the labeler) or
+`handback: true` (the live `@review` comment) is refused whole. It is a
+separate flag from `--refuse-bundle` because refusing bundles does not
+prevent using a branch that already exists on origin: `pr.open` adopts or
+opens a PR for `branch` whether or not this run pushed to it, so a
+read-only caller with a token that reaches the caller repository's pull
+requests would otherwise let a forged manifest label an existing PR. The
+issue-label policy above does not cover `pr.labels`, and nothing here
+verifies where a manifest's `pr.labels` came from: for the callers that do
+open PRs they are whatever the agent job's composing step wrote (the dev
+workflows copy the gate's trusted labels there; inspect_flow's scheduled
+workflows set `auto` as their own standing policy), which the land job
+accepts as that caller's policy, not as an independently trusted value.
+Callers that open PRs keep the default (accept `pr`).
 
 The schema is documented in .github/actions/emit-landing/README.md; keep
 the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
@@ -192,6 +208,7 @@ class Validator:
         event_issue_number: str = "",
         branch_prefix: str = "",
         refuse_bundle: bool = False,
+        refuse_pr: bool = False,
         allowed_issue_labels=None,
         allowed_issue_assignees=None,
         max_issues: int | None = None,
@@ -209,6 +226,7 @@ class Validator:
         self.event_issue_number = event_issue_number.strip()
         self.branch_prefix = branch_prefix.strip()
         self.refuse_bundle = refuse_bundle
+        self.refuse_pr = refuse_pr
         # None: unrestricted (the caller set no policy). A set, possibly
         # empty: the only values issues[] may carry. Labels are compared
         # case-insensitively (GitHub matches them that way); logins too.
@@ -480,6 +498,19 @@ class Validator:
             if (self.dir / "commits.bundle").exists() or (self.dir / "commits.bundle").is_symlink():
                 self.err("manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact")
 
+        if self.refuse_pr:
+            # The caller's agent may not open, adopt or label a pull request,
+            # nor post the `@review` hand-back (the triage workflow, whose
+            # land job holds a token for another repository's issues but
+            # whose PAT fallback reaches this one's pull requests). Refused
+            # whole, before any step reads these fields: a `pr.open` needs
+            # no bundle — it adopts or opens a PR for a branch that already
+            # exists on origin — so `--refuse-bundle` alone does not close it.
+            if pr is not None or "pr" in m:
+                self.err("manifest: this land job refuses pull-request fields (--refuse-pr) but the manifest carries `pr`")
+            if m.get("handback") is True:
+                self.err("manifest: this land job refuses pull-request fields (--refuse-pr) but the manifest sets handback")
+
         if pr is not None:
             self._unknown_keys(pr, KNOWN_PR, "pr")
             self._bool(pr, "open", "pr", required=True)
@@ -711,6 +742,11 @@ def main(argv=None) -> int:
         help="most issues[] entries the manifest may carry; empty (the default) is no cap",
     )
     ap.add_argument(
+        "--refuse-pr",
+        action="store_true",
+        help="refuse a manifest that carries `pr` (open/adopt/label a PR) or `handback: true` (the caller's agent may not touch pull requests — the triage workflow); a `pr.open` needs no bundle, so --refuse-bundle alone does not close it",
+    )
+    ap.add_argument(
         "--refuse-bundle",
         action="store_true",
         help="refuse a manifest that carries commits (the caller's agent never commits — the reviewer); has_bundle must be false, head_sha must equal start_sha and no commits.bundle may be present. `branch` is then never pushed to, so only the head-ref pin / --branch-prefix and a control-character/length check apply to it (a fork-head PR's `main` passes)",
@@ -742,6 +778,7 @@ def main(argv=None) -> int:
             event_issue_number=args.event_issue_number,
             branch_prefix=args.branch_prefix,
             refuse_bundle=args.refuse_bundle,
+            refuse_pr=args.refuse_pr,
             allowed_issue_labels=allow_list(args.allowed_issue_labels),
             allowed_issue_assignees=allow_list(args.allowed_issue_assignees),
             max_issues=max_issues,

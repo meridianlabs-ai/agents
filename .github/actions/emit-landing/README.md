@@ -93,6 +93,13 @@ to this document together.
 | `provenance_comment_file` | workflow | posted with `<!-- model-provenance -->` as its first line |
 | `review_verdict` | workflow (claude-review.yml, both engines) | `clean` or `suggestions`; needs `pr_number`. `land` posts one of two FIXED bodies — the reviewer's `🔎 Review complete …` marker comment with the `claude-review-summary` / `claude-review-verdict:<value>` markers live — after `comments[]` (which carries the de-fanged review body) and `review_comments[]`, and only when the Post step lost nothing, so the @auto loop never sees a verdict over a review that did not land. The second body posted verbatim besides the hand-back; no agent text reaches it |
 
+`land`'s `refuse-pr` input is for a caller whose agent may not touch pull
+requests at all (the triage workflow in the actions repo): the validator then
+refuses a manifest carrying `pr` or `handback: true`, since a `pr.open` needs
+no push (it adopts or opens a PR for a branch already on origin and labels
+it) and `refuse-bundle` alone does not close it. Callers that open PRs keep
+the default.
+
 `emit-landing`'s `read-only` input and `land`'s `refuse-bundle` input are the
 pair for a caller whose agent never commits (claude-review.yml, whose Claude
 reviewer writes its summary, inline comments and verdict to files the review

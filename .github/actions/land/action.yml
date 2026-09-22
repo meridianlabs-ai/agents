@@ -134,6 +134,20 @@ inputs:
       no cap. The triage workflow allows one issue action per run.
     required: false
     default: ""
+  refuse-pr:
+    description: >-
+      "true" for a caller whose agent may not touch pull requests at all
+      (the triage workflow): the validator refuses a manifest that carries
+      `pr` (open or adopt a PR for `branch`, label it — `auto` opts it into
+      the autonomous loops, whose gates accept the machine account as the
+      labeler) or `handback: true` (the live `@review` comment), before any
+      step reads them. Distinct from `refuse-bundle`: a `pr.open` needs no
+      push, it adopts or opens a PR for a branch that already exists on
+      origin, so a read-only caller whose token reaches this repository's
+      pull requests (the PAT fallback) needs this too. Callers that open
+      PRs keep the default.
+    required: false
+    default: "false"
   pr-head-ref:
     description: >-
       headRefName of the PR `pr-number` names (`github.event.pull_request.head.ref`
@@ -310,6 +324,7 @@ runs:
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         BRANCH_PREFIX: ${{ inputs.branch-prefix }}
         REFUSE_BUNDLE: ${{ inputs.refuse-bundle == 'true' && '1' || '' }}
+        REFUSE_PR: ${{ inputs.refuse-pr == 'true' && '1' || '' }}
         ALLOWED_LABELS: ${{ inputs.allowed-issue-labels }}
         ALLOWED_ASSIGNEES: ${{ inputs.allowed-issue-assignees }}
         MAX_ISSUES: ${{ inputs.max-issues }}
@@ -320,7 +335,7 @@ runs:
           --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
           --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
-          --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} \
+          --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} \
           --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
           --max-issues "$MAX_ISSUES" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }

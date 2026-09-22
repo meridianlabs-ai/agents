@@ -203,7 +203,13 @@ workflow) the validator additionally refuses any manifest that carries
 commits, claims HEAD moved or ships a bundle, whatever the agent job
 uploaded, and the push-side branch rules are off because nothing is pushed.
 `emit-landing`'s `read-only` input is the producing side of the same pair:
-no git runs, `head_sha` equals `start_sha`, no bundle.
+no git runs, `head_sha` equals `start_sha`, no bundle. Refusing bundles does
+not refuse pull requests: `pr.open` adopts or opens a PR for a branch that
+already exists on origin and labels it, with no push. Under `refuse-pr` (the
+triage workflow, since 2026-09-22) the validator also refuses a manifest
+carrying `pr` or `handback: true`, so a caller whose token reaches the
+repository's pull requests (the `MARVIN_TOKEN` fallback) cannot be made to
+label an existing PR `auto` or post `@review` by a forged artifact.
 
 Every agent-authored body the land job posts passes through a de-fang step
 first (trigger tokens lose their `@`, loop markers are split,
@@ -304,8 +310,10 @@ never by lookup: the collaborators endpoint reports `none` for an App and
 its comments carry no MEMBER or COLLABORATOR association. What that trust
 covers is the loops' own callbacks — the `@review` hand-back the reviewer's
 trig step accepts, the counter and verdict markers the loop gates read, the
-`auto` label on a PR that `verify-auto-labeler` accepts because it
-propagates a human's already-verified opt-in. It does not cover starting
+`auto` label on a PR that `verify-auto-labeler` accepts because the machine
+account wrote it for a trusted decider (a human's trig-verified opt-in, or a
+trusted caller workflow's standing policy such as inspect_flow's scheduled
+PRs). It does not cover starting
 the dev agent: `claude.yml`'s trig step and the caller stubs exclude both
 logins from every kickoff, the `auto`-label path included (since
 2026-09-22; Claude Security finding 4628345 — the machine account writes
@@ -532,7 +540,7 @@ under the landing directory; it holds the job token and the Anthropic key,
 no Slack secret, and passes `github_token: github.token` to the action so no
 App token with write is minted. Its `emit-landing` is `read-only`. The land
 job mints a fork-scoped token (issues and org projects write) and runs `land`
-with `refuse-bundle`, `allowed-issue-repos: meridianlabs-ai/inspect_ai`,
+with `refuse-bundle`, `refuse-pr`, `allowed-issue-repos: meridianlabs-ai/inspect_ai`,
 `allowed-issue-labels: ""`, `allowed-issue-assignees: ransomr`,
 `max-issues: "1"` and the Slack destination from the agent job's validated
 outputs, never from the manifest, which supplies the text alone. The

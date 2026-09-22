@@ -158,12 +158,18 @@ finding 4121989) that is enforced in three layers rather than assumed:
   merged PR still carrying the label costs no timeline fetch and gets no
   notice; the CI-fix loop requires the PR the run names to be open). It reads the PR timeline and
   requires the most recent
-  `labeled` event for `auto` to come from the machine account (claude.yml's
-  opt-in on a PR a write-access human commented `@auto` on, and `land`'s
-  propagation to the PR it opens for a human-labelled issue — both behind
-  the trig check that verified that human, so the machine account is trusted
-  as the writer of a human's decision, never as a decider) or from an
-  account with write access, and returns one of three verdicts. `ok` runs the round. `disarmed`
+  `labeled` event for `auto` to come from the machine account or from an
+  account with write access, and returns one of three verdicts. The machine
+  account is trusted there as a writer, never as a decider: its PR label
+  carries either a write-access human's opt-in (claude.yml's gate on an
+  `@auto` comment, `land`'s propagation to the PR it opens for a
+  human-labelled issue — both behind the trig check that verified that
+  human) or a trusted caller workflow's standing policy (inspect_flow's
+  scheduled inspect-update and canary-fix workflows label the PRs they open
+  `auto` in their own composing step, a maintainer's decision in a workflow
+  file, not a per-item decision from untrusted input). A caller whose agent
+  job may not touch PRs passes `land`'s `refuse-pr`, so no machine-written
+  label for an untrusted decider reaches a PR from there. `ok` runs the round. `disarmed`
   is positive evidence of an outsider — the label is removed as marvin and no
   round runs. `unverified` is no evidence either way — no labeled event, a
   GitHub App labeler (`*[bot]`, recognised from its login and never looked up:

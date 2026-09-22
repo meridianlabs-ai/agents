@@ -420,10 +420,12 @@ jobs:
           # label was a privilege the untrusted agent granted itself
           # (Claude Security finding 4628345). The machine account writes
           # what a trusted job or a human decided; where it applies `auto`
-          # legitimately (the PR it opens for a human's `auto` issue, the
-          # PR a human commented `@auto` on) the human's decision has
-          # already passed this step, and the loop gates trust that label
-          # for that reason. A triage-filed issue is now read by a human,
+          # to a PR legitimately (the PR it opens for a human's `auto`
+          # issue, the PR a human commented `@auto` on — the human's
+          # decision has already passed this step — or a PR a trusted
+          # caller workflow labels by its own standing policy) the loop
+          # gates trust that label as a trusted decider's, not as marvin's
+          # own. A triage-filed issue is now read by a human,
           # who applies `auto` themselves if the brief is worth automating.
           # Reading the label NAME carries no quoted-token hazard.
           # Case-FOLDED, like the action: claude-code-action compiles its

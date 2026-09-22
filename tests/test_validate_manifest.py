@@ -101,6 +101,7 @@ def run(
     event_issue=EVENT_ISSUE,
     branch_prefix="",
     refuse_bundle=False,
+    refuse_pr=False,
     allowed_labels=None,
     allowed_assignees=None,
     max_issues=None,
@@ -118,6 +119,7 @@ def run(
         event_issue_number=event_issue,
         branch_prefix=branch_prefix,
         refuse_bundle=refuse_bundle,
+        refuse_pr=refuse_pr,
         allowed_issue_labels=allowed_labels,
         allowed_issue_assignees=allowed_assignees,
         max_issues=max_issues,
@@ -734,6 +736,55 @@ def test_issue_count_capped_by_the_caller(tmp_path):
     assert any("allows at most 0" in e for e in errs), errs
 
 
+def triage_manifest(d: Path, **overrides) -> dict:
+    """What the triage workflow's land job sees: no bundle, no event PR or
+    issue, `branch` under its prefix — plus whatever a forged artifact adds."""
+    m = {
+        "schema": 1, "repo": REPO, "run_id": int(RUN_ID), "branch": "triage",
+        "start_sha": START, "head_sha": START, "has_bundle": False, "pr_number": None, "issue_number": None,
+        "slack": {"text_file": write(d, "slack.txt")},
+    }
+    m.update(overrides)
+    return m
+
+
+def triage_run(d: Path, m: dict, **kw):
+    return run(d, m, event_pr="", event_issue="", branch_prefix="triage", refuse_bundle=True,
+               allowed_labels=[], allowed_assignees=["ransomr"], max_issues=1, **kw)
+
+
+@pytest.mark.parametrize("extra", [
+    # the review-round-1 fixture: adopt/open a PR for an existing branch and label it `auto`, then hand back
+    {"branch": "triage-fixture", "pr": {"open": True, "title": "Fixture", "body_file": "body.md", "labels": ["auto"]}, "handback": True},
+    {"pr": {"open": True, "title": "Fixture", "body_file": "body.md"}},        # no label: still a PR write
+    {"pr": {"open": False, "title": "Fixture", "body_file": "body.md", "labels": ["auto"]}},
+    {"handback": True},                                                        # the live `@review`, no PR named
+])
+def test_refuse_pr_refuses_pull_request_fields_on_a_read_only_caller(tmp_path, extra):
+    write(tmp_path, "body.md")
+    m = triage_manifest(tmp_path, **extra)
+    errs = triage_run(tmp_path, m, refuse_pr=True)          # the policy the triage workflow passes
+    if "pr" in extra:
+        assert any("refuses pull-request fields (--refuse-pr) but the manifest carries `pr`" in e for e in errs), errs
+    if extra.get("handback"):
+        assert any("refuses pull-request fields (--refuse-pr) but the manifest sets handback" in e for e in errs), errs
+    # Without --refuse-pr the same manifests pass (`handback` alone fails its
+    # own PR requirement) — which is the gap the flag closes for that caller.
+    without = triage_run(tmp_path, m)
+    if "pr" in extra and extra["pr"].get("open"):
+        assert not any("refuse-pr" in e for e in without)
+        assert without == [], without
+
+
+def test_refuse_pr_accepts_what_triage_lands_and_is_off_by_default(tmp_path):
+    m = triage_manifest(tmp_path, issues=[{"repo": "meridianlabs-ai/inspect_ai", "title": "Triage: t",
+                                            "body_file": write(tmp_path, "i.md"), "assignees": ["ransomr"]}])
+    assert triage_run(tmp_path, m, refuse_pr=True) == []
+    assert triage_run(tmp_path, triage_manifest(tmp_path, handback=False), refuse_pr=True) == []
+    # Callers that open PRs keep the default: base_manifest carries pr + handback.
+    assert run(tmp_path, base_manifest(tmp_path)) == []
+
+
 def test_pr_labels_are_not_covered_by_the_issue_label_policy(tmp_path):
     # pr.labels are the trusted gate's (the workflows that open PRs compose
     # them before the agent runs); the issue policy is about issues[].
@@ -1172,6 +1223,15 @@ def test_cli_issue_policy_flags(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "assignee 'ransomr' is not in the allowed issue assignees (none)" in out
     assert "issues lists 1 entries; this land job allows at most 0" in out
+
+
+def test_cli_refuse_pr(tmp_path, capsys):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path) == 0
+    assert cli(tmp_path, "--refuse-pr") == 1
+    out = capsys.readouterr().out
+    assert "refuses pull-request fields (--refuse-pr) but the manifest carries `pr`" in out
+    assert "refuses pull-request fields (--refuse-pr) but the manifest sets handback" in out
 
 
 def test_cli_max_issues_must_be_a_number(tmp_path):
