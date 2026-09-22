@@ -82,11 +82,13 @@ text are checked by the tests under `tests/`.
   interpreter, through a directory the codex user can write or replace. A
   job that may run codex puts nothing under its workspace on
   `GITHUB_PATH`; before the codex user is given write access to the
-  checkout, every hop of every PATH entry (symlink targets included) is
-  checked: one inside the workspace fails the job, one the user can write
-  outside it — the hosted image ships `/opt` and `/usr/local/bin`
-  world-writable — is made runner-only first and fails the job if it stays
-  writable, so codex never runs behind a hijackable search path; the
+  checkout, every hop of every PATH entry (symlink targets included) and
+  every file inside an entry that the user owns, can write or reaches
+  through a symlink is checked: one inside the workspace fails the job, one
+  the user owns or can write outside it — the hosted image ships `/opt` and
+  `/usr/local/bin` world-writable — is made runner-only first and fails the
+  job if it stays the user's, so codex never runs behind a hijackable
+  search path; the
   reclaim step repeats the check after codex without the repair, and every
   post-codex composite runs its commands with `PATH` pinned to the
   root-owned system directories. Codex cannot add to the job PATH itself:

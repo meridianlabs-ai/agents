@@ -207,10 +207,15 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   intermediate symlink component or a writable symlink parent — a relative
   or empty entry, an entry or ancestor the user can write, a not-yet-existing
   entry the user could create, the sticky-directory exception, a symlink
-  loop, a clean PATH, `protect` making a writable image hop or file
-  runner-only instead of refusing and never touching the workspace, and the
-  check's own probes resolving through the pinned system PATH — `sudo` is a
-  stub answering the writability probes from mode bits); the reclaim, `codex-usage`, the
+  loop, a clean PATH, ownership as authority — an owned read-only
+  directory, an owned sticky parent, an owned 0755 executable — the files
+  inside an entry followed through their symlinks (into the workspace, to a
+  writable file, to a file in a replaceable directory, a chain, a shared
+  chain probed once), `protect` making a writable or owned image hop or
+  file runner-only instead of refusing and never touching the workspace,
+  and the check's own probes resolving through the pinned system PATH —
+  `sudo` is a stub answering the ownership and writability probes from a
+  list and mode bits); the reclaim, `codex-usage`, the
   unresolved-merge guard and `emit-landing`'s `write` step run against a
   PLANTED `.venv/bin` of `sudo`, `git`, `find`, `jq` and friends first on
   the job PATH and touch none of it; `provision-fallback` writes nothing to

@@ -20,7 +20,14 @@
 #      them while the runner user still can (npm's global bin).
 #   3. The same check REFUSES a workspace venv on the job PATH, and an
 #      outward symlink from the workspace to /usr/bin (review round 1 of
-#      #131).
+#      #131); and, with real codex ownership (review round 2): a
+#      codex-owned mode-555 directory and a codex-owned sticky directory
+#      holding a runner-owned `bin` are refused without protect and
+#      protected (chown to runner) with it — after which codex cannot chmod
+#      them back; a runner-only directory holding `bash -> <workspace
+#      venv>/bash` is refused in both modes; one holding `bash -> <a
+#      codex-owned 0755 file>` is refused without protect and the file
+#      protected with it.
 #   4. `create-codex-user` step 3 (the grant and the rest) runs.
 #   5. As the codex user: plant `sudo`, `bash`, `git`, `find`, `jq` in the
 #      workspace venv, tamper with .git/config, and try to plant into the
@@ -113,6 +120,44 @@ if run_assert "$GITHUB_WORKSPACE/tools:$job_path" true >"$RUNNER_TEMP/smoke-refu
 grep -q "lies inside the workspace" "$RUNNER_TEMP/smoke-refuse-link.log" || { cat "$RUNNER_TEMP/smoke-refuse-link.log"; fail "wrong refusal"; }
 echo "refused: $(grep -o "job PATH entry '[^']*' lies inside the workspace[^,]*" "$RUNNER_TEMP/smoke-refuse-link.log")"
 rm "$GITHUB_WORKSPACE/tools"
+
+say "3b. real ownership (review round 2): owned directories and linked executables"
+T=$RUNNER_TEMP/r2
+mkdir -p "$T"
+sudo install -d -o codex -g codex -m 555 "$T/owned555"
+sudo install -d -o codex -g codex -m 1777 "$T/ownedsticky"
+install -d -m 755 "$T/ownedsticky/bin"
+install -d -m 755 "$T/linkws" "$T/linkowned" "$T/ownedfile"
+ln -s "$GITHUB_WORKSPACE/.venv/bin/bash" "$T/linkws/bash"
+printf '#!/bin/bash\nexit 0\n' >"$T/ownedfile/bash"; chmod 755 "$T/ownedfile/bash"; sudo chown codex:codex "$T/ownedfile/bash"
+ln -s "$T/ownedfile/bash" "$T/linkowned/bash"
+expect_refusal() { # <label> <PATH> <protect> <expected text>
+  if run_assert "$2" "$3" >"$RUNNER_TEMP/smoke-r2-$1.log" 2>&1; then cat "$RUNNER_TEMP/smoke-r2-$1.log"; fail "$1 (protect=$3) was not refused"; fi
+  grep -q "$4" "$RUNNER_TEMP/smoke-r2-$1.log" || { cat "$RUNNER_TEMP/smoke-r2-$1.log"; fail "$1: wrong refusal"; }
+  echo "$1 (protect=$3) refused: $(grep -o "job PATH entry '[^']*' [^—]*" "$RUNNER_TEMP/smoke-r2-$1.log" | head -1)"
+}
+expect_pass() { # <label> <PATH> <protect> <expected text>
+  run_assert "$2" "$3" >"$RUNNER_TEMP/smoke-r2-$1.log" 2>&1 || { cat "$RUNNER_TEMP/smoke-r2-$1.log"; fail "$1 (protect=$3) did not pass"; }
+  grep -q "$4" "$RUNNER_TEMP/smoke-r2-$1.log" || { cat "$RUNNER_TEMP/smoke-r2-$1.log"; fail "$1: expected '$4'"; }
+  echo "$1 (protect=$3) passed: $(grep -o "protected job PATH [a-z]* [^ ]*" "$RUNNER_TEMP/smoke-r2-$1.log" | tr '\n' ';')"
+}
+expect_refusal owned555 "$T/owned555:$job_path" false "is owned by the codex user (at $T/owned555)"
+expect_pass owned555 "$T/owned555:$job_path" true "protected job PATH hop $T/owned555"
+stat -c '%A %U:%G %n' "$T/owned555"
+if sudo -u codex chmod 777 "$T/owned555" 2>/dev/null; then fail "codex could chmod the protected directory back"; fi
+echo "codex cannot chmod $T/owned555 after protection: ok"
+expect_refusal ownedsticky "$T/ownedsticky/bin:$job_path" false "is owned by the codex user (at $T/ownedsticky)"
+expect_pass ownedsticky "$T/ownedsticky/bin:$job_path" true "protected job PATH hop $T/ownedsticky"
+expect_refusal linkws "$T/linkws:$job_path" false "lies inside the workspace"
+expect_refusal linkws "$T/linkws:$job_path" true "lies inside the workspace"
+expect_refusal linkowned "$T/linkowned:$job_path" false "is owned by the codex user (at $T/ownedfile/bash)"
+expect_pass linkowned "$T/linkowned:$job_path" true "protected job PATH file $T/ownedfile/bash"
+stat -c '%A %U:%G %n' "$T/ownedfile/bash"
+if sudo -u codex sh -c "echo x >>'$T/ownedfile/bash'" 2>/dev/null; then fail "codex could still write the protected file"; fi
+echo "codex cannot write $T/ownedfile/bash after protection: ok"
+# The stock PATH passes again with nothing left to protect.
+run_assert "$job_path" false >"$RUNNER_TEMP/smoke-r2-stock-again.log" || { cat "$RUNNER_TEMP/smoke-r2-stock-again.log"; fail "stock PATH no longer passes"; }
+grep -o 'job PATH: .*' "$RUNNER_TEMP/smoke-r2-stock-again.log"
 
 say "4. create-codex-user, step 3 (its second run block): the grant and the rest"
 /bin/bash -c "$(lift create-codex-user 2)"

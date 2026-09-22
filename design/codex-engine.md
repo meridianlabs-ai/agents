@@ -450,22 +450,38 @@ three layers:
   or empty entry (each step's working directory is the workspace), and a
   hop whose physical path lies inside `$GITHUB_WORKSPACE` (codex-writable
   once the grant runs — checked by path, since the grant has not happened
-  yet). A hop outside the workspace that `sudo -u codex test -w` finds
-  writable (group memberships count) is **protected** — `chown runner`,
-  `chmod go-w`, sticky and other bits kept — and refused only if still
-  writable afterwards (codex-owned, say); so is a writable regular file
-  directly inside an entry (an existing tool overwritten in place). On the
-  stock image that protects `/opt`, `/opt/pipx_bin`, the toolcache chain
-  and `/usr/local/bin`, and keeps the runner user's own writes — npm's
-  global bin, which openai/codex-action's `npm install -g @openai/codex`
-  needs; the toolcache setup-* actions fill — while taking the codex
-  user's away. The one exception to "writable refuses" is a sticky
-  directory such as `/tmp`, where a user may create entries but not rename
-  or unlink another user's: accepted when the child on the way down exists
-  and is not codex-owned (`find -user`, an lstat — a codex-owned symlink
-  child is codex's to rename whatever it points at). A not-yet-existing
-  entry whose nearest existing ancestor is writable is refused the same
-  way (codex could create it). This is the primary defence: it runs before
+  yet). A hop outside the workspace that codex **owns** (`find -user`, an
+  lstat — ownership is authority: an owner can chmod a read-only directory
+  writable again, and the owner of a sticky directory may rename or unlink
+  anyone's entries in it, unlink(2); round 2 of #131) or that `sudo -u
+  codex test -w` finds writable (group memberships count) is **protected**
+  — `chown runner`, `chmod go-w`, sticky and other bits kept — and refused
+  only if still owned or writable afterwards. Then the FILES directly
+  inside each entry — a tool a later step may call, or the runner may pick
+  as an interpreter — are found in one `find` pass (every symlink,
+  everything codex owns, everything codex could write through its groups or
+  the world; nothing else is codex's to change, the image has no ACLs) and
+  settled the same way, a symlink followed as written: its target's
+  directory chain is walked like an entry and the target checked in turn,
+  so `bash -> $GITHUB_WORKSPACE/.venv/bin/bash` in a runner-only directory
+  is refused as a workspace hop, and a link to a file codex owns or can
+  write or replace is protected or refused (round 2 of #131: the first cut
+  scanned regular files by mode bits and skipped symlinks — a link from a
+  runner-only directory to a codex-writable target was the planted
+  interpreter by another name). Hops and files found safe are remembered,
+  so a chain many links share (`/etc/alternatives`, a toolcache) is probed
+  once. On the stock image that protects `/opt`, `/opt/pipx_bin`, the
+  toolcache chain, `/usr/local/bin` and `/usr/local/.ghcup`, the
+  world-writable files in them and the targets their links reach, and
+  keeps the runner user's own writes — npm's global bin, which
+  openai/codex-action's `npm install -g @openai/codex` needs; the toolcache
+  setup-* actions fill — while taking the codex user's away. The one
+  exception to "writable refuses" is a sticky directory codex does NOT own,
+  such as `/tmp`, where a user may create entries but not rename or unlink
+  another user's: accepted when the child on the way down exists and is
+  not codex-owned. A not-yet-existing entry whose nearest existing ancestor
+  is writable is refused the same way (codex could create it). This is the
+  primary defence: it runs before
   codex, on a PATH only the runner has written, and when it refuses codex
   never runs. The check's own probes resolve through its `system-path`
   input — `/usr/sbin:/usr/bin:/sbin:/bin`, the root-owned system
@@ -498,7 +514,11 @@ on every push touching the composites (and by hand), runs the SAME lifted
 bodies of the checked-out revision on the hosted image with the real codex
 user, the real image PATH and real sudo: the pre-grant check passes on the
 stock PATH (naming what it protected), refuses a workspace venv and an
-outward workspace symlink, the grant runs, a codex-user "codex" plants into
+outward workspace symlink, refuses or protects (with real codex ownership)
+a codex-owned 555 directory, a codex-owned sticky parent, a runner-only
+directory linking `bash` into the workspace and one linking to a
+codex-owned file — codex can chmod or write none of them afterwards — the
+grant runs, a codex-user "codex" plants into
 the venv and cannot plant into the protected directories, npm's global
 install still works for the runner, and the reclaim, `codex-usage` and the
 guard complete without running a planted file; the `mechanism` job shows

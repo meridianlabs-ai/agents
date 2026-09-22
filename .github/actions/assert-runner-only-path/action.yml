@@ -30,22 +30,37 @@ description: >-
   (resolved against each step's working directory, the workspace); a hop
   whose physical path lies inside `$GITHUB_WORKSPACE` (codex-writable after
   the grant — checked by path, so it holds before the grant too); when the
-  user exists, a hop that `sudo -u <user> test -w` finds writable, with the
-  one exception of a sticky directory such as `/tmp`, where the user may
-  create entries but not rename or unlink another user's — accepted when the
-  child on the way down exists and is not owned by the user (`find -user`,
-  which does not follow a symlink child); a hop that does not exist yet
-  whose nearest existing ancestor is writable (the user could create it);
-  and a regular file directly inside an entry that the user can write (an
-  existing tool overwritten in place). Every probe runs by absolute system
-  path: this step pins its OWN PATH to `system-path` first, so the check
-  does not depend on the list it is checking.
+  user exists, a hop the user OWNS (`find -user`, an lstat — ownership is
+  authority: an owner can chmod a read-only directory writable again, and
+  the owner of a sticky directory may rename or unlink anyone's entries in
+  it; review round 2 of #131) or that `sudo -u <user> test -w` finds
+  writable, with the one exception of a sticky directory the user does not
+  own, such as `/tmp`, where the user may create entries but not rename or
+  unlink another user's — accepted when the child on the way down exists
+  and is not owned by the user; and a hop that does not exist yet whose
+  nearest existing ancestor is writable (the user could create it). Then
+  the FILES directly inside each entry — a tool a later step may call, or
+  the runner may pick as an interpreter — found in one `find` pass: every
+  symlink, everything the user owns, everything the user could write
+  through its group or the world (nothing else is the user's to change; the
+  hosted image carries no ACLs). A symlink is followed as written — its
+  target's directory chain is walked like an entry and the target checked
+  in turn, recursively — so `bash -> $GITHUB_WORKSPACE/.venv/bin/bash` in a
+  runner-only directory, or a link to a file the user owns or can write or
+  replace, is refused as the planted interpreter it is; a regular file the
+  user owns or can write is refused (round 2 of #131: the first cut skipped
+  symlinks and prefiltered by mode bits). Hops and files found safe are
+  remembered, so a chain many links share (`/etc/alternatives`, a
+  toolcache) is probed once. Every probe runs by absolute system path:
+  this step pins its OWN PATH to `system-path` first, so the check does not
+  depend on the list it is checking.
 
   `protect: "true"` (how `create-codex-user` runs it, before the grant)
-  turns a writable hop outside the workspace into a runner-only one instead
-  of refusing it — `chown <this step's user>` plus `chmod go-w`, sticky and
-  other bits kept — and refuses only if it is still writable afterwards
-  (owned by the user, say). This is not an exemption: the hosted Ubuntu
+  turns an owned or writable hop or file outside the workspace into a
+  runner-only one instead of refusing it — `chown <this step's user>` plus
+  `chmod go-w`, sticky and other bits kept — and refuses only if it is
+  still owned or writable afterwards (a symlink is never protected: it is
+  refused). This is not an exemption: the hosted Ubuntu
   image ships `/opt` (with `/opt/pipx_bin` and `/opt/hostedtoolcache` on
   the job PATH), `/usr/local/bin` and `/usr/local/.ghcup` recursively mode
   777 (actions/runner-images `images/ubuntu/scripts/build/configure-system.sh`,
@@ -56,12 +71,12 @@ description: >-
   convenient. Protecting keeps the runner user's own writes (npm's global
   bin in `/usr/local/bin`, which openai/codex-action's `npm install -g`
   needs; the toolcache setup-* actions fill) and takes the codex user's
-  away. Writable regular files directly inside an entry get `chmod go-w`
-  the same way. Workspace hops are never protected: a workspace directory
+  away. Owned or writable files directly inside an entry, and the targets
+  their symlinks reach, are protected the same way. Workspace hops are never protected: a workspace directory
   on the job PATH is a provisioning mistake the caller must fix
   (`provision-fallback` `add-to-path: false`). Without `protect` (how
-  `reclaim-codex-workspace` runs it after codex) every writable hop
-  refuses.
+  `reclaim-codex-workspace` runs it after codex) every owned or writable hop
+  or file refuses.
 
   Run twice on the codex write paths and once on the review path: by
   `create-codex-user`, after the user exists and BEFORE the workspace
@@ -81,16 +96,17 @@ description: >-
 inputs:
   user:
     description: >-
-      The unprivileged user whose write access disqualifies a directory.
-      Probed with `sudo -u <user> test -w`, so its group memberships count;
-      skipped (path checks only) when the user does not exist yet.
+      The unprivileged user whose ownership or write access disqualifies a
+      directory or file. Probed with `find -user` and `sudo -u <user> test
+      -w`, so its group memberships count; skipped (path checks only) when
+      the user does not exist yet.
     required: false
     default: codex
   protect:
     description: >-
-      "true": a writable hop outside the workspace is made runner-only
-      (`chown` to this step's user, `chmod go-w`) and re-probed instead of
-      refused; "false" (default): refused. See description.
+      "true": an owned or writable hop or file outside the workspace is made
+      runner-only (`chown` to this step's user, `chmod go-w`) and re-probed
+      instead of refused; "false" (default): refused. See description.
     required: false
     default: "false"
   system-path:
@@ -131,54 +147,108 @@ runs:
           printf '%s%s\n' "$real" "$rest"
         }
         refuse() { # <entry> <reason>
-          echo "::error::job PATH entry '$1' $2 — every step after codex resolves its commands, and the runner its shell interpreter, through the job PATH, so a directory the codex user can write or replace there hands it code execution as runner; refusing to continue (design/codex-engine.md → Runner-side search path)."
+          echo "::error::job PATH entry '$1' $2 — every step after codex resolves its commands, and the runner its shell interpreter, through the job PATH, so a directory or file the codex user can write, own or replace there hands it code execution as runner; refusing to continue (design/codex-engine.md → Runner-side search path)."
           exit 1
         }
+        inside_ws() { [ "$1" = "$ws" ] || [ "${1#"$ws"/}" != "$1" ]; }
         have_user=""
-        if id "$USER_NAME" >/dev/null 2>&1; then have_user=1; fi
+        groups_expr=()
+        if id "$USER_NAME" >/dev/null 2>&1; then
+          have_user=1
+          # The user's groups, for the one-pass candidate scan below.
+          for g in $(id -Gn "$USER_NAME"); do
+            [ ${#groups_expr[@]} -eq 0 ] || groups_expr+=(-o)
+            groups_expr+=(-group "$g")
+          done
+        fi
         writable() { sudo -u "$USER_NAME" test -w "$1"; }
-        # lstat, not stat: a symlink child the user owns is the user's to
-        # rename, whatever its target's owner.
+        # lstat, not stat: a symlink the user owns is the user's to rename or
+        # repoint, whatever its target's owner. Ownership is authority: an
+        # owner can chmod a read-only directory or file writable again, so an
+        # owned hop counts whatever its mode says now (review round 2 of #131).
         owned() { [ -n "$(sudo find "$1" -maxdepth 0 -user "$USER_NAME" 2>/dev/null)" ]; }
-        # Make a hop runner-only and say so; the caller re-probes.
+        # Make a hop or file runner-only and say so; the caller re-probes.
         protect() {
           sudo chown "$me" "$1"
           sudo chmod go-w "$1"
-          echo "protected job PATH hop $1 (was writable by $USER_NAME; now owned by $me, group/other write removed)"
+          echo "protected job PATH ${2:-hop} $1 (was writable by or owned by $USER_NAME; now owned by $me, group/other write removed)"
         }
         protected=0
-        # Every hop of PATH as written, from the path up to /, then the
+        # Hops and files already found safe (or made safe): a symlink target's
+        # chain is shared by many links (/etc/alternatives, a toolcache), and
+        # every hop's ancestors were walked when the hop was.
+        seen=$'\n'
+        seen_has() { [[ "$seen" == *$'\n'"$1"$'\n'* ]]; }
+        seen_add() { seen="$seen$1"$'\n'; }
+        # One hop: refuse a workspace hop; a hop the user owns or can write is
+        # protected (protect mode) or refused, with the sticky exception for
+        # a directory the user does not own (see description).
+        settle() { # <entry> <hop as written> <physical> <child or empty> <kind>
+          local e="$1" a="$2" p="$3" child="$4" kind="$5"
+          if inside_ws "$p"; then
+            refuse "$e" "lies inside the workspace $GITHUB_WORKSPACE (at $a), which the codex user can write"
+          fi
+          [ -n "$have_user" ] || return 0
+          sudo test -e "$a" || return 0
+          local why=""
+          if owned "$a"; then why="is owned by the $USER_NAME user"
+          elif writable "$a"; then
+            # Sticky (/tmp): creation only, so an EXISTING child not owned by
+            # the user is safe there; a missing child, or one the user owns,
+            # is not — and an owned sticky directory never is (handled above).
+            if [ "$kind" = hop ] && [ -n "$child" ] && sudo test -k "$a" && sudo test -e "$child" && ! owned "$child"; then
+              return 0
+            fi
+            why="is writable by the $USER_NAME user"
+          else
+            return 0
+          fi
+          if [ "$PROTECT" = "true" ] && [ ! -L "$a" ]; then
+            protect "$a" "$kind"
+            protected=$((protected + 1))
+            if owned "$a" || writable "$a"; then refuse "$e" "is still owned or writable by the $USER_NAME user after protection (at $a)"; fi
+          else
+            refuse "$e" "$why (at $a)"
+          fi
+        }
+        # Every hop of a path as written, from the path up to /, then the
         # target chain of each symlink hop the same way (see description).
         walk() { # <entry> <path as written> <symlink depth>
           local e="$1" a="$2" depth="$3" child="" p target
           if [ "$depth" -gt 8 ]; then refuse "$e" "passes through more than 8 symlinks (at $a)"; fi
           while :; do
+            if seen_has "$a"; then break; fi
             p=$(physical "$a") || refuse "$e" "cannot be resolved (at $a)"
-            if [ "$p" = "$ws" ] || [ "${p#"$ws"/}" != "$p" ]; then
-              refuse "$e" "lies inside the workspace $GITHUB_WORKSPACE (at $a), which the codex user can write"
-            fi
             if [ -L "$a" ]; then
               target=$(readlink "$a")
               case "$target" in /*) ;; *) target="$(dirname "$a")/$target" ;; esac
               walk "$e" "$target" $((depth + 1))
             fi
-            if [ -n "$have_user" ] && sudo test -e "$a" && writable "$a"; then
-              # Sticky (/tmp): creation only, so an EXISTING child not owned
-              # by the user is safe there; a missing child or one the user
-              # owns is not.
-              if [ -n "$child" ] && sudo test -k "$a" && sudo test -e "$child" && ! owned "$child"; then
-                :
-              elif [ "$PROTECT" = "true" ] && [ ! -L "$a" ]; then
-                protect "$a"
-                protected=$((protected + 1))
-                if writable "$a"; then refuse "$e" "is still writable by the $USER_NAME user after protection (at $a)"; fi
-              else
-                refuse "$e" "is writable by the $USER_NAME user (at $a)"
-              fi
-            fi
+            settle "$e" "$a" "$p" "$child" hop
+            seen_add "$a"
             [ "$a" = / ] && break
             child="$a"; a=$(dirname "$a")
           done
+        }
+        # A file directly inside a PATH entry — a tool a later step may call
+        # or the runner may pick as an interpreter. A symlink is followed as
+        # written: its target's directory chain is walked and the target
+        # checked in turn (a link from a runner-only directory into the
+        # workspace, or to a file the user owns or can write or replace, is
+        # the planted interpreter by another name — review round 2 of #131).
+        check_file() { # <entry> <file as written> <symlink depth>
+          local e="$1" f="$2" depth="$3" p target
+          if seen_has "$f"; then return 0; fi
+          if [ "$depth" -gt 8 ]; then refuse "$e" "holds $f, which passes through more than 8 symlinks"; fi
+          if [ -L "$f" ]; then
+            target=$(readlink "$f")
+            case "$target" in /*) ;; *) target="$(dirname "$f")/$target" ;; esac
+            walk "$e" "$(dirname "$target")" $((depth + 1))
+            check_file "$e" "$target" $((depth + 1))
+          fi
+          p=$(physical "$f") || refuse "$e" "holds $f, which cannot be resolved"
+          settle "$e" "$f" "$p" "" file
+          seen_add "$f"
         }
         n=0
         # `tr` rather than `read -a`: an empty component ("a::b", a trailing
@@ -192,23 +262,16 @@ runs:
           esac
           walk "$e" "$e" 0
           [ -n "$have_user" ] || continue
-          # Regular files directly inside the entry: an existing tool the
-          # user could overwrite in place. Symlinks are skipped (chmod would
-          # reach only their targets); group/other write bits select the
-          # candidates, the user probe decides.
+          # The entry's files, in one find pass: every symlink (its target
+          # decides), everything the user owns, and everything the user could
+          # write through its group or the world. Nothing else is the user's
+          # to change (no ACLs on the hosted image).
           p=$(physical "$e")
           if sudo test -d "$p"; then
             while IFS= read -r f; do
               [ -n "$f" ] || continue
-              writable "$f" || continue
-              if [ "$PROTECT" = "true" ]; then
-                sudo chmod go-w "$f"
-                protected=$((protected + 1))
-                if writable "$f"; then refuse "$e" "holds $f, still writable by the $USER_NAME user after protection"; fi
-              else
-                refuse "$e" "holds $f, a file writable by the $USER_NAME user"
-              fi
-            done < <(sudo find "$p" -maxdepth 1 -type f \( -perm -0002 -o -perm -0020 \) 2>/dev/null)
+              check_file "$e" "$f" 0
+            done < <(sudo find "$p" -mindepth 1 -maxdepth 1 \( -type l -o -user "$USER_NAME" -o -perm -0002 -o \( -perm -0020 \( "${groups_expr[@]}" \) \) \) 2>/dev/null)
           fi
         done < <(printf '%s\n' "$job_path" | tr ':' '\n')
-        echo "job PATH: $n entries, none inside the workspace${have_user:+ or writable by $USER_NAME}${have_user:+ ($protected hop(s)/file(s) protected)}."
+        echo "job PATH: $n entries, none inside the workspace${have_user:+ or owned or writable by $USER_NAME}${have_user:+ ($protected hop(s)/file(s) protected)}."
