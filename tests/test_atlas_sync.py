@@ -3,9 +3,13 @@ its writes.
 
 Security scan 2026-09-04, findings 4121985 and 4121986: the hourly sync
 believed comment text (retrigger_stale_handbacks) and issue-body text
-(companion_pr) from anyone. Every `gh` call goes through the module's `gh()`
-wrapper, so the tests stand in a fake for it and route each call by the
-arguments. Run with `python3 -m pytest` from the repo root.
+(companion_pr) from anyone. Finding 4628443 (2026-09-21): it then believed
+any author whose payload carried an OWNER/MEMBER/COLLABORATOR
+`author_association`, which GitHub reports for org members and invited
+collaborators at ANY repository permission, read and triage included. Every
+`gh` call goes through the module's `gh()` wrapper, so the tests stand in a
+fake for it and route each call by the arguments. Run with `python3 -m
+pytest` from the repo root.
 """
 
 import importlib.util
@@ -97,21 +101,27 @@ def permission(gh, login, perm, role=None):
 
 
 @pytest.mark.parametrize(
-    "login, association, expected",
+    "login, expected",
     [
-        (MARVIN, None, True),
-        (MARVIN_BOT, None, True),  # by name: an App's permission reads `none`
-        (MARVIN_BOT, "NONE", True),
-        ("colleague", "OWNER", True),
-        ("colleague", "MEMBER", True),
-        ("colleague", "COLLABORATOR", True),
-        ("github-actions[bot]", "MEMBER", False),  # never, whatever the payload says
-        ("", "OWNER", False),
+        (MARVIN, True),
+        (MARVIN_BOT, True),  # by name: an App's permission reads `none`
+        ("github-actions[bot]", False),  # never
+        ("", False),
     ],
 )
-def test_trusted_author_decides_without_a_lookup(gh, login, association, expected):
-    assert atlas.trusted_author(login, FORK, association) is expected
+def test_trusted_author_decides_the_named_logins_without_a_lookup(gh, login, expected):
+    assert atlas.trusted_author(login, FORK) is expected
     assert gh.calls == []
+
+
+def test_trusted_author_takes_no_association_argument():
+    # Finding 4628443: the payload's `author_association` used to short-circuit
+    # the lookup, yet MEMBER and COLLABORATOR carry no repository permission.
+    # The helper now has no way to be told one, so no caller can trust it.
+    import inspect
+
+    assert list(inspect.signature(atlas.trusted_author).parameters) == ["login", "repo"]
+    assert not hasattr(atlas, "TRUSTED_ASSOCIATIONS")
 
 
 @pytest.mark.parametrize(
@@ -126,19 +136,25 @@ def test_trusted_author_decides_without_a_lookup(gh, login, association, expecte
 )
 def test_trusted_author_looks_up_write_access(gh, perm, role, expected):
     permission(gh, "someone", perm, role)
-    assert atlas.trusted_author("someone", FORK, "CONTRIBUTOR") is expected
+    assert atlas.trusted_author("someone", FORK) is expected
     assert len(gh.matching(is_permission_lookup)) == 1
+
+
+def test_trusted_author_refuses_a_triage_collaborator(gh):
+    # GitHub answers `permission: read` with the finer role in `role_name`
+    permission(gh, "someone", "read", "triage")
+    assert atlas.trusted_author("someone", FORK) is False
 
 
 def test_trusted_author_fails_closed_on_a_broken_lookup(gh):
     gh.route(has("/collaborators/"), RuntimeError("gh api ...: HTTP 502"))
-    assert atlas.trusted_author("someone", FORK, "NONE") is False
+    assert atlas.trusted_author("someone", FORK) is False
 
 
 def test_trusted_author_caches_the_lookup_per_login_and_repo(gh):
     permission(gh, "someone", "write")
     assert atlas.trusted_author("someone", FORK) is True
-    assert atlas.trusted_author("someone", FORK, "NONE") is True
+    assert atlas.trusted_author("someone", FORK) is True
     assert len(gh.matching(is_permission_lookup)) == 1
     assert atlas.trusted_author("someone", TS_MONO) is True
     assert len(gh.matching(is_permission_lookup)) == 2
@@ -262,7 +278,7 @@ def test_the_trusted_set_is_the_machine_account_under_both_logins():
 @pytest.mark.parametrize("login", ["foo[bot]", REVIEWER_BOT])
 def test_other_apps_fall_through_to_the_lookup_and_are_refused_on_none(gh, login):
     permission(gh, login, "none")
-    assert not atlas.trusted_author(login, FORK, "NONE")
+    assert not atlas.trusted_author(login, FORK)
     assert len(gh.matching(is_permission_lookup)) == 1
 
 
@@ -303,6 +319,40 @@ def test_revives_for_a_write_access_author_found_by_lookup(gh):
     atlas.retrigger_stale_handbacks()
     assert len(revivals(gh)) == 1
     assert len(gh.matching(is_permission_lookup)) == 1
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_a_write_access_colleagues_handback_is_revived_only_after_a_lookup(gh, association):
+    # Finding 4628443: the association used to skip the lookup. A colleague
+    # with write access is still revived — by the lookup, not the payload.
+    permission(gh, "colleague", "write")
+    auto_pr(gh, [comment("@review", login="colleague", association=association)])
+    atlas.retrigger_stale_handbacks()
+    assert len(revivals(gh)) == 1
+    assert len(gh.matching(is_permission_lookup)) == 1
+
+
+@pytest.mark.parametrize("association", ["MEMBER", "COLLABORATOR"])
+@pytest.mark.parametrize("perm, role", [("read", "read"), ("read", "triage"), ("none", "none")])
+def test_does_not_revive_a_sub_write_members_trigger(gh, association, perm, role):
+    # An org member without write on the fork, or a collaborator invited at
+    # read/triage: the reviewer gate refused this `@review` (write access
+    # looked up, no ack), so re-issuing it as the machine account would be
+    # the privilege step the gate denied. The payload's association is the
+    # attacker's only asset here and it decides nothing.
+    permission(gh, "colleague", perm, role)
+    auto_pr(gh, [comment("@review", login="colleague", association=association)])
+    atlas.retrigger_stale_handbacks()
+    assert revivals(gh) == []
+    assert len(gh.matching(is_permission_lookup)) == 1
+    assert any("by colleague ignored" in a for a in atlas.actions)
+
+
+def test_does_not_revive_a_sub_write_members_forged_verdict(gh):
+    permission(gh, "colleague", "read", "triage")
+    auto_pr(gh, [comment(VERDICT, login="colleague", association="MEMBER")])
+    atlas.retrigger_stale_handbacks()
+    assert revivals(gh) == []
 
 
 def test_ignores_an_outsider_review_trigger(gh):
@@ -417,17 +467,40 @@ def test_a_trusted_authors_url_line_is_honoured(gh):
     comp = atlas.companion_pr(ISSUE, HEAD)
     assert (comp["number"], comp["_repo"]) == (7, TS_MONO)
     assert gh.matching(is_discovery_query) == []
-    # author fields ride the body fetch: one issue read, asking for them
+    # the author's login rides the body fetch: one issue read, asking for it
+    # and not for the association, which decides nothing (finding 4628443)
     (fetch,) = gh.matching(is_issue_fetch)
-    assert ".user.login" in fetch[3] and ".author_association" in fetch[3]
+    assert ".user.login" in fetch[3] and ".author_association" not in fetch[3]
     assert gh.repos_of(is_url_query) == [TS_MONO]  # the URL's PR is read under the ts-mono token
 
 
-def test_a_trusted_associations_opt_out_is_honoured(gh):
+def test_a_write_access_colleagues_opt_out_is_honoured_after_a_lookup(gh):
+    permission(gh, "colleague", "write")
     anchor(gh, "Companion PR: none", login="colleague", association="MEMBER")
     assert atlas.companion_pr(ISSUE, HEAD) is None
-    assert gh.matching(is_permission_lookup) == []
+    assert len(gh.matching(is_permission_lookup)) == 1
     assert gh.matching(is_discovery_query) == []
+
+
+@pytest.mark.parametrize("association", ["MEMBER", "COLLABORATOR"])
+@pytest.mark.parametrize("perm, role", [("read", "read"), ("read", "triage")])
+def test_a_sub_write_members_opt_out_is_ignored(gh, association, perm, role):
+    # Finding 4628443: a board issue's author with a MEMBER/COLLABORATOR
+    # association but no write access could disable the companion hold
+    permission(gh, "colleague", perm, role)
+    anchor(gh, "Companion PR: none", login="colleague", association=association)
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9  # the convention decided
+    assert len(gh.matching(is_permission_lookup)) == 1
+    assert any(
+        "issue author colleague is not a trusted author" in a for a in atlas.actions
+    )
+
+
+def test_a_sub_write_members_url_line_is_ignored(gh):
+    permission(gh, "colleague", "read", "triage")
+    anchor(gh, f"Companion PR: {TS_MONO_URL}", login="colleague", association="MEMBER")
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9
+    assert gh.matching(is_url_query) == []
 
 
 def test_an_untrusted_authors_opt_out_is_ignored(gh):

@@ -510,9 +510,11 @@ stage, resolved by the hourly sync:
   `claude/issue-251-20260818-2127` in both repos). An explicit
   `Companion PR: <url>` line in the anchor issue body overrides the
   convention for human-named branches — but only when the issue's author
-  is a trusted identity or has write access (the machine account, an
-  OWNER/MEMBER/COLLABORATOR association, or a write permission looked up
-  on the fork) and the URL is a ts-mono PR — and, on an imported issue,
+  is a trusted identity or has write access (the machine account by login,
+  or a write permission looked up on the fork; the payload's
+  `author_association` decides nothing, since MEMBER and COLLABORATOR are
+  reported at any repository permission — finding 4628443, fixed
+  2026-09-22) and the URL is a ts-mono PR — and, on an imported issue,
   only above the import's `---` rule, since the snapshot below it is the
   upstream author's text copied verbatim under the importer's name. Any
   other line is treated as absent: an issue body stays editable by its

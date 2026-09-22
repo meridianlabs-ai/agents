@@ -62,8 +62,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
 - `test_atlas_sync.py` — the hourly Atlas sync's author checks
   (`.github/scripts/atlas_sync.py`, against a fake `gh`): `trusted_author`
   (trusted logins — the machine account under both its User and GitHub App
-  logins — `author_association`, the cached write-permission lookup,
-  fail-closed), the stale hand-back revival honouring only trusted authors
+  logins — or the cached write-permission lookup, fail-closed; the payload's
+  `author_association` decides nothing, so a MEMBER or COLLABORATOR at read
+  or triage is refused), the stale hand-back revival honouring only trusted authors
   (an outsider's `@review` or forged verdict is never re-issued as the
   machine account and ends the search), the `Companion PR:` issue-body
   line counting only from a trusted author and only for a ts-mono URL, and
