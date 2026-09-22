@@ -21,13 +21,21 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the gate's, on escalation), the no-change relay, and the two failure
   paths that land nothing — a failed Claude step, whatever the execution
   file says (the base merge and a commit of the run included; 4628657) and a
-  codex round whose guard did not succeed.
+  codex round whose guard did not succeed. The failed step's attempt is
+  kept: `test_ci_fix_gate.py` pins the refund to a step the runner never
+  entered, and runs the refund → gate sequence against the cap (4628735).
+- `test_land_helpers.py` also runs the `land` composite's `plan` step: a
+  `handback` on a manifest with no bundle is dropped unless the caller's
+  `allow-no-change-handback` is "true" (the loops pass the agent step's
+  success), a bundled one is never touched, and the drop reaches the final
+  report (4628734).
 - `test_review_fix_composer.py` — `claude-auto-review.yml`'s `Compose
   landing manifest` step, lifted from the workflow the same way: the
   review loop's ending contract (exactly one hand-back), the agent-field
-  normalization, and the codex path's hand-back / hand-off decision — with
-  the codex no-thread-ids case run on through `emit-landing` and the
-  validator.
+  normalization, the codex path's hand-back / hand-off decision, and the
+  rule that a hand-back without a commit needs a successful agent step
+  (4628734) — with the codex no-thread-ids case run on through
+  `emit-landing` and the validator.
 - `test_review_composer.py` — `claude-review.yml`'s `Prepare Claude review
   for landing` and `Compose landing manifest` steps, lifted the same way
   (issue #114): the reviewer's summary / verdict / inline.json files become
@@ -191,7 +199,14 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   budget; the no-id lookup follows the review gate's rule (the loop's own
   marker or nothing) and is covered too, as is the composite's
   `trusted-logins` default (both machine-account logins; an explicit empty
-  string resets nothing).
+  string resets nothing). Since Claude Security 4628734: the no-progress
+  check escalates on the recorded tip whatever the count reads (a refunded
+  round 1 leaves `rounds: 0` with its head marker), the refund → gate
+  sequence on an unchanged tip escalates, and the refund's `if:` is pinned
+  to a fix job that was cancelled or whose agent step was never entered
+  (`agent_skipped`) plus nothing pushed — never the agent step's own
+  outcome or an execution file — with the Land step admitting a bundle-less
+  hand-back only on the agent step's success.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS` (the machine

@@ -197,6 +197,34 @@ def test_claude_failed_run_without_commit_lands_nothing_and_decides_nothing(repo
     assert m == {}
 
 
+@pytest.mark.parametrize("outcome", ["failure", "skipped", "cancelled", ""])
+def test_a_no_change_handback_needs_a_successful_agent_step(repo, outcome):
+    # Claude Security 4628734: the steered agent writes `handback: true`,
+    # commits nothing and kills its own step (or the PR's provisioning step
+    # writes the file and fails, so the agent step is skipped). Nothing
+    # landed and the step did not complete, so no re-review is owed — the
+    # manifest carries neither hand-back, and the land job drops such a
+    # hand-back again from the trusted side. Replies still post.
+    m, res, _, _ = compose(repo, engine="claude", claude_outcome=outcome, agent_extra=json.dumps({
+        "handback": True, "replies": [{"review_comment_id": 7, "body_file": "r.md"}]}))
+    assert "handback" not in m and "handoff_body_file" not in m and "stage" not in m, outcome
+    assert m["replies"] == [{"review_comment_id": 7, "body_file": "r.md"}]
+    assert "the agent step did not succeed" in res.stdout and "none is requested" in res.stdout
+
+
+def test_a_no_change_handback_is_honored_after_a_successful_step_and_a_committed_one_whatever_the_outcome(repo):
+    # The two legitimate shapes: a run that finished and asked for the
+    # re-review without committing (the gate's no-progress check bounds it),
+    # and a run that committed and then failed (the commits land, the push
+    # re-runs CI, the ⚠️ posts alongside).
+    m, res, _, _ = compose(repo, engine="claude", agent_extra=json.dumps({"handback": True}))
+    assert m["handback"] is True and "handoff_body_file" not in m
+    assert "without committing anything; the re-review re-reads unchanged code" in res.stdout
+    commit(repo)
+    m, _, _, _ = compose(repo, engine="claude", claude_outcome="failure", agent_extra=json.dumps({"handback": True}))
+    assert m["handback"] is True
+
+
 def test_claude_mistyped_fields_are_dropped_not_fatal(repo):
     commit(repo)
     m, res, _, _ = compose(repo, engine="claude", agent_extra=json.dumps({
