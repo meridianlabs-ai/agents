@@ -156,9 +156,13 @@ on:
           and network on; it has no sudo, HOME is /home/codex, PATH is
           sudo's default plus ~/.local/bin, and it must create the project's
           `.venv` for the prompts' tool discovery (which also looks in
-          `node_modules/.bin` and ~/.local/bin). It comes from the caller's
-          workflow file, so it is trusted like every other input here; keep
-          it free of anything derived from the run's event.
+          `node_modules/.bin` and ~/.local/bin). It runs under `bash
+          --noprofile --norc -eo pipefail`, like a `shell: bash` step: a
+          failing command fails provisioning (handle an expected failure
+          with `|| true`). A recipe runs whether or not the checkout has a
+          pyproject.toml — only the generic recipe needs one. It comes from
+          the caller's workflow file, so it is trusted like every other input
+          here; keep it free of anything derived from the run's event.
         required: false
         type: string
         default: ""
@@ -2043,8 +2047,10 @@ jobs:
       # never `./.github/actions/claude-setup`, even on callers that define
       # it: the venv lands in the checkout as before, codex-owned, and the
       # compose step names its tools by the composite's `bin` output. Python
-      # projects only (`pyproject.toml`); anything else codex provisions
-      # itself inside its sandbox, which has network (its prompt says so).
+      # projects (`pyproject.toml`) get the generic recipe; a caller recipe runs
+      # without one (the stub knows its project: a Node repository's `pnpm
+      # install` has no pyproject); anything else codex provisions itself
+      # inside its sandbox, which has network (its prompt says so).
       # Placed after the base sync (so a dependency file the merge touched is
       # what gets installed). A provisioning failure SKIPS the agent; the
       # round the gate already recorded is refunded by the land job (the
@@ -2064,7 +2070,7 @@ jobs:
       - name: Provision project environment (as the codex user)
         id: setup
         timeout-minutes: 10
-        if: hashFiles('pyproject.toml') != ''
+        if: hashFiles('pyproject.toml') != '' || inputs.codex_provision != ''
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
         with:

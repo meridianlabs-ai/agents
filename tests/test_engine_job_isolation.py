@@ -151,7 +151,14 @@ def test_the_codex_job_provisions_as_the_codex_user_after_the_boundary(name):
     provision = step_with(codex_job, "provision-fallback@main")
     assert "        with:\n          user: codex\n" in provision
     assert "          recipe: ${{ inputs.codex_provision }}\n" in provision
-    assert "        if: " in provision and "hashFiles('pyproject.toml') != ''" in provision
+    # Gate: a Python project (the generic recipe) OR a caller recipe — a
+    # Node repository's recipe must run without a pyproject.toml (review
+    # round 2); the reviewer keeps its `ok` clause.
+    cond = next(l for l in provision.splitlines() if l.startswith("        if: "))
+    if name == "claude-review.yml":
+        assert cond == "        if: needs.gate.outputs.ok == 'true' && (hashFiles('pyproject.toml') != '' || inputs.codex_provision != '')"
+    else:
+        assert cond == "        if: hashFiles('pyproject.toml') != '' || inputs.codex_provision != ''"
     order = [s for s in steps(codex_job) if any(k in s for k in ("create-codex-user@main", "provision-fallback@main", CODEX_ACTION))]
     assert [("create-codex-user@main" in order[0], "provision-fallback@main" in order[1],
              "create-codex-user@main" in order[2], CODEX_ACTION in order[3])] == [(True, True, True, True)]
@@ -213,8 +220,13 @@ def test_the_caller_recipe_input_is_declared_and_reaches_only_the_codex_job(name
     decl = decl[:re.search(r"\n      [a-z_]+:\n", decl).start()]
     assert "        required: false\n" in decl and "        type: string\n" in decl and decl.endswith('        default: ""')
     for job, block in jobs(text).items():
-        uses = [l for l in code_lines(block) if "inputs.codex_provision" in l]
-        assert uses == (["          recipe: ${{ inputs.codex_provision }}"] if job == AGENT_JOBS[name][1] else []), job
+        uses = [l.strip() for l in code_lines(block) if "inputs.codex_provision" in l]
+        if job == AGENT_JOBS[name][1]:
+            # The provisioning step's gate and its `recipe` input, nothing else.
+            assert len(uses) == 2 and uses[1] == "recipe: ${{ inputs.codex_provision }}", uses
+            assert uses[0].startswith("if: ") and "inputs.codex_provision != ''" in uses[0], uses
+        else:
+            assert uses == [], job
 
 
 @pytest.mark.parametrize("name", REUSABLE)
@@ -309,19 +321,20 @@ def test_composite_fails_when_sudo_fails(tmp_path):
     assert r.returncode == 7
 
 
-def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str, caller_recipe: str = None):
+def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str, caller_recipe: str = None, check: bool = True):
     """Run provision.sh with the network and uv stubbed: the uv installer
     curl prints an empty script, `uv` records its arguments; `python3` is
     the interpreter running the tests (tomllib needs 3.11)."""
     bins = tmp_path / "bin"
-    bins.mkdir()
+    bins.mkdir(parents=True)
     log = tmp_path / "uv.log"
     write_exe(bins / "curl", "#!/usr/bin/env bash\nexit 0\n")
     write_exe(bins / "uv", '#!/usr/bin/env bash\nprintf "uv %s\\n" "$*" >>"$UV_LOG"\n')
     write_exe(bins / "python3", f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
     work = tmp_path / "work"
     (work / ".git" / "info").mkdir(parents=True)
-    (work / "pyproject.toml").write_text(pyproject)
+    if pyproject is not None:
+        (work / "pyproject.toml").write_text(pyproject)
     gh_path = tmp_path / "github_path"
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "UV_LOG": str(log), "HOME": str(tmp_path)}
     if github_path:
@@ -332,8 +345,10 @@ def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str, caller_reci
         (tmp_path / "caller.sh").write_text(caller_recipe)
         args = [str(tmp_path / "caller.sh")]
     r = sh("bash", str(COMPOSITE / "provision.sh"), *args, cwd=work, check=False, env=env)
-    assert r.returncode == 0, r.stderr
-    return log.read_text(), gh_path, work
+    if check:
+        assert r.returncode == 0, r.stderr
+        return log.read_text(), gh_path, work
+    return r, log.read_text() if log.exists() else "", work
 
 
 def test_recipe_runs_the_caller_script_instead_of_the_default_install(tmp_path):
@@ -351,6 +366,31 @@ def test_recipe_installs_the_checkout_and_appends_path_only_as_the_runner(tmp_pa
     assert log == "uv venv\nuv pip install -e .[dev]\n"
     assert gh_path.read_text() == f"{tmp_path}/.local/bin\n{work}/.venv/bin\n"
     assert (work / ".git" / "info" / "exclude").read_text() == ".venv/\n*.egg-info/\n"
+
+
+def test_recipe_runs_a_caller_script_without_a_pyproject(tmp_path):
+    # A Node repository: no pyproject.toml, the caller's recipe does the
+    # provisioning (review round 2 — the workflows gate the step on either).
+    log, _, work = recipe_run(tmp_path, github_path=False, pyproject=None,
+                              caller_recipe='echo "pnpm install --frozen-lockfile" >>"$UV_LOG"\n')
+    assert log == "pnpm install --frozen-lockfile\n"
+    assert not (work / "pyproject.toml").exists()
+
+
+def test_recipe_fails_fast_like_a_bash_step(tmp_path):
+    # An intermediate failure fails the recipe (review round 2: a plain
+    # `bash "$recipe"` returned 0 through `false` then `printf`).
+    r, log, _ = recipe_run(tmp_path / "a", github_path=False, pyproject=None, check=False,
+                           caller_recipe='false\necho REACHED_AFTER_FAILURE >>"$UV_LOG"\n')
+    assert r.returncode != 0 and "REACHED" not in log
+    # A failed pipeline followed by a successful command fails too (pipefail).
+    r, log, _ = recipe_run(tmp_path / "b", github_path=False, pyproject=None, check=False,
+                           caller_recipe='false | cat\necho REACHED_AFTER_PIPE >>"$UV_LOG"\n')
+    assert r.returncode != 0 and "REACHED" not in log
+    # A caller's explicit handling of an expected failure is preserved.
+    log, _, _ = recipe_run(tmp_path / "c", github_path=False, pyproject=None,
+                           caller_recipe='false || echo "handled" >>"$UV_LOG"\necho done >>"$UV_LOG"\n')
+    assert log == "handled\ndone\n"
 
 
 def test_recipe_skips_the_path_append_under_sudo_and_adds_the_dev_group(tmp_path):

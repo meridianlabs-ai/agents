@@ -64,9 +64,14 @@ description: >-
   the checkout, network), so it can pin a Python (`uv venv --python
   3.11`), sync a lockfile (`uv sync --dev`), or install Node tooling
   (`corepack enable --install-directory ~/.local/bin && pnpm install
-  --frozen-lockfile`). The composite writes it to `$RUNNER_TEMP` (readable
-  by the user) and passes the path as the script's one argument. Empty (the
-  default) keeps the generic recipe.
+  --frozen-lockfile`). It runs under `bash --noprofile --norc -eo
+  pipefail`, the options a `shell: bash` step gets, so any failing command
+  fails the provisioning step (a caller handles an expected failure with
+  `|| true`). The composite writes it to `$RUNNER_TEMP` (readable by the
+  user) and passes the path as the script's one argument. Empty (the
+  default) keeps the generic recipe. With a recipe the step is not gated on
+  `pyproject.toml`: a Node repository's recipe runs too (the workflows'
+  `if:`), and only the generic recipe needs the Python project.
 
   The `bin` output is the directories the codex compose steps look the
   tools up in, colon-separated and absolute — `<workspace>/.venv/bin`,

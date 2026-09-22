@@ -28,9 +28,14 @@ printf '%s\n' .venv/ '*.egg-info/' >>.git/info/exclude
 if [ -n "$recipe" ]; then
   # The caller's recipe: uv is on PATH, the cwd is the checkout, and the
   # environment is whatever the composite's caller gave this script (sudo's
-  # reset environment under `user`).
+  # reset environment under `user`). Run with the options a `shell: bash`
+  # workflow step gets (`bash --noprofile --norc -eo pipefail`): a failing
+  # command or pipeline fails the recipe and so the provisioning step,
+  # instead of a later successful command hiding it (review round 2 of the
+  # fix: `false` then `printf` returned 0 through a plain `bash "$recipe"`).
+  # A caller that expects a failure handles it explicitly (`cmd || true`).
   echo "running the caller's codex provisioning recipe"
-  bash "$recipe"
+  bash --noprofile --norc -eo pipefail "$recipe"
 else
   uv venv
   if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then

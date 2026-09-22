@@ -122,9 +122,13 @@ on:
           and network on; it has no sudo, HOME is /home/codex, PATH is
           sudo's default plus ~/.local/bin, and it must create the project's
           `.venv` for the prompts' tool discovery (which also looks in
-          `node_modules/.bin` and ~/.local/bin). It comes from the caller's
-          workflow file, so it is trusted like every other input here; keep
-          it free of anything derived from the run's event.
+          `node_modules/.bin` and ~/.local/bin). It runs under `bash
+          --noprofile --norc -eo pipefail`, like a `shell: bash` step: a
+          failing command fails provisioning (handle an expected failure
+          with `|| true`). A recipe runs whether or not the checkout has a
+          pyproject.toml — only the generic recipe needs one. It comes from
+          the caller's workflow file, so it is trusted like every other input
+          here; keep it free of anything derived from the run's event.
         required: false
         type: string
         default: ""
@@ -2017,7 +2021,9 @@ jobs:
       # under `sudo -u codex -H`), never `./.github/actions/claude-setup`,
       # even on callers that define it: the venv lands in the checkout as
       # before, codex-owned, and the compose step names its tools by the
-      # composite's `bin` output. Python projects only (`pyproject.toml`);
+      # composite's `bin` output. Python projects (`pyproject.toml`) get the
+      # generic recipe; a caller recipe runs without one (the stub knows its
+      # project: a Node repository's `pnpm install` has no pyproject);
       # anything else codex provisions itself inside its sandbox, which has
       # network (its prompt says so). Fatal on failure, with the codex
       # conflict-path exception: sync-branch hands codex the base merge
@@ -2035,7 +2041,7 @@ jobs:
       - name: Provision project environment (as the codex user)
         id: setup
         timeout-minutes: 10
-        if: hashFiles('pyproject.toml') != ''
+        if: hashFiles('pyproject.toml') != '' || inputs.codex_provision != ''
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
         with:

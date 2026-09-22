@@ -36,9 +36,25 @@
 #                          home holds exactly the composite's config.toml.
 #                          Then a caller recipe (`recipe:`) runs as codex
 #                          with uv on PATH and HOME=/home/codex.
+#   caller-recipes         one job per fixture in tests/fixtures/callers
+#                          (agents-owned stand-ins for the callers whose
+#                          claude-setup does more than the generic recipe:
+#                          the inspect_ai fork's Python 3.11 editable
+#                          install, inspect_flow's Python 3.11 locked `uv
+#                          sync --dev`, inspect_harbor's Python 3.12 `uv
+#                          sync` with dev+doc default groups, ts-mono's Node
+#                          22 pnpm frozen install — the last with no
+#                          pyproject.toml, the recipe-without-Python route):
+#                          this revision's composites provision the fixture
+#                          as codex with its `codex_provision` recipe, reset
+#                          the home, discover the tools the way the compose
+#                          steps do and run each as codex under
+#                          codex-action's launch shape, then the fixture's
+#                          own checks (interpreter/Node version, groups,
+#                          lockfile unchanged).
 #
-# Runs on pushes that touch the composites, the harness or the scanner, and
-# by hand.
+# Runs on pushes that touch the composites, the harness, the scanner or the
+# fixtures, and by hand.
 
 name: engine isolation canary
 
@@ -52,6 +68,7 @@ on:
       - ".github/workflows/engine-isolation-canary-reusable.yml"
       - "tests/secret_delivery_scan.py"
       - "tests/fixtures/hostile-checkout/**"
+      - "tests/fixtures/callers/**"
 
 permissions:
   contents: read
@@ -144,3 +161,88 @@ jobs:
           grep -q "^recipe uid=$(id -u codex) home=/home/codex cwd=$GITHUB_WORKSPACE uv=/home/codex/.local/bin/uv$" recipe-report.txt || { echo "::error::the recipe did not run as expected"; exit 1; }
           [ -x .venv-recipe/bin/python ] || { echo "::error::the recipe's venv was not created"; exit 1; }
           .venv-recipe/bin/python --version
+
+  caller-recipes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [inspect-ai-like, inspect-flow-like, inspect-harbor-like, ts-mono-like]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The fixture's project files take the place of a caller's tree at the
+      # workspace root; its recipe is read into an output the way a caller
+      # stub's `codex_provision` reaches the reusable workflow; the lockfile
+      # hash is recorded so the checks can show the sync was the locked one.
+      - name: Stage the fixture
+        id: fx
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          set -euo pipefail
+          cp -R "tests/fixtures/callers/$FIXTURE/project/." .
+          {
+            echo "recipe<<RECIPE_EOF"
+            cat "tests/fixtures/callers/$FIXTURE/codex-provision.sh"
+            echo "RECIPE_EOF"
+          } >>"$GITHUB_OUTPUT"
+          lock=""
+          for f in uv.lock pnpm-lock.yaml; do [ -f "$f" ] && lock=$(sha256sum <"$f"); done
+          echo "lock=$lock" >>"$GITHUB_OUTPUT"
+          echo "pyproject=$([ -f pyproject.toml ] && echo yes || echo no)" >>"$GITHUB_OUTPUT"
+          echo "staged $FIXTURE (pyproject: $([ -f pyproject.toml ] && echo yes || echo no))"
+
+      - name: Create codex user (this revision)
+        uses: ./.github/actions/create-codex-user
+
+      # The reusable workflows' gate for this step, evaluated the same way:
+      # a pyproject.toml OR a recipe — ts-mono-like has no pyproject.
+      - name: Provision as the codex user with the caller's recipe (this revision)
+        id: setup
+        timeout-minutes: 10
+        if: hashFiles('pyproject.toml') != '' || steps.fx.outputs.recipe != ''
+        uses: ./.github/actions/provision-fallback
+        with:
+          user: codex
+          recipe: ${{ steps.fx.outputs.recipe }}
+
+      - name: Reset codex home (this revision)
+        uses: ./.github/actions/create-codex-user
+        with:
+          mode: reset-home
+
+      # Tool discovery exactly as the compose steps do it (the composite's
+      # `bin` directories, the same list), then every discovered tool runs
+      # as codex under codex-action's launch shape: `sudo -u codex` with
+      # sudo's reset environment, no runner PATH.
+      - name: Discovered tools run as codex
+        env:
+          BIN: ${{ steps.setup.outputs.bin }}
+        run: |
+          set -euo pipefail
+          [ "${{ steps.setup.outcome }}" = success ] || { echo "::error::provisioning did not succeed"; exit 1; }
+          tools=""
+          IFS=: read -r -a dirs <<<"$BIN"
+          for t in pytest ruff mypy pyright python3 node pnpm npm; do
+            for d in "${dirs[@]}"; do
+              [ -x "$d/$t" ] && { tools="$tools$t=$d/$t "; break; }
+            done
+          done
+          echo "discovered: ${tools:-none}"
+          [ -n "$tools" ] || { echo "::error::no tool discovered in $BIN"; exit 1; }
+          for kv in $tools; do
+            path=${kv#*=}
+            sudo -u codex -H -- "$path" --version >/dev/null 2>&1 || { echo "::error::$path does not run as codex"; exit 1; }
+            echo "runs as codex: $path"
+          done
+
+      - name: The fixture's checks
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+          LOCK_BEFORE: ${{ steps.fx.outputs.lock }}
+          AS_CODEX: sudo -u codex -H --
+        run: bash "tests/fixtures/callers/$FIXTURE/check.sh"

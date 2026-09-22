@@ -727,6 +727,17 @@ which are empty when the codex job ran). Two Claude Security findings
   PATH, and `~codex/.local/bin` is one of the tool directories the prompts
   search). Until a stub sets the input, that caller's codex runs get the
   generic recipe (or none, for a repository without a `pyproject.toml`).
+  The provisioning step runs when the checkout has a `pyproject.toml` OR
+  the stub set a recipe (review round 2: gating on the pyproject alone
+  would have skipped ts-mono's recipe), and a recipe runs under `bash
+  --noprofile --norc -eo pipefail`, a `shell: bash` step's options, so a
+  failing command fails provisioning instead of a later successful one
+  hiding it (review round 2). Each of the four recipes is exercised by the
+  hosted canary's `caller-recipes` job against an agents-owned stand-in
+  project (`tests/fixtures/callers/`, its README has the table): the
+  interpreter or Node version the recipe selects, the dependency groups or
+  extras it installs, the lockfile left unchanged by a locked sync, and
+  every discovered tool run as codex under codex-action's launch shape.
 
 Caller-visible effects of the codex-side change (the Claude jobs are
 unchanged, minus the key): a codex run on a caller with a `claude-setup`

@@ -1,0 +1,15 @@
+# Representative of inspect_harbor's setup (Python 3.12, plain `uv sync`
+# with `[tool.uv] default-groups = ["dev", "doc"]` against a committed
+# uv.lock). Used by the hosted canary's caller-recipes job.
+[project]
+name = "inspect-harbor-like"
+version = "0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+doc = ["markdown>=3"]
+
+[tool.uv]
+default-groups = ["dev", "doc"]

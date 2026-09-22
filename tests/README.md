@@ -236,11 +236,16 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the home script; refuses while `pkill` keeps finding codex processes).
   The four composer tests lift each engine's composer from its own job
   (`job_block` / `lift_run` in `test_land_helpers.py`).
-- `secret_delivery_scan.py` and `fixtures/hostile-checkout/` are not tests
-  but the hosted canary's pieces (`.github/workflows/engine-isolation-canary.yml`):
-  the root-run scanner that counts synthetic sentinel secrets in the
-  runner processes' memory, and the hostile `setup.py` build backend the
-  provisioning-boundary job installs as the codex user.
+- `secret_delivery_scan.py`, `fixtures/hostile-checkout/` and
+  `fixtures/callers/` are not tests but the hosted canary's pieces
+  (`.github/workflows/engine-isolation-canary.yml`): the root-run scanner
+  that counts synthetic sentinel secrets in the runner processes' memory,
+  the hostile `setup.py` build backend the provisioning-boundary job
+  installs as the codex user, and the four representative caller projects
+  (with the `codex_provision` recipe each caller's stub would set and the
+  checks that its interpreter/Node version, dependency groups and lockfile
+  came out as intended, run as the codex user) — `fixtures/callers/README.md`
+  has the table.
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc
