@@ -171,6 +171,20 @@ inputs:
       default branch and `refused-branches`.
     required: false
     default: ""
+  base-branch:
+    description: >-
+      The branch the run's new branches are cut from, when the CALLER's
+      trusted configuration names one (claude.yml's `base_branch`; the
+      inspect_ai fork's stubs pass `main`, its pristine mirror, while its
+      default branch `meridian` carries workflow files `main` does not).
+      The `workflows` step lists a branch the push creates against this
+      branch's tip on origin; compared against the default branch instead,
+      every default-only workflow file would read as deleted and a
+      source-only issue run would be refused. Empty (the default): the
+      default branch. On a PR run the PR's own base wins; the
+      `default-branch` refusal of the manifest's `branch` is unaffected.
+    required: false
+    default: ""
   pr-number:
     description: >-
       The PR the caller's TRUSTED context names (`github.event.pull_request.number`,
@@ -373,7 +387,8 @@ runs:
     # started from. `git fetch <bundle>` needs the bundle's prerequisite
     # (start_sha) present, so that is fetched from origin first, by SHA.
     # Also fetches the tip of the run's base branch (the PR's base, else the
-    # default branch — trusted context, not the manifest) as refs/land/base:
+    # caller's `base-branch`, else the default branch — trusted context, not
+    # the manifest) as refs/land/base:
     # the reference the `workflows` step below tells the runner's base merge
     # from the agent's own changes by, and lists a NEW branch's changes
     # against. A failed base fetch is a warning here; it costs that
@@ -390,7 +405,7 @@ runs:
         BRANCH: ${{ steps.plan.outputs.branch }}
         START_SHA: ${{ steps.plan.outputs.start_sha }}
         HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
-        BASE: ${{ steps.lookup.outputs.base || inputs.default-branch || steps.lookup.outputs.default_branch }}
+        BASE: ${{ steps.lookup.outputs.base || inputs.base-branch || inputs.default-branch || steps.lookup.outputs.default_branch }}
         GIT_CONFIG_GLOBAL: /dev/null
         # Step-scoped credential (design/architecture.md → "No persisted git
         # credentials"): the READ token, under the one variable name every

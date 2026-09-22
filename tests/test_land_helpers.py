@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / ".github" / "actions" / "land" / "lib.sh"
 EMIT = ROOT / ".github" / "actions" / "emit-landing" / "action.yml"
 LAND = ROOT / ".github" / "actions" / "land" / "action.yml"
+CLAUDE = ROOT / ".github" / "workflows" / "claude.yml"
 
 
 def sh(*cmd, cwd=None, check=True, env=None):
@@ -1183,9 +1184,16 @@ def test_workflows_step_gates_the_push_and_reaches_the_report():
     assert "REMOTE_SHA: ${{ steps.fetch.outputs.remote_sha }}" in block
     assert "START_SHA" not in block and "start_sha" not in block
     fetch = step_block(text, "fetch", indent=4)
-    assert "BASE: ${{ steps.lookup.outputs.base || inputs.default-branch || steps.lookup.outputs.default_branch }}" in fetch
+    # The base a NEW branch is listed against: the PR's base, else the branch
+    # the caller's trusted configuration cuts issue branches from (claude.yml
+    # forwards its `base_branch`: the inspect_ai fork's `main`, not its
+    # `meridian` default with the extra workflow files), else the default.
+    assert "BASE: ${{ steps.lookup.outputs.base || inputs.base-branch || inputs.default-branch || steps.lookup.outputs.default_branch }}" in fetch
     assert '"refs/heads/$BASE:refs/land/base"' in fetch and 'echo "base_sha=$base_sha"' in fetch
     assert 'echo "remote_sha=$remote"' in fetch
+    land_call = step_block(CLAUDE.read_text(), "land")
+    assert "uses: meridianlabs-ai/agents/.github/actions/land@main" in land_call
+    assert "base-branch: ${{ inputs.base_branch }}" in land_call
     lookup = step_block(text, "lookup", indent=4)
     assert lookup.splitlines()[1].strip() == "if: inputs.pr-number != '' || inputs.default-branch == ''"
     assert "--json headRefName,baseRefName" in lookup
@@ -1775,6 +1783,56 @@ def test_new_branch_without_a_base_tip_is_refused_unchecked(repos):
     assert "no workflow files" not in res.stdout
     hint = bash_lib("landing_failure_hint 'workflows' '' '' ''")
     assert hint.stdout.startswith("The landing could not check whether the agent's commits change workflow files")
+
+
+def run_fetch_step(r, branch, base):
+    """The land composite's `fetch` step, lifted and run as GitHub runs it
+    against the local origin: BRANCH is the manifest's branch, BASE the
+    step's resolved base (the PR's base, the caller's `base-branch`, else the
+    default branch). Returns the bare repo it filled and the step's outputs
+    (`remote_sha`, `base_sha`, `already`)."""
+    repo = r["tmp"] / "landing-repo"
+    out = r["tmp"] / "fetch-out.txt"
+    out.write_text("")
+    env = {"DIR": str(r["landing"]), "WORK": str(repo), "URL": str(r["origin"]), "BRANCH": branch,
+           "START_SHA": r["start"], "HEAD_SHA": r["head"], "BASE": base, "GITHUB_OUTPUT": str(out)}
+    res = sh("bash", "-eo", "pipefail", "-c", step_script("fetch"), check=False, env=env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    return repo, outputs
+
+
+def test_new_branch_cut_from_a_configured_nondefault_base_lands(repos):
+    # Review round 1: the inspect_ai fork keeps `main` pristine and works on
+    # a `meridian` default branch that carries workflow files `main` does
+    # not; its stubs pass claude.yml `base_branch: main`, so issue branches
+    # are cut from main. Listed against the DEFAULT branch, every
+    # meridian-only workflow file would read as deleted and a source-only
+    # issue run would be refused (and re-running would not help). claude.yml
+    # forwards `base_branch` as the composite's `base-branch`, which the
+    # fetch step resolves ahead of the default branch; the real lifted fetch
+    # step supplies the guard's inputs here.
+    r = repos
+    work = r["work"]
+    git("checkout", "-q", "-b", "meridian", r["start"], cwd=work)
+    commit_path(r, ".github/workflows/meridian-only.yml", "on: issue_comment\n")
+    git("push", "-q", str(r["origin"]), "HEAD:refs/heads/meridian", cwd=work)
+    git("checkout", "-q", "feature", cwd=work)
+    cut_branch_from_base_tip(r)
+    commit_path(r, "src/agent.py")
+    emit(r)
+    repo, fetched = run_fetch_step(r, "claude/issue-7-source-only", "main")
+    assert fetched["remote_sha"] == "" and fetched["base_sha"] == r["start"]
+    res, outputs = run_workflows_step(r, repo, base=fetched["base_sha"], remote=fetched["remote_sha"])
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+    git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/claude/issue-7-source-only", cwd=repo)
+    # The default branch as the base is exactly the refusal the input exists
+    # to prevent — and the shifted-start attacks above stay refused.
+    repo, fetched = run_fetch_step(r, "claude/issue-8-source-only", "meridian")
+    res, outputs = run_workflows_step(r, repo, base=fetched["base_sha"], remote=fetched["remote_sha"])
+    assert res.returncode != 0
+    assert outputs["files"] == "`.github/workflows/meridian-only.yml`"
 
 
 def test_workflow_file_already_on_the_branch_is_not_this_pushs_change(repos):

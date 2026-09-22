@@ -2440,6 +2440,14 @@ jobs:
           # composed from the trusted issue number, keeps the push off the
           # branches of PRs opened for other issues. Ignored on PR runs.
           branch-prefix: ${{ !github.event.issue.pull_request && github.event.issue.number && format('claude/issue-{0}-', github.event.issue.number) || '' }}
+          # The branch an issue run's new branch was cut from (Record base
+          # SHA / the codex prep step resolve the same input): what the
+          # composite's `workflows` step compares a branch the push creates
+          # against. Without it the default branch stands in — on the
+          # inspect_ai fork that is `meridian`, whose extra workflow files
+          # would read as the agent's deletions on every `main`-cut issue
+          # branch. Empty (most callers) keeps the default branch.
+          base-branch: ${{ inputs.base_branch }}
           # The dev-agent manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""
