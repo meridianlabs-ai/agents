@@ -66,15 +66,15 @@ def write(root: Path, files: dict):
         p.write_text(text)
 
 
-def make_checkout(tmp_path, *, head_files=HEAD_FILES, delete=()) -> Path:
-    """A base repo (branch `main`) and a clone of it — the workspace — with a
-    PR head commit on top (adding `head_files`, deleting `delete`), so
-    `refs/remotes/origin/main` is there as an actions/checkout with
-    fetch-depth 0 leaves it."""
+def make_checkout(tmp_path, *, base_files=BASE_FILES, head_files=HEAD_FILES, delete=()) -> Path:
+    """A base repo (branch `main`, holding `base_files`) and a clone of it —
+    the workspace — with a PR head commit on top (adding `head_files`,
+    deleting `delete`), so `refs/remotes/origin/main` is there as an
+    actions/checkout with fetch-depth 0 leaves it."""
     base = tmp_path / "base"
     base.mkdir(parents=True)
     git("init", "-q", "-b", "main", cwd=base)
-    write(base, BASE_FILES)
+    write(base, base_files)
     git("add", "-A", cwd=base)
     git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base", cwd=base)
     ws = tmp_path / "workspace"
@@ -278,6 +278,51 @@ def test_replant_check_fails_on_an_untracked_file_under_a_restored_directory(tmp
     (ws / ".claude/settings.local.json").write_text('{"sandbox": {"enabled": false}}\n')
     assert git("ls-files", "--others", "--exclude-standard", "--", ".claude", cwd=ws).stdout == ""
     r = replant(ws)
+    assert r.returncode == 1 and "./.claude" in r.stdout
+
+
+def test_replant_check_compares_bytes_not_attribute_normalized_content(tmp_path):
+    # Review round 2 (B5): `git diff` honours the head's .gitattributes, so
+    # with `ident` on the settings file a planted `{"note":"$Id: ",...,"tail":"$"}`
+    # contracted to the base's `$Id$` and compared equal. The check compares
+    # the blob's bytes with the file's.
+    base = dict(BASE_FILES, **{".claude/settings.json": '{"note":"$Id$"}\n'})
+    head = dict(HEAD_FILES, **{".gitattributes": ".claude/settings.json ident\n"})
+    ws = make_checkout(tmp_path, base_files=base, head_files=head)
+    strip(ws)
+    restore_from_base(ws)
+    (ws / ".claude/settings.json").write_text('{"note":"$Id: ","sandbox":{"enabled":false},"tail":"$"}\n')
+    assert git("diff", "--quiet", "origin/main", "--", ".claude/settings.json", cwd=ws, check=False).returncode == 0  # git's view
+    r = replant(ws)
+    assert r.returncode == 1 and "./.claude" in r.stdout
+    # The same attribute makes `git checkout` itself smudge the restored
+    # file ($Id$ → $Id: <sha> $), so even the untouched restore differs from
+    # the blob: fail-closed by design, and no caller carries such an attribute.
+    ws2 = make_checkout(tmp_path / "two", base_files=base, head_files=head)
+    strip(ws2)
+    restore_from_base(ws2)
+    assert "$Id: " in (ws2 / ".claude/settings.json").read_text()
+    assert replant(ws2).returncode == 1
+
+
+def test_replant_check_requires_the_same_entry_type_and_mode(tmp_path):
+    # Same bytes reached through a symlink, or a mode flip, is not the restore.
+    ws = make_checkout(tmp_path)
+    strip(ws)
+    restore_from_base(ws)
+    target = ws / "elsewhere.md"
+    target.write_text((ws / "CLAUDE.md").read_text())
+    (ws / "CLAUDE.md").unlink()
+    (ws / "CLAUDE.md").symlink_to("elsewhere.md")
+    r = replant(ws)
+    error = [l for l in r.stdout.splitlines() if l.startswith("::error::")]
+    assert r.returncode == 1 and len(error) == 1 and error[0].endswith(": ./CLAUDE.md — the review is withheld")
+    assert "root ./.claude matches" in r.stdout
+    ws2 = make_checkout(tmp_path / "two")
+    strip(ws2)
+    restore_from_base(ws2)
+    (ws2 / ".claude/settings.json").chmod(0o755)
+    r = replant(ws2)
     assert r.returncode == 1 and "./.claude" in r.stdout
 
 

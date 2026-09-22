@@ -1399,9 +1399,16 @@ jobs:
       # index: the action's `git reset` after its restore leaves a file the
       # PR deleted untracked, and against the PR's index that trusted
       # restore read as a re-plant (review round 1). Against the base index,
-      # `git diff` covers every path the base tracks under the entry
-      # (content and type) and `git ls-files --others` every path it does
-      # not, honouring no ignore rules (`.gitignore` is the contributor's). A
+      # every path the base tracks under the entry is compared RAW — type,
+      # mode and bytes, the blob against the file with no attribute
+      # conversion (`git diff` would honour the head's `.gitattributes`:
+      # an `ident` attribute let a changed `$Id: … $` settings file compare
+      # equal, review round 2) — and `git ls-files --others` lists every
+      # path it does not track, honouring no ignore rules (`.gitignore` is
+      # the contributor's). The price is fail-closed: a head `.gitattributes`
+      # that makes `git checkout` transform one of these paths (ident, eol,
+      # a smudge filter) leaves the action's restore differing from the blob
+      # and the review is withheld; no caller carries such an attribute. A
       # root entry that passes is verified as a whole subtree, so the
       # configuration names inside a restored `.claude/` (`.claude/CLAUDE.md`,
       # `.claude/rules/`, a nested `.claude/`) are exempt with it; every
@@ -1409,7 +1416,7 @@ jobs:
       # restore set), is a survivor. git runs pinned like the codex landing
       # steps: the checkout's config and hooks are the contributor's
       # (`GIT_DIR`, `GIT_WORK_TREE`, no global or system config, hooks path
-      # and fsmonitor off, `--no-ext-diff`). Sandboxed paths only; skipped
+      # and fsmonitor off). Sandboxed paths only; skipped
       # when the agent never launched.
       - name: Check for re-planted project configuration
         id: replant
@@ -1438,6 +1445,31 @@ jobs:
           if [ -n "$base" ] && ! GIT_INDEX_FILE="$tmpidx" git read-tree "$base" 2>/dev/null; then
             base=""
           fi
+          # Raw comparison of one root entry against the base tree: every
+          # path the base tracks under it must be present with the same
+          # type, mode and BYTES (the blob via `git cat-file`, the file via
+          # `cmp`; no attribute conversion is involved on either side — `git
+          # diff` would apply the head's .gitattributes, review round 2), a
+          # symlink must point where the base's does, a gitlink is never
+          # exempt, and nothing the base does not track may be there.
+          identical_to_base() {
+            local entry=$1 rec mode sha rest path tracked=0
+            while IFS= read -r -d '' rec; do
+              tracked=1
+              mode=${rec%% *}; rest=${rec#* }; sha=${rest%% *}; rest=${rest#* }; path=${rest#*$'\t'}
+              case "$mode" in
+                120000)
+                  [ -L "$path" ] && [ "$(readlink "$path")" = "$(git cat-file blob "$sha")" ] || return 1 ;;
+                100644|100755)
+                  [ -f "$path" ] && ! [ -L "$path" ] || return 1
+                  git cat-file blob "$sha" | cmp -s - "$path" || return 1
+                  if [ "$mode" = 100755 ]; then [ -x "$path" ] || return 1; else ! [ -x "$path" ] || return 1; fi ;;
+                *) return 1 ;;
+              esac
+            done < <(GIT_INDEX_FILE="$tmpidx" git ls-files -s -z -- "$entry")
+            [ "$tracked" = 1 ] || return 1
+            [ -z "$(GIT_INDEX_FILE="$tmpidx" git ls-files --others -z -- "$entry")" ]
+          }
           # First pass, root entries: verified (identical to base) or survivor.
           verified=""
           survivors=""
@@ -1447,10 +1479,8 @@ jobs:
               ./*/*) continue ;;
               ./AGENTS.md) survivors="$survivors $p"; continue ;;
             esac
-            if [ -n "$base" ] \
-               && GIT_INDEX_FILE="$tmpidx" git diff --quiet --no-ext-diff -- "$p" 2>/dev/null \
-               && [ -z "$(GIT_INDEX_FILE="$tmpidx" git ls-files --others -- "$p")" ]; then
-              echo "root $p matches origin/$BASE_REF: claude-code-action's base-branch restore, not a re-plant"
+            if [ -n "$base" ] && identical_to_base "$p"; then
+              echo "root $p matches origin/$BASE_REF byte for byte: claude-code-action's base-branch restore, not a re-plant"
               verified="$verified$p"$'\n'
             else
               survivors="$survivors $p"

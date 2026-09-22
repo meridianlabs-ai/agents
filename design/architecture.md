@@ -1340,14 +1340,21 @@ now compose, each holding on its own:
   comparison runs against a temporary index holding the base tree, never
   the PR's index — the action's `git reset` after its restore leaves a
   path the PR deleted untracked, which against the PR's index read as a
-  re-plant — so `git diff` covers every path the base tracks under the
-  entry and `git ls-files --others` every path it does not (`.gitignore`
-  is the contributor's and is not honoured); a root that passes is
+  re-plant — and compares every path the base tracks under the entry
+  *raw*: type, mode and bytes, the blob (`git cat-file`) against the file
+  (`cmp`), with no attribute conversion, because `git diff` honours the
+  head's `.gitattributes` and an `ident` attribute let a changed
+  `$Id: … $` settings file compare equal (review round 2); `git ls-files
+  --others` lists every path the base does not track (`.gitignore` is the
+  contributor's and is not honoured). Fail-closed corollary: a head
+  `.gitattributes` that makes `git checkout` transform one of these paths
+  leaves the action's own restore differing from the blob and the review
+  is withheld — no caller carries such an attribute. A root that passes is
   verified as a whole subtree, so the configuration names inside a
   restored `.claude/` are exempt with it, and every other nested entry is
   a survivor. The step's git runs pinned (`GIT_DIR`, `GIT_WORK_TREE`, no
-  global or system config, hooks path and fsmonitor off, `--no-ext-diff`):
-  the checkout's config is the contributor's.
+  global or system config, hooks path and fsmonitor off): the checkout's
+  config is the contributor's.
 
 The alternative for the settings tier — managed policy settings at
 `/etc/claude-code/managed-settings.json`, which the sudo-capable runner could
