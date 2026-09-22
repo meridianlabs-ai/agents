@@ -2105,14 +2105,16 @@ jobs:
       #     clean base merge — merge-only), handoff → handoff_body_file,
       #     stage: Review (everything remaining declined with rationale —
       #     the replies carry it; a merge-only round lands the merge too)
-      #   no agent commit, handback → honored when the agent step SUCCEEDED
+      #   no agent commit, handback → honored when HEAD moved (merge-only:
+      #     the runner's base merge lands and re-runs CI, so the re-review
+      #     is owed like any bundled hand-back) or the agent step SUCCEEDED
       #     (the re-review re-reads the same code; the gate's no-progress
       #     check then escalates, as it did when the agent posted the
-      #     request itself) and dropped when it did not: a failed or skipped
-      #     step that landed nothing owes no re-review, and honoring one
-      #     would let a round that never ran re-arm the loop (Claude
-      #     Security 4628734; the land job drops it again from the trusted
-      #     side — see the Land step's `allow-no-change-handback`)
+      #     request itself), and dropped when neither holds: a failed or
+      #     skipped step with nothing to land owes no re-review, and
+      #     honoring one would let a round that never ran re-arm the loop
+      #     (Claude Security 4628734; the land job drops it again from the
+      #     trusted side — see the Land step's `allow-no-change-handback`)
       #   no agent commit, neither → the round is CONCLUDED with a hand-off
       #     whose body is the agent's final message (when the run succeeded
       #     and the Surface step found no error): the codex path's rule,
@@ -2259,19 +2261,25 @@ jobs:
             if [ -n "$violation" ]; then
               echo "::error::landing: ending-contract violation — $violation; posting neither hand-back."
             elif [ "$handback" = "true" ]; then
-              if [ -n "$committed" ] || [ "${CLAUDE_OUTCOME:-}" = "success" ]; then
+              if [ "$moved" = "true" ] || [ "${CLAUDE_OUTCOME:-}" = "success" ]; then
                 extra=$(jq -c '.handback = true' <<<"$extra")
-                [ -n "$committed" ] || echo "::warning::landing: the agent set handback without committing anything; the re-review re-reads unchanged code (the gate's no-progress check escalates a stall)."
+                [ -n "$committed" ] || echo "::warning::landing: the agent set handback without committing anything${merge_only:+ (the base merge from the runner lands)}; the re-review re-reads unchanged code (the gate's no-progress check escalates a stall)."
               else
                 # Nothing to land and no completed run behind the request:
-                # a re-review is owed by a landed commit or by a run that
+                # a re-review is owed by a landed commit — the agent's or
+                # the runner's clean base merge, whose bundle lands and
+                # re-runs CI whatever the step's outcome — or by a run that
                 # finished and chose it, never by a round that failed or
-                # never ran (the file may predate the agent — the PR's own
-                # provisioning step can write it). The land job enforces the
-                # same rule from the trusted side (`allow-no-change-handback`
-                # off unless the agent step succeeded); this keeps the
-                # manifest honest and the log explicit.
-                echo "::warning::landing: the agent set handback without committing anything and the agent step did not succeed (outcome: ${CLAUDE_OUTCOME:-unknown}); no re-review is owed by a round that landed nothing and did not complete, so none is requested."
+                # never ran with nothing to push (the file may predate the
+                # agent — the PR's own provisioning step can write it). Keyed
+                # on `moved`, the same test emit-landing bundles by, so the
+                # hand-back and the bundle cannot come apart (emit-landing
+                # drops both when the bundle is lost). The land job enforces
+                # the same rule from the trusted side (`allow-no-change-
+                # handback` off unless the agent step succeeded, bundled
+                # hand-backs exempt); this keeps the manifest honest and the
+                # log explicit.
+                echo "::warning::landing: the agent set handback, HEAD did not move and the agent step did not succeed (outcome: ${CLAUDE_OUTCOME:-unknown}); no re-review is owed by a round that landed nothing and did not complete, so none is requested."
               fi
             elif [ -n "$handoff" ]; then
               extra=$(jq -c --arg f "$handoff" '.handoff_body_file = $f | .stage = "Review"' <<<"$extra")
@@ -2377,7 +2385,8 @@ jobs:
   # a fix job that failed still gets its error posted and its round refunded;
   # with no artifact at all (runner killed mid-agent) the composite fails
   # its download, lands nothing, and says so on the PR. A CANCELLED fix job
-  # skips the Land step but still gets its refund (see the step gates).
+  # skips the Land step; its refund follows the same evidence as every
+  # other round's (see the refund step).
   #
   # Gated on the gate job having SUCCEEDED, not only on its `act` output: a
   # gate that failed after writing act=fix — `Record round` is the realistic
@@ -2429,7 +2438,15 @@ jobs:
       # PR for nothing; a run cancelled by hand mid-agent is skipped too, so
       # its partial commits are not pushed and re-reviewed on the strength of
       # an always(). The step is gated, not the job, so the refund below
-      # still runs and gives back the round the gate recorded. `skipped` is
+      # still runs — and refunds only on the evidence every round needs: the
+      # job's own `agent_skipped` output. A job cancelled during checkout,
+      # sync or provisioning delivers it (the agent step is `skipped`) and
+      # is refunded; one cancelled after the agent step started delivers
+      # `false` and keeps its round; a PENDING job cancelled before it
+      # started delivers no outputs at all, and unknown keeps its round —
+      # one round of slack on a rare concurrency cancellation, not a refund
+      # decided by a job that may have run the agent (Claude Security
+      # 4628734, review round 1). `skipped` is
       # excluded too — the job-level gate on the gate job's success already
       # rules it out, so the test is belt and braces for the same "no
       # artifact, no agent" shape should the job gate ever loosen.
@@ -2473,15 +2490,20 @@ jobs:
       # or provisioning failure that skipped it outright (before the split
       # the round was recorded after those steps; it cannot be any more, so
       # the refund covers it), a failed codex feedback-fetch / prep /
-      # user-setup step, or a fix job cancelled before it ran
-      # (the concurrency group's arbitrary ordering) — attempted no fix.
-      # Roll the sticky counter back one. Two conditions: the fix job was
-      # cancelled or its `agent_skipped` output is true (both engines' agent
-      # steps `skipped`, a step outcome the runner settled before any agent
-      # code ran; a cancellation is the server's, and needs actions:write,
-      # which no token in the fix job holds), and the landing pushed nothing
-      # (a round whose commits landed keeps its round whatever the agent
-      # step's outcome). A step that was entered and then FAILED — the
+      # user-setup step, or a job cancelled while one of those steps ran
+      # (the agent step is `skipped` then too) — attempted no fix. Roll the
+      # sticky counter back one. Two conditions: the fix job's
+      # `agent_skipped` output is true (both engines' agent steps `skipped`,
+      # a step outcome the runner settled before any agent code ran), and
+      # the landing pushed nothing (a round whose commits landed keeps its
+      # round whatever the agent step's outcome). The job's RESULT is not
+      # evidence: a job cancelled after the agent step started ran the
+      # agent (its output reads `false` and the round is kept), and a
+      # pending job cancelled before it started delivers no outputs at all
+      # — unknown, so it keeps its round (one round of slack on a rare
+      # concurrency cancellation; the escalation still drops the label and
+      # posts, and the reset restores the budget). A step that was entered
+      # and then FAILED — the
       # action's bootstrap failure, its actor refusal, a Claude or codex
       # failure during the run, the codex step failing on a missing
       # OPENAI_API_KEY (which used to be refunded; the sandboxed agent can
@@ -2516,7 +2538,7 @@ jobs:
       - name: Refund infra-crashed round
         if: >-
           always() && needs.gate.outputs.act == 'fix' &&
-          (needs.fix.result == 'cancelled' || needs.fix.outputs.agent_skipped == 'true') &&
+          needs.fix.outputs.agent_skipped == 'true' &&
           steps.land.outputs.pushed != '1'
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}

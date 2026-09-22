@@ -588,8 +588,8 @@ the model for the review-fix loop and the dev agent:
   review loop's 4628734 is the same shape) the rule is narrower again: a
   round is refunded only when the fix job's `agent_skipped` output is true
   — both engines' agent steps `skipped`, a step outcome the runner settled
-  before any agent code ran — or the fix job was cancelled, and nothing was
-  pushed; a step that was entered and then failed keeps its attempt, since
+  before any agent code ran — and nothing was pushed; a step that was
+  entered and then failed keeps its attempt, since
   the agent decides how its own step ends and a refund keyed on that let a
   steered agent make a completed round read as an infra crash. A transient
   bootstrap failure now spends an attempt; the cap bounds spend either
@@ -621,7 +621,12 @@ the model for the review-fix loop and the dev agent:
   fix job's result is `cancelled` — as `claude-review.yml`'s land job is —
   rather than failing its artifact download and reporting "Landing failed"
   on the PR for a round whose agent never started; the refund step still
-  runs. A run cancelled by hand mid-agent lands nothing either. The land
+  runs, on the job's own `agent_skipped` output like every round's — a
+  pending job cancelled before it started delivers no outputs and keeps its
+  attempt (unknown is not evidence; one attempt of slack, since 2026-09-22),
+  a job cancelled during sync or provisioning is refunded, and one cancelled
+  after the agent step started keeps it. A run cancelled by hand mid-agent
+  lands nothing either. The land
   job as a whole is additionally gated on the gate job's *success*, not only
   on its `act` output: a gate that failed after deciding `fix` (a
   `Record attempt` API write that did not go through) skips the fix job,
@@ -701,8 +706,9 @@ agent posts nothing and resolves nothing in-run):
   output, nothing pushed), with the same one-round regression on a
   provisioning failure over a stale branch, and narrowed again with it on
   2026-09-22 (Claude Security 4628734): the round is refunded only when the
-  agent step was never entered (`agent_skipped`) or the fix job was
-  cancelled, and nothing was pushed. The refund re-reads the sticky
+  agent step was never entered (`agent_skipped`, the fix job's own output;
+  a cancelled job is refunded on that evidence alone) and nothing was
+  pushed. The refund re-reads the sticky
   comment's current count *and* head marker rather than writing the gate's
   values, since the land job is outside the per-PR concurrency group. Two
   companions close the loop the finding described (a steered agent killing

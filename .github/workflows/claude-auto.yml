@@ -2013,7 +2013,8 @@ jobs:
   # job that failed still gets its error posted and its attempt refunded;
   # with no artifact at all (runner killed mid-agent) the composite fails
   # its download, lands nothing, and says so on the PR. A CANCELLED fix job
-  # skips the Land step but still gets its refund (see the step gates).
+  # skips the Land step; its refund follows the same evidence as every
+  # other round's (see the refund step).
   #
   # Gated on the gate job having SUCCEEDED, not only on its `act` output: a
   # gate that failed after writing act=fix — `Record attempt` is the
@@ -2069,7 +2070,15 @@ jobs:
       # for nothing. A run cancelled by hand mid-agent is skipped too: its
       # partial commits are not pushed and re-reviewed on the strength of an
       # always(). The step is gated, not the job, so the refund below still
-      # runs and gives back the attempt the gate recorded. `skipped` is
+      # runs — and refunds only on the evidence every round needs: the job's
+      # own `agent_skipped` output. A job cancelled during checkout, sync or
+      # provisioning delivers it (the agent step is `skipped`) and is
+      # refunded; one cancelled after the agent step started delivers
+      # `false` and keeps its attempt; a PENDING job cancelled before it
+      # started delivers no outputs at all, and unknown keeps its attempt —
+      # one attempt of slack on a rare concurrency cancellation, not a
+      # refund decided by a job that may have run the agent (Claude
+      # Security 4628735, review round 1). `skipped` is
       # excluded too — the job-level gate on the gate job's success already
       # rules it out (a fix job is skipped only when its gate did not
       # succeed), so the test is belt and braces for the same "no artifact,
@@ -2087,7 +2096,7 @@ jobs:
       # after the run, it cannot be the run's origin. Nothing the agent job
       # uploaded is consulted for any of it. Same skip as the Land step: a
       # cancelled or skipped fix job has nothing to land, and the refund
-      # below still runs.
+      # below still runs (on the job's own evidence, see there).
       - name: Revalidate the run binding
         id: rebind
         if: needs.fix.result != 'cancelled' && needs.fix.result != 'skipped'
@@ -2172,15 +2181,19 @@ jobs:
       # NEVER ENTERED — a sync / provisioning failure that skipped it
       # outright (before the split the attempt was recorded after those
       # steps; it cannot be any more, so the refund covers it), a failed
-      # codex prep / user-setup step, or a fix job cancelled before it ran
-      # (the concurrency group's arbitrary ordering) — landed no fix. Roll
-      # the sticky counter back one. Two conditions:
-      # the fix job was cancelled or its `agent_skipped` output is true
-      # (both engines' agent steps `skipped`, a step outcome the runner
-      # settled before any agent code ran; a cancellation is the server's,
-      # and needs actions:write, which no token in the fix job holds), and
+      # codex prep / user-setup step, or a job cancelled while one of those
+      # steps ran (the agent step is `skipped` then too) — landed no fix.
+      # Roll the sticky counter back one. Two conditions: the fix job's
+      # `agent_skipped` output is true (both engines' agent steps `skipped`,
+      # a step outcome the runner settled before any agent code ran), and
       # the landing pushed nothing (a round whose commits landed keeps its
-      # attempt whatever the agent step's outcome). A step that was entered
+      # attempt whatever the agent step's outcome). The job's RESULT is not
+      # evidence: a job cancelled after the agent step started ran the
+      # agent (its output reads `false` and the attempt is kept), and a
+      # pending job cancelled before it started delivers no outputs at all
+      # — unknown, so it keeps its attempt (one attempt of slack on a rare
+      # concurrency cancellation; the escalation still drops the label and
+      # posts, and the reset restores the budget). A step that was entered
       # and then FAILED — the action's bootstrap failure (observed: "socket
       # hang up" before the agent started), its actor refusal, a Claude or
       # codex failure during the run, the codex step failing on a missing
@@ -2219,7 +2232,7 @@ jobs:
       - name: Refund infra-crashed attempt
         if: >-
           always() && needs.gate.outputs.act == 'fix' &&
-          (needs.fix.result == 'cancelled' || needs.fix.outputs.agent_skipped == 'true') &&
+          needs.fix.outputs.agent_skipped == 'true' &&
           steps.land.outputs.pushed != '1'
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}

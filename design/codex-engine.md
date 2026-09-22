@@ -73,11 +73,13 @@ path throughout: a failed codex step *or* any of its prep steps
 (workspace/context prep, and the dev verb's separate prompt-compose)
 surfaces a visible error comment and, in the loops, a failed prep step
 refunds the review round / CI-fix attempt (the codex step was never
-entered; infra failures — e.g. a missing `OPENAI_API_KEY` — must not march
-a PR toward spurious escalation), while a codex step that ran and failed
-keeps its round, like a failed Claude step (Claude Security 4628734 /
-4628735, 2026-09-22: a refund keyed on the agent step's own outcome is
-the agent's to trigger);
+entered), while a codex step that ran and failed keeps its round, like a
+failed Claude step (Claude Security 4628734 / 4628735, 2026-09-22: a
+refund keyed on the agent step's own outcome is the agent's to trigger).
+A missing `OPENAI_API_KEY` fails the entered codex action step — the key
+is passed straight to it — and therefore consumes a round or attempt,
+where it used to be refunded; a persistently missing key now reaches the
+cap and a human instead of a refund on every trigger;
 in both loops (`claude-auto.yml` since #82, `claude-auto-review.yml`
 since #83) the codex step only *commits*:
 the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)

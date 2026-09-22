@@ -97,8 +97,10 @@ text are checked by the tests under `tests/`.
   the action's execution-file output is not launch evidence, so the step's
   outcome decides what lands, and a round is refunded only when the agent
   step was never entered (both engines' steps `skipped`, a step outcome the
-  runner settled before any agent code ran) or the fix job was cancelled,
-  never on how the agent's own step ended (Claude Security 4628734 and
+  runner settled before any agent code ran, delivered by the fix job's own
+  outputs — a cancelled job is refunded on that evidence alone, and a
+  pending job cancelled before it started, which delivers none, keeps its
+  round), never on how the agent's own step ended (Claude Security 4628734 and
   4628735, 2026-09-22); in both loops a manifest with no bundle posts the
   `@review` hand-back only when the agent step succeeded, so a round that
   landed nothing and did not complete cannot re-arm the loop, and the
