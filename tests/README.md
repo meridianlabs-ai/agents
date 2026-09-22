@@ -8,6 +8,17 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   case per rule — including the per-caller issue policy (`allowed-issue-labels`
   / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
   workflow's actual land inputs, against forged manifests.
+- `test_import_codex_final.py` — the `import-codex-final` composite's
+  script (`.github/scripts/import_codex_final.py`): a regular file owned by
+  the expected user is copied byte for byte; a symlink (to a runner file, or
+  dangling), a directory, a FIFO (without blocking), a file owned by someone
+  else and an unknown owner are refused with no copy and a stale copy
+  removed; oversize input is truncated. Plus the `resolve-reported-threads`
+  composite's step, lifted the same way, refusing a symlinked final message
+  (no ids, no stripped copy), and the structural rule over the three
+  write-path workflows: the codex-owned output file is named only by
+  codex-action's `output-file`, every reader takes the imported copy, and
+  the import step sits right after the reclaim (finding 4628447).
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
   retry, open-or-adopt PR and the branch-existence probe against a stub
   `gh`, the landing-failure hint) and

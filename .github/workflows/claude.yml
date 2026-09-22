@@ -1472,6 +1472,27 @@ jobs:
         if: always() && steps.codexuser.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
 
+      # Bring codex's final message across the user boundary ONCE, right
+      # after the reclaim's kill loop has ended every codex process: the
+      # output file sits in the codex-owned $RUNNER_TEMP/codex, whose entry
+      # codex could swap for a symlink, and every reader below runs as the
+      # runner. The composite opens it with O_NOFOLLOW, refuses anything
+      # but a regular codex-owned file, and copies it to
+      # $RUNNER_TEMP/codex-final.md (runner-only); the commit subject, the
+      # RESOLVED-THREADS parse and the summary read that copy and nothing
+      # else under the codex-owned dir (finding 4628447). A refused or
+      # missing message leaves no copy and the readers fall back to their
+      # defaults (default subject, the no-final-message placeholder).
+      # Gated like the guard; runs no git. continue-on-error: the copy is
+      # best-effort like the parse — a failure here (a misconfigured owner,
+      # an unwritable destination) must leave no copy, not strand the
+      # commit behind the readers' implicit success() gate.
+      - name: Import codex final message
+        id: codexfinal
+        continue-on-error: true
+        if: steps.codexrun.outcome == 'success' && steps.codexreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
+
       # Token split for the codex run: the CLI's step-log "tokens used" is one
       # blended number (non-cached input + output), so this reads the session
       # rollout codex wrote under its CODEX_HOME and puts input / cached /
@@ -1536,7 +1557,9 @@ jobs:
         env:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           START_SHA: ${{ steps.codexprep.outputs.sha }}
-          OUT: ${{ runner.temp }}/codex/codex-final.md
+          # The copy `Import codex final message` verified, never the
+          # codex-owned output file (finding 4628447).
+          OUT: ${{ runner.temp }}/codex-final.md
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           GIT_DIR: ${{ github.workspace }}/.git
           GIT_COMMON_DIR: ${{ github.workspace }}/.git
@@ -1612,7 +1635,7 @@ jobs:
           token: ${{ github.token }}
           repo: ${{ github.repository }}
           pr: ${{ github.event.issue.number || github.event.pull_request.number }}
-          final-message: ${{ runner.temp }}/codex/codex-final.md
+          final-message: ${{ runner.temp }}/codex-final.md
           stripped: ${{ runner.temp }}/codex-final.stripped.md
           resolve: "false"
 
@@ -1630,8 +1653,9 @@ jobs:
       # posts the codex reviewer's real one — so this is the footer's only
       # layer). Gated on the parse step (which is gated on the commit step):
       # the summary states the thread count, and OUT is the stripped copy it
-      # wrote — falling back to FINAL, codex's message unstripped, when that
-      # copy is missing (the composite warned; a stray RESOLVED-THREADS line
+      # wrote — falling back to FINAL, the imported copy of codex's message
+      # unstripped (never the codex-owned output file; finding 4628447), when
+      # that copy is missing (the composite warned; a stray RESOLVED-THREADS line
       # in a comment beats the summary going unread — inspect_ai#428's ten
       # blind rounds). The footer lines say "committed", never "pushed": this
       # step cannot know the push happened (emit-landing may still lose the
@@ -1642,7 +1666,7 @@ jobs:
         env:
           DIR: ${{ runner.temp }}/landing
           OUT: ${{ runner.temp }}/codex-final.stripped.md
-          FINAL: ${{ runner.temp }}/codex/codex-final.md
+          FINAL: ${{ runner.temp }}/codex-final.md
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           COMMITTED: ${{ steps.codexcommit.outputs.committed }}
           MERGE_ONLY: ${{ steps.codexcommit.outputs.merge_only }}

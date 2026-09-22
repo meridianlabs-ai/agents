@@ -22,6 +22,7 @@ take effect on every repo's next run.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
   `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
+  `import-codex-final`,
   `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
@@ -129,7 +130,14 @@ take effect on every repo's next run.
   the Surface steps set their
   error on `!= success`, not `= failure`, so a reclaim cancelled mid-run
   skips their git calls too) and put nothing that runs git between codex
-  and it. The landing steps additionally pin
+  and it. Right after it, `import-codex-final` copies codex's final
+  message out of the codex-owned `$RUNNER_TEMP/codex` (opened once with
+  `O_NOFOLLOW`, refused unless a regular codex-owned file) to
+  `$RUNNER_TEMP/codex-final.md`; every later reader — the commit subject,
+  `resolve-reported-threads`, the summary body — takes that copy, and no
+  runner-side step opens a path under the codex-owned dir (finding
+  4628447: a planted symlink would have had the runner publish its
+  target). The landing steps additionally pin
   `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE`, `GIT_CONFIG_GLOBAL=/dev/null`
   and the same two `core.*` keys by env as belt and braces; the guard pins
   the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
