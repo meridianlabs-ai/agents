@@ -33,8 +33,13 @@ gh() {
     "api repos/o/r/issues/12/timeline?per_page=100 --paginate")
       echo timeline >>"$STATE/reads"
       # `gh api --paginate` prints each page's array as it arrives; a page
-      # that fails leaves the earlier pages on stdout and exits non-zero.
-      [ ! -f "$STATE/timeline-partial.json" ] || { cat "$STATE/timeline-partial.json"; echo '{"message":"Server Error"}'; return 1; }
+      # that fails at the transport layer leaves ONLY the earlier pages on
+      # stdout (its diagnostic goes to stderr) and exits non-zero — valid
+      # JSON that parses cleanly, which is what made B1 (review round 1).
+      # An HTTP error body, by contrast, lands on stdout and breaks the
+      # parse by itself, so the partial fixture must not append one (review
+      # round 2, T1: the old code passed with that fixture).
+      [ ! -f "$STATE/timeline-partial.json" ] || { cat "$STATE/timeline-partial.json"; echo 'error connecting to api.github.com' >&2; return 1; }
       [ -f "$STATE/timeline.json" ] || { echo '{"message":"Server Error"}'; return 1; }
       cat "$STATE/timeline.json" ;;
     "api repos/o/r/collaborators/"*"/permission --jq .permission")
@@ -160,11 +165,13 @@ def test_an_unreadable_labeler_fails_closed(tmp_path):
 def test_a_timeline_read_that_fails_after_a_good_page_is_not_used(tmp_path):
     # Review round 1 (B1): `gh api --paginate` prints each page as it
     # arrives, so a transport failure on page two leaves page one's valid
-    # JSON on stdout. Parsing that would name the last labeler of the pages
-    # that arrived — a writer whose label a triage account removed and
-    # re-applied on the page that never came. The response is used only
-    # after a successful exit: here the failed read is retried once and the
-    # run stays one-shot, with no permission lookup at all.
+    # JSON on stdout (nothing else: the transport error is on stderr).
+    # Parsing that would name the last labeler of the pages that arrived —
+    # a writer whose label a triage account removed and re-applied on the
+    # page that never came — and the round 1 code did (`auto=true` with this
+    # fixture). The response is used only after a successful exit: the
+    # failed read is retried once and the run stays one-shot, with no
+    # permission lookup at all.
     r, o, state = run_engine(tmp_path, partial_text=pages([labeled("alice")]), perms={"alice": "write"})
     assert o["auto"] == "false" and o["pr_labels"] == []
     assert timeline_reads(state) == ["timeline", "timeline"] and lookups(state) == []
