@@ -54,6 +54,6 @@ gh pr create --repo "$REPO" --head "$BRANCH" \
 
 Once merged:
 - **Dev agent** — mention \`@claude\` in an issue or PR comment, or add the \`claude\` label to an issue.
-- **Reviewer** — auto-reviews PRs on open; or comment \`@review\` on a PR."
+- **Reviewer** — comment \`@review\` on a PR (or an External-labeled issue) to request a review."
 
 echo "PR opened for $REPO (added: ${added[*]})"

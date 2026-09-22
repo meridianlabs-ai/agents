@@ -7,16 +7,20 @@
 # the review is posted by the GitHub App they name, and a run without them
 # fails at the gate.
 #
-# issue_comment is the ONLY trigger the reusable workflow admits. Auto-review
-# on PR open / ready_for_review was switched off in every Meridian repo on
-# 2026-09-16 (decision: Ransom: no unasked CI reviews; reviews are driven from
-# Orca workspaces — first for meridianlabs-ai/actions on 2026-09-14 after
-# actions#110 was reviewed unasked, then everywhere after inspect_ai#501 was)
-# and the reusable's pull_request / pull_request_target path was removed on
-# 2026-09-22: a stub that still fires a PR event gets a red run with an error
-# naming the fix, not a review. A repo that wants a review from CI posts a
-# top-level @review comment as a write-access identity (the machine account,
-# for example) and lets this trigger pick it up.
+# issue_comment is the ONLY trigger the reusable workflow admits — the
+# comment-only contract. Auto-review on PR open / ready_for_review was
+# switched off as policy on 2026-09-16 (decision: Ransom: no unasked CI
+# reviews; reviews are driven from Orca workspaces — first for
+# meridianlabs-ai/actions on 2026-09-14 after actions#110 was reviewed
+# unasked, then after inspect_ai#501 was) and the reusable's pull_request /
+# pull_request_target path was removed on 2026-09-22, when eight of the ten
+# deployed stubs were already comment-only (inspect_harbor and inspect_vscode
+# still carried PR triggers; see the agents repo's design/architecture.md →
+# The reviewer: auto-review tradeoffs). A stub that still fires a PR event
+# gets a red run with an error naming the fix, not a review. A repo that
+# wants a review from CI posts a top-level @review comment as a write-access
+# identity (the machine account, for example) and lets this trigger pick it
+# up.
 #
 # Caveat: PRs from forks — a maintainer can review a fork PR with an @review
 # comment, the same trust decision made explicitly — the reusable's trig

@@ -1644,26 +1644,35 @@ substring collision in trigger gates). Design choices:
   version produced a good review that went nowhere because no posting tool
   was allowed, which is why `gh` and the inline-comment MCP were
   allow-listed until the landing manifest carried the review instead.
-- **Auto-review is OFF everywhere since 2026-09-16, and the reusable's
+- **Auto-review is OFF as policy since 2026-09-16, and the reusable's
   `pull_request` / `pull_request_target` path was REMOVED on 2026-09-22**
   (decision: Ransom; actions first on 2026-09-14 after actions#110 was
-  reviewed unasked, then every repo after inspect_ai#501 was). Reviews are
-  asked for — an `@review` comment, or from an Orca workspace — never
-  posted by CI. `issue_comment` is the only event the trig step admits: any
-  other event fails the gate red with an error naming the caller stub, so a
-  stub that still fires a PR event is noticed rather than silently no-oped.
-  The reviewer stubs carry only the `issue_comment` trigger and the fork's
-  dev stub sets `request_review_after_open: "false"`; a repo that wants a
-  review from CI posts a top-level `@review` as a write-access identity
-  (inspect_harbor's `synchronize` trigger for its nightly registry PR was
-  the one caller still on the PR-event path at removal time — its stub is
-  the dependent change). Gone with the path: the gate's release-please
+  reviewed unasked, then the policy for every repo after inspect_ai#501
+  was). Reviews are asked for — an `@review` comment, or from an Orca
+  workspace — never posted by CI. `issue_comment` is the only event the
+  trig step admits — the comment-only contract: any other event fails the
+  gate red with an error naming the caller stub, so a stub that still fires
+  a PR event is noticed rather than silently no-oped. Caller state at the
+  removal (all ten deployed stubs read on 2026-09-22): eight were already
+  comment-only (this repo, actions, inspect_ai on `meridian`, inspect_flow,
+  inspect_sandboxes, inspect_scout, inspect_swe, ts-mono) and two were not.
+  inspect_harbor's stub fires `pull_request: synchronize` for the machine
+  account's pushes to its nightly registry PR (`update-harbor-tasks`), a
+  review its triage flow still relies on, so its stub is a DEPENDENT change
+  after this lands: post a top-level `@review` as the machine account on
+  those pushes, keeping the branch and pusher restriction, and drop the
+  trigger. inspect_vscode's `main` still carries the open/reopen/ready
+  trigger its PR #200 removes. Until each migrates, its PR events get the
+  red gate run. The fork's dev stub sets `request_review_after_open:
+  "false"`; a repo that wants a review from CI posts a top-level `@review`
+  as a write-access identity. Gone with the path: the gate's release-please
   skip, the prt fork-head refusal, the merge-ref checkout, the `ack`-on-PR-
   event rule and the verify step's workflow-validation nudge (issue #27) —
-  all PR-event-only. History, for the record: auto-review ran on
-  `pull_request` `opened`/`reopened`/`ready_for_review` (never
-  `synchronize`, which fires on every push and would have re-reviewed and
-  re-billed every fix commit, the agent's own included); a
+  all PR-event-only. History, for the record: the designed auto-review ran
+  on `pull_request` `opened`/`reopened`/`ready_for_review`, not
+  `synchronize` (which fires on every push and would have re-reviewed and
+  re-billed every fix commit, the agent's own included — inspect_harbor's
+  narrowly scoped `synchronize` was the one deliberate exception); a
   `pull_request_target` switch was attempted 2026-08-26 and REVERTED
   2026-08-27 because Anthropic's workload-identity token exchange rejects
   prt-shaped OIDC subjects ("Invalid OIDC token", 2/2 on first exercise),

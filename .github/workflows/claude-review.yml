@@ -9,13 +9,19 @@ name: Claude review (reusable)
 # agent. Callers add a stub (see
 # examples/claude-review-stub.yml) that triggers on issue_comment: a
 # top-level @review comment on a PR, or on an External-labeled proxy issue.
-# That is the ONLY admitted event. The pull_request / pull_request_target
-# path (auto-review on PR open; prt attempted 2026-08-26 and reverted —
-# Anthropic's token exchange rejects prt-shaped OIDC subjects) was switched
-# off in every caller on 2026-09-16 and removed from this workflow on
-# 2026-09-22; the trig step fails loudly on any other event so a caller stub
-# that still fires one is noticed rather than silently no-oped. See
-# design/architecture.md → The reviewer: auto-review tradeoffs.
+# That is the ONLY admitted event — the comment-only contract. The
+# pull_request / pull_request_target path (auto-review on PR open; prt
+# attempted 2026-08-26 and reverted — Anthropic's token exchange rejects
+# prt-shaped OIDC subjects) was removed on 2026-09-22: auto-review had been
+# switched off as policy on 2026-09-16 and eight of the ten deployed callers
+# were already comment-only, but two were not — inspect_harbor's stub fires
+# `synchronize` for the machine account's pushes to its nightly registry PR,
+# a review it still needs (so its stub must post a top-level @review on those
+# pushes instead: a dependent change after this lands), and inspect_vscode's
+# main still carries the open/ready trigger its PR #200 removes. The trig
+# step fails RED on any other event so a stub that still fires one is
+# noticed rather than silently no-oped. See design/architecture.md → The
+# reviewer: auto-review tradeoffs.
 #
 # Callers MUST grant id-token: write at the calling job level (GitHub does not
 # pass id-token to reusable workflows implicitly).
@@ -380,9 +386,10 @@ jobs:
           # issue_comment is the only admitted event (the @review comment
           # path). The pull_request / pull_request_target path was removed
           # (2026-09-22): a caller stub that still fires one gets a RED run
-          # with this error, not a silent no-op — the harbor stub's
-          # `synchronize` trigger for its nightly registry PR depended on it
-          # and must switch to posting a top-level @review instead.
+          # with this error, not a silent no-op — inspect_harbor's stub
+          # (`synchronize`, its nightly registry PR: it must post a top-level
+          # @review instead) and inspect_vscode's (open/ready, until its #200
+          # lands) still did at removal time.
           if [ "$EVENT" != "issue_comment" ]; then
             echo "::error::claude-review.yml admits issue_comment (a top-level @review comment) only; the pull_request / pull_request_target path was removed on 2026-09-22. This run came from a '$EVENT' event — drop that trigger from the caller stub, or have it post a top-level @review comment instead."
             exit 1
