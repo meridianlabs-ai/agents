@@ -110,6 +110,10 @@ SUDO_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >>"$SUDO_LOG"
 # "Owned by the user": listed in FAKE_CODEX_OWNED and not chowned away since.
 owned() { grep -qxF -- "$1" <<<"${FAKE_CODEX_OWNED:-}" && ! grep -qxF -- "$1" "${CHOWN_LOG:-/dev/null}" 2>/dev/null; }
+# Under the test's directory, by physical path (macOS: /var is /private/var,
+# and the check hands over paths both as written and resolved).
+root_real=$(cd "${FAKE_ROOT:?}" && pwd -P)
+under_root() { local d; d=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1; case "$d/" in "$root_real"/*) return 0 ;; esac; return 1; }
 if [ "$1" = -u ]; then
   user=$2; shift 2
   [ "$1" = -H ] && shift
@@ -119,14 +123,14 @@ if [ "$1" = -u ]; then
     # world-writable — under FAKE_ROOT only (the host's own tree is never
     # "writable" here).
     if [ ! -L "$3" ] && owned "$3"; then [ -n "$(find "$3" -maxdepth 0 -perm -0200 2>/dev/null)" ]; exit; fi
-    case "$3" in "${FAKE_ROOT:?}"/*) ;; *) exit 1 ;; esac
+    under_root "$3" || exit 1
     [ -n "$(find -L "$3" -maxdepth 0 -perm -0002 2>/dev/null)" ]; exit
   fi
   if [ "$1" = find ] && [ "$3" = -mindepth ] && [ "$7" = -writable ]; then
     # The batched writability listing (GNU find -writable, absent on macOS):
     # the same answers as the single probe, for every entry of the directory.
     dir=$2
-    case "$dir" in "${FAKE_ROOT:?}"/*|"${FAKE_ROOT:?}") find -L "$dir" -mindepth 1 -maxdepth 1 -perm -0002 2>/dev/null ;; esac
+    if under_root "$dir/x"; then find -L "$dir" -mindepth 1 -maxdepth 1 -perm -0002 2>/dev/null; fi
     while IFS= read -r o; do
       [ -n "$o" ] && [ "$(dirname "$o")" = "$dir" ] && [ ! -L "$o" ] && owned "$o" && [ -n "$(find "$o" -maxdepth 0 -perm -0200 2>/dev/null)" ] && printf '%s\n' "$o"
     done <<<"${FAKE_CODEX_OWNED:-}"
@@ -641,6 +645,19 @@ def test_executables_inside_an_entry_are_checked_through_their_symlinks_and_owne
     rep.chmod(0o755)
     r = check(w, job, user=ME)
     assert r.returncode == 1 and f"(at {rep / 'jq'})" in r.stdout
+    # Two links in one directory to two writable targets: the directory is
+    # listed once, before the first target is protected, so the second
+    # link's answer must not come from that listing (the hosted image's
+    # /opt/pipx_bin has a dozen such links; round 3 of #131's first push).
+    two = w["tmp"] / "two-links"
+    two.mkdir()
+    for name in ("ansible", "ansible-pull"):
+        (ext / name).write_text("#!/bin/bash\n")
+        (ext / name).chmod(0o777)
+        (two / name).symlink_to(ext / name)
+    r = check(w, f"{two}:{w['tail']}", user=ME, protect="true")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("protected job PATH file") == 2
     # Safe links pass, and a chain many links share is probed once.
     (rep / "jq").chmod(0o755)
     (rb / "sed").symlink_to(rep / "jq")

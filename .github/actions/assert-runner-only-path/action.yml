@@ -237,6 +237,12 @@ runs:
           exists "$a" || return 0
           local why=""
           if owned "$a"; then why="is owned by the $USER_NAME user"
+          elif [ -L "$a" ]; then
+            # A symlink's writability is its target's, settled through the
+            # target chain before this; the link itself is replaced only by
+            # its owner (above) or through its parent (a hop). Never ask the
+            # listing: it may predate the target's protection.
+            return 0
           elif writable "$a"; then
             # Sticky (/tmp): creation only, so an EXISTING child not owned by
             # the user is safe there; a missing child, or one the user owns,
