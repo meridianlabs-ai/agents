@@ -46,6 +46,9 @@ take effect on every repo's next run.
 
 ## Conventions
 
+- **All changes land via PR; main rejects direct pushes** (repo ruleset;
+  policy: Ransom, 2026-08-26). The ruleset requires no GitHub approvals,
+  but the agent review requirement below still applies.
 - **Make changes from a throwaway worktree, not the primary clone**
   (Ransom, 2026-08-27): Ransom works in his checkout (IDE open,
   in-progress state), so never branch-switch it — `git worktree add
@@ -73,13 +76,11 @@ take effect on every repo's next run.
 - **Do NOT label PRs `auto`, and do not post `@auto`** (policy: Ransom,
   2026-09-11 — reverses the 2026-08-27 default of labeling every PR
   `auto` so the review-fix loop drove rounds to convergence). Agent work
-  and review are driven from Orca workspaces now (orca-pr-sync mirrors
-  PRs into workspaces; a local review skill runs the review), so the
-  GitHub-hosted autonomous loop is not engaged on new PRs. The `@auto`
-  workflows themselves stay in place for now — this is a policy change,
-  not a removal. Still request the CI review with a top-level `@review`
-  comment (mandatory for workflow-editing PRs; see CLAUDE.md), then
-  address its findings yourself on the branch. If a PR does carry the
+  and review happen outside the GitHub-hosted autonomous loop, which is
+  not engaged on new PRs. The `@auto` workflows themselves stay in place
+  for now — this is a policy change, not a removal. Every PR requires
+  agent review before merge; include a short review summary in its PR
+  description and address findings on the branch. If a PR does carry the
   label (a Marvin-opened PR from an `auto` issue inherits it), don't
   race the loop — it is serialized per PR, and a session push mid-round
   invalidates its state.

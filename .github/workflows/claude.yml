@@ -455,8 +455,25 @@ jobs:
               # codex branch and PR). A matching label is handled above.
               text=""
               if [ "$EVENT_ACTION" = "opened" ]; then
-                text="$IBODY
+                # An imported upstream issue (skills/import/import.sh): the
+                # body opens with the machine-readable `Upstream issue:` line,
+                # and the title and the snapshot below the importer's header
+                # are the upstream author's text — any GitHub account's —
+                # republished under the importing maintainer's login, which
+                # is the actor judged below. import.sh backticks the phrases
+                # before it posts; this is the gate's own refusal behind that,
+                # so no caller's stub or an older import.sh has to be right
+                # (Claude Security 4629154). The first line only, the shape
+                # import.sh writes: a maintainer's own issue that cites an
+                # upstream issue further down is theirs. A `claude`/`auto`
+                # label or a later comment starts work on an import, judged
+                # by its own actor.
+                if printf '%s' "$IBODY" | head -n1 | grep -qE '^Upstream issue:[[:space:]]*https?://'; then
+                  echo "::notice::imported upstream issue: its body and title are the upstream author's text, not a trigger; label it or comment to start the agent."
+                else
+                  text="$IBODY
           $ITITLE"
+                fi
               fi
             fi
             esc=$(printf '%s' "$PHRASE" | sed 's/[.[\*^$()+?{|]/\\&/g')

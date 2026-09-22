@@ -474,6 +474,16 @@ that mirror:
   plus a snapshot of the upstream body with bare `#N` refs qualified (in fork
   context they'd rebind to unrelated fork issue numbers). Snapshot only — no
   comment/state syncing; canonical discussion stays upstream.
+- Title and snapshot are de-fanged (`@claude` → `` `claude` ``, likewise
+  `@i-am-marvin`, `@auto`, `@review`; the loops' markers split), the land
+  composite's rewrite: the issue is posted under the importer's login and the
+  fork's stubs read an opened issue's body and title as its author's
+  directive, so an outsider's trigger phrase upstream would otherwise run the
+  agent — or arm the `@auto` loop — as the maintainer the moment they imported
+  it (Claude Security 4629154, fixed 2026-09-22). Behind that, claude.yml's
+  gate declines body/title text triggers on an opened issue whose first line
+  is `Upstream issue:`; a `claude`/`auto` label or a later comment, judged by
+  its own actor, starts work on an import.
 - Added to Atlas with `Status = Todo`; Stage stays unset (the agent post-step
   owns `Todo → Agent`).
 - Dedup key: the upstream URL in the body line (issue search, open *and*

@@ -9,6 +9,27 @@
 # issue (closed, a PR, or missing).
 set -euo pipefail
 
+# defang — stdin to stdout with the agents' trigger phrases backticked
+# (`@auto` -> `` `auto` ``) and the loops' `<!-- … -->` markers split,
+# case-insensitively: the rewrite land/lib.sh defang() applies to every body
+# the machine account republishes, plus `@i-am-marvin`, the dev stub's other
+# phrase. The fork issue is created under the IMPORTING maintainer's login,
+# and the fork's stubs fire on an opened issue whose body or title contains a
+# phrase (GitHub's contains() ignores case) with the gate authorizing
+# github.actor — so a bare `@claude <task>` an outsider wrote upstream would
+# run as the maintainer's directive the moment they imported it (Claude
+# Security 4629154). Python, not GNU sed's `I` flag: this runs on a
+# maintainer's Mac. The list is the land composite's; keep them in step.
+defang() {
+  python3 -c '
+import re, sys
+s = sys.stdin.read()
+s = re.sub(r"@(review|claude|auto|i-am-marvin)", r"`\1`", s, flags=re.I)
+s = re.sub(r"claude-review-(summary|verdict|comment|nudge)", r"claude-review \1", s, flags=re.I)
+s = re.sub(r"auto-(handoff|converged|review-rounds|review-head|fix-attempts)", r"auto \1", s, flags=re.I)
+sys.stdout.write(s)'
+}
+
 FORK=meridianlabs-ai/inspect_ai
 UPSTREAM=UKGovernmentBEIS/inspect_ai
 PROJECT=PVT_kwDOC7YMCM4BU68p
@@ -28,7 +49,7 @@ jq -e 'has("pull_request") | not' <<<"$UP" >/dev/null ||
   { echo "$UPSTREAM#$N is a PR — upstream PRs get External proxies via the Atlas sync, not /import" >&2; exit 4; }
 [ "$(jq -r .state <<<"$UP")" = "open" ] ||
   { echo "$UPSTREAM#$N is closed — nothing to work on" >&2; exit 4; }
-TITLE=$(jq -r .title <<<"$UP")
+TITLE=$(jq -r .title <<<"$UP" | defang)
 
 # ---- dedupe on the machine-readable "Upstream issue:" body line, open AND
 # closed (a Done import must never be recreated). Search-index lag (~1 min)
@@ -41,9 +62,12 @@ if [ -n "$EXISTING" ]; then
 fi
 
 # ---- body: "Upstream issue:" key line (promote.sh reads it to add the
-# upstream Fixes ref), then a snapshot with bare #refs qualified — in fork
-# context they would rebind to unrelated fork issue numbers.
-BODY=$(UP_BODY="$(jq -r '.body // ""' <<<"$UP")" UP_URL="$UP_URL" python3 -c '
+# upstream Fixes ref), then a snapshot, de-fanged (above) and with bare #refs
+# qualified — in fork context they would rebind to unrelated fork issue
+# numbers. The Atlas sync reads directives only above the `---` rule, and
+# claude.yml's gate declines body/title text triggers on an opened issue
+# whose first line is this one; keep both lines as they are.
+BODY=$(UP_BODY="$(jq -r '.body // ""' <<<"$UP" | defang)" UP_URL="$UP_URL" python3 -c '
 import os, re
 snap = re.sub(r"(?<![\w/])#(\d+)\b", r"UKGovernmentBEIS/inspect_ai#\1",
               os.environ["UP_BODY"])
@@ -51,7 +75,7 @@ print("""Upstream issue: %s
 
 Imported from upstream so the agents can work it here (no upstream write
 access). Canonical discussion stays upstream; below is a snapshot of the
-upstream body at import time.
+upstream body at import time, with agent trigger phrases backticked.
 
 ---
 
