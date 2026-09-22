@@ -59,8 +59,9 @@ description: >-
   the codex-run counterpart of its `claude-setup` action, since a composite
   action can only run as the runner and is never run on the codex path. It
   runs with the same environment as the default recipe (as `user` when
-  set: no sudo, HOME=/home/<user>, sudo's PATH plus `~/.local/bin` for uv,
-  cwd the checkout, network), so it can pin a Python (`uv venv --python
+  set: no sudo, an explicit minimal environment — HOME=/home/<user>, the
+  system PATH plus `~/.local/bin` for uv, no runner or XDG variables — cwd
+  the checkout, network), so it can pin a Python (`uv venv --python
   3.11`), sync a lockfile (`uv sync --dev`), or install Node tooling
   (`corepack enable --install-directory ~/.local/bin && pnpm install
   --frozen-lockfile`). The composite writes it to `$RUNNER_TEMP` (readable
@@ -176,11 +177,20 @@ runs:
         else
           # A copy under RUNNER_TEMP (755 runner:runner on the hosted image,
           # so readable by the user) rather than the action's own path, and
-          # a clean sudo environment (-H: that user's HOME, for the uv
-          # bootstrap and its caches; no -E: no GITHUB_* or runner PATH
-          # reaches the recipe). sudo keeps the working directory, so the
-          # venv lands in the checkout as in the runner case.
+          # an EXPLICIT minimal environment (`env -i`): sudo's env_reset
+          # alone is not enough — the hosted image's sudoers keeps the XDG_*
+          # variables, and the first hosted run of the canary had the uv
+          # installer, running as codex, try to write its receipt to the
+          # runner's `$XDG_CONFIG_HOME/uv` (EACCES, three times, provisioning
+          # failed). HOME, USER and LOGNAME are the user's; PATH is the
+          # image's system path (the recipe prepends ~/.local/bin itself);
+          # no GITHUB_*, no runner PATH, no XDG_* reaches the recipe. sudo
+          # keeps the working directory, so the venv lands in the checkout
+          # as in the runner case.
           install -m 644 "$RECIPE" "$RUNNER_TEMP/provision-fallback.sh"
           echo "provisioning as $AS_USER"
-          sudo -u "$AS_USER" -H bash "$RUNNER_TEMP/provision-fallback.sh" ${args[@]+"${args[@]}"}
+          sudo -u "$AS_USER" -H -- env -i \
+            HOME="/home/$AS_USER" USER="$AS_USER" LOGNAME="$AS_USER" LANG=C.UTF-8 \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            bash "$RUNNER_TEMP/provision-fallback.sh" ${args[@]+"${args[@]}"}
         fi

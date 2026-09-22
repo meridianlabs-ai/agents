@@ -250,8 +250,11 @@ def dispatch(tmp_path: Path, user: str, caller_recipe: str = ""):
     bins = tmp_path / "bin"
     bins.mkdir()
     log = tmp_path / "log"
+    # Records the full argv, then runs the command as the caller: `-u X -H
+    # --` and the explicit `env -i VAR=…` prefix are swallowed so the
+    # recipe stub keeps the test's LOG variable.
     write_exe(bins / "sudo", '#!/usr/bin/env bash\nprintf "sudo %s\\n" "$*" >>"$LOG"\n'
-              'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H) shift ;; *) break ;; esac; done\nexec "$@"\n')
+              'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H|--|env|-i|*=*) shift ;; *) break ;; esac; done\nexec "$@"\n')
     recipe = write_exe(tmp_path / "recipe.sh", '#!/usr/bin/env bash\nprintf "recipe %s %s%s\\n" "$0" "$(pwd)" "${1:+ arg=$1}" >>"$LOG"\n')
     temp = tmp_path / "runner-temp"
     temp.mkdir()
@@ -276,7 +279,7 @@ def test_composite_runs_a_runner_temp_copy_under_sudo_for_the_user(tmp_path):
     copy = temp / "provision-fallback.sh"
     assert copy.exists() and stat.S_IMODE(copy.stat().st_mode) == 0o644
     assert copy.read_text() == (tmp_path / "recipe.sh").read_text()
-    assert log == f"sudo -u codex -H bash {copy}\nrecipe {copy} {tmp_path / 'work'}\n"
+    assert log == f"sudo -u codex -H -- env -i HOME=/home/codex USER=codex LOGNAME=codex LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash {copy}\nrecipe {copy} {tmp_path / 'work'}\n"
     assert "provisioning as codex" in r.stdout
 
 
@@ -286,7 +289,7 @@ def test_composite_hands_the_caller_recipe_to_the_script_as_a_runner_temp_file(t
     caller = temp / "provision-recipe.sh"
     assert caller.read_text().rstrip("\n") == "uv venv --python 3.11\nuv sync --dev" and stat.S_IMODE(caller.stat().st_mode) == 0o644
     copy = temp / "provision-fallback.sh"
-    assert log == f"sudo -u codex -H bash {copy} {caller}\nrecipe {copy} {tmp_path / 'work'} arg={caller}\n"
+    assert log == f"sudo -u codex -H -- env -i HOME=/home/codex USER=codex LOGNAME=codex LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash {copy} {caller}\nrecipe {copy} {tmp_path / 'work'} arg={caller}\n"
 
 
 def test_composite_refuses_a_caller_recipe_that_is_not_bash(tmp_path):
