@@ -45,6 +45,9 @@ take effect on every repo's next run.
 
 ## Conventions
 
+- **All changes land via PR; main rejects direct pushes** (repo ruleset;
+  policy: Ransom, 2026-08-26). The ruleset requires no GitHub approvals,
+  but the agent review requirement below still applies.
 - **Make changes from a throwaway worktree, not the primary clone**
   (Ransom, 2026-08-27): Ransom works in his checkout (IDE open,
   in-progress state), so never branch-switch it — `git worktree add
