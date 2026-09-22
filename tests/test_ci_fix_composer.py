@@ -59,27 +59,24 @@ def commit(r):
 
 
 def compose(r, *, engine="claude", claude_outcome="success", merge_sha="", final_message="Nothing to fix.",
-            error=None, agent_started=None, codexguard_outcome=None):
+            error=None, codexguard_outcome=None):
     landing = r["tmp"] / "landing"
     landing.mkdir(exist_ok=True)
+    # The execution file is always present and well-formed here: it is a
+    # file the PR's provisioning step could have pre-created, so nothing
+    # about landing may depend on it (finding 4628657, review round 2).
     exec_file = r["tmp"] / "exec.json"
-    if agent_started is False:
-        exec_file.write_text("")                 # the action produced no execution output
-    else:
-        exec_file.write_text(json.dumps([{"type": "result", "result": final_message}]))
+    exec_file.write_text(json.dumps([{"type": "result", "result": final_message}]))
     error_file = r["tmp"] / "agent-error.md"
     if error is not None:
         error_file.write_text(error)
     extra = r["tmp"] / "landing-extra.json"
-    if agent_started is None:
-        agent_started = engine == "claude"
     if codexguard_outcome is None:
         codexguard_outcome = "success" if engine == "codex" else "skipped"
     env = {
         "DIR": str(landing), "EXTRA": str(extra), "PR": "42", "ATTEMPT": "2", "ENGINE": engine,
         "START_SHA": r["start"], "MERGE_SHA": merge_sha, "EXEC": str(exec_file),
         "CLAUDE_OUTCOME": claude_outcome if engine == "claude" else "skipped",
-        "AGENT_STARTED": "true" if agent_started else "false",
         "CODEXGUARD_OUTCOME": codexguard_outcome,
         "CODEXCOMMIT_OUTCOME": "skipped", "PROV_NOTE": "", "ERROR_FILE": str(error_file),
         "GIT_DIR": str(r["work"] / ".git"), "GIT_COMMON_DIR": str(r["work"] / ".git"),
@@ -113,37 +110,25 @@ def test_no_commit_owes_nothing_and_sets_no_stage(repo):
     assert m["comments"] == [{"number": 42, "body_file": "agent-summary.md"}]
 
 
-def test_errored_attempt_with_a_commit_still_owes_the_handback_and_sets_no_stage(repo):
-    # The CI-fix loop's own rule, unchanged: the landed commit owes the
-    # re-review whatever the step's outcome (the push re-runs CI); the ⚠️
-    # travels as the error. Still no stage — escalation is the gate's.
-    commit(repo)
-    m, _ = compose(repo, claude_outcome="failure", error="⚠️ it broke\n")
-    assert m["handback"] is True and "stage" not in m and m["error"]["fail_run"] is True
-
-
-def test_a_claude_step_that_failed_without_launching_lands_nothing_not_even_the_base_merge(repo):
+def test_a_failed_claude_step_lands_nothing_whatever_the_execution_file_says(repo):
     # Finding 4628657's local reproduction: the action refused the actor
-    # (or failed to start) and the round still bundled the runner's clean
-    # base merge — a marvin push, a CI re-run and a kept attempt for a round
-    # nobody authorized. Now: no hand-back, no relay, no git; the error
-    # travels and the land job's refund (agent not started, nothing pushed)
-    # gives the attempt back. Same shape as the codex refusal path.
+    # and the round still bundled the runner's clean base merge — a marvin
+    # push, a CI re-run and a kept attempt for a round nobody authorized.
+    # Review round 2: the action's own `execution_file` output is no launch
+    # evidence either (its error handler publishes a pre-existing default-
+    # path file), so the rule is the step OUTCOME, fail-closed: a failed
+    # Claude step lands nothing — not the base merge, not a commit made
+    # before the failure — owes no hand-back, relays nothing, and the land
+    # job's refund (agent step not successful, nothing pushed) gives the
+    # attempt back. Same shape as the codex failure path. The execution
+    # file here is present and well-formed, as a preseeded one would be.
     commit(repo)                                    # the runner's base merge, above the start SHA
     head = git("rev-parse", "HEAD", cwd=repo["work"]).stdout.strip()
-    m, landing = compose(repo, claude_outcome="failure", agent_started=False, merge_sha=head,
-                         error="⚠️ the CI-fix step failed before the agent launched\n")
-    assert "handback" not in m and "comments" not in m and "stage" not in m
-    assert m["error"]["fail_run"] is True
-    assert not (landing / "agent-summary.md").exists()
-
-
-def test_a_claude_step_that_launched_and_then_failed_still_lands_its_commit(repo):
-    # Unchanged: a failure AFTER launch keeps the CI-fix loop's own rule (the
-    # landed commit owes the re-review; the push re-runs CI).
-    commit(repo)
-    m, _ = compose(repo, claude_outcome="failure", agent_started=True, error="⚠️ it broke\n")
-    assert m["handback"] is True and m["error"]["fail_run"] is True
+    for merge_sha in (head, ""):                    # merge-only, and a commit of the run
+        m, landing = compose(repo, claude_outcome="failure", merge_sha=merge_sha, error="⚠️ it broke\n")
+        assert "handback" not in m and "comments" not in m and "stage" not in m, merge_sha
+        assert m["error"]["fail_run"] is True
+        assert not (landing / "agent-summary.md").exists()
 
 
 def test_a_codex_round_whose_guard_did_not_succeed_lands_nothing(repo):

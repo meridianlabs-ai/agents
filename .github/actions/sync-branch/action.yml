@@ -82,6 +82,16 @@ inputs:
       the live base as the merge target, as before.
     required: false
     default: ""
+  base-sha:
+    description: >-
+      The base tip the caller's trusted context read (`bind-ci-run`'s
+      `base_sha`). When set, `origin/<base>` as fetched must be exactly it or
+      this step FAILS before merging — the base is not allowed to move
+      between the gate's read and the merge, so the context the round was
+      charged for is the context merged. Empty (the default) merges the
+      fetched tip, as before.
+    required: false
+    default: ""
 
 outputs:
   base:
@@ -142,6 +152,7 @@ runs:
         USER_NAME: ${{ inputs.user-name }}
         USER_EMAIL: ${{ inputs.user-email }}
         PINNED_BASE: ${{ inputs.base }}
+        PINNED_BASE_SHA: ${{ inputs.base-sha }}
         # Step-scoped git credential for the fetches below (design/
         # architecture.md → "No persisted git credentials"): git reads
         # GIT_CONFIG_* from the environment with command-line precedence, so
@@ -238,6 +249,15 @@ runs:
         # exactly the drift this step exists to end.
         start_sha=$(git rev-parse HEAD)
         echo "start_sha=$start_sha" >>"$GITHUB_OUTPUT"
+        # The caller's pinned base tip (see the `base-sha` input): what was
+        # fetched must be exactly it, else nothing is merged.
+        if [ -n "${PINNED_BASE_SHA:-}" ]; then
+          fetched=$(git rev-parse "origin/$base")
+          if [ "$fetched" != "$PINNED_BASE_SHA" ]; then
+            echo "::error::origin/$base is at $fetched, but the caller's trusted context read $PINNED_BASE_SHA as the base tip to merge; the base moved between the gate and this step — refusing to merge, the next CI event retries."
+            exit 1
+          fi
+        fi
         conflicts=""
         if git merge --no-edit "origin/$base"; then
           # "Already up to date" also exits 0 without moving HEAD. Only a

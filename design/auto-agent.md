@@ -279,11 +279,19 @@ reads and refuses everything else:
    the current base is the tested base. That base is then *pinned*: the
    gate emits it, the fix job's `sync-branch` takes it as its `base` input
    and fails before fetching or merging anything if the PR's live base has
-   moved off it, and the land job's revalidation requires it again. What
-   this does not recover is the merge commit the run built — GitHub records
-   a pull_request run's PR head, not its merge — so the runner merges that
-   base's *current* tip, as a re-run of CI would; the design doc says so
-   rather than claiming the tested tree.
+   moved off it, and the land job's revalidation requires it again. The
+   base *tip* is read from the branch at the gate (`base_sha`) and the sync
+   is pinned to exactly it (sync-branch's `base-sha` input): the base may
+   have advanced between the run and the gate — the loop's job is to make
+   the branch pass against the base as it is — but not between the gate's
+   read and the merge, so the context the counter was charged for is the
+   context merged; after the merge the landing's ancestry rules govern.
+   What this does not recover is the merge commit the run built or the base
+   tip it merged — GitHub records a pull_request run's PR head, not its
+   merge, and a *re-run* of that run reuses the original merge commit
+   (`GITHUB_SHA`/`GITHUB_REF`); only a new push builds a new one. The doc
+   says so rather than claiming the tested tree; exact tested-commit
+   provenance needs a producer inside the CI run (Open follow-ups).
 5. **The run's actors are authorized in the gate.** `actor` (whose push or
    PR open/reopen started the run) and `triggering_actor` (who re-ran it,
    when different) must each be one of `TRUSTED_LOGINS` or hold write
@@ -329,17 +337,23 @@ The `auto` label, verified by who applied it, stays the opt-in — a
 maintainer may label another author's PR on purpose, and a "PR author must
 be a writer" rule would refuse that while telling two writers' PRs apart no
 better. The actor check judges who *ran* CI, not who *authored* the PR. And a
-Claude step that fails *without launching the agent* (the action's actor
-refusal, or a bootstrap failure — indistinguishable from outside it) now
-lands nothing, the runner's base merge included, and its attempt is
-refunded, as the codex refusal path always did; a step that launched and
-then failed still lands what it committed. "Launched" is read from the
-action's own `execution_file` output and nothing else: a file at the
-action's default path is one the PR's provisioning step can pre-create,
-and reading it as launch evidence let a refused round bundle the base merge
-and dodge its refund (review round 1). A provisioning failure, whose agent
-step is skipped rather than failed, keeps landing the base merge (decision
-2026-09-09, recorded on the Surface step).
+Claude step that **fails**, for any reason — the action's actor refusal, a
+bootstrap failure, a failure during the run — now lands nothing: not the
+runner's base merge, not a commit Claude made before failing; its attempt
+is refunded, as the codex failure path always did. The three causes cannot
+be told apart from outside the action, and nothing the fix job can observe
+proves Claude launched: a file at the action's default path is one the
+PR's provisioning step can pre-create (review round 1), and the action's
+own `execution_file` output is no better — its error handler publishes
+that path whenever the file exists, refusal or not (review round 2,
+`setExecutionFileOutputIfPresent()` in the catch block). So the rule is
+the step's outcome, a runner fact no PR file can forge, and the fix job
+carries no "launched" signal at all. The cost: a Claude run that committed
+a fix and then failed (say, a post-run error) loses that commit with the
+runner, where before it landed and kept its attempt; the codex path always
+behaved this way. A provisioning failure, whose agent step is skipped
+rather than failed, keeps landing the base merge (decision 2026-09-09,
+recorded on the Surface step).
 
 Tests: `tests/test_ci_fix_binding.py` runs the composite's shell against
 synthetic run, pull-request, timeline and permission records for every rule
@@ -808,23 +822,26 @@ The simple case ships first and is independently useful:
   cheap pre-filter (consistency with `claude-review.yml`, reduces forged-marker
   surface); the deployed inspect_flow and fork stubs can be synced to match when
   convenient — purely surface-reduction, not a security gap.
-- **Exact run-to-PR provenance (design decision, not started).** The
-  binding above (Binding the failed run to its PR) refuses when two PRs
-  share a branch because no API field names a `pull_request` run's
-  triggering PR. The one exact source GitHub offers is the CI job's own
-  OIDC token (`ref: refs/pull/N/merge`, `base_ref`, `head_ref`, `sha` of
-  the merge commit, `run_id`, `run_attempt`, signed by GitHub), which would
-  let a run drive the right PR even while another shares its branch. It
-  would cost: every caller's CI workflow minting a token with a dedicated
-  audience and publishing it as an artifact (the CI job runs the PR's own
-  workflow file, so the receipt is adversary-produced and only the
-  signature is trusted), a verifier in the gate (issuer, signature,
-  audience, expiry, exact run id and attempt), and a policy for callers
-  that do not publish one (fail closed to today's singleton rule). Bearer
-  tokens in artifacts need their own review even with a private audience.
-  Ransom's call whether the availability cost of the singleton rule is
-  worth avoiding; the 2026-09-21 investigation lists it as a design
-  candidate, not a tested drop-in.
+- **Exact run provenance (design decision for Ransom; returned as the
+  scope stop of the 4628657 loop, round 3).** The binding above establishes
+  the run's head commit, the base branch it merged into, the base tip the
+  sync merges, and that no other PR can be the origin; it cannot establish
+  the merge commit the run tested, the base tip it merged, or which of two
+  PRs sharing a branch GitHub considered the trigger — no API field carries
+  any of them. The one exact source GitHub offers is the CI job's own OIDC
+  token (`ref: refs/pull/N/merge`, `base_ref`, `head_ref`, `sha` of the
+  merge commit, `run_id`, `run_attempt`, signed by GitHub). Options: (A)
+  keep the current chain as the automatic path and accept the stated
+  limits; (B) a provenance producer — every caller's CI workflow grants
+  `id-token: write` to the PR's own job, mints a token with a dedicated
+  audience and publishes it as an artifact (adversary-produced; only the
+  signature is trusted), and `bind-ci-run` verifies issuer, signature,
+  audience, expiry, exact run id and attempt before reading the claims,
+  failing closed for callers that publish none — at the cost of a bearer
+  token in an artifact and of granting the PR's job OIDC minting; (C) no
+  automatic CI-fix at all: a maintainer starts a round by hand (an `@auto`
+  comment already exists as the manual trigger). The 2026-09-21
+  investigation lists (B) as a design candidate, not a tested drop-in.
 
 ## Kickoff: `@auto` as a distinct trigger
 

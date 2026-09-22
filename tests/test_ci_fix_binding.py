@@ -32,10 +32,12 @@ head branch — from fixtures, one case per rule:
 - with `revalidate`, the gate's context must be reproduced before landing;
 - a persistent API error fails the step rather than binding.
 
-The fix job's `launched` signal, which the landing composer and the refund
-key on, is lifted too: it believes only the Claude action's own
-`execution_file` output, never a file at the default path (which the PR's
-provisioning step can pre-create).
+The fix job has no launch signal at all: the Claude action's own
+`execution_file` output is published by its error handler from whatever
+file sits at the default path (which the PR's provisioning step can
+pre-create), so a failed Claude step lands nothing and is refunded on the
+step's outcome alone — checked structurally here, behaviourally in
+test_ci_fix_composer.py.
 
 Every fixture is synthetic: no case here reproduces GitHub's event
 generation, the contents or order of a real completed-event association
@@ -71,6 +73,7 @@ BIND = step_script(ACTION, "    - id: bind", 8)
 
 SHA_A = "a" * 40      # the head the run tested
 SHA_B = "b" * 40      # a later push
+SHA_BASE = "c" * 40   # the base branch's tip when the gate reads it
 RUN_CREATED = "2026-09-20T10:00:00Z"
 BEFORE = "2026-09-20T09:00:00Z"
 AFTER = "2026-09-20T10:05:00Z"
@@ -98,7 +101,12 @@ case "$1 $2" in
   pr\ view)
     if [ -f "$STUB/pr" ]; then cat "$STUB/pr"; else echo '{"message":"Not Found"}'; exit 1; fi ;;
   api\ repos/o/r/branches/*)
-    if [ -f "$STUB/branch-sha" ]; then printf '%s' "$(cat "$STUB/branch-sha")"; else echo '{"message":"Not Found"}'; exit 1; fi ;;
+    if [ -f "$STUB/branch-fail" ]; then echo '<html>502</html>'; exit 1; fi
+    if [ ! -f "$STUB/branch-sha" ]; then echo '{"message":"Not Found"}'; exit 1; fi
+    case "$*" in
+      *--jq*) printf '%s' "$(cat "$STUB/branch-sha")" ;;
+      *) printf '{"commit":{"sha":"%s"}}' "$(cat "$STUB/branch-sha")" ;;
+    esac ;;
   api\ repos/o/r/collaborators/*)
     login=${2#repos/o/r/collaborators/}; login=${login%/permission}
     if [ -f "$STUB/perm.$login" ]; then printf '{"permission":"%s","role_name":"%s"}' "$(cat "$STUB/perm.$login")" "$(cat "$STUB/perm.$login")"
@@ -135,7 +143,7 @@ def pages(*page_lists):
 
 def bind(tmp_path, *, run=None, pulls=None, expect_pr="101", run_id="9002", event_run_id="9002",
          event_attempt="1", event_name="workflow_run", head="shared", revalidate=None, fixtures=None,
-         timeline=None, perms=None, trusted=TRUSTED_LOGINS):
+         timeline=None, perms=None, trusted=TRUSTED_LOGINS, base_sha=SHA_BASE):
     """Run the lifted step under the composite's shell options (`bash
     --noprofile --norc -eo pipefail`), with the fixtures given; `revalidate`
     is the gate's (head_sha, base_ref, run_attempt) to reproduce; `perms`
@@ -155,6 +163,8 @@ def bind(tmp_path, *, run=None, pulls=None, expect_pr="101", run_id="9002", even
         (stub / "pulls").write_text(pulls if isinstance(pulls, str) else pages(pulls))
     if timeline is not None:
         (stub / "timeline").write_text(timeline if isinstance(timeline, str) else pages(timeline))
+    if base_sha is not None:
+        (stub / "branch-sha").write_text(base_sha)
     for login, perm in ({"alice": "write"} | (perms or {})).items():
         if perm is not None:
             (stub / f"perm.{login}").write_text(perm)
@@ -212,7 +222,8 @@ def test_binds_the_only_same_repo_pr_open_on_the_branch_when_the_run_was_created
     assert res.returncode == 0, res.stderr
     assert out["ok"] == "1" and out["reason"] == ""
     assert out["pr"] == "101" and out["head_sha"] == SHA_A and out["head_branch"] == "shared"
-    assert out["base_ref"] == "main" and out["run_attempt"] == "1" and out["workflow_id"] == "77"
+    assert out["base_ref"] == "main" and out["base_sha"] == SHA_BASE
+    assert out["run_attempt"] == "1" and out["workflow_id"] == "77"
     assert out["created_at"] == RUN_CREATED and out["actor"] == "alice" and out["triggering_actor"] == "alice"
     # One run read, one permission lookup for the actor, one enumeration of
     # this repo's PRs from the branch, by the owner-qualified head filter,
@@ -222,8 +233,9 @@ def test_binds_the_only_same_repo_pr_open_on_the_branch_when_the_run_was_created
         "api repos/o/r/pulls?state=all&per_page=100&head=o:shared --paginate"]
     assert lookups(calls) == ["api repos/o/r/collaborators/alice/permission"]
     assert timeline_reads(calls) == ["api repos/o/r/issues/101/timeline?per_page=100 --paginate"]
-    assert len(calls) == 4
-    assert "bound to PR #101 (shared -> main at " + SHA_A in res.stdout
+    assert "api repos/o/r/branches/main" in calls
+    assert len(calls) == 5
+    assert f"bound to PR #101 (shared at {SHA_A} -> main, now at {SHA_BASE})" in res.stdout
 
 
 def test_the_head_branch_is_uri_encoded_in_the_listing(tmp_path):
@@ -601,33 +613,61 @@ def test_revalidation_refuses_a_gate_head_sha_the_run_does_not_carry(tmp_path):
     refused(res, out, f"head SHA read {SHA_B} at the gate and {SHA_A} now")
 
 
-# --- the fix job's launch signal (B2: not a file the PR can pre-create) --------
-
-LAUNCHED = step_script(WORKFLOW, "        id: launched", 10)
+# --- the fix job has no launch signal (B2: nothing it can observe proves one) -----
 
 
-def test_launched_believes_only_the_actions_own_output(tmp_path):
-    """The action sets `execution_file` after Claude ran and nothing when it
-    refused the actor or failed to start; a file at its default path is
-    forgeable by the PR's provisioning step, so it counts for nothing."""
-    out = tmp_path / "output"
-    real = tmp_path / "exec.json"
-    real.write_text("[]")
-    empty = tmp_path / "empty.json"
-    empty.write_text("")
+def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_files():
+    """The action's `execution_file` output is published by its own error
+    handler from whatever file sits at the default path (review round 2:
+    `setExecutionFileOutputIfPresent()` runs in the catch block), which the
+    PR's provisioning step can pre-create — so no "did the agent launch"
+    signal exists that the fix job could trust. The landing composer and
+    emit-landing withhold on the Claude step's OUTCOME being `failure`, and
+    the refund keys on the agent outcome and the push only."""
+    text = WORKFLOW.read_text()
+    assert "id: launched" not in text and "agent_started" not in text and "AGENT_STARTED" not in text
+    landing = step_block(text, "landing")
+    assert 'elif [ "$ENGINE" != "codex" ] && [ "${CLAUDE_OUTCOME:-}" = "failure" ]; then' in landing
+    emit = text[text.index("- name: Emit landing manifest"):text.index("  land:\n")]
+    assert ("read-only: ${{ ((needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success') || "
+            "(needs.gate.outputs.engine != 'codex' && steps.claude.outcome == 'failure')) && 'true' || 'false' }}") in emit
+    refund = text[text.index("- name: Refund infra-crashed attempt"):]
+    refund = refund[:refund.index("run: |")]
+    assert "needs.fix.outputs.agent_outcome != 'success' &&" in refund
+    assert "steps.land.outputs.pushed != '1'" in refund
+    assert "execution" not in refund
 
-    def launched(exec_path):
-        out.write_text("")
-        res = sh("bash", "-e", "-c", LAUNCHED, check=False, env={"PATH": os.environ["PATH"], "EXEC": exec_path,
-                                                                  "GITHUB_OUTPUT": str(out)})
-        assert res.returncode == 0, res.stderr
-        return out.read_text().strip()
 
-    assert launched(str(real)) == "value=true"
-    assert launched(str(empty)) == "value=false"
-    assert launched("") == "value=false"                 # refused / never started: no output at all
-    code = "\n".join(l for l in LAUNCHED.splitlines() if not l.lstrip().startswith("#"))
-    assert "claude-execution-output.json" not in code   # no default-path fallback anywhere in the step
+# --- the base tip the sync must merge (B1: pinned gate -> merge) ------------------
+
+
+def test_the_base_tip_is_read_from_the_branch_and_emitted(tmp_path):
+    # From the branch, not the PR object's `base.sha` (the tip as of the
+    # PR's last update): the sync is pinned to exactly this commit.
+    res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], base_sha="d" * 40)
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["base_sha"] == "d" * 40
+    assert calls[-1] == "api repos/o/r/branches/main"
+
+
+def test_an_unreadable_or_malformed_base_tip_refuses_and_a_persistent_error_fails(tmp_path):
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)], base_sha=None)
+    refused(res, out, "base branch 'main' cannot be read (not found)")
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)], base_sha="not-a-sha")
+    refused(res, out, "has no readable tip ('not-a-sha')")
+    res, out, calls = bind(tmp_path, run=run_json(), pulls=[pr(101)], fixtures={"branch-fail": ""})
+    assert res.returncode != 0 and "ok" not in out
+    assert len([c for c in calls if c.startswith("api repos/o/r/branches/")]) == 4
+
+
+def test_revalidation_does_not_require_the_base_tip_to_stand_still(tmp_path):
+    # The base may advance once the merge is made (other PRs land); the
+    # landing's own ancestry rules govern the push. What revalidation
+    # requires is the PR, head SHA, base BRANCH and attempt.
+    res, out, _ = bind(tmp_path, run=run_json(), pulls=[pr(101)], base_sha="d" * 40,
+                       revalidate=(SHA_A, "main", "1"))
+    assert res.returncode == 0, res.stderr
+    assert out["ok"] == "1" and out["base_sha"] == "d" * 40
 
 
 # --- sync-branch pins the base the gate established (B1) -------------------------
@@ -641,6 +681,7 @@ def sync_repo(tmp_path):
     (cut from main), and a checkout of `shared` with origin pointing at it —
     the CI-fix loop's shape (checkout=false: the head is already checked out)."""
     from test_land_helpers import git
+    tmp_path.mkdir(exist_ok=True)
     origin = tmp_path / "origin.git"
     work = tmp_path / "work"
     git("init", "-q", "--bare", str(origin), cwd=tmp_path)
@@ -667,8 +708,12 @@ def sync_repo(tmp_path):
     return work
 
 
-def sync(tmp_path, *, live_base, pinned_base):
+def sync(tmp_path, *, live_base, pinned_base, pinned_base_sha=""):
+    """`pinned_base_sha="TIP"` pins to this fixture's own origin/<live_base>
+    tip (every fixture repo has its own SHAs)."""
     work = sync_repo(tmp_path)
+    if pinned_base_sha == "TIP":
+        pinned_base_sha = origin_tip(work, live_base)
     binp = tmp_path / "bin"
     binp.mkdir(exist_ok=True)
     gh = binp / "gh"
@@ -684,11 +729,35 @@ def sync(tmp_path, *, live_base, pinned_base):
     out.write_text("")
     env = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
            "GH_TOKEN": "x", "REPO": "o/r", "NUM": "101", "ENGINE": "claude", "CHECKOUT": "false",
-           "USER_NAME": "a", "USER_EMAIL": "a@b", "PINNED_BASE": pinned_base, "GIT_CONFIG_GLOBAL": "/dev/null",
+           "USER_NAME": "a", "USER_EMAIL": "a@b", "PINNED_BASE": pinned_base, "PINNED_BASE_SHA": pinned_base_sha,
+           "GIT_CONFIG_GLOBAL": "/dev/null",
            "GIT_ALLOW_PROTOCOL": "file"}
     res = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", SYNC, cwd=work, check=False, env=env)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     return res, outputs, work
+
+
+def origin_tip(work, branch):
+    from test_land_helpers import git
+    return git("rev-parse", f"origin/{branch}", cwd=work).stdout.strip()
+
+
+def test_sync_merges_exactly_the_pinned_base_tip(tmp_path):
+    # Two fixtures of the same shape: the tip the gate read is the one on
+    # origin — merged; a different one — the base moved between the gate
+    # and the sync — is refused after the fetch and before the merge, with
+    # HEAD and the tree untouched.
+    from test_land_helpers import git
+    res, out, work = sync(tmp_path / "ok", live_base="main", pinned_base="main", pinned_base_sha="TIP")
+    assert res.returncode == 0, res.stderr
+    assert out["merge_sha"] and (work / "f").read_text() == "2\n"
+    res, out, work = sync(tmp_path / "moved", live_base="main", pinned_base="main", pinned_base_sha="e" * 40)
+    assert res.returncode != 0
+    tip = origin_tip(work, "main")
+    assert f"origin/main is at {tip}, but the caller's trusted context read {'e' * 40}" in res.stdout
+    assert "merge_sha" not in out and (work / "f").read_text() == "1\n"
+    assert git("rev-parse", "HEAD", cwd=work).stdout == git("rev-parse", "origin/shared", cwd=work).stdout
+    assert out["start_sha"]                                  # the pin is checked after the fetch, before the merge
 
 
 def test_sync_merges_the_pinned_base_when_the_pr_still_targets_it(tmp_path):
@@ -740,6 +809,8 @@ def test_gate_and_land_pass_the_events_own_run_to_the_binding():
     # carry the run read's permission (B3; the exact sets are pinned in
     # test_app_token_minting.py).
     assert "base: ${{ needs.gate.outputs.base_ref }}" in step_block(text, "sync")
+    assert "base-sha: ${{ needs.gate.outputs.base_sha }}" in step_block(text, "sync")
+    assert "      base_sha: ${{ steps.bind.outputs.base_sha }}" in text
     assert text.count("          permission-actions: read\n") == 2
     rebind = step_block(text, "rebind")
     assert 'revalidate: "true"' in rebind
@@ -764,17 +835,12 @@ def test_the_gate_resolves_the_bound_pr_and_the_land_step_waits_for_the_revalida
     assert "steps.bind.outcome == 'failure'" in surface
 
 
-def test_the_fix_job_requires_the_tested_head_and_withholds_an_unlaunched_claude_round():
+def test_the_fix_job_requires_the_tested_head():
     text = WORKFLOW.read_text()
     base = step_block(text, "base")
     assert "TESTED_SHA: ${{ needs.gate.outputs.head_sha }}" in base
     assert 'if [ "$sha" != "$TESTED_SHA" ]; then' in base and "exit 1" in base
-    landing = step_block(text, "landing")
-    assert "AGENT_STARTED: ${{ steps.launched.outputs.value }}" in landing
-    emit = text[text.index("- name: Emit landing manifest"):text.index("  land:\n")]
-    assert ("read-only: ${{ ((needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success') || "
-            "(needs.gate.outputs.engine != 'codex' && steps.claude.outcome == 'failure' && "
-            "steps.launched.outputs.value != 'true')) && 'true' || 'false' }}") in emit
+    # the withholding and the refund are covered by the outcome-keyed test above
 
 
 def test_the_example_stub_forwards_the_events_own_fields():

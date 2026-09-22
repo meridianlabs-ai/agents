@@ -280,10 +280,13 @@ jobs:
       # The run's context the bind step established (trusted: read from the
       # API before any PR code ran): the fix job requires its checkout to be
       # at `head_sha` (the head the run tested), and the land job derives
-      # the same context again and requires these three to be reproduced
-      # before it pushes.
+      # the same context again and requires PR, head SHA, base ref and
+      # attempt to be reproduced before it pushes; `base_sha` is the base
+      # tip the sync must merge (not reproduced at landing: the base may
+      # advance after the merge).
       head_sha: ${{ steps.bind.outputs.head_sha }}
       base_ref: ${{ steps.bind.outputs.base_ref }}
+      base_sha: ${{ steps.bind.outputs.base_sha }}
       run_attempt: ${{ steps.bind.outputs.run_attempt }}
       # The identity the fix job's runner-side commits carry (the base
       # merge, the codex commit): the bot's when this job minted an app
@@ -751,7 +754,7 @@ jobs:
       # the agent — never burned an attempt; it cannot follow them any more
       # (they run in the untrusted job, and this is a marvin write), so the
       # land job's refund step now covers that case too: an attempt whose
-      # agent never launched and whose landing pushed nothing is refunded,
+      # agent step did not succeed and whose landing pushed nothing is refunded,
       # whatever skipped it.
       - name: Record attempt
         if: steps.gate.outputs.act == 'fix'
@@ -862,14 +865,18 @@ jobs:
       actions: read           # the failed CI run's logs
     outputs:
       # What the land job's refund step needs from this job: whether the
-      # agent step ran to a result, and whether it launched at all (the
-      # execution file exists only on this runner). `agent_outcome` is
-      # `failure` when any codex step that precedes or is the codex run
-      # failed, `success` when the codex run succeeded, and the Claude step's
-      # outcome otherwise (`skipped` on a run whose sync or provisioning
-      # failed before either engine started).
+      # agent step ran to a result. `agent_outcome` is `failure` when any
+      # codex step that precedes or is the codex run failed, `success` when
+      # the codex run succeeded, and the Claude step's outcome otherwise
+      # (`skipped` on a run whose sync or provisioning failed before either
+      # engine started). There is deliberately no "did the agent launch"
+      # output any more: nothing this job can observe proves it — the
+      # action's `execution_file` output is published by its own error
+      # handler from whatever file sits at the default path, which the PR's
+      # provisioning step can pre-create (review round 2 of finding
+      # 4628657's fix) — so a failed Claude step is treated as a round that
+      # landed nothing, and refunded, whether or not Claude ran.
       agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || (steps.codexfix.outcome == 'success' && 'success') || steps.claude.outcome }}
-      agent_started: ${{ steps.launched.outputs.value }}
     steps:
       # Check out the PR branch so the agent fixes in place; the land job
       # pushes the result. persist-credentials:false (issue #61): checkout
@@ -968,6 +975,11 @@ jobs:
           # skipped, the attempt refunded) instead of merging a base the
           # failing logs never saw.
           base: ${{ needs.gate.outputs.base_ref }}
+          # ...and the base TIP the gate read: the fetched origin/<base> must
+          # be exactly it, so the base cannot move between the gate's read
+          # and the merge (it may have moved between the run and the gate:
+          # the loop targets the base as it is).
+          base-sha: ${{ needs.gate.outputs.base_sha }}
           # The merge commit's author: the gate decided it from which token
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
@@ -1530,30 +1542,6 @@ jobs:
           echo "codex summary: $(wc -c <"$DIR/codex-comment.md") bytes — posted by the land job."
       # ---- end Codex engine ---------------------------------------------------
 
-      # Whether the Claude agent launched at all, for the land job's refund
-      # step: the execution file exists only on this runner, and the action
-      # writes it only after the Claude session (or on an SDK error mid-run)
-      # — never when it dies before starting Claude. Bash builtins only (the
-      # value flows into a marvin write's condition; nothing on PATH is
-      # consulted). Codex runs never have one: their success is read from the
-      # codex step's outcome (see the job outputs).
-      - name: Record whether the agent launched
-        id: launched
-        if: always()
-        env:
-          EXEC: ${{ steps.claude.outputs.execution_file }}
-        run: |
-          # The action's OUTPUT only, never a fallback path: the action sets
-          # `execution_file` after Claude ran (its run entrypoint), and sets
-          # nothing when it refused the actor or failed to start — whereas a
-          # file at the default path is one the PR's own provisioning step
-          # can pre-create (review round 1 of finding 4628657's fix: a
-          # preseeded file read as "launched", so a refused round bundled
-          # the base merge and dodged its refund). The landing composer and
-          # the refund key on this value; a forged file no longer reaches
-          # either.
-          if [ -n "$EXEC" ] && [ -s "$EXEC" ]; then echo "value=true"; else echo "value=false"; fi >>"$GITHUB_OUTPUT"
-
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
       # --fallback-model fires, so this parses modelUsage, writes the served-
@@ -1724,17 +1712,13 @@ jobs:
             err="codex finished but committing its leftover edits failed — codex's own local commits, if any, still land; its uncommitted edits did not (see the job logs)."
           fi
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
-            # Launched means the action's own output names a non-empty
-            # file (the `launched` step's rule; a file at the default path
-            # alone is PR-forgeable).
-            if [ -n "$EXEC" ] && [ -s "$EXEC" ]; then
-              err="the CI-fix step failed before producing a result (see the job logs)."
-            else
-              # Never launched: the action refused the actor, or failed to
-              # start. The composer withholds the whole round (the runner's
-              # base merge included) and the attempt is refunded.
-              err="the CI-fix step failed before the agent launched (the action refused to run for this actor, or failed to start — see the job logs); nothing was landed, the runner's base merge included, and the attempt is refunded."
-            fi
+            # Whether Claude launched before the failure cannot be told from
+            # outside the action (its execution-file output is published by
+            # its error handler from whatever sits at the default path), so
+            # every failed step is one round: nothing lands and the attempt
+            # is refunded — the composer withholds the bundle, the runner's
+            # base merge and any local commits included.
+            err="the CI-fix step failed (the action refused to run for this actor, failed to start, or failed during the run — see the job logs); nothing was landed, the runner's base merge and any commits of the run included, and the attempt is refunded."
           fi
           # Completed-but-blocked (Claude path): the action reports success,
           # but the agent left edits to tracked files uncommitted — they die
@@ -1850,21 +1834,27 @@ jobs:
       # (AGENTS.md; the reclaim's refusal of a redirect is the primary
       # defence, this is belt and braces).
       #
-      # The Claude path has the same withholding for a step that FAILED
-      # WITHOUT LAUNCHING the agent (no execution output: the action's own
-      # actor-permission refusal, or a bootstrap failure before Claude
-      # started — the two are indistinguishable from outside the action).
-      # Before this (finding 4628657's local reproduction) such a round still
-      # bundled the runner's clean base merge, so a declined authorization
-      # pushed a marvin commit, re-ran CI and kept its attempt while the
-      # codex path's refusal landed nothing. Now neither engine lands a
-      # round its agent never ran: no git, no hand-back, and the refund
-      # (agent not started, nothing pushed) gives the attempt back. A Claude
-      # step that launched and then failed is unchanged — its commits, if
-      # any, land and owe the hand-back (the push re-runs CI). A round whose
-      # agent step was SKIPPED (a provisioning failure) is unchanged too: the
-      # Surface step's provisioning clauses document that the base merge
-      # lands there (decision 2026-09-09).
+      # The Claude path has the same withholding for a step that FAILED, for
+      # any reason: the action's own actor-permission refusal, a bootstrap
+      # failure before Claude started, or a failure during the run. The
+      # three cannot be told apart from outside the action — its
+      # `execution_file` output is not launch evidence, since its error
+      # handler publishes whatever file sits at the default path, which the
+      # PR's provisioning step can pre-create (review rounds 1 and 2 of
+      # finding 4628657's fix: a preseeded file read as "launched" and let a
+      # refused round bundle the base merge and dodge its refund). So the
+      # rule is fail-closed on the step's OUTCOME, a runner fact no PR file
+      # can forge: a failed Claude step lands nothing — no git, no
+      # hand-back, not the runner's base merge, not a commit Claude may have
+      # made before failing — and the refund (agent step not successful,
+      # nothing pushed) gives the attempt back. Before finding 4628657 such a
+      # round still bundled the runner's clean base merge (and its commits),
+      # so a declined authorization pushed a marvin commit, re-ran CI and
+      # kept its attempt while the codex path's failure landed nothing; the
+      # two engines now agree. A round whose agent step was SKIPPED (a
+      # provisioning failure) is unchanged: the Surface step's provisioning
+      # clauses document that the base merge lands there (decision
+      # 2026-09-09).
       - name: Compose landing manifest
         id: landing
         if: always()
@@ -1878,7 +1868,6 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
-          AGENT_STARTED: ${{ steps.launched.outputs.value }}
           CODEXGUARD_OUTCOME: ${{ steps.codexguard.outcome }}
           CODEXCOMMIT_OUTCOME: ${{ steps.codexcommit.outcome }}
           PROV_NOTE: ${{ steps.provenance.outputs.note }}
@@ -1900,8 +1889,8 @@ jobs:
           head=""
           if [ "$ENGINE" = "codex" ] && [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then
             echo "landing: the codex unresolved-merge guard did not succeed (outcome: ${CODEXGUARD_OUTCOME:-unknown} — a failed prep, user-setup, codex or reclaim step skips it); running no git — nothing lands and no hand-back is owed."
-          elif [ "$ENGINE" != "codex" ] && [ "${CLAUDE_OUTCOME:-}" = "failure" ] && [ "${AGENT_STARTED:-}" != "true" ]; then
-            echo "landing: the Claude step failed without launching the agent (no execution output: the action refused the actor, or failed to start); running no git — nothing lands, not the runner's base merge either, no hand-back is owed, and the attempt is refunded."
+          elif [ "$ENGINE" != "codex" ] && [ "${CLAUDE_OUTCOME:-}" = "failure" ]; then
+            echo "landing: the Claude step failed (the action refused the actor, failed to start, or failed during the run — indistinguishable from here); running no git — nothing lands, not the runner's base merge or a commit of the run either, no hand-back is owed, and the attempt is refunded."
           elif [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
             if [ "$head" != "$START_SHA" ] && git merge-base --is-ancestor "$START_SHA" "$head" 2>/dev/null; then
@@ -1968,10 +1957,10 @@ jobs:
       # start SHA. Either way the manifest still carries the Surface step's
       # error for the land job to post (the README's snippet skips the step
       # outright there; here the report matters more than the empty bundle).
-      # read-only on the Claude path too when the step failed without
-      # launching the agent (the composer's condition, see its comment): the
-      # runner's base merge above the start SHA is not packaged for a round
-      # nobody authorized to run.
+      # read-only on the Claude path too when the step FAILED (the
+      # composer's condition, see its comment): nothing above the start SHA
+      # — the runner's base merge, a commit made before the failure — is
+      # packaged for a round the action did not complete.
       - name: Emit landing manifest
         if: always()
         uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
@@ -1987,7 +1976,7 @@ jobs:
           branch: ${{ inputs.head_branch }}
           pr-number: ${{ needs.gate.outputs.pr }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
-          read-only: ${{ ((needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success') || (needs.gate.outputs.engine != 'codex' && steps.claude.outcome == 'failure' && steps.launched.outputs.value != 'true')) && 'true' || 'false' }}
+          read-only: ${{ ((needs.gate.outputs.engine == 'codex' && steps.codexguard.outcome != 'success') || (needs.gate.outputs.engine != 'codex' && steps.claude.outcome == 'failure')) && 'true' || 'false' }}
 
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate,
@@ -2144,21 +2133,28 @@ jobs:
           exit 1
 
       # Infra crashes must not burn fix attempts: the counter increments in
-      # the gate job, BEFORE the agent runs (so real crashes still consume
-      # attempts), but a round whose agent never launched — a bootstrap
-      # failure with NO execution output (observed: "socket hang up" before
-      # the agent started; two such blips nearly escalated a PR spuriously),
-      # a failed codex prep / user-setup / run step (no fix reached the
-      # branch; a persistently missing OPENAI_API_KEY must not burn attempts
-      # toward spurious escalation), or a sync / provisioning failure that
-      # skipped the agent outright (before the split the attempt was
-      # recorded after those steps; it cannot be any more, so the refund
-      # covers it) — attempted no fix. Roll the sticky counter back one.
-      # Three conditions: the agent step did not succeed (a successful codex
-      # run has no execution file), it never produced execution output (a
-      # Claude run that reached a result counts, failed or not), and the
-      # landing pushed nothing (a round whose commits landed keeps its
-      # attempt whatever the agent step's outcome). Never on a FAILED gate
+      # the gate job, BEFORE the agent runs, but a round whose agent step did
+      # not succeed and whose landing pushed nothing — a bootstrap failure
+      # (observed: "socket hang up" before the agent started; two such blips
+      # nearly escalated a PR spuriously), the action's own actor refusal, a
+      # Claude failure during the run, a failed codex prep / user-setup /
+      # run step (no fix reached the branch; a persistently missing
+      # OPENAI_API_KEY must not burn attempts toward spurious escalation), or
+      # a sync / provisioning failure that skipped the agent outright (before
+      # the split the attempt was recorded after those steps; it cannot be
+      # any more, so the refund covers it) — landed no fix. Roll the sticky
+      # counter back one. Two conditions: the agent step did not succeed,
+      # and the landing pushed nothing (a round whose commits landed keeps
+      # its attempt whatever the agent step's outcome). There used to be a
+      # third — "the agent never produced execution output" — so that a
+      # Claude run that reached a result kept its attempt even when it
+      # failed; it was dropped (finding 4628657, review round 2) because the
+      # only evidence for it, the action's execution-file output, is
+      # published by the action's error handler from a file the PR's
+      # provisioning step can pre-create, and a forged "launched" both
+      # admitted a bundle and blocked this refund. A crashing agent cannot
+      # loop on refunds: nothing pushed means no CI re-run and no next
+      # round until a human pushes. Never on a FAILED gate
       # (the job gate above): whether `Record attempt` ever incremented is
       # then unknown, and an unrecorded attempt refunded would put the count
       # one below the truth — not refunding is the conservative side.
@@ -2180,7 +2176,6 @@ jobs:
         if: >-
           always() && needs.gate.outputs.act == 'fix' &&
           needs.fix.outputs.agent_outcome != 'success' &&
-          needs.fix.outputs.agent_started != 'true' &&
           steps.land.outputs.pushed != '1'
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}

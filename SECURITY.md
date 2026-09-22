@@ -76,11 +76,15 @@ text are checked by the tests under `tests/`.
   sharing a branch, a run started or re-run by an account without write
   access, a run re-run, a branch pushed or a PR retargeted at any point
   after the run stop the round rather than guess, before any counter, stage
-  move, merge or model work. What this establishes is the run's head commit
-  and the base branch it was merged into, and that no other PR can be the
-  run's origin — not which PR GitHub considered the trigger, and not the
-  merge commit the run built, since the API carries neither
-  (design/auto-agent.md → Binding the failed run to its PR).
+  move, merge or model work; the runner merges exactly the base tip the
+  gate read. A Claude step that fails lands nothing and is refunded — the
+  action's execution-file output is not launch evidence, so the step's
+  outcome decides. What this establishes is the run's head commit, the base
+  branch it was merged into and the base tip that is merged now, and that
+  no other PR can be the run's origin — not which PR GitHub considered the
+  trigger, not the merge commit the run built, and not the base tip it
+  merged, since the API carries none of them (design/auto-agent.md →
+  Binding the failed run to its PR).
 
 ## By design, not a finding
 
@@ -99,9 +103,14 @@ text are checked by the tests under `tests/`.
   eligible `auto` PR. Re-review requests follow the configured allow-lists
   (`review_allowed_bots` defaults to `claude[bot]` in the review-fix gate;
   the reviewer admits that bot when the caller's `allowed_bots` includes it,
-  as in the inspect_ai fork). The identity can also reach the CI-fix loop
-  indirectly, since a CI failure on an already-authorized `auto` PR starts a
-  fix round whatever identity pushed the branch, on the Codex path included.
+  as in the inspect_ai fork). It no longer reaches the CI-fix loop
+  indirectly: a CI run started by a push from `claude[bot]` — or any bot
+  other than the machine account — is refused by the CI-fix gate's actor
+  check before any write, on both engines (the Codex step's own allow-list
+  admitted `claude` until 2026-09-22; the gate now decides first). A push the
+  Claude App made itself therefore ends the automatic loop for that branch
+  until the machine account or a write-access human pushes; a policy
+  tightening, recorded as a decision for Ransom in design/auto-agent.md.
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.

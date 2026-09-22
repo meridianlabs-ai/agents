@@ -16,9 +16,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
 - `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
   step, lifted the same way: a landed fix or merge-only attempt owes the
   re-review request and sets no stage (a hand-back is mid-flight; Review is
-  the gate's, on escalation), the no-change relay, the errored attempt, and
-  the two refusal paths that land nothing — a Claude step that failed
-  without launching the agent (the base merge included; 4628657) and a
+  the gate's, on escalation), the no-change relay, and the two failure
+  paths that land nothing — a failed Claude step, whatever the execution
+  file says (the base merge and a commit of the run included; 4628657) and a
   codex round whose guard did not succeed.
 - `test_review_fix_composer.py` — `claude-auto-review.yml`'s `Compose
   landing manifest` step, lifted from the workflow the same way: the
@@ -90,14 +90,18 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   context); a persistent API error fails the step. Also `sync-branch`'s
   `base` input against a local origin (the pinned base merges; a PR
   retargeted since fails before any fetch or merge; no pin keeps the live
-  base), and the fix job's `launched` signal (the action's own
-  `execution_file` output only, never a file at the default path). Every
+  base; the pinned base tip merges, a moved one is refused after the fetch
+  and before the merge), the base tip read from the branch and emitted (an
+  unreadable one refuses), and that the fix job carries no launch signal at
+  all (the action's `execution_file` output is published by its error
+  handler from a pre-existing file; landing and refund key on step outcomes).
+  Every
   fixture is synthetic — GitHub's event generation and association ordering
   are not reproduced. Also the workflow's wiring (the event's own run id and
   attempt and `TRUSTED_LOGINS` reach both bind steps, the gate's base reaches
   the sync, both mints carry `actions: read`, Land waits for the
   revalidation, the fix job requires the tested head and goes read-only on a
-  Claude step that failed without launching) and the example stub's
+  failed Claude step) and the example stub's
   forwarding of the event's own fields.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
   the auto label`, `Gate and count`), the escalation's reset (the
