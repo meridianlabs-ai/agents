@@ -487,14 +487,16 @@ it creates. Bare refs resolve fine there (upstream PRs base on upstream
 `main`), so the upstream issue gets the native linked-PR chip and auto-closes
 on merge; the fork issue closes via the hourly sync as usual. Creation-time
 only: an adopted (pre-existing) upstream PR's body is never edited. The line
-is honoured only as the import header — the body's first line, above the
-`---` rule — and only when the fork issue's author is a trusted login or
+is honoured only as the import header — the body's literal first line,
+with the `---` rule below it — and only when the fork issue's author is a trusted login or
 has write access on the fork (the same rule the fork PR passes; a failed
 lookup is untrusted), since the fork is public and an issue body stays
 editable by its author; any other occurrence is ignored and reported. For
 the same reason every bare `#M` in the fork PR body is qualified to
 `meridianlabs-ai/inspect_ai#M` before the body is republished upstream —
-closing keyword or not, in any case — so the only bare ref the upstream PR
+closing keyword or not, in any case (an already-qualified `owner/repo#M`,
+an HTML entity, a URL fragment or a Markdown link destination is not a bare
+ref and stays verbatim) — so the only bare ref the upstream PR
 carries is that `Fixes #<up>`; the script prints the body as it will be
 published, in `--dry-run` and in the real run (findings 4629156 and 4629152,
 fixed 2026-09-22).

@@ -15,11 +15,12 @@
 # upstream PR opened as the operator, so nothing an outsider wrote may reach
 # that step. The fork ISSUE's body is the other outsider-writable input to
 # that PR: its `Upstream issue:` line (which adds a bare `Fixes #<up>`
-# upstream) is believed only as /import's header — the body's first line —
-# and only from an author who passes the same trust rule. Every bare `#M`
-# in the fork PR body is qualified to the fork before the body is published
-# upstream, where bare refs resolve against upstream's tracker; the body is
-# printed as it will be published, in --dry-run and in the real run.
+# upstream) is believed only as /import's header — the body's first line,
+# with the `---` rule below it — and only from an author who passes the same
+# trust rule. Every bare `#M` in the fork PR body is qualified to the fork
+# before the body is published upstream, where bare refs resolve against
+# upstream's tracker; the body is printed as it will be published, in
+# --dry-run and in the real run.
 #
 # Usage: promote.sh <issue-number> [--dry-run] [--pr <number>]
 #   --dry-run      print the candidates, each verdict, the decision and every
@@ -154,18 +155,21 @@ ISSUE_STATE=$(jq -r '.data.repository.issue.state' <<<"$JSON")
 # upstream issue links and auto-closes on merge (bare refs resolve there —
 # upstream PRs base on upstream main). That line is free text on any other
 # issue, and an issue body stays editable by its author forever, so it is
-# believed ONLY when it is the header — the body's first line, above the
-# `---` rule and the snapshot — AND the issue's author passes the trust rule
-# (TRUSTED_LOGINS or write access on the fork; fail closed). Anything else
-# is ignored and said so on stderr: the fork is public, and the `Fixes #<up>`
-# would close whichever upstream issue the line names.
+# believed ONLY when the body has /import's shape — the header is the
+# literal first line and a `---` rule follows it, above the snapshot — AND
+# the issue's author passes the trust rule (TRUSTED_LOGINS or write access
+# on the fork; fail closed). Anything else is ignored and said so on stderr:
+# the fork is public, and the `Fixes #<up>` would close whichever upstream
+# issue the line names.
 ISSUE_AUTHOR=$(jq -r ".data.repository.issue.author | $NORM_LOGIN" <<<"$JSON")
 ISSUE_BODY=$(jq -r '.data.repository.issue.body // ""' <<<"$JSON" | tr -d '\r')
 UP_ISSUE=""
 if grep -qF 'Upstream issue:' <<<"$ISSUE_BODY"; then
-  UP_HEADER=$(grep -m1 -vE '^[[:space:]]*$' <<<"$ISSUE_BODY" || true)
+  UP_HEADER=$(head -n1 <<<"$ISSUE_BODY")
   if ! grep -qE "^Upstream issue: https://github\.com/$UPSTREAM/issues/[0-9]+[[:space:]]*$" <<<"$UP_HEADER"; then
     echo "note: issue #$N's 'Upstream issue:' line ignored — it is not the body's first line (/import's header); no upstream Fixes ref will be added" >&2
+  elif ! tail -n +2 <<<"$ISSUE_BODY" | grep -qE '^---[[:space:]]*$'; then
+    echo "note: issue #$N's 'Upstream issue:' header ignored — no \`---\` rule follows it (not /import's body); no upstream Fixes ref will be added" >&2
   elif ! trusted_login "$ISSUE_AUTHOR"; then
     echo "note: issue #$N's 'Upstream issue:' header ignored — issue author '${ISSUE_AUTHOR:-unknown}' is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $FORK; no upstream Fixes ref will be added" >&2
   else
@@ -412,11 +416,25 @@ else
   # would close that issue on merge. Qualify every bare ref to the fork, as
   # /import does in the other direction, then make sure a closing ref to THIS
   # issue is present (prepend one otherwise). The only bare ref that may
-  # remain is the `Fixes #<up>` added from the validated import header.
+  # remain is the `Fixes #<up>` added from the validated import header. A
+  # bare ref is a `#M` GitHub would resolve against the tracker: preceded by
+  # nothing, whitespace or opening punctuation, not a Markdown link
+  # destination `](#…)` and not inside a URL token. A `#M` glued to a word
+  # character, `/`, `-`, `.`, `&`, `=` … is the tail of a qualified
+  # `owner/repo#M`, an HTML entity or a URL fragment and is left alone.
   BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
 n = os.environ["ISSUE_N"]
-body = re.sub(r"(?<![\w/&])#(\d+)\b", r"meridianlabs-ai/inspect_ai#\1", os.environ["FPR_BODY"])
+src = os.environ["FPR_BODY"]
+def qualify(m):
+    i = m.start()
+    prev = src[i - 1] if i else " "
+    if prev not in " \t\r\n([{\"\x27*~>|,;" or src[i - 2:i] == "](":
+        return m.group(0)
+    if "://" in re.split(r"\s", src[:i])[-1]:
+        return m.group(0)
+    return "meridianlabs-ai/inspect_ai#" + m.group(1)
+body = re.sub(r"#(\d+)\b", qualify, src)
 kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
 if not re.search(kw + r"meridianlabs-ai/inspect_ai#%s\b" % n, body, re.I):
     body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body

@@ -722,25 +722,36 @@ def test_promote_ignores_the_upstream_issue_header_from_an_untrusted_issue_autho
     assert sum("collaborators/outsider/permission" in c for c in s.calls()) == 1
 
 
-@pytest.mark.parametrize("body", [
+NOT_FIRST = "note: issue #42's 'Upstream issue:' line ignored — it is not the body's first line"
+NO_RULE = "note: issue #42's 'Upstream issue:' header ignored — no `---` rule follows it"
+
+
+@pytest.mark.parametrize("body, note", [
     # a trusted author's issue carrying the line only below the `---` rule
-    import_body(header="Mirror of an upstream report.", snapshot=f"{IMPORT_HEADER}\n"),
+    (import_body(header="Mirror of an upstream report.", snapshot=f"{IMPORT_HEADER}\n"), NOT_FIRST),
     # hidden in an HTML comment GitHub renders invisibly
-    f"<!-- {IMPORT_HEADER} -->\nA plausible bug report.",
+    (f"<!-- {IMPORT_HEADER} -->\nA plausible bug report.", NOT_FIRST),
     # not at the start of its line
-    f"See {IMPORT_HEADER}\n\n---\n\nsnapshot",
+    (f"See {IMPORT_HEADER}\n\n---\n\nsnapshot", NOT_FIRST),
     # preceded by prose, so not the header
-    f"Please look at this.\n{IMPORT_HEADER}\n",
+    (f"Please look at this.\n{IMPORT_HEADER}\n", NOT_FIRST),
+    # the literal first line is blank: the header is the second line
+    ("\n" + import_body(), NOT_FIRST),
     # a URL under another repository
-    import_body(header=f"Upstream issue: https://github.com/outsider/inspect_ai/issues/{UP_N}"),
-], ids=["below-rule", "html-comment", "mid-line", "second-line", "other-repo"])
-def test_promote_ignores_an_upstream_issue_line_that_is_not_the_import_header(tmp_path, body):
-    # Even from a trusted author (marvin here), only the body's first line —
-    # what /import writes — counts; a deleted issue author is untrusted anyway.
+    (import_body(header=f"Upstream issue: https://github.com/outsider/inspect_ai/issues/{UP_N}"), NOT_FIRST),
+    # the header without /import's `---` rule: a hand-written body
+    (f"{IMPORT_HEADER}\nA hand-written report.", NO_RULE),
+    # a rule-like line that is not a rule
+    (f"{IMPORT_HEADER}\n\n--- snapshot ---\n\ntext", NO_RULE),
+], ids=["below-rule", "html-comment", "mid-line", "second-line", "blank-first-line", "other-repo",
+        "no-rule", "rule-with-text"])
+def test_promote_ignores_an_upstream_issue_line_that_is_not_the_import_header(tmp_path, body, note):
+    # Even from a trusted author (marvin here), only /import's shape counts:
+    # the header as the literal first line, a `---` rule below it.
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")], author=MARVIN, body=body))
     r = s.run(PROMOTE, str(N), "--dry-run")
     assert r.returncode == 0, r.stderr
-    assert "note: issue #42's 'Upstream issue:' line ignored — it is not the body's first line" in r.stderr
+    assert note in r.stderr
     assert "upstream issue: none" in advisory(r.stdout)
     assert f"#{UP_N}" not in published_body(r.stdout)
     assert not any("/permission" in c for c in s.calls())  # nothing to look up: the shape failed first
@@ -775,6 +786,28 @@ def test_promote_qualifies_every_bare_ref_in_the_upstream_body(tmp_path):
     assert not body.startswith("Fixes")
     assert '-f body=<the body printed above>' in r.stdout
     assert promote_calls_wrote_nothing(s.calls())
+
+
+def test_promote_leaves_qualified_refs_link_destinations_and_urls_alone(tmp_path):
+    # Review round 1: a `#M` glued to a qualified repository name (whatever
+    # its last character), an HTML entity, a Markdown link destination or a
+    # URL fragment is not a bare issue reference and must survive verbatim,
+    # while bare refs next to punctuation are still qualified.
+    keep = ("[Reproduction](#1-reproduction) [fragment](https://example.test/?q=#123) "
+            "other/repo-#7 other/repo.#8 other/repo_x#9 repo1#10 UKGovernmentBEIS/inspect_ai#11 &#123; "
+            "https://github.com/x/y/pull/5#issuecomment-6 <https://e.test/#15> https://e.test/a#16")
+    bare = "(#21) **#22** |#23| a,#24 \"#25\" [#26]"
+    fork_body = f"Summary.\n\n{keep}\n{bare}\n#27 at the start of a line\nCloses\t#28\n"
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    body = published_body(r.stdout)
+    assert body.splitlines()[0] == f"Fixes meridianlabs-ai/inspect_ai#{N}"
+    assert keep in body  # every kept token verbatim, none double-qualified
+    for m in range(21, 29):
+        assert f"meridianlabs-ai/inspect_ai#{m}" in body, (m, body)
+    assert "Closes\tmeridianlabs-ai/inspect_ai#28" in body
+    assert not re.search(r"(?<![\w/&.=-])#\d+", body.replace("](#1-", "")), body  # no bare ref left
 
 
 @pytest.mark.parametrize("ref, prepended", [

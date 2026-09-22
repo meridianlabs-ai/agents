@@ -46,8 +46,8 @@ missing).
 
 ## The loop closes at promotion
 
-promote.sh reads the `Upstream issue:` header — the body's first line, as
-this skill writes it, and only when the fork issue's author is a trusted
+promote.sh reads the `Upstream issue:` header — the body's first line with
+the `---` rule below it, as this skill writes them, and only when the fork issue's author is a trusted
 login or has write access on the fork (the import is the operator's issue;
 anyone can file a fork issue carrying the same line, or paste it below the
 `---` rule) — and adds a second closing ref — bare `Fixes #<upstream-N>` —
