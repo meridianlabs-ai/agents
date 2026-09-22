@@ -265,10 +265,13 @@ on:
 # (Phase 2: once the gate and land jobs mint app tokens, every push, comment
 # and label that is marvin's today carries the bot login; the User is
 # retired at the end of Phase 2 and then leaves this list). Read by the trig
-# step (the label kickoff and the actor authorization — the bot's
-# collaborator permission reads `none`, so it is trusted by login, never by
-# lookup), by the agent steps' bot allow-lists, and by the re-engagement
-# reset, so it rewrites only the loops' own counter comments.
+# step, which EXCLUDES both logins from every kickoff — the machine account
+# writes what a trusted job or a human decided and never decides for itself,
+# so its `auto` label is not a human's authorization (Claude Security finding
+# 4628345: the triage pipeline's issue, filed as marvin from an untrusted
+# agent's manifest, used to start the dev agent through that label) — and by
+# the re-engagement reset, so it rewrites only the loops' own counter
+# comments.
 env:
   TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]
 
@@ -407,14 +410,24 @@ jobs:
           # trusted_login LOGIN: membership in the workflow-level TRUSTED_LOGINS
           # (the machine account's logins; spaces ignored).
           trusted_login() { case ",${TRUSTED_LOGINS// /}," in *",$1,"*) return 0 ;; esac; return 1; }
-          # The label path is exempt from the machine-account exclusion: the
-          # triage pipeline labels issues `auto` AS marvin, and that labeled
-          # event is the intended kickoff (fork PR inspect_ai#237) — without
-          # this, marvin-labeled kickoffs ran the agent but skipped the ack
-          # and both Atlas stage steps, so the board never showed the pickup.
-          # Reading the label NAME carries no quoted-token hazard; bots stay
-          # excluded everywhere — except the machine account's own bot login
-          # (TRUSTED_LOGINS), which labels exactly as the User does today.
+          # The label path: a human's label kicks off (their write access is
+          # verified below); no bot's does, and neither of the machine
+          # account's logins (TRUSTED_LOGINS) does. Until 2026-09-22 the
+          # machine account was exempt here because the triage pipeline
+          # labelled its issues `auto` AS marvin (fork PR inspect_ai#237),
+          # but that label was decided by an agent that had read test
+          # output — untrusted input — and only written by marvin, so the
+          # label was a privilege the untrusted agent granted itself
+          # (Claude Security finding 4628345). The machine account writes
+          # what a trusted job or a human decided; where it applies `auto`
+          # to a PR legitimately (the PR it opens for a human's `auto`
+          # issue, the PR a human commented `@auto` on — the human's
+          # decision has already passed this step — or a PR a trusted
+          # caller workflow labels by its own standing policy) the loop
+          # gates trust that label as a trusted decider's, not as marvin's
+          # own. A triage-filed issue is now read by a human,
+          # who applies `auto` themselves if the brief is worth automating.
+          # Reading the label NAME carries no quoted-token hazard.
           # Case-FOLDED, like the action: claude-code-action compiles its
           # trigger regexes with the `i` flag and lower-cases both label names
           # before comparing (src/github/validation/trigger.ts), and the stubs'
@@ -426,10 +439,10 @@ jobs:
           label=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]')
           if [ "$EVENT" = "issues" ] && [ "$EVENT_ACTION" = "labeled" ] \
              && [ -n "$label" ] && [ "$lname" = "$label" ]; then
-            if trusted_login "$ACTOR" || [[ "$ACTOR" != *"[bot]" ]]; then ok=true; fi
+            if ! trusted_login "$ACTOR" && [[ "$ACTOR" != *"[bot]" ]]; then ok=true; fi
           fi
           # Bot and machine actors (TRUSTED_LOGINS, either login) never stage
-          # from text (label path above excepted).
+          # from text either.
           if ! trusted_login "$ACTOR" && [[ "$ACTOR" != *"[bot]" ]]; then
             text="$COMMENT$REVIEW"
             if [ "$EVENT" = "issues" ]; then
@@ -456,22 +469,21 @@ jobs:
           # job token (read is enough, and it cannot expire like a PAT). Who
           # is judged: github.actor — the commenter/author, and on the
           # `labeled` path the account that applied the label (the actor of
-          # a label event IS the labeler; marvin for triage-applied `auto`
-          # labels). A TRUSTED_LOGINS actor is authorized without a lookup:
-          # the User holds write, and the collaborators endpoint answers
-          # `none` for the App's bot login (checked 2026-09-16), so the bot
-          # must be trusted by name — the same rule as the reviewer's trig
-          # step. Everyone else fails closed: a lookup error is `none`.
-          # Retried once like the fork-head
+          # a label event IS the labeler). Every actor that reaches this
+          # point is a human account (the paths above admit no bot and
+          # neither machine login), and every one is looked up: the machine
+          # account is not authorized by name here any more, since nothing
+          # it writes is its own decision (see the label path above; the
+          # reviewer's trig step still trusts its `@review` hand-back by
+          # login, which IS the loop's own callback). Fails closed: a lookup
+          # error is `none`. Retried once like the fork-head
           # lookup, each attempt captured and used only on success (a failed
           # `gh api` prints its error body to STDOUT). Checked BEFORE the
           # fork-head lookup so an outsider's trigger costs one read and
           # produces no refusal comment: `fork_head` stays false for them,
           # and the refusal step is gated on `authorized` as well.
           authorized=false
-          if [ "$ok" = "true" ] && trusted_login "$ACTOR"; then
-            authorized=true
-          elif [ "$ok" = "true" ]; then
+          if [ "$ok" = "true" ]; then
             perm=""
             for i in 1 2; do
               perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission' 2>/dev/null) && break
@@ -613,9 +625,10 @@ jobs:
       # residual gap — a bare @claude posted by MARVIN (a User the action
       # accepts) running the Claude path on a codex item — is closed now that
       # the agent job is gated on steps.trig too (issue #59): marvin never
-      # passes this check, so such a run skips (marvin-authored text is
-      # de-fanged everywhere by design, and every stub excludes marvin at
-      # the job level, so nothing relied on it running).
+      # passes this check — from text or, since 2026-09-22, from a label —
+      # so such a run skips (marvin-authored text is de-fanged everywhere by
+      # design, and every stub excludes marvin at the job level, so nothing
+      # relied on it running).
       # The same label read decides the run's @auto standing (`auto`: an
       # @auto trigger or an `auto` label — the land job's hand-back and PR
       # labels key on it) and, on PR runs, reads the PR's live head branch
@@ -1123,15 +1136,11 @@ jobs:
           label_trigger: ${{ inputs.label_trigger }}
           base_branch: ${{ inputs.base_branch }}
           additional_permissions: "actions: read"
-          # The machine account's own bot login only (TRUSTED_LOGINS; the
-          # User entry is inert — the action consults this list for
-          # non-User actors alone), so the one bot-actor kickoff the gate
-          # admits — the `auto` label applied by marvin, under Phase 2's App
-          # identity — is not refused by the action's non-human-actor guard.
-          # Every other bot is still refused: the stubs and the trig step
-          # exclude bot actors from the text paths, so the reviewer's own
-          # comments cannot retrigger the dev agent.
-          allowed_bots: ${{ env.TRUSTED_LOGINS }}
+          # No allowed_bots: the gate's trig step admits no bot actor (the
+          # machine account's own bot login included, since 2026-09-22 —
+          # its `auto` label was the untrusted triage agent's decision, not
+          # a human's), so the action's non-human-actor guard is a second
+          # refusal behind the gate, never a gap the list has to bridge.
           settings: ${{ steps.agentsettings.outputs.value }}
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
@@ -1441,11 +1450,9 @@ jobs:
           # built-in write-access check on the triggering actor is the second,
           # independent gate (mirroring the Claude path, where
           # claude-code-action's internal check is the second one). No
-          # allow-bot-users: bot actors never pass the gate's trig step, so none reach
-          # this step — except the machine account's own bot login
-          # (TRUSTED_LOGINS), whose `auto` label the gate admits under Phase
-          # 2's App identity — matching the Claude path's allowed_bots.
-          allow-bot-users: ${{ env.TRUSTED_LOGINS }}
+          # allow-bot-users: bot actors never pass the gate's trig step — the
+          # machine account's own bot login included, since 2026-09-22 — so
+          # none reach this step, matching the Claude path.
           prompt-file: .codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 

@@ -101,6 +101,10 @@ def run(
     event_issue=EVENT_ISSUE,
     branch_prefix="",
     refuse_bundle=False,
+    refuse_pr=False,
+    allowed_labels=None,
+    allowed_assignees=None,
+    max_issues=None,
 ):
     return vm.validate(
         manifest,
@@ -115,6 +119,10 @@ def run(
         event_issue_number=event_issue,
         branch_prefix=branch_prefix,
         refuse_bundle=refuse_bundle,
+        refuse_pr=refuse_pr,
+        allowed_issue_labels=allowed_labels,
+        allowed_issue_assignees=allowed_assignees,
+        max_issues=max_issues,
     )
 
 
@@ -654,6 +662,138 @@ def test_labels_must_be_strings(tmp_path):
     assert any("issues[0]: labels must be a list" in e for e in errs)
 
 
+# --- per-caller issue policy (Claude Security finding 4628345) ---------------
+#
+# The triage workflow's agent job is untrusted after it has read test output,
+# and the label `auto` on the issue it files would have commissioned the
+# autonomous coding agent. The policy — no labels, one owner, one issue — is
+# enforced here on the land job's fresh runner, from the caller's inputs, so a
+# manifest crafted past the caller's composing step is refused all the same.
+
+
+@pytest.mark.parametrize("entry", [
+    {"labels": ["auto"]},                                   # a create carrying the label
+    {"labels": ["Auto"]},                                   # GitHub labels are case-insensitive
+    {"labels": ["auto"], "comment_on": 444},                # a comment carrying it (land applies none, but the rule must not depend on that)
+    {"labels": ["engine:codex"]},                           # any label at all
+])
+def test_issue_labels_refused_when_the_caller_allows_none(tmp_path, entry):
+    m = base_manifest(tmp_path)
+    m["issues"][0].update(entry)
+    errs = run(tmp_path, m, allowed_labels=[])
+    assert any("is not in the allowed issue labels (none)" in e for e in errs), errs
+
+
+def test_issue_labels_on_the_callers_list_pass_and_others_do_not(tmp_path):
+    m = base_manifest(tmp_path)
+    m["issues"][0]["labels"] = ["triage", "AUTO"]
+    assert run(tmp_path, m, allowed_labels=["triage", "auto"]) == []
+    errs = run(tmp_path, m, allowed_labels=["triage"])
+    assert any("label 'AUTO' is not in the allowed issue labels (triage)" in e for e in errs), errs
+
+
+def test_issue_labels_unrestricted_when_the_caller_sets_no_policy(tmp_path):
+    # Generic callers (the dev agent's follow-up issues) keep their behaviour.
+    m = base_manifest(tmp_path)
+    m["issues"][0]["labels"] = ["auto", "anything"]
+    assert run(tmp_path, m) == []
+    m["issues"][0]["labels"] = []
+    assert run(tmp_path, m, allowed_labels=[]) == []
+    del m["issues"][0]["labels"]
+    assert run(tmp_path, m, allowed_labels=[]) == []
+
+
+@pytest.mark.parametrize("entry", [
+    {"assignees": ["evil"]},
+    {"assignees": ["ransomr", "evil"]},
+    {"assignees": ["evil"], "comment_on": 444},
+])
+def test_issue_assignees_outside_the_callers_list_are_refused(tmp_path, entry):
+    m = base_manifest(tmp_path)
+    m["issues"][0].update(entry)
+    errs = run(tmp_path, m, allowed_assignees=["ransomr"])
+    assert any("assignee 'evil' is not in the allowed issue assignees (ransomr)" in e for e in errs), errs
+    assert run(tmp_path, m) == []                            # no policy: unrestricted
+
+
+def test_issue_assignees_on_the_callers_list_pass_case_insensitively(tmp_path):
+    m = base_manifest(tmp_path)
+    m["issues"][0]["assignees"] = ["RansomR"]
+    assert run(tmp_path, m, allowed_assignees=["ransomr"]) == []
+    m["issues"][0]["assignees"] = []
+    assert run(tmp_path, m, allowed_assignees=[]) == []
+
+
+def test_issue_count_capped_by_the_caller(tmp_path):
+    m = base_manifest(tmp_path)
+    second = dict(m["issues"][0], title="Second", body_file=write(tmp_path, "i2.md"))
+    m["issues"].append(second)
+    assert run(tmp_path, m) == []                            # no cap by default
+    assert run(tmp_path, m, max_issues=2) == []
+    errs = run(tmp_path, m, max_issues=1)
+    assert any("issues lists 2 entries; this land job allows at most 1" in e for e in errs), errs
+    errs = run(tmp_path, m, max_issues=0)
+    assert any("allows at most 0" in e for e in errs), errs
+
+
+def triage_manifest(d: Path, **overrides) -> dict:
+    """What the triage workflow's land job sees: no bundle, no event PR or
+    issue, `branch` under its prefix — plus whatever a forged artifact adds."""
+    m = {
+        "schema": 1, "repo": REPO, "run_id": int(RUN_ID), "branch": "triage",
+        "start_sha": START, "head_sha": START, "has_bundle": False, "pr_number": None, "issue_number": None,
+        "slack": {"text_file": write(d, "slack.txt")},
+    }
+    m.update(overrides)
+    return m
+
+
+def triage_run(d: Path, m: dict, **kw):
+    return run(d, m, event_pr="", event_issue="", branch_prefix="triage", refuse_bundle=True,
+               allowed_labels=[], allowed_assignees=["ransomr"], max_issues=1, **kw)
+
+
+@pytest.mark.parametrize("extra", [
+    # the review-round-1 fixture: adopt/open a PR for an existing branch and label it `auto`, then hand back
+    {"branch": "triage-fixture", "pr": {"open": True, "title": "Fixture", "body_file": "body.md", "labels": ["auto"]}, "handback": True},
+    {"pr": {"open": True, "title": "Fixture", "body_file": "body.md"}},        # no label: still a PR write
+    {"pr": {"open": False, "title": "Fixture", "body_file": "body.md", "labels": ["auto"]}},
+    {"handback": True},                                                        # the live `@review`, no PR named
+])
+def test_refuse_pr_refuses_pull_request_fields_on_a_read_only_caller(tmp_path, extra):
+    write(tmp_path, "body.md")
+    m = triage_manifest(tmp_path, **extra)
+    errs = triage_run(tmp_path, m, refuse_pr=True)          # the policy the triage workflow passes
+    if "pr" in extra:
+        assert any("refuses pull-request fields (--refuse-pr) but the manifest carries `pr`" in e for e in errs), errs
+    if extra.get("handback"):
+        assert any("refuses pull-request fields (--refuse-pr) but the manifest sets handback" in e for e in errs), errs
+    # Without --refuse-pr the same manifests pass (`handback` alone fails its
+    # own PR requirement) — which is the gap the flag closes for that caller.
+    without = triage_run(tmp_path, m)
+    if "pr" in extra and extra["pr"].get("open"):
+        assert not any("refuse-pr" in e for e in without)
+        assert without == [], without
+
+
+def test_refuse_pr_accepts_what_triage_lands_and_is_off_by_default(tmp_path):
+    m = triage_manifest(tmp_path, issues=[{"repo": "meridianlabs-ai/inspect_ai", "title": "Triage: t",
+                                            "body_file": write(tmp_path, "i.md"), "assignees": ["ransomr"]}])
+    assert triage_run(tmp_path, m, refuse_pr=True) == []
+    assert triage_run(tmp_path, triage_manifest(tmp_path, handback=False), refuse_pr=True) == []
+    # Callers that open PRs keep the default: base_manifest carries pr + handback.
+    assert run(tmp_path, base_manifest(tmp_path)) == []
+
+
+def test_pr_labels_are_not_covered_by_the_issue_label_policy(tmp_path):
+    # pr.labels are the trusted gate's (the workflows that open PRs compose
+    # them before the agent runs); the issue policy is about issues[].
+    m = base_manifest(tmp_path)
+    del m["issues"][0]["labels"]
+    assert m["pr"]["labels"] == ["auto"]
+    assert run(tmp_path, m, allowed_labels=[]) == []
+
+
 # --- scalars -----------------------------------------------------------------
 
 
@@ -1067,6 +1207,38 @@ def test_cli_refuse_bundle_relaxes_the_branch_rules(tmp_path, capsys):
     assert cli(tmp_path, pr_head_ref="main") == 1
     assert "must not be the default branch" in capsys.readouterr().out
     assert cli(tmp_path, "--refuse-bundle", pr_head_ref="main") == 0
+
+
+def test_cli_issue_policy_flags(tmp_path, capsys):
+    # `*` (the flags' default) is unrestricted; an empty value allows none;
+    # --max-issues empty is no cap. The land composite passes all three from
+    # its inputs, so the triage caller's `""` / `ransomr` / `1` reach here.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path, "--allowed-issue-labels", "*", "--allowed-issue-assignees", "*", "--max-issues", "") == 0
+    assert cli(tmp_path, "--allowed-issue-labels", "", "--allowed-issue-assignees", "ransomr", "--max-issues", "1") == 1
+    out = capsys.readouterr().out
+    assert "label 'auto' is not in the allowed issue labels (none)" in out
+    assert "assignee" not in out and "allows at most" not in out
+    assert cli(tmp_path, "--allowed-issue-assignees", "", "--max-issues", "0") == 1
+    out = capsys.readouterr().out
+    assert "assignee 'ransomr' is not in the allowed issue assignees (none)" in out
+    assert "issues lists 1 entries; this land job allows at most 0" in out
+
+
+def test_cli_refuse_pr(tmp_path, capsys):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path) == 0
+    assert cli(tmp_path, "--refuse-pr") == 1
+    out = capsys.readouterr().out
+    assert "refuses pull-request fields (--refuse-pr) but the manifest carries `pr`" in out
+    assert "refuses pull-request fields (--refuse-pr) but the manifest sets handback" in out
+
+
+def test_cli_max_issues_must_be_a_number(tmp_path):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    with pytest.raises(SystemExit) as exc:
+        cli(tmp_path, "--max-issues", "one")
+    assert exc.value.code == 2
 
 
 def test_cli_missing_manifest(tmp_path, capsys):

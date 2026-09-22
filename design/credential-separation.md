@@ -181,7 +181,15 @@ payload names, and fails the run. It requires:
   inside the artifact, under 64 KiB.
 - `issues[].repo` on the land job's `allowed-issue-repos` list (empty for the
   three writing workflows; the caller repo for the reviewer; the inspect_ai
-  fork for the triage workflow in the `actions` repo); thread ids
+  fork for the triage workflow in the `actions` repo); `issues[].labels` and
+  `issues[].assignees` on the land job's `allowed-issue-labels` /
+  `allowed-issue-assignees` lists and the entry count within `max-issues`
+  when the caller sets them (`*` and empty, the defaults, leave the four
+  reusable workflows unrestricted; the triage workflow passes no labels, one
+  assignee and a cap of one, since 2026-09-22 — Claude Security finding
+  4628345: a label is an authorization when a workflow reacts to it, and the
+  triage agent's `auto` used to reach the fork's kickoff through marvin);
+  thread ids
   `PRRT_…`; `stage` one of the Atlas options; `review_verdict` `clean` or
   `suggestions`; a `comments[]` entry flagged `review` only alongside a
   `review_verdict`.
@@ -195,7 +203,13 @@ workflow) the validator additionally refuses any manifest that carries
 commits, claims HEAD moved or ships a bundle, whatever the agent job
 uploaded, and the push-side branch rules are off because nothing is pushed.
 `emit-landing`'s `read-only` input is the producing side of the same pair:
-no git runs, `head_sha` equals `start_sha`, no bundle.
+no git runs, `head_sha` equals `start_sha`, no bundle. Refusing bundles does
+not refuse pull requests: `pr.open` adopts or opens a PR for a branch that
+already exists on origin and labels it, with no push. Under `refuse-pr` (the
+triage workflow, since 2026-09-22) the validator also refuses a manifest
+carrying `pr` or `handback: true`, so a caller whose token reaches the
+repository's pull requests (the `MARVIN_TOKEN` fallback) cannot be made to
+label an existing PR `auto` or post `@review` by a forged artifact.
 
 Every agent-authored body the land job posts passes through a de-fang step
 first (trigger tokens lose their `@`, loop markers are split,
@@ -292,13 +306,23 @@ the reusable workflows stopped accepting that token on 2026-09-18, revoking
 it in the account and deleting the `MARVIN_TOKEN` org secret are the
 admin's steps, and the login stays trusted until the account itself is
 retired, a separate step. The bot is trusted by login and
-never by lookup: the collaborators endpoint reports `none` for an App, its
-comments carry no MEMBER or COLLABORATOR association, and so the caller
-stubs' `[bot]` exclusions name it as the one exception and the
-claude-code-action and codex-action steps carry it in their bot
-allow-lists. App-token pushes and comments trigger workflows as a User's do
-(only `github.token` events are suppressed), so the `@review` hand-back and
-the CI re-run work unchanged.
+never by lookup: the collaborators endpoint reports `none` for an App and
+its comments carry no MEMBER or COLLABORATOR association. What that trust
+covers is the loops' own callbacks — the `@review` hand-back the reviewer's
+trig step accepts, the counter and verdict markers the loop gates read, the
+`auto` label on a PR that `verify-auto-labeler` accepts because the machine
+account wrote it for a trusted decider (a human's trig-verified opt-in, or a
+trusted caller workflow's standing policy such as inspect_flow's scheduled
+PRs). It does not cover starting
+the dev agent: `claude.yml`'s trig step and the caller stubs exclude both
+logins from every kickoff, the `auto`-label path included (since
+2026-09-22; Claude Security finding 4628345 — the machine account writes
+what a trusted job or a human decided and never decides for itself, so a
+label it applied to an issue was the triage agent's decision, made from
+untrusted test output), and the claude-code-action and codex-action steps
+carry no bot allow-list. App-token pushes and comments trigger workflows as
+a User's do (only `github.token` events are suppressed), so the `@review`
+hand-back and the CI re-run work unchanged.
 
 **No Workflows permission** (decision: Ransom, 2026-09-17). A fine-grained
 PAT pushes workflow files under its Contents permission; an App needs the
@@ -540,9 +564,15 @@ under the landing directory; it holds the job token and the Anthropic key,
 no Slack secret, and passes `github_token: github.token` to the action so no
 App token with write is minted. Its `emit-landing` is `read-only`. The land
 job mints a fork-scoped token (issues and org projects write) and runs `land`
-with `refuse-bundle`, `allowed-issue-repos: meridianlabs-ai/inspect_ai` and
-the Slack destination from the agent job's validated outputs, never from the
-manifest, which supplies the text alone.
+with `refuse-bundle`, `refuse-pr`, `allowed-issue-repos: meridianlabs-ai/inspect_ai`,
+`allowed-issue-labels: ""`, `allowed-issue-assignees: ransomr`,
+`max-issues: "1"` and the Slack destination from the agent job's validated
+outputs, never from the manifest, which supplies the text alone. The
+label, assignee and count policy is thereby enforced on the land runner
+and not only by the agent job's composing step (Claude Security finding
+4628345, 2026-09-22): the issue triage files carries no label, and the
+`auto` handoff — which the composer used to admit on the agent's say-so —
+is a maintainer's decision after reading the brief.
 
 Both trusted jobs in this repository still read `steps.mint.outputs.token ||
 secrets.MARVIN_TOKEN` and gate the mint on the app secrets being configured:

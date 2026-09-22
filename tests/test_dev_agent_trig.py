@@ -1,12 +1,15 @@
 """Tests for claude.yml's `Check trigger (stage gating)` step: who may start
 the dev agent (issue #92), and the machine account's two logins (Phase 2
-prep): the `auto` label it applies kicks the run off under either login with
-no permission lookup (the collaborators endpoint answers `none` for a GitHub
-App, so the bot is trusted by name), neither login starts a run from text,
-and every other bot stays excluded. Lifted from the workflow the way
-test_review_trig.py lifts the reviewer's trig step, run against a stub `gh`.
+prep): neither login starts a run from text or from a label (Claude Security
+finding 4628345 — the `auto` label it applied for the triage pipeline was an
+untrusted agent's decision, only written by marvin, and used to kick the run
+off with no lookup), every other bot stays excluded, and a human's label or
+comment runs only after the write-access lookup. Lifted from the workflow the
+way test_review_trig.py lifts the reviewer's trig step, run against a stub
+`gh`.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -38,13 +41,14 @@ gh() {
 """
 
 
-def run_trig(tmp_path, *, actor, event, action, perms=None, comment="", label="", is_pr=False):
+def run_trig(tmp_path, *, actor, event, action, perms=None, comment="", label="", is_pr=False,
+             phrase="@auto", label_trigger="auto"):
     state = fresh_state(tmp_path)
     (state / "perms").write_text("".join(f"{k} {v}\n" for k, v in (perms or {}).items()))
     out = tmp_path / "out"
     out.write_text("")
     env = {
-        "GITHUB_OUTPUT": str(out), "STATE": str(state), "PHRASE": "@auto", "LABEL": "auto",
+        "GITHUB_OUTPUT": str(out), "STATE": str(state), "PHRASE": phrase, "LABEL": label_trigger,
         "EVENT": event, "EVENT_ACTION": action, "ACTOR": actor, "COMMENT": comment, "REVIEW": "",
         "IBODY": "", "ITITLE": "", "LNAME": label, "REPO": "o/r",
         "IS_PR_COMMENT": "true" if is_pr else "false", "PR_NUM": "7", "HEAD_REPO": "",
@@ -56,10 +60,28 @@ def run_trig(tmp_path, *, actor, event, action, perms=None, comment="", label=""
 
 
 @pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT])
-def test_the_machine_accounts_auto_label_kicks_off_without_a_lookup_under_either_login(tmp_path, login):
-    _, o, state = run_trig(tmp_path, actor=login, event="issues", action="labeled", label="auto")
-    assert o["ok"] == "true" and o["authorized"] == "true" and o["fork_head"] == "false"
+def test_the_machine_accounts_auto_label_does_not_kick_off_under_either_login(tmp_path, login):
+    # The label is a write the machine account performs for someone else's
+    # decision — the triage pipeline's untrusted agent, until the label was
+    # taken out of its manifest — never its own; no lookup is even made (the
+    # User holds write, so a lookup would have authorized it).
+    _, o, state = run_trig(tmp_path, actor=login, event="issues", action="labeled", label="auto",
+                           perms={MARVIN: "write"})
+    assert o["ok"] == "false" and o["authorized"] == "false" and o["fork_head"] == "false"
     assert lookups(state) == []
+
+
+@pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT])
+def test_the_machine_accounts_claude_label_does_not_kick_off_either(tmp_path, login):
+    # The rule is the login, not the label name: a machine-applied `claude`
+    # label (the one-shot agent's label trigger) is refused the same way,
+    # while a human's is not.
+    _, o, state = run_trig(tmp_path, actor=login, event="issues", action="labeled", label="claude",
+                           phrase="@claude", label_trigger="claude")
+    assert o["ok"] == "false" and o["authorized"] == "false" and lookups(state) == []
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="labeled", label="claude",
+                           phrase="@claude", label_trigger="claude", perms={"alice": "write"})
+    assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
 
 
 @pytest.mark.parametrize("bot", ["github-actions[bot]", "foo[bot]"])
@@ -69,12 +91,19 @@ def test_another_apps_auto_label_does_not_kick_off(tmp_path, bot):
 
 
 def test_a_humans_label_is_authorized_by_the_permission_lookup(tmp_path):
+    # The preserved route: a maintainer who read a triage-filed (marvin-
+    # authored) issue applies `auto` themselves; the labeler is the human,
+    # whatever account authored the issue.
     _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="labeled", label="auto",
                            perms={"alice": "write"})
     assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
     _, o, state = run_trig(tmp_path, actor="nobody", event="issues", action="labeled", label="auto",
                            perms={"nobody": "read"})
     assert o["ok"] == "false" and o["authorized"] == "false" and lookups(state) == ["nobody"]
+    # A label whose actor cannot be looked up (an unknown account) fails
+    # closed, after the step's one retry.
+    _, o, state = run_trig(tmp_path, actor="ghost", event="issues", action="labeled", label="auto")
+    assert o["ok"] == "false" and o["authorized"] == "false" and lookups(state) == ["ghost", "ghost"]
 
 
 @pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT, "foo[bot]"])
@@ -93,25 +122,26 @@ def test_a_humans_comment_starts_a_run_after_the_lookup(tmp_path):
     assert lookups(state) == ["alice"]
 
 
-def test_workflow_names_both_logins_once_and_carries_them_into_the_agent_steps_bot_allow_lists():
-    # The one env value; the trig step reads it rather than naming a login;
-    # claude-code-action's allowed_bots and codex-action's allow-bot-users
-    # carry it so the label kickoff under the App login is not refused by the
-    # actions' own non-human-actor guards after the gate admitted it.
+def test_workflow_names_both_logins_once_and_the_agent_steps_admit_no_bot():
+    # The one env value; the trig step reads it rather than naming a login.
+    # Since no bot actor passes the gate any more, neither claude-code-action
+    # nor codex-action carries a bot allow-list: their own non-human-actor
+    # guards are a second refusal behind the gate, not a gap to bridge.
     assert TRUSTED_LOGINS == f"{MARVIN},{MARVIN_BOT}"
     text = WORKFLOW.read_text()
     assert text.count("\nenv:\n") == 1
-    assert "allowed_bots: ${{ env.TRUSTED_LOGINS }}" in text
-    assert "allow-bot-users: ${{ env.TRUSTED_LOGINS }}" in text
+    assert not re.search(r"^\s*allowed_bots:", text, re.M)
+    assert not re.search(r"^\s*allow-bot-users:", text, re.M)
     assert "i-am-marvin" not in lift_step(WORKFLOW, "        id: trig")
 
 
-def test_dev_stubs_admit_the_machine_accounts_bot_login_on_the_auto_label_path_only():
-    # The stubs have no env to read: the label path names the App login next
-    # to the `[bot]` exclusion; the `claude` job's guard and the text paths
-    # keep excluding every bot, the machine account's included.
+def test_dev_stubs_exclude_the_machine_account_on_the_auto_label_path_too():
+    # The stubs have no env to read, so the label path names the User login
+    # next to the `[bot]` exclusion (which covers the App login) — the same
+    # guard the `claude` job and the text paths carry. No bot, and neither
+    # machine login, is admitted anywhere.
     for stub in (ROOT / ".github" / "workflows" / "claude-stub.yml", ROOT / "examples" / "claude-stub.yml"):
         text = stub.read_text()
-        assert text.count("( !endsWith(github.actor, '[bot]') || github.actor == 'meridian-marvin[bot]' )") == 1, stub
+        assert "meridian-marvin[bot]'" not in text, stub
         assert text.count("!endsWith(github.actor, '[bot]')") == 3, stub
-        assert text.count("github.actor != 'i-am-marvin'") == 3, stub  # the comment naming the guard, and two guards
+        assert text.count("github.actor != 'i-am-marvin'") == 4, stub  # the comment naming the guard, and three guards

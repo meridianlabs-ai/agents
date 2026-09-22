@@ -4,8 +4,23 @@ description: >-
   opt-in and kill-switch, and before this check nothing asked who opted in: a
   label planted by an account without write access armed the loop exactly
   like a maintainer's. The most recent `labeled` event for the label must
-  come from the machine account (claude.yml's @auto opt-in and PR-open
-  propagation, or the triage pipeline) or from an account with write access.
+  come from the machine account or from an account with write access. The
+  machine account is trusted here as a WRITER, never as a decider: its
+  `auto` label on a PR carries a decision made elsewhere by someone trusted
+  — a write-access human's opt-in (claude.yml's gate labels the PR a human
+  commented `@auto` on; `land` labels the PR it opens for an issue a human
+  labelled `auto`; both behind claude.yml's trig step, which verified that
+  human first), or a trusted caller workflow's standing policy (inspect_flow's
+  scheduled inspect-update and canary-fix workflows put `auto` on the PRs they
+  open, a maintainer's decision written into a workflow file on the default
+  branch, not made per item from untrusted input). What this check cannot
+  tell apart is a label the machine account wrote for an UNTRUSTED decider:
+  claude.yml's trig used to admit such a label as an issue kickoff (Claude
+  Security finding 4628345 — the triage pipeline filed issues labelled `auto`
+  as marvin from an untrusted agent's manifest), so that path is closed at
+  trig, and a caller whose agent job may not touch PRs passes `land`'s
+  `refuse-pr` so no such label reaches a PR either. Trusting the machine
+  account here is therefore only as sound as every caller's land inputs.
   Shared by claude-auto.yml and claude-auto-review.yml, between their
   label check and their counting step, so the two gates cannot drift.
   Referenced fully-qualified
