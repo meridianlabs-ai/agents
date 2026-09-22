@@ -14,7 +14,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the git sequence its fetch/push steps rely on (bundle above the start SHA;
   unbundle into an empty bare repo; refuse a moved branch; push without
   `--force`), run against local repos — including `emit-landing`'s `write`
-  step, lifted from the action and run against those repos.
+  step, lifted from the action and run against those repos, and the
+  `workflows` guard, lifted the same way: what the push would change on
+  origin, listed from the branch's live tip or the base tip, never from
+  the manifest's `start_sha` (a start shifted onto a fork PR's head or an
+  old base commit still names the file; Claude Security 4628444).
 - `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
   step, lifted the same way: a landed fix or merge-only attempt owes the
   re-review request and sets no stage (a hand-back is mid-flight; Review is
