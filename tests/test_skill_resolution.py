@@ -841,6 +841,9 @@ def test_promote_leaves_every_link_destination_form_alone(tmp_path):
         # balanced parentheses in the destination, a nested image in a link
         "> [q]: #15-q", "- [l]: #16-l", "1. [o]: #17-o", "[la\\]bel]: #18-e", "[la\nbel]: #19-m",
         "[p](path(part),#20-p)", "![i](path(part),#21-i)", "[![img](#22-in)](#23-out)",
+        # review round 4: nested and escaped parentheses in the destination
+        "[n](path(part(inner)),#24-n)", "![m](a(b(c(d))),#25-m)", "[o](path(part\\(inner),#26-o)",
+        "[e](path(part\\)inner),#27-e)", "[t](#28-t \"title (1)\")",
     ]
     fork_body = "Summary.\n\n" + "\n".join(keep) + "\n\n[#31 in the text](#32-anchor)\n[#33]: #34-label\nsee #35\nCloses #36\n"
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
@@ -871,8 +874,20 @@ def test_promote_leaves_every_link_destination_form_alone(tmp_path):
     ("<a href=\"Fixes #14\">x</a>", "<a href=\"Fixes meridianlabs-ai/inspect_ai#14\">x</a>"),
     ("Fixes:#15 and fixes: #16", "Fixes:meridianlabs-ai/inspect_ai#15 and fixes: meridianlabs-ai/inspect_ai#16"),  # colon spellings
     ("href=\"#17-h\" mentioned in prose", "href=\"meridianlabs-ai/inspect_ai#17-h\" mentioned in prose"),  # no tag, no keyword
+    # review round 4: any amount of whitespace between keyword and ref, in
+    # every protected destination family — the keyword is found over the
+    # whole body, not a fixed window before the ref
+    ("[x](<Closes" + " " * 20 + "#18>)", "[x](<Closes" + " " * 20 + "meridianlabs-ai/inspect_ai#18>)"),
+    ("<a href=\"Fixes" + " " * 20 + "#19\">x</a>", "<a href=\"Fixes" + " " * 20 + "meridianlabs-ai/inspect_ai#19\">x</a>"),
+    ("<img src=\x27Resolved" + " " * 20 + "#20\x27>", "<img src=\x27Resolved" + " " * 20 + "meridianlabs-ai/inspect_ai#20\x27>"),
+    ("[ref]: <Closed" + " " * 20 + "#21>", "[ref]: <Closed" + " " * 20 + "meridianlabs-ai/inspect_ai#21>"),
+    ("<a href=\"Fixes\n\n#22\">x</a>", "<a href=\"Fixes\n\nmeridianlabs-ai/inspect_ai#22\">x</a>"),
+    ("Fixes" + " " * 20 + "#23 in prose", "Fixes" + " " * 20 + "meridianlabs-ai/inspect_ai#23 in prose"),
+    ("[x](unbalanced(paren,#24-anchor", "[x](unbalanced(paren,meridianlabs-ai/inspect_ai#24-anchor"),  # not a destination
 ], ids=["href-prose", "src-prose", "no-link-text", "unclosed-link", "blank-label", "trailing-text",
-        "keyword-in-destination", "keyword-in-href", "colon", "attr-no-tag"])
+        "keyword-in-destination", "keyword-in-href", "colon", "attr-no-tag",
+        "padded-angle-link", "padded-href", "padded-src", "padded-refdef", "newlines-href", "padded-prose",
+        "unbalanced-parens"])
 def test_promote_qualifies_closing_refs_inside_markup_lookalikes(tmp_path, text, ref):
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Summary.\n\n{text}\n")]))
     r = s.run(PROMOTE, str(N), "--dry-run")
@@ -880,6 +895,19 @@ def test_promote_qualifies_closing_refs_inside_markup_lookalikes(tmp_path, text,
     body = published_body(r.stdout)
     assert ref in body, body
     assert not re.search(r"(?<![\w/&.=-])#\d+", body), body  # no bare ref left anywhere
+
+
+def test_promote_keyword_suffix_of_a_longer_word_is_not_a_closing_keyword(tmp_path):
+    # Review round 4: a fixed lookback window invented a word boundary, so
+    # `discloses` read as `closes` and a genuine destination was rewritten.
+    # The keyword match runs over the whole body with a real \b.
+    fork_body = "Summary.\n\n[x](<discloses" + " " * 10 + "#7>) and discloses #8 in prose\n"
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    body = published_body(r.stdout)
+    assert "[x](<discloses" + " " * 10 + "#7>)" in body, body            # a destination, no keyword: kept
+    assert "discloses meridianlabs-ai/inspect_ai#8 in prose" in body, body  # a bare mention: qualified
 
 
 @pytest.mark.parametrize("ref, prepended", [

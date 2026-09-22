@@ -420,41 +420,68 @@ else
   # /import does in the other direction, then make sure a closing ref to THIS
   # issue is present (prepend one otherwise). The only bare ref that may
   # remain is the `Fixes #<up>` added from the validated import header. A
-  # `#M` right after a closing keyword is ALWAYS qualified, whatever markup
-  # surrounds it — the guarantee does not rest on the heuristics below.
-  # Otherwise a bare ref is a `#M` GitHub would resolve against the tracker:
-  # preceded by nothing, whitespace or opening punctuation, not inside a URL
-  # token and not inside the destination of a syntactically complete
-  # Markdown inline link/image, reference definition or HTML href/src
-  # attribute (malformed lookalikes are prose and are qualified). A `#M`
-  # glued to a word character, `/`, `-`, `.`, `&`, `=` … is the tail of a
-  # qualified `owner/repo#M`, an HTML entity or a URL fragment and is left
-  # alone.
+  # `#M` after a closing keyword (any whitespace between, found over the
+  # whole body) is ALWAYS qualified, whatever markup surrounds it — the
+  # guarantee does not rest on the heuristics below. Otherwise a bare ref is
+  # a `#M` GitHub would resolve against the tracker: preceded by nothing,
+  # whitespace or opening punctuation, not inside a URL token and not inside
+  # the destination of a syntactically complete Markdown inline link/image
+  # (balanced and escaped parentheses honoured), reference definition or
+  # HTML href/src attribute (malformed lookalikes are prose and are
+  # qualified). A `#M` glued to a word character, `/`, `-`, `.`, `&`, `=` …
+  # is the tail of a qualified `owner/repo#M`, an HTML entity or a URL
+  # fragment and is left alone.
   BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
 n = os.environ["ISSUE_N"]
 src = os.environ["FPR_BODY"]
-# Destination spans (group 1) of syntactically complete constructs only:
-# an inline link/image ("[text](dest)" with an optional title and balanced
-# parentheses in dest), a reference definition ("[label]: dest" alone on
-# its line, container prefixes allowed) and an href/src attribute inside
-# an HTML tag. Malformed lookalikes are ordinary text and are qualified.
-TITLE = r"(?:\"[^\"]*\"|\x27[^\x27]*\x27|\([^()]*\))"
-DEST = r"(<[^<>\n]*>|(?:[^\s()\\<]|\\.|\([^\s()]*\))*)"
-dest = []
-# The inline pattern is a lookahead so nested constructs ("[![img](a)](b)")
-# are all found (a lookahead is non-capturing, so the destination stays group 1).
-for pat, g in ((r"(?=\[(?:[^\[\]\\]|\\.|\[[^\[\]]*\])*\]\(\s*" + DEST + r"(?:\s+" + TITLE + r")?\s*\))", 1),
-               (r"^(?:[ \t]*(?:>|[-*+]|\d{1,9}[.)]))*[ \t]*\[(?!\s*\])(?:[^\[\]\\]|\\.)+\]:[ \t]*\n?[ \t]*"
-                r"(<[^<>\n]*>|[^\s<]\S*)(?:[ \t]*\n?[ \t]*" + TITLE + r")?[ \t]*(?=\n|$)", 1),
-               (r"<[a-zA-Z][^<>]*?\s(?:href|src)\s*=\s*(\"[^\"]*\"|\x27[^\x27]*\x27|[^\s\"\x27=<>`]+)[^<>]*>", 1)):
-    dest += [m.span(g) for m in re.finditer(pat, src, re.M | re.I)]
 kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+# Every `#M` that follows a closing keyword (optional colon, any whitespace),
+# located over the whole source so the word boundary is real and the gap is
+# unbounded: these are qualified whatever markup surrounds them.
+closing = {m.start(1) for m in re.finditer(kw + r":?\s*(#\d+)\b", src, re.I)}
+# Destination spans of syntactically complete constructs only: a reference
+# definition ("[label]: dest" alone on its line, container prefixes allowed),
+# an href/src attribute inside an HTML tag, and — scanned by hand, since
+# regexes cannot balance parentheses — an inline link or image
+# ("[text](dest)" with an optional title). Malformed lookalikes are
+# ordinary text and are qualified.
+TITLE = r"(?:\"[^\"]*\"|\x27[^\x27]*\x27|\([^()]*\))"
+dest = []
+for pat in (r"^(?:[ \t]*(?:>|[-*+]|\d{1,9}[.)]))*[ \t]*\[(?!\s*\])(?:[^\[\]\\]|\\.)+\]:[ \t]*\n?[ \t]*"
+            r"(<[^<>\n]*>|[^\s<]\S*)(?:[ \t]*\n?[ \t]*" + TITLE + r")?[ \t]*(?=\n|$)",
+            r"<[a-zA-Z][^<>]*?\s(?:href|src)\s*=\s*(\"[^\"]*\"|\x27[^\x27]*\x27|[^\s\"\x27=<>`]+)[^<>]*>"):
+    dest += [m.span(1) for m in re.finditer(pat, src, re.M | re.I)]
+close_paren = re.compile(r"\s*(?:" + TITLE + r"\s*)?\)")
+# A lookahead, so nested constructs ("[![img](a)](b)") are all visited.
+for m in re.finditer(r"(?=(\[(?:[^\[\]\\]|\\.|\[[^\[\]]*\])*\]\())", src):
+    i = m.end(1)
+    while i < len(src) and src[i] in " \t\n":
+        i += 1
+    start = i
+    if i < len(src) and src[i] == "<":
+        j = src.find(">", i)
+        if j < 0 or "\n" in src[i:j]:
+            continue
+        i = j + 1
+    else:
+        depth = 0
+        while i < len(src):
+            c = src[i]
+            if c == "\\" and i + 1 < len(src):
+                i += 2
+                continue
+            if c in " \t\n" or (c == ")" and depth == 0):
+                break
+            depth += (c == "(") - (c == ")")
+            i += 1
+        if depth:
+            continue
+    if close_paren.match(src, i):
+        dest.append((start, i))
 def qualify(m):
     i = m.start()
-    # A closing keyword right before the ref is qualified whatever surrounds
-    # it: the guarantee never depends on the destination heuristics above.
-    if re.search(kw + r":?\s*$", src[max(0, i - 16):i], re.I):
+    if i in closing:
         return "meridianlabs-ai/inspect_ai#" + m.group(1)
     prev = src[i - 1] if i else " "
     if prev not in " \t\r\n([{\"\x27*~>|,;" or any(a <= i < b for a, b in dest):
