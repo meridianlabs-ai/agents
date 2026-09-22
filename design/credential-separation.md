@@ -712,9 +712,11 @@ results against the invariant each one tests.
   the land job refuses bundles. Its normal output is the three review files, landed as the
   review summary, the inline findings and a verdict that is one of two
   fixed bodies, after the de-fang. The enforced limits stop there: the
-  review job runs tests and Python (unsandboxed on same-repo heads), its
-  workspace stays writable on the sandboxed paths and `gh` runs outside
-  the sandbox there, and the landing manifest it uploads is data the
+  review job runs tests and Python (unsandboxed on same-repo heads), on the
+  sandboxed paths its scratch copy of the checkout stays writable while the
+  checkout itself is read-only to sandboxed commands (Claude Security
+  4628445) and `gh` runs outside the sandbox there, and the landing
+  manifest it uploads is data the
   validator checks for shape, not intent. Under `refuse-bundle` the
   validator accepts `comments[]` on any thread of the caller repository,
   `issues[]` in the caller repository (create, comment, reopen, assign), a

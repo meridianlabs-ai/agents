@@ -35,7 +35,27 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `review_comments` — the lenient verdict read, the malformed-inline
   fallbacks, external mode's single comment, the codex branch untouched —
   with the pr-mode and external results run on through `emit-landing` and
-  the validator under the land job's `refuse-bundle`.
+  the validator under the land job's `refuse-bundle`. Also the `Compose
+  settings` step: the review-dir allow and posting denies, and on the
+  sandboxed paths the overlay — the checkout and the review dir on
+  `denyWrite`, the scratch copy the one `allowWrite`, `claudeMdExcludes`
+  and the agents-md `instructionFiles` option composed with the caller's
+  entries, a caller's `allowWrite` and `tlsTerminate` dropped.
+- `test_review_strip.py` — `claude-review.yml`'s untrusted-checkout
+  preparation and post-agent check (Claude Security 4628445), lifted the
+  same way and run against local repos: the strip renames `CLAUDE.md` /
+  `CLAUDE.local.md` / `AGENTS.md` to `*.untrusted` and deletes `.claude` /
+  `.mcp.json` at every depth; the scratch step copies the stripped tree with
+  its credential-free `.git`; the re-plant check passes on a clean tree,
+  exempts exactly the root paths claude-code-action restores from
+  `origin/<base>` when byte-identical (tracked content and untracked files,
+  ignore rules not honoured), and fails on a nested entry, a changed or
+  added root entry, a root `AGENTS.md`, a missing base ref (fail-closed, a
+  hostile `BASE_REF` included) — with the checkout's hooks, fsmonitor and
+  external diff never run. Also the wiring: `--setting-sources user` on the
+  agent step after the caller's args, the three steps gated on the sandboxed
+  paths, the landing prep gated on the check, the 2.1.246 version floor, the
+  Surface step's outcomes and note, and the prompt's scratch-copy guidance.
 - `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
   step, lifted the same way: the PR open for an issue run (title, body,
   labels, base, the hand-back an `auto`-labelled PR owes and the
