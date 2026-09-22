@@ -96,7 +96,7 @@ echo "before: $before"
 run_assert "$job_path" true | tee "$RUNNER_TEMP/smoke-assert-stock.log"
 after=$(for d in /opt /opt/pipx_bin /usr/local/bin; do [ -d "$d" ] && stat -c '%A %U %n' "$d"; done || true)
 echo "after: $after"
-grep -q 'none inside the workspace or writable by codex' "$RUNNER_TEMP/smoke-assert-stock.log" || fail "stock PATH did not pass"
+grep -q 'none inside the workspace or owned or writable by codex' "$RUNNER_TEMP/smoke-assert-stock.log" || fail "stock PATH did not pass"
 say "2b. the protected hops: codex cannot create in them, runner can"
 for d in /opt/pipx_bin /usr/local/bin; do
   [ -d "$d" ] || continue
