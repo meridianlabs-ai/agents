@@ -1450,8 +1450,12 @@ jobs:
           # type, mode and BYTES (the blob via `git cat-file`, the file via
           # `cmp`; no attribute conversion is involved on either side — `git
           # diff` would apply the head's .gitattributes, review round 2), a
-          # symlink must point where the base's does, a gitlink is never
-          # exempt, and nothing the base does not track may be there.
+          # symlink's target must be the base blob's exact bytes (hashed from
+          # `readlink -n` with `--no-filters`, so no command substitution
+          # strips a trailing newline that would let `target` and
+          # `target<LF>` compare equal — review round 3; several callers keep
+          # a symlinked root CLAUDE.md or .claude), a gitlink is never exempt,
+          # and nothing the base does not track may be there.
           identical_to_base() {
             local entry=$1 rec mode sha rest path tracked=0
             while IFS= read -r -d '' rec; do
@@ -1459,7 +1463,7 @@ jobs:
               mode=${rec%% *}; rest=${rec#* }; sha=${rest%% *}; rest=${rest#* }; path=${rest#*$'\t'}
               case "$mode" in
                 120000)
-                  [ -L "$path" ] && [ "$(readlink "$path")" = "$(git cat-file blob "$sha")" ] || return 1 ;;
+                  [ -L "$path" ] && [ "$(readlink -n "$path" | git hash-object --no-filters --stdin)" = "$sha" ] || return 1 ;;
                 100644|100755)
                   [ -f "$path" ] && ! [ -L "$path" ] || return 1
                   git cat-file blob "$sha" | cmp -s - "$path" || return 1

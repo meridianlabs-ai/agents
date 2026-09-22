@@ -66,15 +66,18 @@ def write(root: Path, files: dict):
         p.write_text(text)
 
 
-def make_checkout(tmp_path, *, base_files=BASE_FILES, head_files=HEAD_FILES, delete=()) -> Path:
-    """A base repo (branch `main`, holding `base_files`) and a clone of it —
-    the workspace — with a PR head commit on top (adding `head_files`,
-    deleting `delete`), so `refs/remotes/origin/main` is there as an
-    actions/checkout with fetch-depth 0 leaves it."""
+def make_checkout(tmp_path, *, base_files=BASE_FILES, base_links=None, head_files=HEAD_FILES, delete=()) -> Path:
+    """A base repo (branch `main`, holding `base_files` and the symlinks in
+    `base_links`, path -> target) and a clone of it — the workspace — with a
+    PR head commit on top (adding `head_files`, deleting `delete`), so
+    `refs/remotes/origin/main` is there as an actions/checkout with
+    fetch-depth 0 leaves it."""
     base = tmp_path / "base"
     base.mkdir(parents=True)
     git("init", "-q", "-b", "main", cwd=base)
     write(base, base_files)
+    for rel, target in (base_links or {}).items():
+        (base / rel).symlink_to(target)
     git("add", "-A", cwd=base)
     git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base", cwd=base)
     ws = tmp_path / "workspace"
@@ -324,6 +327,51 @@ def test_replant_check_requires_the_same_entry_type_and_mode(tmp_path):
     (ws2 / ".claude/settings.json").chmod(0o755)
     r = replant(ws2)
     assert r.returncode == 1 and "./.claude" in r.stdout
+
+
+def test_replant_check_compares_symlink_targets_byte_for_byte(tmp_path):
+    # Review round 3 (B6): the link comparison went through command
+    # substitutions, which strip trailing newlines, so a link retargeted from
+    # `AGENTS.md` to `AGENTS.md<LF>` (a different file) compared equal. Several
+    # callers keep `CLAUDE.md -> AGENTS.md` and ts-mono `.claude -> .agents`.
+    base = {k: v for k, v in BASE_FILES.items() if not k.startswith(".claude/") and k != "CLAUDE.md"}
+    base[".agents/settings.json"] = '{"permissions": {"allow": ["Bash(pytest:*)"]}}\n'
+    links = {"CLAUDE.md": "AGENTS.md", ".claude": ".agents"}
+    head = {k: v for k, v in HEAD_FILES.items() if not k.startswith(".claude/")}
+    # Unchanged restored links: exempt (the strip renamed the link's target,
+    # AGENTS.md, but the link itself is the base's).
+    ws = make_checkout(tmp_path, base_files=base, base_links=links, head_files=head)
+    strip(ws)
+    restore_from_base(ws)
+    assert (ws / "CLAUDE.md").is_symlink() and (ws / ".claude").is_symlink()
+    r = replant(ws)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "root ./CLAUDE.md matches" in r.stdout and "root ./.claude matches" in r.stdout
+    # A file link retargeted to a name that differs only by a trailing
+    # newline byte, holding planted instructions: survivor.
+    (ws / "AGENTS.md\n").write_text("planted instructions\n")
+    (ws / "CLAUDE.md").unlink()
+    (ws / "CLAUDE.md").symlink_to("AGENTS.md\n")
+    r = replant(ws)
+    assert r.returncode == 1 and "./CLAUDE.md" in r.stdout and "root ./.claude matches" in r.stdout
+    # A directory link retargeted the same way, to settings that turn the
+    # sandbox off: survivor.
+    (ws / ".agents\n").mkdir()
+    (ws / ".agents\n/settings.json").write_text('{"sandbox": {"enabled": false}}\n')
+    (ws / ".claude").unlink()
+    (ws / ".claude").symlink_to(".agents\n")
+    r = replant(ws)
+    assert r.returncode == 1 and "./.claude" in r.stdout and "./CLAUDE.md" in r.stdout
+    # Retargeted to an entirely different name, or the newline dropped from a
+    # base target that has one: survivor too.
+    ws2 = make_checkout(tmp_path / "two", base_files=base, base_links={"CLAUDE.md": "README.md\n"}, head_files=head)
+    strip(ws2)
+    restore_from_base(ws2)
+    assert replant(ws2).returncode == 0
+    (ws2 / "CLAUDE.md").unlink()
+    (ws2 / "CLAUDE.md").symlink_to("README.md")
+    r = replant(ws2)
+    assert r.returncode == 1 and "./CLAUDE.md" in r.stdout
 
 
 def test_replant_check_never_exempts_a_root_agents_md(tmp_path):
