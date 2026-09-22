@@ -3,9 +3,13 @@
 # run it, and delete that copy before merging. It runs the three-job shape
 # on a throwaway branch with a plain `git commit` standing in for the agent:
 #
-#   gate  (trusted)   -> records nothing here; in real workflows: trigger check
-#   agent (untrusted) -> checkout, commit a file, emit-landing (job token only)
-#   land  (trusted)   -> fresh runner, no checkout: land pushes and comments
+#   gate  (trusted)   -> records the run's start (the throwaway branch's tip
+#                        on origin, or the default branch's when it does not
+#                        exist yet); in real workflows also: trigger check
+#   agent (untrusted) -> checkout at that start, commit a file, emit-landing
+#                        (job token only)
+#   land  (trusted)   -> fresh runner, no checkout: land pins the manifest's
+#                        start_sha to the gate's read, pushes and comments
 #
 # Confirms: the pushed tip equals the manifest's head_sha; the push
 # authenticates as marvin — `meridian-marvin[bot]` on the app path,
@@ -44,8 +48,26 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    outputs:
+      # The run's START, read here before the agent job runs (finding
+      # 4628444, criterion 2): the land job pins the manifest's start_sha
+      # to it, so a bundle built on any other commit — one the agent job
+      # named — is refused before the fetch. The throwaway branch's tip when
+      # it exists; the default branch's tip (github.sha on a dispatch) when
+      # the agent job is about to create it.
+      start: ${{ steps.start.outputs.sha }}
     steps:
-      - run: echo "gate — nothing to do in the smoke test"
+      - name: Record run start
+        id: start
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -uo pipefail
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq '.commit.sha' 2>/dev/null) || sha=""
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || sha="$GITHUB_SHA"
+          echo "run start: $sha"
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
 
   agent:
     needs: gate
@@ -56,10 +78,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
+      # The checkout must agree with the gate's start: a branch pushed to
+      # between the two jobs fails here, before the stand-in agent runs, as
+      # sync-branch's `head-sha` does in the real workflows.
       - name: Check out or create the throwaway branch
         id: base
         env:
           BRANCH: ${{ inputs.branch }}
+          START: ${{ needs.gate.outputs.start }}
           GIT_TOKEN: ${{ github.token }}
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
@@ -73,7 +99,10 @@ jobs:
           else
             git checkout --quiet -b "$BRANCH"
           fi
-          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          sha=$(git rev-parse HEAD)
+          [ "$sha" = "$START" ] \
+            || { echo "::error::$BRANCH is at $sha, but the gate read $START as the run's start; the branch moved between the two jobs — re-run."; exit 1; }
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
       - name: Stand-in for the agent — commit a file, compose the extra fields
         env:
           ISSUE: ${{ inputs.issue }}
@@ -117,7 +146,7 @@ jobs:
           retention-days: 1
 
   land:
-    needs: agent
+    needs: [gate, agent]
     if: always()
     runs-on: ubuntu-latest
     # Fresh runner, NO checkout: the land composite is the only code that
@@ -154,6 +183,10 @@ jobs:
           # it (here: equal it), so the tamper run is refused by this rule
           # as well as by `refused-branches`.
           branch-prefix: ${{ inputs.branch }}
+          # The gate's read of the run's start — never the agent job's: a
+          # manifest that carries commits must name exactly it as start_sha,
+          # or the validator refuses it before the fetch (finding 4628444).
+          start-sha: ${{ needs.gate.outputs.start }}
       - name: Confirm the pushed tip is head_sha
         if: steps.land.outputs.pushed == '1'
         env:

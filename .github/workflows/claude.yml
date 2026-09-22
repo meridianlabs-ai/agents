@@ -920,27 +920,43 @@ jobs:
       # this job ran: the trusted start the land job is pinned to — finding
       # 4628444), not this job's own, which the agent could rewrite along
       # with the rest of this job's outputs. The checkout must agree with
-      # it: origin/<base> here is that commit or a descendant (the base
-      # advanced in the seconds between; the branch is cut from the live
-      # tip and the bundle above the gate's tip then carries the base's
-      # newer commits too — harmless, and what the workflows guard exempts
-      # as the base's own). A tip that does NOT descend from it means the
-      # base was rewritten since the gate read it: refused, nothing is
-      # attempted. With no gate read (its API call failed) this falls back
-      # to the local tip with a warning: the agent still runs — a
-      # comment-only run needs no start — and the land job refuses any
-      # commits, since it holds no trusted start to pin them to. Each git
-      # call on its own line under -e, so a failure is this step's; the
-      # Surface step names it, and the emit step falls back to github.sha
-      # so the manifest carrying that error still validates.
+      # it, so origin/<base> is first REFRESHED from origin: actions/checkout
+      # resets the event ref's remote-tracking ref to the event commit
+      # (github.sha) even at fetch-depth 0, so on a default-base run
+      # origin/<base> is where the base stood when the comment was posted —
+      # older than the gate's read whenever a push landed in between, or on
+      # a re-run of an older event — and the codex prep cuts its branch from
+      # origin/<base>; after the refresh both are the live tip, which is the
+      # gate's tip or a descendant (the base advanced in the seconds between;
+      # the branch is cut from the live tip and the bundle above the gate's
+      # tip then carries the base's newer commits too — harmless, and what
+      # the workflows guard exempts as the base's own). A tip that does NOT
+      # descend from it means the base was rewritten since the gate read
+      # it: refused, nothing is attempted. With no gate read (its API call
+      # failed) this falls back to the live tip with a warning: the agent
+      # still runs — a comment-only run needs no start — and the land job
+      # refuses any commits, since it holds no trusted start to pin them
+      # to. Each git call on its own line under -e, so a failure is this
+      # step's; the Surface step names it, and the emit step falls back to
+      # github.sha so the manifest carrying that error still validates. The
+      # fetch authenticates through the step-scoped credential helper every
+      # runner-side git network call uses (AGENTS.md; a read, so the job
+      # token) — the checkout persisted none.
       - name: Record base SHA
         id: base
         if: github.event.issue.pull_request == '' && github.event.pull_request == ''
         env:
           BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}
           GATE_SHA: ${{ needs.gate.outputs.start_sha }}
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -euo pipefail
+          git fetch --quiet origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
           tip=$(git rev-parse "origin/$BASE")
           if [ -z "$GATE_SHA" ]; then
             echo "::warning::the gate did not record the tip of base branch $BASE; starting from $tip unpinned — the land job refuses any commits this run produces (comments still land)."
@@ -1902,7 +1918,7 @@ jobs:
           # Issue runs: the base branch's tip could not be read (the caller's
           # base_branch input names a branch that is not on origin?).
           if [ -z "$err" ] && [ "${BASE_OUTCOME:-}" = "failure" ]; then
-            err="recording the run's start on the base branch failed before the agent started (the base_branch the caller configured is not on origin, or its tip no longer descends from the one the gate read — see the job logs); nothing was attempted."
+            err="recording the run's start on the base branch failed before the agent started (the base_branch the caller configured is not on origin, its live tip could not be fetched, or that tip no longer descends from the one the gate read — see the job logs); nothing was attempted."
           fi
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every

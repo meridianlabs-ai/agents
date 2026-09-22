@@ -182,7 +182,8 @@ payload names, and fails the run. It requires:
   tip a PR run checks out), and refused when the input is empty. The agent
   job pins its own start to the same value before the agent runs
   (`claude.yml`'s `Record base SHA` takes the gate's tip and requires the
-  checkout's `origin/<base>` to descend from it; `sync-branch`'s `head-sha`
+  base's live tip — fetched again there, since actions/checkout leaves
+  `origin/<base>` at the event commit — to descend from it; `sync-branch`'s `head-sha`
   fails the sync when the tip it checked out is not the gate's), so the
   checkout, the manifest and the push agree on one revision, and the land
   job's fetch — by SHA, which origin answers for any reachable commit —

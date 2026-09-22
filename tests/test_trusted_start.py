@@ -300,20 +300,53 @@ def test_sync_without_a_pinned_head_records_whatever_it_checked_out(tmp_path):
 # --- claude.yml's Record base SHA (issue runs) ---------------------------------------
 
 
-def record_base(tmp_path, gate):
+def record_base(tmp_path, gate, *, before=None):
     """Run the lifted step over the fixture clone (origin/main two commits
     deep; `release` forks off main~1 and is not in main's history). GATE(work)
     is the SHA the gate read, computed from that same clone (every fixture
-    repo has its own SHAs)."""
+    repo has its own SHAs); BEFORE(work) runs after the gate's read and before
+    the step — what happens to origin, or to the checkout, in between."""
     work = sync_repo(tmp_path)
     git("checkout", "-q", "main", cwd=work)
     gate_sha = gate(work)
+    if before:
+        before(work)
     out = tmp_path / "output"
     out.write_text("")
-    env = {"BASE": "main", "GATE_SHA": gate_sha, "GITHUB_OUTPUT": str(out), "GIT_CONFIG_GLOBAL": "/dev/null"}
+    env = {"BASE": "main", "GATE_SHA": gate_sha, "GITHUB_OUTPUT": str(out),
+           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ALLOW_PROTOCOL": "file"}
     res = sh("bash", "--noprofile", "--norc", "-c", RECORD_BASE, cwd=work, check=False, env=env)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     return res, outputs, work, gate_sha
+
+
+def checkout_resets_origin_main_to(event_sha):
+    """What actions/checkout leaves behind on a default-base run: the event
+    ref's remote-tracking ref reset to the EVENT commit (github.sha) — even
+    at fetch-depth 0 — and the branch checked out there."""
+    def before(work):
+        git("fetch", "--quiet", "origin", f"+{event_sha(work)}:refs/remotes/origin/main", cwd=work)
+        git("checkout", "--quiet", "-B", "main", "refs/remotes/origin/main", cwd=work)
+    return before
+
+
+def push_to_main(work):
+    """A push to the base on origin after the gate's read (from another
+    clone, so the checkout does not see it until the step fetches)."""
+    other = work.parent / "other"
+    git("clone", "-q", "-b", "main", str(work.parent / "origin.git"), str(other), cwd=work.parent)
+    git("config", "user.email", "h@b", cwd=other)
+    git("config", "user.name", "h", cwd=other)
+    (other / "later").write_text("1\n")
+    git("add", "later", cwd=other)
+    git("commit", "-qm", "base advanced after the gate", cwd=other)
+    git("push", "-q", "origin", "main", cwd=other)
+
+
+def force_push_main_to_release(work):
+    """The base rewritten after the gate's read: origin/main moved to a commit
+    that does not descend from the gate's tip."""
+    git("push", "-q", "--force", "origin", "origin/release:refs/heads/main", cwd=work)
 
 
 def test_record_base_takes_the_gates_tip(tmp_path):
@@ -323,31 +356,81 @@ def test_record_base_takes_the_gates_tip(tmp_path):
     assert "::warning::" not in res.stdout and "advanced" not in res.stdout
 
 
+def test_record_base_refreshes_the_event_reset_tracking_ref_before_comparing(tmp_path):
+    # Review round 1 (B2): a push landed between the comment and the gate,
+    # or an older event was re-run — the gate read the live tip B, but
+    # actions/checkout reset origin/main to the event commit A (older). A is
+    # an ancestor of B, not the other way round, so a comparison against the
+    # checkout's origin/main would call the base "rewritten". The step
+    # fetches the live tip first: the run starts at B, origin/main (where
+    # the codex prep cuts its branch) is B too.
+    older = lambda w: git("rev-parse", "origin/main~1", cwd=w).stdout.strip()
+    res, out, work, gate = record_base(tmp_path, lambda w: origin_tip(w, "main"), before=checkout_resets_origin_main_to(older))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert out == {"sha": gate}
+    assert git("rev-parse", "origin/main", cwd=work).stdout.strip() == gate
+    assert "::warning::" not in res.stdout and "advanced" not in res.stdout and "rewritten" not in res.stdout
+    # The checkout itself (HEAD, the event commit) is left where it was.
+    assert git("rev-parse", "HEAD", cwd=work).stdout.strip() == older(work)
+
+
 def test_record_base_keeps_the_gates_tip_when_the_base_advanced_since(tmp_path):
-    # The gate read main~1; a push moved main before the checkout. The run
+    # A push moved main between the gate's read and this step. The run
     # starts from the gate's tip (the land job's pin) — the branch is cut
     # from the live tip, so the bundle carries the base's newer commit too.
-    res, out, work, gate = record_base(tmp_path, lambda w: git("rev-parse", "origin/main~1", cwd=w).stdout.strip())
+    res, out, work, gate = record_base(tmp_path, lambda w: origin_tip(w, "main"), before=push_to_main)
     assert res.returncode == 0, res.stderr
     assert out == {"sha": gate}
-    assert f"base branch main advanced from {gate} to {origin_tip(work, 'main')} since the gate read it" in res.stdout
+    live = git("ls-remote", "--heads", str(work.parent / "origin.git"), "main", cwd=work).stdout.split("\t")[0]
+    assert live != gate and git("rev-parse", "origin/main", cwd=work).stdout.strip() == live
+    assert f"base branch main advanced from {gate} to {live} since the gate read it" in res.stdout
 
 
-@pytest.mark.parametrize("which", ["release", "unknown"])
+def test_record_base_advanced_base_over_an_event_reset_checkout(tmp_path):
+    # Both at once: the checkout's origin/main is the event commit, origin
+    # moved past the gate's tip. Still the gate's tip.
+    older = lambda w: git("rev-parse", "origin/main~1", cwd=w).stdout.strip()
+    reset = checkout_resets_origin_main_to(older)
+
+    def before(work):
+        reset(work)
+        push_to_main(work)
+    res, out, _, gate = record_base(tmp_path, lambda w: origin_tip(w, "main"), before=before)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert out == {"sha": gate} and "advanced from" in res.stdout
+
+
+@pytest.mark.parametrize("which", ["force-push", "unknown"])
 def test_record_base_refuses_a_base_rewritten_since_the_gate_read_it(tmp_path, which):
-    # The gate's tip is not in origin/main's history any more (a commit off
-    # another branch; a SHA this clone never had): nothing is attempted.
-    res, out, work, gate = record_base(tmp_path, lambda w: origin_tip(w, "release") if which == "release" else "e" * 40)
+    # The gate's tip is not in origin/main's history any more (main
+    # force-pushed to another branch's commit; a SHA this clone never had):
+    # nothing is attempted.
+    if which == "force-push":
+        res, out, work, gate = record_base(tmp_path, lambda w: origin_tip(w, "main"), before=force_push_main_to_release)
+    else:
+        res, out, work, gate = record_base(tmp_path, lambda w: "e" * 40)
     assert res.returncode != 0
     assert out == {}
-    assert f"::error::the gate read {gate} as the tip of base branch main, but origin/main is now {origin_tip(work, 'main')}" in res.stdout
+    live = git("ls-remote", "--heads", str(work.parent / "origin.git"), "main", cwd=work).stdout.split("\t")[0]
+    assert f"::error::the gate read {gate} as the tip of base branch main, but origin/main is now {live}" in res.stdout
     assert "does not descend from it" in res.stdout
 
 
-def test_record_base_without_a_gate_read_falls_back_to_the_local_tip_with_a_warning(tmp_path):
-    res, out, work, _ = record_base(tmp_path, lambda w: "")
+def test_record_base_fails_when_the_live_tip_cannot_be_fetched(tmp_path):
+    # Unchecked is not agreed: a failed fetch is this step's failure (the
+    # Surface step names it), not a fall-through to the checkout's ref.
+    def before(work):
+        git("remote", "set-url", "origin", str(work.parent / "gone.git"), cwd=work)
+    res, out, _, _ = record_base(tmp_path, lambda w: origin_tip(w, "main"), before=before)
+    assert res.returncode != 0 and out == {}
+
+
+def test_record_base_without_a_gate_read_falls_back_to_the_live_tip_with_a_warning(tmp_path):
+    older = lambda w: git("rev-parse", "origin/main~1", cwd=w).stdout.strip()
+    res, out, work, _ = record_base(tmp_path, lambda w: "", before=checkout_resets_origin_main_to(older))
     assert res.returncode == 0, res.stderr
-    assert out == {"sha": origin_tip(work, "main")}
+    live = git("ls-remote", "--heads", str(work.parent / "origin.git"), "main", cwd=work).stdout.split("\t")[0]
+    assert out == {"sha": live} and live != older(work)
     assert "::warning::the gate did not record the tip of base branch main" in res.stdout
     assert "the land job refuses any commits this run produces" in res.stdout
 
@@ -455,6 +538,11 @@ def test_claude_yml_gate_records_the_start_and_the_issue_run_pins_to_it():
     base = step_block(text, "base")
     assert "GATE_SHA: ${{ needs.gate.outputs.start_sha }}" in base
     assert "BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}" in base
+    # Its fetch of the live base tip runs under the one step-scoped
+    # credential-helper block every runner-side git network call uses.
+    assert "GIT_TOKEN: ${{ github.token }}" in base
+    assert "GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo \"password=$GIT_TOKEN\"; }; f'" in base
+    assert 'git fetch --quiet origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"' in base
     # The gate step runs after the engine step whose head_branch it reads,
     # and before the ack (nothing it does needs to wait for the ack).
     assert text.index("        id: engine\n") < text.index("        id: start\n")
@@ -464,6 +552,21 @@ def test_claude_yml_gate_records_the_start_and_the_issue_run_pins_to_it():
     emit = [s for s in text.split("\n      - ") if "emit-landing@main" in s]
     assert len(emit) == 1
     assert "start-sha: ${{ steps.base.outputs.sha || steps.sync.outputs.start_sha || steps.sync.outputs.head_sha || github.sha }}" in emit[0]
+
+
+def test_the_landing_smoke_example_is_pinned_like_a_real_caller():
+    # The copyable three-job example (review round 1, B1): its gate records
+    # the start, its agent job's checkout must agree with it, its land job
+    # passes it — the shape every direct `land@main` caller needs.
+    text = (ROOT / "examples" / "landing-smoke.yml").read_text()
+    assert "      start: ${{ steps.start.outputs.sha }}\n" in text
+    assert "START: ${{ needs.gate.outputs.start }}" in step_block(text, "base")
+    assert '[ "$sha" = "$START" ]' in step_block(text, "base")
+    land = step_block(text, "land")
+    assert "start-sha: ${{ needs.gate.outputs.start }}" in land
+    assert "    needs: [gate, agent]\n" in text
+    readme = (ROOT / ".github" / "actions" / "emit-landing" / "README.md").read_text()
+    assert "          start-sha: ${{ needs.gate.outputs.start_sha }}\n" in readme
 
 
 def test_the_reviewers_land_job_refuses_bundles_and_needs_no_start():

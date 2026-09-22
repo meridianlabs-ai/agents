@@ -195,13 +195,23 @@ failed early:
           manifest-extra: ${{ runner.temp }}/landing-extra.json   # composed by an earlier step
 ```
 
-Land job (`needs: agent`, `if: always()`, a fresh runner, **no checkout**):
+Land job (`needs: [gate, agent]`, `if: always()`, a fresh runner, **no
+checkout**):
 
 ```yaml
       - uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
           token: <the machine account's token — minted by the land job; the agent job never sees it>
           allowed-issue-repos: ${{ github.repository }}
+          # The run's start as the GATE read it before the agent job ran (the
+          # base tip an issue run branches from, the PR head's live tip a PR
+          # run checks out) — never the agent job's own record: a manifest
+          # that carries commits must name exactly it as start_sha, or the
+          # validator refuses it before the fetch; a land job given none
+          # refuses every bundle (finding 4628444, criterion 2). The agent
+          # job pins its own start to the same value before the agent runs
+          # (claude.yml's Record base SHA, sync-branch's `head-sha`).
+          start-sha: ${{ needs.gate.outputs.start_sha }}
           # The same expressions as above: the validator pins the manifest's
           # pr_number / issue_number to them, and they are the trusted
           # fallback target for the final report when the manifest never
