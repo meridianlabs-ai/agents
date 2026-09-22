@@ -71,6 +71,27 @@ inputs:
     description: The matching noreply address (see user-name).
     required: false
     default: i-am-marvin@users.noreply.github.com
+  base:
+    description: >-
+      The base branch the caller's trusted context established (the CI-fix
+      loop's gate: the base the failed run tested, `bind-ci-run`'s
+      `base_ref`). When set, the PR's live base must equal it or this step
+      FAILS before fetching or merging anything — a PR retargeted between
+      the gate and the sync would otherwise be merged with a base the
+      failing run never saw. Empty (the default, and the other callers) keeps
+      the live base as the merge target, as before.
+    required: false
+    default: ""
+  base-sha:
+    description: >-
+      The base tip the caller's trusted context read (`bind-ci-run`'s
+      `base_sha`). When set, `origin/<base>` as fetched must be exactly it or
+      this step FAILS before merging — the base is not allowed to move
+      between the gate's read and the merge, so the context the round was
+      charged for is the context merged. Empty (the default) merges the
+      fetched tip, as before.
+    required: false
+    default: ""
 
 outputs:
   base:
@@ -130,6 +151,8 @@ runs:
         CHECKOUT: ${{ inputs.checkout }}
         USER_NAME: ${{ inputs.user-name }}
         USER_EMAIL: ${{ inputs.user-email }}
+        PINNED_BASE: ${{ inputs.base }}
+        PINNED_BASE_SHA: ${{ inputs.base-sha }}
         # Step-scoped git credential for the fetches below (design/
         # architecture.md → "No persisted git credentials"): git reads
         # GIT_CONFIG_* from the environment with command-line precedence, so
@@ -167,6 +190,12 @@ runs:
         [ -n "$prj" ] || { echo "::error::could not read PR #$NUM after 3 attempts"; exit 1; }
         branch=$(jq -r '.headRefName' <<<"$prj")
         base=$(jq -r '.baseRefName' <<<"$prj")
+        # The caller's pinned base (see the `base` input): the live base
+        # must still be it, else nothing is fetched or merged.
+        if [ -n "${PINNED_BASE:-}" ] && [ "$base" != "$PINNED_BASE" ]; then
+          echo "::error::PR #$NUM's base is now '$base', but the caller's trusted context established '$PINNED_BASE' (the base the failed run tested); refusing to merge a base the run never saw."
+          exit 1
+        fi
         # Live head tip, stamped before the agent runs and BEFORE the
         # closed-PR skip below: claude.yml's "Ensure hand-back after agent
         # push" compares it to the live tip after the run, and the closed-PR
@@ -220,6 +249,15 @@ runs:
         # exactly the drift this step exists to end.
         start_sha=$(git rev-parse HEAD)
         echo "start_sha=$start_sha" >>"$GITHUB_OUTPUT"
+        # The caller's pinned base tip (see the `base-sha` input): what was
+        # fetched must be exactly it, else nothing is merged.
+        if [ -n "${PINNED_BASE_SHA:-}" ]; then
+          fetched=$(git rev-parse "origin/$base")
+          if [ "$fetched" != "$PINNED_BASE_SHA" ]; then
+            echo "::error::origin/$base is at $fetched, but the caller's trusted context read $PINNED_BASE_SHA as the base tip to merge; the base moved between the gate and this step — refusing to merge, the next CI event retries."
+            exit 1
+          fi
+        fi
         conflicts=""
         if git merge --no-edit "origin/$base"; then
           # "Already up to date" also exits 0 without moving HEAD. Only a

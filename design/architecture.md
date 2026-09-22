@@ -342,9 +342,9 @@ without the app secrets since the retirement):
 | `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write | job token |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read | none: the mint step fails the run before any review |
 | `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no push: bundles are refused) | none: the mint step fails the run; the job token holds no write permission (#114) |
-| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write | none: the mint step fails the run |
+| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write; actions: read (the failed run's record) and contents: read (the base branch's tip), for the run-to-PR binding | none: the mint step fails the run |
 | `claude-auto-review.yml` gate | caller repo | issues, pull requests, org projects: write; contents: read (the closed-PR continuation reads the live branch tip) | none: the mint step fails the run |
-| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write | none: the mint step fails the run (the gate already failed without the secrets) |
+| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write; `claude-auto.yml` also actions: read (the binding's revalidation) | none: the mint step fails the run (the gate already failed without the secrets) |
 | `atlas-sync.yml` (fork token, `GH_TOKEN`) | `inspect_ai` | issues, pull requests, org projects: write; actions: read | none: the mint step fails the run |
 | `atlas-sync.yml` (ts-mono read token, `GH_TOKEN_TS_MONO`) | `ts-mono` | metadata, pull requests: read | none: the mint step fails the run |
 

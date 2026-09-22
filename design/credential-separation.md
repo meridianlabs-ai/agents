@@ -270,9 +270,9 @@ repository mints:
 | `claude.yml` land | caller repo | contents, issues, pull requests, org projects: write |
 | `claude-review.yml` gate | caller repo | issues, org projects: write; pull requests: read |
 | `claude-review.yml` land | caller repo | issues, pull requests, org projects: write (no contents: bundles are refused) |
-| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write |
+| `claude-auto.yml` gate | caller repo | issues, pull requests, org projects: write; actions: read (the failed run's record) and contents: read (the base branch's tip), for the run-to-PR binding |
 | `claude-auto-review.yml` gate | caller repo | contents: read; issues, pull requests, org projects: write |
-| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write |
+| `claude-auto.yml` / `claude-auto-review.yml` land | caller repo | contents, issues, pull requests, org projects: write; `claude-auto.yml` also actions: read (the binding's revalidation) |
 | `atlas-sync.yml`, fork token | `inspect_ai` | issues, pull requests, org projects: write; actions: read |
 | `atlas-sync.yml`, ts-mono token | `ts-mono` | metadata, pull requests: read |
 
@@ -363,11 +363,17 @@ human step.
   allow-lists: `review_allowed_bots` defaults to `claude[bot]` in the
   review-fix gate, and the reviewer itself admits a bot's `@review` when the
   caller's `allowed_bots` names it, as the inspect_ai fork's stub does. The
-  identity can also start a CI-fix round indirectly: a branch update on an
+  identity used to start a CI-fix round indirectly: a branch update on an
   open same-repo `auto` PR whose CI then fails reaches `claude-auto.yml`
-  through `workflow_run`, whose caller condition and gate check the PR and
-  the label, not who pushed, and whose codex step names `claude` in
-  `allow-bot-users` for that case. The dev agent and the
+  through `workflow_run`, and until 2026-09-22 the gate checked the PR and
+  the label, not who pushed, while the codex step named `claude` in
+  `allow-bot-users` for that case. The gate's bind step now refuses a run
+  whose actor is any bot but the machine account, on both engines, before
+  any write (finding 4628657; decision: Ransom, 2026-09-22, the Claude App is
+  not a run actor), so a Claude-App push ends the automatic loop
+  for that branch until the machine account or a write-access human pushes;
+  the codex step's `claude` entry is unreachable for the run actor and is
+  kept only for the step's own workflow-actor check. The dev agent and the
   CI-fix loop ask that token for `actions: read` in addition
   (`additional_permissions`) so `gh run view --log-failed` works.
 - **The model credential.** Claude authenticates through Workload Identity
@@ -446,7 +452,16 @@ the separate, write-capable channel that sections 3.5 and 7 describe. The
 only.
 
 **`claude-auto.yml`, the CI-fix loop** (`gate` → `fix` → `land`). The gate
-resolves the PR by the caller's `pr_number`, requires it open, same-repo and
+first binds the failed run to its PR (`bind-ci-run`, design/auto-agent.md →
+Binding the failed run to its PR): the run is the workflow_run event's own,
+read back from the API as this repository's failed `pull_request` run on the
+named head branch, whose actors (who started it, who re-ran it) are the
+machine account or write-access accounts — the model actions' own actor
+rule, decided here before any write instead of after the counter and the
+base merge — and it binds to the one same-repo PR from that branch open
+when the run was created, at the run's head SHA, whose timeline shows no
+retarget since — which must be the caller's `pr_number`; none, several or a
+disagreement skips. The gate then requires that PR open, same-repo and
 on the named head branch, verifies who applied the `auto` label
 (`verify-auto-labeler`: the machine account under either login or a
 write-access account, from the PR timeline; a GitHub App labeler or a failed
@@ -456,7 +471,16 @@ the label), and reads the attempt counter only from a marker comment by a
 `Record attempt` is the gate's write. The fix job holds the read-only job
 token and `actions: read` for the failed run's logs; its manifest carries the
 fix commits with `handback: true` and no stage, or a relay of the agent's
-final message when it committed nothing. The land job pushes, posts exactly
+final message when it committed nothing; its base sync merges only the base
+branch and tip the gate established (`sync-branch`'s `base` and `base-sha`
+inputs) and fails on a PR retargeted or a base moved since; a Claude step
+that failed — for any reason; the action's `execution_file` output is not
+launch evidence, since its error handler publishes a pre-existing
+default-path file the PR's provisioning step could create — packages
+nothing, the runner's base merge and any commit of the run included, as the
+codex failure path does. The land job derives the run's context again
+(`bind-ci-run` with `revalidate`) and pushes only when the gate's PR, head
+SHA, base ref and run attempt are reproduced, posts exactly
 `@review`, and refunds the attempt when the agent did not run and nothing was
 pushed, PATCHing only the loop's own counter comment.
 

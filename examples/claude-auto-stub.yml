@@ -28,8 +28,24 @@ on:
 
 jobs:
   # CI-failure -> fix. Only a *failed* CI run for a *same-repo* PR (same-repo
-  # excludes untrusted fork PRs). The reusable workflow does the authoritative
-  # gate (open PR + `auto` label + attempt cap).
+  # excludes fork heads; it does NOT mean writer-authored — any account that
+  # may open a PR here can produce such a run). The reusable workflow does
+  # the authoritative gate: it first binds the run to its PR from trusted
+  # context (design/auto-agent.md in the agents repo → Binding the failed
+  # run to its PR), then checks the `auto` label, who applied it, and the
+  # attempt cap. The three `with:` values below are the event's own fields,
+  # forwarded as-is so the reusable can compare like with like:
+  # `pull_requests[0].number` is an ASSOCIATION, not the triggering PR —
+  # GitHub's schema says the list "do[es] not necessarily indicate pull
+  # requests that triggered the run" (two PRs from one branch into different
+  # bases both appear, in no specified order) — so the reusable derives the
+  # PR itself (the one same-repo PR from `head_branch` open when the run was
+  # created, at the run's head SHA, not retargeted since) and skips unless
+  # this number agrees; it also requires the run's actors (who started and
+  # who re-ran it) to be the machine account or write-access accounts before
+  # any counter, stage, merge or model work. What it cannot establish, and
+  # does not claim: which PR GitHub considered the trigger when two share
+  # the branch, or the merge commit the run built.
   ci-fix:
     if: >-
       github.event_name == 'workflow_run' &&

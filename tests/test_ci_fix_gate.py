@@ -145,8 +145,11 @@ def pr_json(*, state="OPEN", cross=False, head="claude/issue-1-fix", labels=("au
 # --- Resolve PR and check the auto label (4122320) --------------------------
 
 
-def resolve(tmp_path, *, pr_number="7", head="claude/issue-1-fix", pr=None):
-    env = {"HEAD": head, "PR_NUMBER": pr_number, "AUTO_LABEL": "auto"}
+def resolve(tmp_path, *, pr_number="7", head="claude/issue-1-fix", pr=None, bind_ok="1", bind_reason=""):
+    # PR_NUMBER is the bind step's BOUND PR (finding 4628657; the binding
+    # itself is tested in test_ci_fix_binding.py), empty when it refused.
+    env = {"HEAD": head, "PR_NUMBER": pr_number, "AUTO_LABEL": "auto",
+           "BIND_OK": bind_ok, "BIND_REASON": bind_reason}
     fixtures = {"pr": pr} if pr is not None else {}
     return run_step(RESOLVE, tmp_path, env, fixtures)
 
@@ -159,6 +162,21 @@ def test_resolve_views_the_run_pr_by_number_and_never_lists_by_branch(tmp_path):
     assert not any(c.startswith("pr list") for c in calls)
     code = "\n".join(l for l in RESOLVE.splitlines() if not l.lstrip().startswith("#"))
     assert "pr list" not in code and "--head" not in code
+
+
+def test_resolve_skips_an_unbound_run_with_its_reason_and_reads_nothing(tmp_path):
+    # The bind step refused (several PRs share the branch, a foreign or
+    # stale run, a caller number that disagrees): no PR is viewed, no
+    # counter is touched, and the reason lands in the log.
+    reason = "run 9002 cannot be bound to one PR: #7 (open, base main) and #8 (open, base alt) all had head branch 'claude/issue-1-fix'"
+    res, out, calls, _ = resolve(tmp_path, pr_number="", bind_ok="", bind_reason=reason, pr=pr_json())
+    assert res.returncode == 0, res.stderr
+    assert out == {"act": "skip"} and calls == []
+    assert reason in res.stdout
+    # A bound number without ok=1 is still a refusal (belt and braces).
+    res, out, calls, _ = resolve(tmp_path, pr_number="7", bind_ok="", pr=pr_json())
+    assert res.returncode == 0 and out == {"act": "skip"} and calls == []
+    assert "could not be bound to a PR (no reason recorded)" in res.stdout
 
 
 def test_resolve_unlabeled_pr_skips_but_still_names_it(tmp_path):
@@ -540,6 +558,24 @@ def verify(tmp_path, labeler, *, trusted, perms=None):
     for login, perm in (perms or {}).items():
         fixtures[f"perm.{login}"] = perm
     return run_step(VERIFY, tmp_path, env, fixtures, composite=True)
+
+
+def test_labeler_authorizes_another_authors_pr_on_a_write_access_humans_label(tmp_path):
+    # The trusted-labeler policy, preserved by finding 4628657's fix: a
+    # maintainer's `auto` label authorizes the round whoever authored the PR
+    # (the author is never consulted — no lookup of any login but the
+    # labeler's), and a read-only account's label disarms. Replacing this
+    # with "the PR author must be a writer" would refuse deliberately
+    # authorized work and would not tell two writers' PRs apart anyway.
+    res, out, calls, _ = verify(tmp_path, "a-maintainer", trusted=TRUSTED_LOGINS, perms={"a-maintainer": "write"})
+    assert res.returncode == 0, res.stderr
+    assert out["verdict"] == "ok" and out["labeler"] == "a-maintainer"
+    assert len(lookups(calls)) == 1 and lookups(calls) == lookups(calls, "a-maintainer")
+    res, out, calls, _ = verify(tmp_path, "read-only-member", trusted=TRUSTED_LOGINS,
+                                perms={"read-only-member": "read"})
+    assert res.returncode == 0, res.stderr
+    assert out["verdict"] == "disarmed"
+    assert any(c.startswith("pr edit 7 --repo o/r --remove-label auto") for c in calls)
 
 
 def test_labeler_trusts_a_listed_bot_login_without_a_lookup(tmp_path):

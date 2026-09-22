@@ -1,0 +1,482 @@
+name: bind-ci-run
+description: >-
+  Bind a failed CI run to the one pull request it can have been for, from
+  trusted context only, before the CI-fix loop (claude-auto.yml) writes,
+  syncs or lands anything (Claude Security finding 4628657, qualified by the
+  2026-09-21 investigation). The caller stub forwards
+  `workflow_run.pull_requests[0].number`, and GitHub's own schema says that
+  list holds the open PRs whose head matches the run and "do not necessarily
+  indicate pull requests that triggered the run": it is an association, not a
+  trigger record. Two PRs from one head branch into different bases share a
+  head SHA and both appear (in an order GitHub does not specify), and the one
+  that survives after the other closes is not thereby the origin. So this
+  step trusts neither the caller's number nor the association list as
+  identity. It establishes the context itself and fails closed:
+
+  1. The event must be `workflow_run` and `run-id` the triggering run's id
+     (`github.event.workflow_run.id`) — the reusable workflow cannot be
+     pointed at an arbitrary run from another event or with a forged input.
+  2. The run is read back from the API with the trusted token: it must
+     belong to `repo`, be a `pull_request` run whose head repository is
+     `repo` (fork heads refused) on `expect-head-branch`, its latest attempt
+     must be the one the event completed (a re-run since makes this event
+     stale) and must have concluded `failure`. Its `head_sha` is the PR head
+     the run tested (for a pull_request run GitHub records the PR head, not
+     the merge commit — the merge commit is not exposed by the API, so the
+     tested merge itself cannot be re-derived; the limit is stated, not
+     papered over).
+  3. The candidate origins are the PRs in `repo` whose head is `repo`'s
+     `expect-head-branch` and that were OPEN when the run was created
+     (`created_at` on or before the run's, still open or closed on or after
+     it). Exactly one candidate binds; none or several refuse. Several is the
+     same-head/different-base topology (both PRs re-run CI on every push to
+     the branch, and nothing GitHub exposes tells the two runs apart), and
+     one closed after the run started is the surviving-association case.
+     Refusing is the fail-closed choice: the way out is for a maintainer
+     to close the PR that should not share the branch (retargeting it keeps
+     it a candidate) and push a new commit (re-running the old run keeps
+     its creation time); see the end of this description.
+  4. The bound PR must be the number the caller forwarded (an inconsistent
+     association — another repository's PR listed on a fork run has been
+     observed — refuses), must still be open, and its live head must be the
+     run's `head_sha` (a head that advanced while the run was queued is a
+     stale run; the newer push's own run supersedes it).
+  5. The base the run tested is the PR's base AS IT WAS when the run was
+     created. The PR's timeline records every retarget (`base_ref_changed`,
+     and GitHub's own `automatic_base_change_succeeded`) with a timestamp;
+     one at or after the run's creation means the run merged into a base
+     the PR no longer targets, and refuses — the next push's own run tests
+     the current base. With no such event the current base IS the tested
+     base, and it is emitted as `base_ref` for the fix job's sync to pin
+     (sync-branch's `base` input) and the land job to reproduce.
+  6. The run's actors must be authorized: `actor` (whose event started the
+     run — the push, or the PR's open/reopen) and `triggering_actor` (who
+     re-ran it, when different) must each be one of `trusted-logins` or an
+     account with admin/maintain/write on the repository, looked up on the
+     collaborators endpoint (cached per login, fail closed: a failed lookup
+     refuses; an unlisted `[bot]` login is never looked up and refuses).
+     Enforced for both engines here, in trusted control flow, before any
+     counter, stage, sync or model work, and again before landing. This is
+     STRICTER than the engines' own checks, by decision (Ransom,
+     2026-09-22): the Claude action's checker admits any `[bot]` actor and
+     the Codex step's allow-list named `claude`, so the Claude App's own
+     pushes used to start rounds; here no bot but the machine account does.
+     It is an actor rule, not a PR-author rule: the `auto` label, verified
+     by who applied it, remains the
+     authorization of the PR, and a maintainer may deliberately label
+     another author's PR — its runs are then driven by whoever pushes to
+     the branch (a writer, or the machine account), who is the actor judged.
+
+  With `revalidate: "true"` (the land job) the same derivation runs again and
+  must reproduce the gate's context — PR, head SHA, base ref, run attempt;
+  `base_sha` is re-read but not required equal, the base may advance once
+  the merge is made —
+  so a PR retargeted, a branch pushed, a run re-run or a closed PR from the
+  branch reopened during the round withholds the landing (a PR opened during
+  the round does not: created after the run, it cannot be its origin).
+
+  What this does NOT establish, so nobody re-asserts it: which PR GitHub
+  itself considered the trigger (no immutable field carries it), the merge
+  commit the run tested, or the base commit it merged — GitHub records a
+  pull_request run's PR head, not the merge it built nor the base tip at the
+  time (a re-run of that run reuses the original merge commit; only a new
+  push builds a new one). What is established is that head, the base BRANCH
+  it was merged into (by the absence of a retarget since), and the base tip
+  as it stands when the gate runs (`base_sha`, read from the branch), which
+  the fix job's sync is pinned to (sync-branch's `base-sha` input): the base
+  is permitted to have advanced between the run and the gate — the loop's
+  job is to make the branch pass against the base as it is now — but not
+  between the gate and the merge, so the context the counter was charged
+  for is the context that is merged. Exact tested-commit provenance is not
+  established and is accepted as the loop's limit — no producer inside the
+  CI run is built (decision: Ransom, 2026-09-22; design/auto-agent.md →
+  Binding the failed run to its PR → Decisions); this composite does not
+  claim it. The
+  singleton rule is not a proof of origin either: it is a proof that no
+  OTHER same-repo PR can have been the origin, which is what makes acting
+  on this one safe. Its cost is availability while two PRs share a branch;
+  the way out is to CLOSE the PR that should not share it (retargeting
+  keeps it a candidate) and then push a new commit (re-running the old run
+  keeps its creation time, so a PR closed after that still counts). No
+  manual route binding a run to a PR exists, by decision (Ransom,
+  2026-09-22).
+
+  Every refusal is a normal exit with `ok` empty and `reason` set (the
+  caller skips and logs it); a persistent API error fails the step, which
+  the caller's gate-failure failsafe surfaces. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/bind-ci-run@main); NO post step
+  (local composite actions with post steps break teardown on the fork).
+
+inputs:
+  token:
+    description: >-
+      Token that can read the repository's workflow runs (`actions: read` —
+      a permission of its own, which the gate and land jobs' mints request
+      explicitly; pull-requests does not imply it, and only a public
+      repository answers the run read without it), its branches
+      (`contents: read`, for the base tip — the gate mint requests it, the
+      land mint's contents: write covers it; likewise answered without it
+      only on a public repository), its pull requests and their timelines,
+      and collaborator permissions (the machine account's minted token in
+      the gate and land jobs).
+    required: true
+  trusted-logins:
+    description: >-
+      Comma-separated logins admitted as run actors without a lookup — the
+      workflow's TRUSTED_LOGINS (the machine account's two logins). Any
+      other `[bot]` login is refused; every other login needs write access.
+    required: false
+    default: i-am-marvin,meridian-marvin[bot]
+  repo:
+    description: owner/name the run and the PR live in (`github.repository`).
+    required: true
+  run-id:
+    description: The failed run's id as the caller forwarded it (`inputs.ci_run_id`).
+    required: true
+  event-name:
+    description: "`github.event_name`: must be `workflow_run`."
+    required: true
+  event-run-id:
+    description: "`github.event.workflow_run.id`: the run this event completed."
+    required: true
+  event-run-attempt:
+    description: "`github.event.workflow_run.run_attempt`: the attempt this event completed."
+    required: true
+  expect-head-branch:
+    description: The head branch as the caller forwarded it (`inputs.head_branch`).
+    required: true
+  expect-pr:
+    description: >-
+      The PR number as the caller forwarded it (`inputs.pr_number`, from the
+      association list). Empty refuses (CI ran on a non-PR branch, or the run
+      named no PR); a bound PR that differs refuses.
+    required: false
+    default: ""
+  revalidate:
+    description: >-
+      "true" in the land job: the `expect-head-sha`, `expect-base-ref` and
+      `expect-run-attempt` inputs are the gate's outputs and must be
+      reproduced.
+    required: false
+    default: "false"
+  expect-head-sha:
+    description: The gate's `head_sha` output (revalidate only).
+    required: false
+    default: ""
+  expect-base-ref:
+    description: The gate's `base_ref` output (revalidate only).
+    required: false
+    default: ""
+  expect-run-attempt:
+    description: The gate's `run_attempt` output (revalidate only).
+    required: false
+    default: ""
+
+outputs:
+  ok:
+    description: '"1" when the run is bound to one PR and every check passed; empty otherwise.'
+    value: ${{ steps.bind.outputs.ok }}
+  reason:
+    description: Why the binding was refused (empty when `ok` is 1).
+    value: ${{ steps.bind.outputs.reason }}
+  pr:
+    description: The bound PR's number (empty when refused).
+    value: ${{ steps.bind.outputs.pr }}
+  head_sha:
+    description: The run's head SHA — the PR head it tested, and the PR's live head now.
+    value: ${{ steps.bind.outputs.head_sha }}
+  head_branch:
+    description: The run's head branch (equal to `expect-head-branch`).
+    value: ${{ steps.bind.outputs.head_branch }}
+  base_ref:
+    description: >-
+      The bound PR's base branch — the base the run tested, since the PR's
+      timeline shows no retarget at or after the run's creation.
+    value: ${{ steps.bind.outputs.base_ref }}
+  base_sha:
+    description: >-
+      The base branch's tip as read now (`repos/<repo>/branches/<base>`): the
+      commit the fix job's sync must merge (sync-branch's `base-sha` input).
+      Not the base commit the run tested — the API does not record that; see
+      the description.
+    value: ${{ steps.bind.outputs.base_sha }}
+  run_attempt:
+    description: The run's latest attempt (equal to `event-run-attempt`).
+    value: ${{ steps.bind.outputs.run_attempt }}
+  workflow_id:
+    description: The run's workflow id, for the record.
+    value: ${{ steps.bind.outputs.workflow_id }}
+  created_at:
+    description: When the run was created (the instant the candidate PRs are judged at).
+    value: ${{ steps.bind.outputs.created_at }}
+  actor:
+    description: The run's `actor` login, authorized as a trusted login or a write-access account.
+    value: ${{ steps.bind.outputs.actor }}
+  triggering_actor:
+    description: The run's `triggering_actor` login (who re-ran it, if anyone), authorized the same way.
+    value: ${{ steps.bind.outputs.triggering_actor }}
+
+runs:
+  using: composite
+  steps:
+    - id: bind
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        RUN_ID: ${{ inputs.run-id }}
+        EVENT_NAME: ${{ inputs.event-name }}
+        EVENT_RUN_ID: ${{ inputs.event-run-id }}
+        EVENT_RUN_ATTEMPT: ${{ inputs.event-run-attempt }}
+        HEAD: ${{ inputs.expect-head-branch }}
+        EXPECT_PR: ${{ inputs.expect-pr }}
+        REVALIDATE: ${{ inputs.revalidate }}
+        EXPECT_HEAD_SHA: ${{ inputs.expect-head-sha }}
+        EXPECT_BASE: ${{ inputs.expect-base-ref }}
+        EXPECT_ATTEMPT: ${{ inputs.expect-run-attempt }}
+        TRUSTED_LOGINS: ${{ inputs.trusted-logins }}
+      run: |
+        set -uo pipefail
+        # A refusal is a decision, not an error: `ok` stays empty, `reason`
+        # says why, and the step exits 0 for the caller to skip on.
+        refuse() {
+          echo "ok=" >>"$GITHUB_OUTPUT"
+          printf 'reason=%s\n' "$1" >>"$GITHUB_OUTPUT"
+          echo "bind: refused — $1"
+          exit 0
+        }
+        lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+        # read_api ENDPOINT [gh api args...]: sets API_OUT on success. Returns
+        # 1 on a definite Not Found (the run or the repo is not there — a
+        # refusal), 2 on a persistent error after the same retry/backoff as
+        # the gates' ghr (a failure, surfaced by the caller's failsafe). Each
+        # attempt's stdout is captured, never streamed: a failed `gh api`
+        # prints the HTTP error body to stdout.
+        read_api() {
+          local n=0 out
+          until out=$(gh api "$@" 2>/dev/null); do
+            if jq -e 'type == "object" and .message == "Not Found"' <<<"$out" >/dev/null 2>&1; then
+              API_OUT="$out"; return 1
+            fi
+            n=$((n+1))
+            if [ "$n" -ge 4 ]; then return 2; fi
+            sleep $((n*3))
+          done
+          API_OUT="$out"
+        }
+
+        # 1. The event and the run id it names. The reusable workflow is
+        #    callable with any inputs; only a workflow_run event's own run
+        #    is acted on.
+        [ "$EVENT_NAME" = "workflow_run" ] \
+          || refuse "the CI-fix loop acts only on a workflow_run event (this run's event is '$EVENT_NAME'); nothing to do."
+        [[ "$RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] \
+          || refuse "ci_run_id '$RUN_ID' is not a run id; nothing to do."
+        [ "$RUN_ID" = "$EVENT_RUN_ID" ] \
+          || refuse "ci_run_id $RUN_ID is not the run this event completed ($EVENT_RUN_ID); nothing to do."
+        [[ "$EVENT_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,8}$ ]] \
+          || refuse "the event names no run attempt ('$EVENT_RUN_ATTEMPT'); nothing to do."
+        [ -n "$HEAD" ] || refuse "the event names no head branch; nothing to do."
+        [[ "$EXPECT_PR" =~ ^[1-9][0-9]{0,9}$ ]] \
+          || refuse "No PR number from the triggering run (pr_number='$EXPECT_PR': CI ran on a non-PR branch, or the run named no PR); nothing to do."
+        if [ "$REVALIDATE" = "true" ]; then
+          [[ "$EXPECT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] && [ -n "$EXPECT_BASE" ] && [[ "$EXPECT_ATTEMPT" =~ ^[1-9][0-9]{0,8}$ ]] \
+            || refuse "revalidation was asked for without the gate's context (head_sha='$EXPECT_HEAD_SHA', base_ref='$EXPECT_BASE', run_attempt='$EXPECT_ATTEMPT'); refusing."
+        fi
+
+        # 2. The run, read back with the trusted token — never the caller's
+        #    description of it.
+        rc=0
+        read_api "repos/$REPO/actions/runs/$RUN_ID" || rc=$?
+        if [ "$rc" -eq 1 ]; then
+          refuse "run $RUN_ID is not a run of $REPO (not found); refusing a foreign or deleted run."
+        elif [ "$rc" -ne 0 ]; then
+          echo "::error::bind: could not read run $RUN_ID of $REPO after retries."
+          exit 1
+        fi
+        run="$API_OUT"
+        j() { jq -r "$1" <<<"$run"; }
+        run_repo=$(j '.repository.full_name // ""')
+        [ "$(lower "$run_repo")" = "$(lower "$REPO")" ] \
+          || refuse "run $RUN_ID belongs to '$run_repo', not $REPO; refusing a foreign run."
+        run_event=$(j '.event // ""')
+        [ "$run_event" = "pull_request" ] \
+          || refuse "run $RUN_ID is a '$run_event' run, not a pull_request run; the CI-fix loop acts on pull request runs only."
+        run_head_repo=$(j '.head_repository.full_name // ""')
+        [ "$(lower "$run_head_repo")" = "$(lower "$REPO")" ] \
+          || refuse "run $RUN_ID's head is in '${run_head_repo:-?}' (a fork); the CI-fix loop works same-repo PRs only."
+        run_head_branch=$(j '.head_branch // ""')
+        [ "$run_head_branch" = "$HEAD" ] \
+          || refuse "run $RUN_ID ran on branch '$run_head_branch', not '$HEAD'; refusing the inconsistent context."
+        run_head_sha=$(j '.head_sha // ""')
+        [[ "$run_head_sha" =~ ^[0-9a-f]{40}$ ]] \
+          || refuse "run $RUN_ID records no head SHA; refusing."
+        run_attempt=$(j '.run_attempt // ""')
+        [ "$run_attempt" = "$EVENT_RUN_ATTEMPT" ] \
+          || refuse "run $RUN_ID has moved on to attempt ${run_attempt:-?} since attempt $EVENT_RUN_ATTEMPT completed; this event is stale, and the newer attempt's own completion decides."
+        run_conclusion=$(j '.conclusion // ""')
+        [ "$run_conclusion" = "failure" ] \
+          || refuse "run $RUN_ID's attempt $run_attempt concluded '${run_conclusion:-in progress}', not failure; nothing to fix."
+        created=$(j '.created_at // ""')
+        [[ "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+          || refuse "run $RUN_ID records no creation time ('$created'); refusing."
+        workflow_id=$(j '.workflow_id // ""')
+        [[ "$workflow_id" =~ ^[1-9][0-9]{0,18}$ ]] \
+          || refuse "run $RUN_ID records no workflow id ('$workflow_id'); refusing."
+        actor=$(j '.actor.login // ""')
+        triggering_actor=$(j '.triggering_actor.login // ""')
+        # The association list, logged for the record only: it is what the
+        # caller's pr_number came from, and it is NOT a trigger record.
+        echo "bind: run $RUN_ID (workflow $workflow_id, attempt $run_attempt, event $run_event, actor '$actor', triggering actor '$triggering_actor', created $created) tested $run_head_sha on $run_head_repo:$run_head_branch."
+        echo "bind: the run's associated PRs (informational — GitHub lists the open PRs matching the head, not the trigger): $(j '[.pull_requests[]? | "\(.base.repo.name // "?")#\(.number) (base \(.base.ref // "?"))"] | join(", ") | if . == "" then "none" else . end')."
+
+        # 2b. The run's actors. The same rule the loops' author checks use
+        #     (finding 4121987's trusted_author), stricter than either
+        #     engine's own actor check (decision: Ransom, 2026-09-22 — the
+        #     Claude action admits any [bot], the Codex step named claude): a
+        #     TRUSTED_LOGINS login passes by name; any other
+        #     `[bot]` is refused without a lookup (the collaborators endpoint
+        #     404s for Apps, and github-actions[bot] is any repository's
+        #     workflow); a human needs admin/maintain/write, looked up once
+        #     per login, and a failed lookup refuses. Both actors are judged
+        #     when they differ (a re-run by someone else). Decided here, in
+        #     trusted control flow, so a run an unauthorized account started
+        #     never reaches the counter, the escalation, the stage move, the
+        #     base sync or an engine (which would refuse it later, after
+        #     those writes — the asymmetry finding 4628657's investigation
+        #     measured), and decided again before landing.
+        perms=""
+        trusted_actor() {
+          local login="$1" perm
+          [ -n "$login" ] || return 1
+          case ",${TRUSTED_LOGINS// /}," in *",$login,"*) return 0 ;; esac
+          case "$login" in *"[bot]") return 1 ;; esac
+          case "$perms" in
+            *"|$login="*) perm=${perms##*"|$login="}; perm=${perm%%"|"*} ;;
+            *) # Retried like every other read here; a Not Found (a deleted
+               # account) or a persistent error both read as no permission.
+               perm=""
+               if read_api "repos/$REPO/collaborators/$login/permission"; then
+                 perm=$(jq -r '.permission // ""' <<<"$API_OUT")
+               fi
+               perms="$perms|$login=$perm|" ;;
+          esac
+          case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
+        }
+        [ -n "$actor" ] || refuse "run $RUN_ID records no actor; refusing."
+        trusted_actor "$actor" \
+          || refuse "run $RUN_ID was started by '$actor', who is not a trusted login and holds no write access here (or whose permission could not be read); the CI-fix loop acts only on runs a write-access account or the machine account started."
+        if [ -n "$triggering_actor" ] && [ "$triggering_actor" != "$actor" ]; then
+          trusted_actor "$triggering_actor" \
+            || refuse "run $RUN_ID was re-run by '$triggering_actor', who is not a trusted login and holds no write access here (or whose permission could not be read); refusing."
+        fi
+        echo "bind: actor $actor${triggering_actor:+ and triggering actor $triggering_actor} authorized."
+
+        # 3. The candidate origins: every PR of this repo whose head is this
+        #    repo's HEAD branch and that was open when the run was created.
+        #    `head=owner:branch` restricts the listing to heads in this
+        #    owner's repositories; the head-repository filter below narrows
+        #    it to THIS repository (an owner may hold a same-named fork).
+        #    Timestamps are GitHub's second-precision UTC strings, which
+        #    compare as strings. A PR created after the run cannot have
+        #    triggered it; one closed before the run was created cannot
+        #    either; everything else could have.
+        owner=${REPO%%/*}
+        rc=0
+        read_api "repos/$REPO/pulls?state=all&per_page=100&head=$owner:$(jq -rn --arg b "$HEAD" '$b|@uri')" --paginate || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::bind: could not list $REPO's pull requests from '$HEAD' after retries."
+          exit 1
+        fi
+        cands=$(jq -cs --arg repo "$(lower "$REPO")" --arg head "$HEAD" --arg t "$created" '
+          [ .[] | if type == "array" then .[] else . end
+            | select(((.head.repo.full_name // "") | ascii_downcase) == $repo)
+            | select((.head.ref // "") == $head)
+            | select(((.base.repo.full_name // "") | ascii_downcase) == $repo)
+            | select((.created_at // "") != "" and .created_at <= $t)
+            | select(.state == "open" or ((.closed_at // "") >= $t))
+            | {number, state, head_sha: (.head.sha // ""), base: (.base.ref // ""), created_at, closed_at}
+          ] | sort_by(.number)' <<<"$API_OUT") || { echo "::error::bind: could not parse the pull request listing."; exit 1; }
+        n=$(jq 'length' <<<"$cands")
+        if [ "$n" -eq 0 ]; then
+          refuse "no same-repo PR from '$HEAD' was open when run $RUN_ID was created ($created); the run cannot be bound to a PR. Nothing to do."
+        elif [ "$n" -ne 1 ]; then
+          refuse "run $RUN_ID cannot be bound to one PR: $(jq -r '[.[] | "#\(.number) (\(.state), base \(.base))"] | join(" and ")' <<<"$cands") all had head branch '$HEAD' when it was created ($created), and GitHub records which PRs a run is associated with, not which one triggered it. Close the PR that should not share the branch (retargeting it keeps it a candidate), then push a new commit (re-running this run keeps its creation time)."
+        fi
+        bound=$(jq -r '.[0].number' <<<"$cands")
+        state=$(jq -r '.[0].state' <<<"$cands")
+        pr_head=$(jq -r '.[0].head_sha' <<<"$cands")
+        base=$(jq -r '.[0].base' <<<"$cands")
+
+        # 4. The bound PR against the caller's number, its state and its head.
+        [ "$bound" = "$EXPECT_PR" ] \
+          || refuse "the triggering run's associations named PR #$EXPECT_PR, but run $RUN_ID binds to PR #$bound (the only same-repo PR from '$HEAD' open when it was created); refusing the inconsistent context."
+        [ "$state" = "open" ] \
+          || refuse "PR #$bound is $state, not open; nothing to do."
+        [ "$pr_head" = "$run_head_sha" ] \
+          || refuse "PR #$bound's head is now $pr_head but run $RUN_ID tested $run_head_sha: the branch moved while the run was queued or running, and the newer push's own run supersedes it."
+        [ -n "$base" ] || refuse "PR #$bound records no base branch; refusing."
+
+        # 5. The base the run tested: the PR's timeline records every
+        #    retarget with a timestamp (`base_ref_changed` by hand, GitHub's
+        #    `automatic_base_change_succeeded` when a base branch was merged
+        #    or deleted). One at or after the run's creation means the run
+        #    merged into a base the PR no longer targets — refuse; the next
+        #    push's own run tests the current base. Read the same way
+        #    verify-auto-labeler reads the timeline (100 per page, flattened
+        #    locally). A persistent fetch failure fails the step.
+        rc=0
+        read_api "repos/$REPO/issues/$bound/timeline?per_page=100" --paginate || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::bind: could not read PR #$bound's timeline after retries."
+          exit 1
+        fi
+        retargeted=$(jq -rs --arg t "$created" '
+          [ .[] | if type == "array" then .[] else . end
+            | select(.event == "base_ref_changed" or .event == "automatic_base_change_succeeded")
+            | select((.created_at // "") >= $t) | .created_at ] | sort | first // empty' <<<"$API_OUT") \
+          || { echo "::error::bind: could not parse PR #$bound's timeline."; exit 1; }
+        [ -z "$retargeted" ] \
+          || refuse "PR #$bound was retargeted at $retargeted, after run $RUN_ID was created ($created): the run tested a merge into a base the PR no longer targets (now '$base'), and the next push's own run tests the current one."
+
+        # 5b. The base tip the fix job must merge: read now, from the branch
+        #     (the PR object's `base.sha` is the tip as of the PR's last
+        #     update, not the live one). The sync is pinned to it, so the
+        #     base may not move between this read and the merge; it may
+        #     have moved between the run and now (the loop targets the base
+        #     as it is). Not found or malformed refuses.
+        rc=0
+        read_api "repos/$REPO/branches/$(jq -rn --arg b "$base" '$b|@uri')" || rc=$?
+        if [ "$rc" -eq 1 ]; then
+          refuse "PR #$bound's base branch '$base' cannot be read (not found); refusing."
+        elif [ "$rc" -ne 0 ]; then
+          echo "::error::bind: could not read the tip of base branch '$base' after retries."
+          exit 1
+        fi
+        base_sha=$(jq -r '.commit.sha // ""' <<<"$API_OUT")
+        [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] \
+          || refuse "PR #$bound's base branch '$base' has no readable tip ('$base_sha'); refusing."
+
+        if [ "$REVALIDATE" = "true" ]; then
+          [ "$run_head_sha" = "$EXPECT_HEAD_SHA" ] \
+            || refuse "the run's head SHA read $EXPECT_HEAD_SHA at the gate and $run_head_sha now; refusing."
+          [ "$base" = "$EXPECT_BASE" ] \
+            || refuse "PR #$bound's base changed from '$EXPECT_BASE' to '$base' during the round (the runner merged '$EXPECT_BASE'); refusing to land against the wrong base."
+          [ "$run_attempt" = "$EXPECT_ATTEMPT" ] \
+            || refuse "run $RUN_ID's attempt read $EXPECT_ATTEMPT at the gate and $run_attempt now; refusing."
+        fi
+        {
+          echo "ok=1"
+          echo "reason="
+          echo "pr=$bound"
+          echo "head_sha=$run_head_sha"
+          echo "head_branch=$run_head_branch"
+          echo "base_ref=$base"
+          echo "base_sha=$base_sha"
+          echo "run_attempt=$run_attempt"
+          echo "workflow_id=$workflow_id"
+          echo "created_at=$created"
+          echo "actor=$actor"
+          echo "triggering_actor=$triggering_actor"
+        } >>"$GITHUB_OUTPUT"
+        echo "bind: run $RUN_ID is bound to PR #$bound ($HEAD at $run_head_sha -> $base, now at $base_sha): the only same-repo PR from that branch open when the run was created, its base branch unchanged since, its actors authorized."
