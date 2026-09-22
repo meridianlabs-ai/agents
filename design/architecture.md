@@ -1335,12 +1335,19 @@ now compose, each holding on its own:
   exemption: the root-level `.claude`, `.mcp.json`, `CLAUDE.md` and
   `CLAUDE.local.md` that claude-code-action's prepare phase restores from
   the base branch on PR events, accepted only when byte-identical to
-  `origin/<base>` (tracked content unchanged, no untracked file beneath —
-  `.gitignore` is the contributor's and is not honoured) and never when
-  that ref is absent (external mode restores nothing; a changed action
-  behaviour fails closed). The step's git runs pinned (`GIT_DIR`,
-  `GIT_WORK_TREE`, no global or system config, hooks path and fsmonitor
-  off, `--no-ext-diff`): the checkout's config is the contributor's.
+  `origin/<base>` and never when that ref is absent (external mode
+  restores nothing; a changed action behaviour fails closed). The
+  comparison runs against a temporary index holding the base tree, never
+  the PR's index — the action's `git reset` after its restore leaves a
+  path the PR deleted untracked, which against the PR's index read as a
+  re-plant — so `git diff` covers every path the base tracks under the
+  entry and `git ls-files --others` every path it does not (`.gitignore`
+  is the contributor's and is not honoured); a root that passes is
+  verified as a whole subtree, so the configuration names inside a
+  restored `.claude/` are exempt with it, and every other nested entry is
+  a survivor. The step's git runs pinned (`GIT_DIR`, `GIT_WORK_TREE`, no
+  global or system config, hooks path and fsmonitor off, `--no-ext-diff`):
+  the checkout's config is the contributor's.
 
 The alternative for the settings tier — managed policy settings at
 `/etc/claude-code/managed-settings.json`, which the sudo-capable runner could

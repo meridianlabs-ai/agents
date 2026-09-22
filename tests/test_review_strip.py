@@ -27,11 +27,21 @@ REPLANT = lift_step(WORKFLOW, "        id: replant")
 
 CONFIG_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json", ".claude")
 
+RESTORE_ROOTS = (".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md")  # claude-code-action's SENSITIVE_PATHS we strip
+
 BASE_FILES = {
     "README.md": "base\n",
     "CLAUDE.md": "@AGENTS.md\n",
+    "CLAUDE.local.md": "base local\n",
     "AGENTS.md": "base agents\n",
+    ".mcp.json": '{"mcpServers": {}}\n',
     ".claude/settings.json": '{"permissions": {"allow": ["Bash(pytest:*)"]}}\n',
+    ".claude/CLAUDE.md": "base .claude instructions\n",
+    ".claude/CLAUDE.local.md": "base .claude local\n",
+    ".claude/AGENTS.md": "base .claude agents\n",
+    ".claude/.mcp.json": "{}\n",
+    ".claude/rules/testing.md": "rules\n",
+    ".claude/pkg/.claude/settings.json": "{}\n",
     "pkg/__init__.py": "",
 }
 HEAD_FILES = {
@@ -56,10 +66,11 @@ def write(root: Path, files: dict):
         p.write_text(text)
 
 
-def make_checkout(tmp_path) -> Path:
+def make_checkout(tmp_path, *, head_files=HEAD_FILES, delete=()) -> Path:
     """A base repo (branch `main`) and a clone of it — the workspace — with a
-    PR head commit on top, so `refs/remotes/origin/main` is there as an
-    actions/checkout with fetch-depth 0 leaves it."""
+    PR head commit on top (adding `head_files`, deleting `delete`), so
+    `refs/remotes/origin/main` is there as an actions/checkout with
+    fetch-depth 0 leaves it."""
     base = tmp_path / "base"
     base.mkdir(parents=True)
     git("init", "-q", "-b", "main", cwd=base)
@@ -69,7 +80,9 @@ def make_checkout(tmp_path) -> Path:
     ws = tmp_path / "workspace"
     git("clone", "-q", str(base), str(ws), cwd=tmp_path)
     git("checkout", "-q", "-b", "pr", cwd=ws)
-    write(ws, HEAD_FILES)
+    for p in delete:
+        git("rm", "-rq", "--", p, cwd=ws)
+    write(ws, head_files)
     git("add", "-A", "-f", cwd=ws)
     git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "head", cwd=ws)
     return ws
@@ -95,11 +108,12 @@ def replant(ws: Path, *, base_ref="main"):
 
 def restore_from_base(ws: Path):
     """What claude-code-action's restoreConfigFromBase does after the strip
-    on a PR event: the root sensitive paths come back from origin/<base>."""
+    on a PR event: the root sensitive paths come back from origin/<base>,
+    then the index is reset to HEAD (so a path the PR deleted is untracked)."""
     git("fetch", "-q", "origin", "main", cwd=ws)
-    for p in (".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md"):
+    for p in RESTORE_ROOTS:
         git("checkout", "origin/main", "--", p, cwd=ws, check=False)
-    git("reset", "-q", "--", ".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md", cwd=ws, check=False)
+    git("reset", "-q", "--", *RESTORE_ROOTS, cwd=ws, check=False)
 
 
 # --- Strip -------------------------------------------------------------------
@@ -170,10 +184,58 @@ def test_replant_check_exempts_the_actions_base_branch_restore(tmp_path):
     strip(ws)
     restore_from_base(ws)
     assert (ws / "CLAUDE.md").read_text() == "@AGENTS.md\n" and (ws / ".claude/settings.json").is_file()
+    # Review round 1 (B3): the configuration names INSIDE a restored
+    # `.claude/` are the base's too — exempt with their verified root.
+    for name in (".claude/CLAUDE.md", ".claude/CLAUDE.local.md", ".claude/AGENTS.md", ".claude/.mcp.json",
+                 ".claude/rules/testing.md", ".claude/pkg/.claude/settings.json"):
+        assert (ws / name).is_file(), name
     r = replant(ws)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "root ./CLAUDE.md matches origin/main" in r.stdout
-    assert "root ./.claude matches origin/main" in r.stdout
+    for root in RESTORE_ROOTS:
+        assert f"root ./{root} matches origin/main" in r.stdout, root
+
+
+def test_replant_check_exempts_a_restore_of_paths_the_pr_deleted(tmp_path):
+    # Review round 1 (B2): the action restores a path the PR deleted with
+    # `git checkout origin/<base> -- p` then `git reset -- p`, which leaves
+    # it UNTRACKED in the PR's index. Byte-identical to the base, it is the
+    # trusted restore all the same; the comparison must not read the PR's
+    # index.
+    ws = make_checkout(tmp_path, head_files={"pkg/x.py": "x=1\n"}, delete=RESTORE_ROOTS)
+    strip(ws)
+    assert config_entries(ws) == ["AGENTS.md"] or config_entries(ws) == []  # AGENTS.md stays at head → renamed below
+    restore_from_base(ws)
+    for root in RESTORE_ROOTS:
+        assert (ws / root).exists(), root
+    assert "CLAUDE.md" in git("ls-files", "--others", "--", "CLAUDE.md", cwd=ws).stdout  # untracked at head
+    r = replant(ws)
+    assert r.returncode == 0, r.stderr + r.stdout
+    for root in RESTORE_ROOTS:
+        assert f"root ./{root} matches origin/main" in r.stdout, root
+
+
+def test_replant_check_fails_on_a_changed_or_added_descendant_of_a_restored_dir(tmp_path):
+    ws = make_checkout(tmp_path)
+    strip(ws)
+    restore_from_base(ws)
+    with (ws / ".claude/CLAUDE.md").open("a") as f:
+        f.write("planted\n")
+    r = replant(ws)
+    assert r.returncode == 1 and "./.claude" in r.stdout and "./.claude/CLAUDE.md" in r.stdout
+    ws2 = make_checkout(tmp_path / "two")
+    strip(ws2)
+    restore_from_base(ws2)
+    (ws2 / ".claude/extra").mkdir()
+    (ws2 / ".claude/extra/CLAUDE.md").write_text("planted\n")
+    r = replant(ws2)
+    assert r.returncode == 1 and "./.claude/extra/CLAUDE.md" in r.stdout
+    # A file missing from a restored subtree is a difference too.
+    ws3 = make_checkout(tmp_path / "three")
+    strip(ws3)
+    restore_from_base(ws3)
+    (ws3 / ".claude/rules/testing.md").unlink()
+    r = replant(ws3)
+    assert r.returncode == 1 and "./.claude" in r.stdout
 
 
 def test_replant_check_fails_on_a_nested_entry(tmp_path):
@@ -260,6 +322,48 @@ def test_replant_check_ignores_the_git_dir_and_runs_no_hooks(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     for marker in ("hook-ran", "fsmonitor-ran", "extdiff-ran"):
         assert not (ws / marker).exists(), marker
+
+
+# --- Prompt ------------------------------------------------------------------------
+
+
+PROMPT = lift_step(WORKFLOW, "        id: reviewprompt")
+
+
+def note(name: str) -> str:
+    """A note's text as the workflow's env block defines it."""
+    m = re.search(rf'^\s+{name}: "(.*)"$', WORKFLOW.read_text(), re.M)
+    assert m, name
+    return m.group(1)
+
+
+def compose_prompt(tmp_path, *, mode, fork_head="false"):
+    out = tmp_path / f"prompt-{mode}-{fork_head}.txt"
+    out.write_text("")
+    env = {"MODE": mode, "FORK_HEAD": fork_head, "UP_REPO": "up/stream", "UP_NUM": "7", "PROXY": "42",
+           "REPO": "meridianlabs-ai/agents", "DEFAULT_PROMPT": "Review this PR.", "THIS_PR": "42",
+           "CONTINUATION": "", "OUT_DIR": "/home/runner/work/_temp/review", "SCRATCH": "/home/runner/work/_temp/scratch",
+           "SANDBOX_NOTE": note("SANDBOX_NOTE"), "STRIP_NOTE": note("STRIP_NOTE"), "GITHUB_OUTPUT": str(out)}
+    r = sh("bash", "-c", PROMPT, cwd=tmp_path, check=False, env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    line = out.read_text().splitlines()[0]
+    assert line.startswith("value=")
+    return line[len("value="):]
+
+
+def test_prompt_names_the_scratch_copy_by_its_absolute_path(tmp_path):
+    # Review round 1 (B1): the note is an env value, so `$SCRATCH` inside it
+    # is not expanded by printing it; the run block substitutes it.
+    for mode, fork_head in (("pr", "true"), ("external", "false")):
+        prompt = compose_prompt(tmp_path, mode=mode, fork_head=fork_head)
+        assert "$SCRATCH" not in prompt, (mode, prompt)
+        assert "cd /home/runner/work/_temp/scratch/src" in prompt
+        assert "scratch copy of the checkout at /home/runner/work/_temp/scratch/src (and /home/runner/work/_temp/scratch)" in prompt
+        assert "READ-ONLY to your commands" in prompt
+        assert "CLAUDE.md / CLAUDE.local.md / AGENTS.md was renamed" in prompt
+    # A same-repo head gets neither note.
+    prompt = compose_prompt(tmp_path, mode="pr", fork_head="false")
+    assert "scratch" not in prompt and "READ-ONLY" not in prompt
 
 
 # --- Wiring ----------------------------------------------------------------------
