@@ -737,7 +737,9 @@ which are empty when the codex job ran). Two Claude Security findings
   project (`tests/fixtures/callers/`, its README has the table): the
   interpreter or Node version the recipe selects, the dependency groups or
   extras it installs, the lockfile left unchanged by a locked sync, and
-  every discovered tool run as codex under codex-action's launch shape.
+  every discovered tool run as codex under codex-action's launch shape
+  (run 35798100140 on `743b495`, all four green — the results are in
+  design/credential-separation.md → section 6).
 
 Caller-visible effects of the codex-side change (the Claude jobs are
 unchanged, minus the key): a codex run on a caller with a `claude-setup`

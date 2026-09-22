@@ -757,7 +757,18 @@ results against the invariant each one tests.
   (35796037163) failed its boundary job before the backend ran — the uv
   installer under `sudo -u codex -H` tried to write the runner's
   `$XDG_CONFIG_HOME/uv` (the hosted sudoers keeps XDG_*) — which is why the
-  composite now runs the recipe under `env -i`.
+  composite now runs the recipe under `env -i`. Run 35798100140 on
+  `743b495` (round 3) added the `caller-recipes` matrix over the four
+  stand-in projects in `tests/fixtures/callers/` and passed all eight jobs:
+  the inspect_ai-like recipe gave a Python 3.11 venv with the `dev` extra
+  (`pytest`, `ruff`), the inspect_flow-like one Python 3.11 with the `dev`
+  group from an unchanged `uv.lock` (`pytest`, `pyright`), the
+  inspect_harbor-like one Python 3.12 with the `dev` and `doc` default
+  groups from an unchanged lock, and the ts-mono-like one — no
+  `pyproject.toml`, the recipe-only route — Node v22.23.2 (the image's),
+  pnpm 11.22.0 via corepack in `~codex/.local/bin`, a frozen install and
+  `prettier` in `node_modules/.bin`; every tool the compose steps' discovery
+  found ran as codex under `sudo -u codex`.
 
 ## 7. Costs and residual risks
 
