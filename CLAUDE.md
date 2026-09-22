@@ -21,13 +21,9 @@ The shared, tool-agnostic instructions for this repo are in `AGENTS.md`
   workflow push goes live on every caller repo's next run, and the
   automated reviews caught real bugs in every round of the sync's
   evolution. The ruleset requires a PR but zero approvals, so the flow
-  stays fast: branch, PR, Orca review, merge. Auto-review-on-open is off
+  stays fast: branch, PR, agent review, merge. Auto-review-on-open is off
   in every Meridian repo (decision: Ransom, 2026-09-16; this repo's own
   stub never had it). Don't label the PR `auto` or post `@auto` — as of 2026-09-11
-  (decision: Ransom) fix rounds are driven from Orca workspaces, not the
-  GitHub-hosted loop (see AGENTS.md → Conventions); address the review's
-  findings yourself. For
-  low-blast-radius changes (skills/, design/, docs — nothing at
-  `@main`), merging right after the PR opens is fine — an in-flight
-  review just lands harmlessly on the merged PR; workflow PRs should
-  wait for the review.
+  (decision: Ransom) fix rounds run outside the GitHub-hosted loop (see
+  AGENTS.md → Conventions). Address the review's findings before merge and
+  summarize the review in the PR description.
