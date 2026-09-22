@@ -23,6 +23,15 @@ inputs:
       (its `conflicts` output). Only these are scanned for markers.
     required: false
     default: ""
+  system-path:
+    description: >-
+      The PATH the step's commands run with, pinned before the first of them:
+      `git` and the text tools here must never resolve through a directory
+      codex could write (Claude Security finding 4628448;
+      design/codex-engine.md → Runner-side search path). The hosted runner
+      image's system directories.
+    required: false
+    default: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 runs:
   using: composite
@@ -30,6 +39,7 @@ runs:
     - shell: bash
       env:
         CONFLICTS: ${{ inputs.conflicts }}
+        SYSTEM_PATH: ${{ inputs.system-path }}
         # This runs as `runner` on a .git the codex user could write to (the
         # codex-user step group-grants the whole workspace). The reclaim step
         # before it restored the pre-codex .git/config, but a restore cannot
@@ -54,6 +64,8 @@ runs:
         GIT_CONFIG_VALUE_0: "false"
       run: |
         set -euo pipefail
+        # System tools only, whatever GITHUB_PATH prepended (see the input).
+        export PATH="$SYSTEM_PATH"
         # The index check runs BEFORE the landing step's `git add -A` on
         # purpose, and the prompt requires codex to `git add` each resolved
         # file: it is the only check that catches binary and modify/delete

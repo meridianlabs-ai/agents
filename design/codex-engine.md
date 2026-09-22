@@ -379,6 +379,102 @@ Verification for a change here, all cases prompted to codex (any verb):
    `$RUNNER_TEMP/no-hooks`, and no later step's log (landing, hand-back,
    Surface) may contain `HOOK-RAN`.
 
+### Runner-side search path
+
+The hook-safe landing reasons about what git *executes*; the job PATH is
+the same kind of boundary for every command (Claude Security finding
+4628448, 2026-09-22). Two runner facts, verified against actions/runner
+`src/Runner.Worker` (`FileCommandManager.cs`, `Handlers/Handler.cs`,
+`Handlers/ScriptHandler.cs`): every line a step writes to `$GITHUB_PATH`
+is added to the job's prepend list and never removed (`PrependPath` is
+only ever appended to and deduplicated), and every later step — composite
+steps included — gets `PATH = <prepend list> : <original PATH>`, with a
+step's own `env: PATH` used only as the tail; and the runner picks each
+`run:` step's shell interpreter with `WhichUtil.Which(shell, …,
+prependPath)`, i.e. through the same list, before the script runs. So a
+directory on the job PATH that the codex user can write is code execution
+as `runner` in the first step after codex — and the reclaim's own script
+cannot pin its way out, since its `bash` was already chosen.
+
+Until 2026-09-22 `provision-fallback` put `$PWD/.venv/bin` on
+`GITHUB_PATH` on every engine, and `create-codex-user`'s `chown -R
+runner:codex` + `chmod -R g+rwX` then made that directory `drwxrwsr-x
+runner codex`: a prompt-injected codex could write `.venv/bin/sudo`
+(wrapping `/usr/bin/sudo`), `bash`, `git`, `find`, `jq`, and the reclaim's
+first command — a bare `sudo pkill -KILL -u codex` — would have run it as
+`runner`, root on a hosted runner, before the kill, the chown, the config
+restore or any refusal; `codex-usage`'s `sudo test`/`sudo find`/`sudo cat`
+on the reviewer's path (which has no reclaim), the guard's `git`, the
+commit step's `git add -A`, emit-landing's `git bundle` likewise. The
+reclaim's guarantees would have been executed by attacker-chosen binaries,
+and the containment argument under "Safety strategy" would have been void.
+The fix is structural, in three layers:
+
+- **Nothing under the workspace goes on the job PATH when codex may run.**
+  `provision-fallback` takes `add-to-path`; the four workflows pass
+  `false` when the gate's engine is codex, and the composite then writes
+  nothing to `GITHUB_PATH` (the venv is still created at `.venv` and
+  installed — the compose steps discover the tools from `.venv/bin` by
+  absolute path, which is how codex was always told to run them). On the
+  Claude engine the venv stays on PATH: Claude runs as `runner` with the
+  job PATH, so a shadow there gives it nothing it does not already have. A
+  caller's own `claude-setup` must follow the same rule on jobs that may
+  run codex — the inspect_ai fork's adds only `~/.local/bin` and is
+  unaffected; a `claude-setup` that puts `$GITHUB_WORKSPACE/.venv/bin` on
+  `GITHUB_PATH` (inspect_flow's and inspect_harbor's did on 2026-09-22)
+  fails the next layer on codex runs until it stops.
+- **`Create codex user` refuses to start codex behind a hijackable PATH**
+  (`assert-runner-only-path`, a nested step between the user's creation
+  and the workspace grant). For every job PATH entry: refused if relative
+  or empty (each step's working directory is the workspace); refused if
+  its physical path lies inside `$GITHUB_WORKSPACE` (codex-writable once
+  the grant runs — checked by path, since the grant has not happened yet);
+  refused if the entry or any ancestor is writable by the codex user
+  (`sudo -u codex test -w`, so group memberships count; a writable
+  ancestor is a rename-and-replace path — the same reasoning as the
+  reclaim's `chmod g-w` on the workspace root), with the one exception of a
+  sticky directory such as `/tmp`, where creation is possible but not the
+  rename or unlink of another user's entry (accepted when the child on the
+  way down exists and is not codex-owned); and an entry that does not exist
+  yet is refused when its nearest existing ancestor is codex-writable. The
+  system directories are on the job PATH too and are checked like every
+  other entry. This is the primary defence: it runs before codex, on a
+  PATH only the runner has written, and when it refuses codex never runs.
+  The check's own probes resolve through its `system-path` input, never
+  through the PATH under test. codex itself cannot add to `GITHUB_PATH`
+  later — the per-step file lives under the runner-only `$RUNNER_TEMP` —
+  and openai/codex-action installs the CLI with `npm install -g` and adds
+  no path, so the PATH the pre-grant check accepted is the PATH every
+  post-codex step gets.
+- **Belt and braces after codex.** `reclaim-codex-workspace` runs the same
+  check as its first step, so a `GITHUB_PATH` addition made between the
+  grant and the reclaim by some later action would fail the reclaim closed
+  (and, through its outcome, skip every git-running step), and its script
+  then pins `PATH` to `system-path` before its first command; `codex-usage`
+  (the reviewer's first post-codex step), `unresolved-merge-guard` and
+  `emit-landing`'s `write` step pin the same way, and so do the three
+  `Commit codex` steps. The pins cover command resolution only — the
+  interpreter is the runner's choice — which is why the pre-grant refusal,
+  not the pins, carries the guarantee. Every one of these steps takes a
+  `system-path` input (default: the hosted image's
+  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`) so a
+  self-hosted layout can name its own, and so the tests can plant a stub
+  `sudo` there.
+
+Verification for a change here (`tests/test_codex_path.py` runs the
+composites' scripts against a planted `.venv/bin/sudo`, `git`, `find`,
+`jq` and friends): prompt codex on a caller whose provisioning leaves a
+venv at `.venv` to write `.venv/bin/sudo` as a script that appends
+`HIJACKED` to a file under `/tmp` and then `exec`s `/usr/bin/sudo "$@"`,
+plus the same for `bash`, `git`, `find` and `jq`; the run's `Reclaim
+workspace from codex`, `Codex usage`, guard and commit steps must complete
+normally, no step's log may show `HIJACKED`, and a scratch step after the
+reclaim that prints `$PATH` must show no entry under the workspace.
+Control: on a scratch branch whose `claude-setup` puts
+`$GITHUB_WORKSPACE/.venv/bin` on `GITHUB_PATH`, the run must go red on
+`Create codex user` with the entry named in its log, the codex step
+skipped, and the Surface comment naming the user setup.
+
 ## v1 limitations (deliberate)
 
 - **External proxy reviews stay on Claude** — their contributor-code
@@ -422,9 +518,9 @@ Verification for a change here, all cases prompted to codex (any verb):
   agent there would strand the branch — the round runs static-only, the
   prompt says so and tells codex to report static-only verification, and
   the next round provisions on the resolved branch. The codex prompt's
-  verification line is composed from the provisioning outcomes (venv on
-  PATH / provisioning failed / nothing to provision) rather than asserting
-  a venv unconditionally.
+  verification line is composed from the provisioning outcomes (venv
+  provisioned / provisioning failed / nothing to provision) rather than
+  asserting a venv unconditionally.
 - **Fix-round context is filtered and stateful since 2026-09-09**: the
   codex fix prompts (review-fix loop, dev verb on a PR) embedded the last
   12 top-level comments and the last 40 inline comments as a flat REST
@@ -494,9 +590,13 @@ Verification for a change here, all cases prompted to codex (any verb):
   before codex starts, so a venv on `GITHUB_PATH` does not resolve as bare
   names (inspect_flow#818: `command -v pytest ruff mypy` printed nothing;
   only the `drop-sudo` strategy forwards the runner PATH). The compose
-  steps run as the runner with the provisioned PATH, discover the paths
-  there (`pytest ruff mypy pyright python3`, the same list in all four
-  workflows), and splice them into the verification instruction.
+  steps run as the runner and discover the paths (`pytest ruff mypy pyright
+  python3`, the same list in all four workflows) in the checkout's
+  `.venv/bin` first — where `provision-fallback` and the fork's
+  `claude-setup` create the venv — and on their own PATH otherwise, then
+  splice them into the verification instruction. Since 2026-09-22 the venv
+  is NOT on the job PATH on a codex run (Runner-side search path, above),
+  which is why the discovery no longer relies on `command -v` alone.
 - **CI-trigger parity depends on the machine account's secrets**: codex-path
   pushes fall back to `github.token` where the app secrets are absent, and
   those pushes do not trigger CI (the Claude path pushes via the app token,

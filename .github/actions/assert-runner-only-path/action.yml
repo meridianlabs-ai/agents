@@ -1,0 +1,129 @@
+name: assert-runner-only-path
+description: >-
+  Fail the job unless every directory on the job PATH is one the codex user
+  cannot write (Claude Security finding 4628448, 2026-09-22;
+  design/codex-engine.md → Runner-side search path). The runner prepends
+  every `GITHUB_PATH` entry to the PATH of every later step of the job,
+  composite steps included, and resolves each `run:` step's shell
+  interpreter through the same list (actions/runner `ScriptHandler`:
+  `WhichUtil.Which(shell, …, prependPath)`); an entry, once added, is
+  never removed. So a directory on the job PATH that the codex user can
+  write — the workspace venv `provision-fallback` used to put there, made
+  `runner:codex g+rwX` by `create-codex-user`'s grant — lets a
+  prompt-injected codex plant `sudo`, `bash`, `git` or `jq` and have the
+  FIRST runner-side step after its own run execute it as `runner`
+  (passwordless sudo → root), before the reclaim's kill, chown or refusals:
+  the codex containment would then be enforced by attacker-chosen binaries.
+  No step's own `PATH=` can undo that (a step's env PATH is what the runner
+  prepends TO, and the interpreter is chosen before the script runs), which
+  is why this is checked and refused rather than pinned around.
+
+  Refused, for each PATH entry: a relative or empty entry (resolved against
+  each step's working directory, the workspace); an entry whose physical
+  path lies inside `$GITHUB_WORKSPACE` (codex-writable after the grant —
+  checked by path, so it holds before the grant too); and, when the user
+  exists, an entry or any ancestor of it that `sudo -u <user> test -w`
+  finds writable — a writable ancestor is a rename-and-replace path even
+  when the entry itself is not writable (a same-parent rename needs write
+  on the parent only; the reclaim's `.git` reasoning). The one exception is
+  a sticky directory such as `/tmp`, where the user may create entries but
+  not rename or unlink another user's: writable-and-sticky is accepted when
+  the child on the way down exists and is not owned by the user. An entry
+  that does not exist yet is refused when the user could create it (its
+  nearest existing ancestor is writable). Every probe runs by absolute
+  system path: this step pins its OWN PATH to `system-path` first, so the
+  check does not depend on the list it is checking.
+
+  Run twice on the codex write paths and once on the review path: by
+  `create-codex-user`, after the user exists and BEFORE the workspace
+  grant, so a job whose PATH would become hijackable never starts codex
+  (the primary defence — codex never runs, and nothing untrusted has
+  touched the runner's PATH); and by `reclaim-codex-workspace` first thing
+  after codex, in case a later step or action added to `GITHUB_PATH`
+  meanwhile (codex itself cannot: the per-step `GITHUB_PATH` file lives
+  under the runner-only `$RUNNER_TEMP`; openai/codex-action installs the
+  CLI with `npm install -g` and adds no path). Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main); NO
+  post step (local composite actions with post steps break teardown on the
+  fork).
+
+inputs:
+  user:
+    description: >-
+      The unprivileged user whose write access disqualifies a directory.
+      Probed with `sudo -u <user> test -w`, so its group memberships count;
+      skipped (path checks only) when the user does not exist yet.
+    required: false
+    default: codex
+  system-path:
+    description: >-
+      The PATH this step runs its own probes with (`sudo`, `test`, `dirname`
+      are resolved through it, never through the job PATH under test). The
+      system directories of the hosted runner image; its entries are part of
+      the job PATH and are checked like every other.
+    required: false
+    default: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        USER_NAME: ${{ inputs.user }}
+        SYSTEM_PATH: ${{ inputs.system-path }}
+      run: |
+        set -euo pipefail
+        job_path="$PATH"
+        export PATH="$SYSTEM_PATH"
+        ws=$(cd "$GITHUB_WORKSPACE" && pwd -P)
+        # The physical path of an entry that may not exist yet: the nearest
+        # existing directory resolved (symlinks and all), the rest appended
+        # verbatim. Portable (`realpath -m` is GNU-only; the tests run on
+        # macOS too).
+        physical() {
+          local p="$1" rest=""
+          while [ ! -d "$p" ]; do
+            rest="/$(basename "$p")$rest"
+            p=$(dirname "$p")
+          done
+          printf '%s%s\n' "$(cd "$p" && pwd -P)" "$rest"
+        }
+        refuse() { # <entry> <reason>
+          echo "::error::job PATH entry '$1' $2 — every step after codex resolves its commands, and the runner its shell interpreter, through the job PATH, so a directory the codex user can write there hands it code execution as runner; refusing to continue (design/codex-engine.md → Runner-side search path)."
+          exit 1
+        }
+        have_user=""
+        if id "$USER_NAME" >/dev/null 2>&1; then have_user=1; fi
+        n=0
+        # `tr` rather than `read -a`: an empty component ("a::b", a trailing
+        # colon) must come out as an empty line, not vanish.
+        while IFS= read -r e; do
+          n=$((n + 1))
+          case "$e" in
+            "" ) refuse "(empty)" "is empty, which means the current directory" ;;
+            /*) ;;
+            *) refuse "$e" "is a relative path, resolved against each step's working directory" ;;
+          esac
+          p=$(physical "$e")
+          if [ "$p" = "$ws" ] || [ "${p#"$ws"/}" != "$p" ]; then
+            refuse "$e" "lies inside the workspace $GITHUB_WORKSPACE, which the codex user can write"
+          fi
+          [ -n "$have_user" ] || continue
+          a="$p"; child=""
+          while :; do
+            if sudo test -e "$a" && sudo -u "$USER_NAME" test -w "$a"; then
+              # Sticky (/tmp): creation only, so an EXISTING child not owned
+              # by the user is safe there; a missing child or one the user
+              # owns is not.
+              if [ -n "$child" ] && sudo test -k "$a" && sudo test -e "$child" \
+                 && ! sudo -u "$USER_NAME" test -O "$child"; then
+                :
+              else
+                refuse "$e" "is writable by the $USER_NAME user (at $a)"
+              fi
+            fi
+            [ "$a" = / ] && break
+            child="$a"; a=$(dirname "$a")
+          done
+        done < <(printf '%s\n' "$job_path" | tr ':' '\n')
+        echo "job PATH: $n entries, none inside the workspace${have_user:+ or writable by $USER_NAME}."

@@ -21,7 +21,8 @@ take effect on every repo's next run.
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
-  `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
+  `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
+  `reclaim-codex-workspace`,
   `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
@@ -134,9 +135,23 @@ take effect on every repo's next run.
   and the same two `core.*` keys by env as belt and braces; the guard pins
   the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
   (`ls-files` runs no hooks); and every post-codex `git status` passes
-  `--ignore-submodules=dirty`; keep all of that when touching them. See
-  design/architecture.md → No persisted git credentials and
-  design/codex-engine.md → Hook-safe landing.
+  `--ignore-submodules=dirty`; keep all of that when touching them. **The
+  job PATH is part of the same boundary** (finding 4628448, 2026-09-22):
+  the runner prepends every `GITHUB_PATH` entry to every later step's PATH
+  and resolves each step's shell interpreter through it, so a directory
+  the codex user can write there — a workspace venv, after the grant —
+  would hand codex the `sudo`, `bash` or `git` the first post-codex step
+  runs as `runner`. Never put a path under `$GITHUB_WORKSPACE` on
+  `GITHUB_PATH` in a job that may run codex (`provision-fallback` takes
+  `add-to-path: false` there; the codex prompts get the tools by absolute
+  path from `.venv/bin`); `create-codex-user` refuses to start codex, and
+  the reclaim refuses to continue, when any PATH entry is inside the
+  workspace or codex-writable (`assert-runner-only-path`); and every
+  post-codex composite pins `PATH` to system directories (`system-path`)
+  before its first command — a new post-codex step should too. See
+  design/architecture.md → No persisted git credentials,
+  design/codex-engine.md → Hook-safe landing and → Runner-side search
+  path.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat
   them as sensitive, and don't add API-key secrets; auth is Workload Identity
   Federation.

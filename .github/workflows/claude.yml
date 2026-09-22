@@ -943,6 +943,13 @@ jobs:
           hashFiles('pyproject.toml') != ''
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+        with:
+          # A codex run puts NOTHING on the job PATH: the venv would be
+          # codex-writable after the user's grant, and `Create codex user`
+          # refuses to run codex behind a workspace directory on PATH
+          # (design/codex-engine.md → Runner-side search path). The compose
+          # step finds the tools at .venv/bin instead.
+          add-to-path: ${{ needs.gate.outputs.engine == 'codex' && 'false' || 'true' }}
 
       # Compose the appended-system-prompt sources into ONE value, so we emit a
       # single --append-system-prompt flag. Multiple flags would force a bet on
@@ -1284,16 +1291,22 @@ jobs:
           # there (inspect_flow#818 dev run, 2026-09-09: `command -v pytest
           # ruff mypy` printed nothing under codex while the venv was on the
           # runner PATH; the reviewer's Create codex user step has said as
-          # much since 2026-09-01). This compose step runs as the runner,
-          # where the provisioned PATH is in effect, so discovery happens
-          # here. A provisioning failure reaches this branch only on the
+          # much since 2026-09-01). Discovered from the checkout's .venv/bin
+          # first — where provision-fallback and the fork's claude-setup
+          # create the venv, and NOT on the job PATH on a codex run (the
+          # provisioning step passes add-to-path: false; a workspace
+          # directory on PATH would be codex-writable, and Create codex user
+          # refuses one — design/codex-engine.md → Runner-side search path)
+          # — then from this step's PATH for a caller that provisions
+          # elsewhere. A provisioning failure reaches this branch only on the
           # tolerated codex conflict path (fatal otherwise — the agent is
           # skipped), so that text names the conflicted dependency file as
           # the likely cause.
           if [ "${SETUP_OUTCOME:-}" = "success" ] || [ "${SETUPFB_OUTCOME:-}" = "success" ]; then
             tools=""
             for t in pytest ruff mypy pyright python3; do
-              path=$(command -v "$t" 2>/dev/null || true)
+              path="$GITHUB_WORKSPACE/.venv/bin/$t"
+              [ -x "$path" ] || path=$(command -v "$t" 2>/dev/null || true)
               [ -n "$path" ] && tools="$tools$t=$path "
             done
             verify="Verify your work with the locally provisioned tools where relevant. Your process runs under sudo with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
@@ -1549,6 +1562,12 @@ jobs:
           GIT_CONFIG_VALUE_1: "false"
         run: |
           set -euo pipefail
+          # System tools only, whatever GITHUB_PATH prepended: `Create codex
+          # user` refused any codex-writable job PATH entry before codex ran,
+          # and the reclaim re-checked; this pin is belt and braces on the
+          # step that commits (design/codex-engine.md → Runner-side search
+          # path).
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
           # Untracked files count: new source files are legitimate codex
           # output (the prompt file and common test/venv scratch are kept
           # out via .git/info/exclude, written by the compose step).
@@ -1831,7 +1850,7 @@ jobs:
           # A failed codex-user setup SKIPS the codex step, so it needs its
           # own check or the failure is a silent red job.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
-            err="the codex user setup failed before the agent started (a runner-image change breaking adduser/usermod? — see the job logs)."
+            err="the codex user setup failed before the agent started (a job PATH entry inside the workspace or writable by the codex user — a caller's claude-setup putting its venv on GITHUB_PATH — or a runner-image change breaking adduser/usermod; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."

@@ -24,7 +24,20 @@ description: >-
      reclaim. `$RUNNER_TEMP` itself stays runner-only (755 runner:runner),
      so codex can read the snapshots but not replace them. The review
      path has no reclaim step and never reads them; harmless there.
-  2. Create the `codex` system user and cross-enrol the groups, then
+  2. Create the `codex` system user and cross-enrol the groups; then, in a
+     nested `assert-runner-only-path` step, refuse to go on if any directory
+     on the job PATH lies inside the workspace or is writable by the new
+     user (Claude Security finding 4628448; design/codex-engine.md →
+     Runner-side search path): the runner prepends `GITHUB_PATH` entries to
+     every later step's PATH — and resolves each step's shell interpreter
+     through them — so a codex-writable directory there would let codex
+     plant the `sudo`, `bash` or `git` the first post-codex step runs as
+     `runner`. Checked after the user exists (the probe is `sudo -u codex
+     test -w`) and BEFORE the grant below, which is what would make a
+     workspace directory writable; a caller whose provisioning put its venv
+     on `GITHUB_PATH` (the workflows pass `provision-fallback` `add-to-path:
+     false` on the codex path; a caller's own `claude-setup` must do the
+     same) fails here, before codex runs, with the entry named. Then
      `chown -R runner:codex` + `chmod -R g+rwX` + setgid on every directory
      of the workspace — the action's `examples/unprivileged-user.yml`
      recipe; the group grant is what lets codex (primary group codex) write
@@ -103,7 +116,9 @@ description: >-
   Runs no git command against the checkout. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
   step (local composite actions with post steps break teardown on the
-  fork). No inputs: the user name, home and the snapshot paths
+  fork). Three steps only so that the PATH check sits between the user's
+  creation and the grant; the workflows' `steps.codexuser.outcome` is the
+  composite's, failed if any of them fails. No inputs: the user name, home and the snapshot paths
   (`$RUNNER_TEMP/git-config.pre-codex`, `$RUNNER_TEMP/embedded-git.pre-codex`)
   are the convention the codex-action steps and `reclaim-codex-workspace`
   are written against.
@@ -117,10 +132,23 @@ runs:
         # 1. Pre-codex snapshots (see description) — before any grant.
         cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
         sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
-        # 2. User, groups, workspace grant.
+        # 2. User and groups — no grant yet: the PATH check in the next step
+        #    probes as this user and must run before the workspace becomes
+        #    writable to it.
         sudo adduser --system --home /home/codex --shell /bin/bash --group codex
         sudo usermod -a -G codex runner
         sudo usermod -a -G runner codex
+
+    # Refuse before the grant if the job PATH has a directory codex could
+    # write (see description, 2). Its own probes run by system path.
+    - uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
+      with:
+        user: codex
+
+    - shell: bash
+      run: |
+        set -euo pipefail
+        # 2, continued: the workspace grant.
         sudo chown -R runner:codex "$GITHUB_WORKSPACE"
         sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
         sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +

@@ -11,8 +11,26 @@ description: >-
   errors) then reads a clean config instead of each step defending itself;
   before this existed the loops' `Ensure hand-back after push` ran `git
   fetch` against the un-restored, codex-writable .git whenever the guard or
-  the landing failed (review finding on #73). Nine things, in order:
+  the landing failed (review finding on #73). Ten things, in order:
 
+  0. Trust nothing on the job PATH (Claude Security finding 4628448;
+     design/codex-engine.md → Runner-side search path). The runner prepends
+     every `GITHUB_PATH` entry to the PATH of every later step, so a
+     directory codex could write there — a workspace venv provisioning put
+     on the job PATH, made group-writable by `Create codex user`'s grant —
+     would have `sudo`, `find`, `cp`, `mv` and the rest of this step's
+     commands resolve to files codex planted, and the very first of them
+     (`sudo pkill`) would run as `runner` → root before any kill or
+     refusal below. Two layers: a nested `assert-runner-only-path` step
+     first — the same check `Create codex user` ran before the grant,
+     repeated after codex in case a later step added to `GITHUB_PATH` —
+     fails this step closed (and, through its outcome, skips every
+     git-running step) if any PATH entry is inside the workspace or
+     writable by codex; and the reclaim script pins its own PATH to
+     `system-path` before its first command, so every command below is
+     the system one whatever the job PATH holds. The interpreter the
+     runner picked for this step is outside both layers' reach, which is
+     why the pre-grant check in `Create codex user` is the primary defence.
   1. Kill every process still running as the codex user (`pkill -KILL -u
      codex`, repeated until a pass finds nothing — one pass scans /proc
      once, and a forking survivor can slip it). codex-action's step is over
@@ -117,16 +135,34 @@ inputs:
       it. Any difference after codex fails the step.
     required: false
     default: ""
+  system-path:
+    description: >-
+      The PATH this step's commands run with, pinned before the first of
+      them (see description, 0) and handed to the nested PATH check for its
+      probes. The hosted runner image's system directories.
+    required: false
+    default: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 runs:
   using: composite
   steps:
+    # 0. Refuse a job PATH with a codex-writable directory before anything
+    #    else runs (see description).
+    - uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
+      with:
+        user: codex
+        system-path: ${{ inputs.system-path }}
+
     - shell: bash
       env:
         SNAPSHOT: ${{ inputs.config-snapshot }}
         EMBEDDED_SNAPSHOT: ${{ inputs.embedded-snapshot }}
+        SYSTEM_PATH: ${{ inputs.system-path }}
       run: |
         set -euo pipefail
+        # 0. System tools only, whatever GITHUB_PATH prepended: nothing
+        #    below may resolve through a directory codex could write.
+        export PATH="$SYSTEM_PATH"
         SNAPSHOT="${SNAPSHOT:-$RUNNER_TEMP/git-config.pre-codex}"
         EMBEDDED_SNAPSHOT="${EMBEDDED_SNAPSHOT:-$RUNNER_TEMP/embedded-git.pre-codex}"
         gitdir="$GITHUB_WORKSPACE/.git"

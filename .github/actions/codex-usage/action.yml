@@ -38,6 +38,17 @@ inputs:
     description: The workflow's codex_effort input (empty = the codex CLI default).
     required: false
     default: ""
+  system-path:
+    description: >-
+      The PATH the step's commands run with, pinned before the first of them.
+      This runs right after codex on every codex path — the reviewer's too,
+      which has no reclaim step — and its first commands are `sudo test` and
+      `sudo find`, so nothing here may resolve through a directory codex
+      could write (Claude Security finding 4628448; design/codex-engine.md →
+      Runner-side search path). The hosted runner image's system
+      directories.
+    required: false
+    default: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 outputs:
   model:
@@ -77,12 +88,15 @@ runs:
         CODEX_HOME_DIR: ${{ inputs.codex-home }}
         REQ_MODEL: ${{ inputs.requested-model }}
         REQ_EFFORT: ${{ inputs.requested-effort }}
+        SYSTEM_PATH: ${{ inputs.system-path }}
       run: |
         # GitHub runs `shell: bash` as `bash -eo pipefail`; -e is dropped
         # deliberately — a failure anywhere below must log and exit 0, not
         # fail the step (see the action description).
         set +e
         set -o pipefail
+        # System tools only, whatever GITHUB_PATH prepended (see the input).
+        export PATH="$SYSTEM_PATH"
         dir="$CODEX_HOME_DIR/sessions"
         if ! sudo test -d "$dir"; then
           echo "codex-usage: no sessions dir at $dir (codex never launched, or ran --ephemeral); nothing to report."
