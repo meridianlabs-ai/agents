@@ -625,8 +625,9 @@ def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_f
     PR's provisioning step can pre-create — so no "did the agent launch"
     signal exists that the fix job could trust. The landing composer and
     emit-landing withhold on the Claude step's OUTCOME being `failure`, and
-    the refund reads no execution file either (its exact condition — a step
-    the runner never entered, or a cancelled job — is pinned in
+    the refund reads no execution file either (its exact condition —
+    `agent_skipped == 'true'` and nothing pushed; a cancellation alone or
+    missing outputs keeps the recorded count — is pinned in
     test_ci_fix_gate.py)."""
     text = WORKFLOW.read_text()
     assert "id: launched" not in text and "agent_started" not in text and "AGENT_STARTED" not in text

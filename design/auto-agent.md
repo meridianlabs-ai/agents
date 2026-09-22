@@ -367,10 +367,12 @@ runner's base merge, not a commit Claude made before failing, as the codex
 failure path always did; since Claude Security 4628735 (2026-09-22) its
 attempt is *kept*, not refunded — the refund fires only when the agent
 step was never entered (`agent_skipped`: both engines' steps `skipped`, a
-step outcome the runner settled before any agent code ran) or the fix job
-was cancelled, because the agent decides how its own step ends and a
-refund keyed on that let a steered agent make a completed round read as an
-infra crash, so the cap bounded only rounds that landed. The three causes cannot
+step outcome the runner settled before any agent code ran) and nothing was
+pushed, because the agent decides how its own step ends and a refund keyed
+on that let a steered agent make a completed round read as an infra crash,
+so the cap bounded only rounds that landed; a cancellation alone, or a job
+that delivered no outputs (a pending fix job cancelled before it started),
+keeps the recorded count. The three causes cannot
 be told apart from outside the action, and nothing the fix job can observe
 proves Claude launched: a file at the action's default path is one the
 PR's provisioning step can pre-create (review round 1), and the action's

@@ -203,10 +203,13 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   check escalates on the recorded tip whatever the count reads (a refunded
   round 1 leaves `rounds: 0` with its head marker), the refund → gate
   sequence on an unchanged tip escalates, and the refund's `if:` is pinned
-  to a fix job that was cancelled or whose agent step was never entered
-  (`agent_skipped`) plus nothing pushed — never the agent step's own
-  outcome or an execution file — with the Land step admitting a bundle-less
-  hand-back only on the agent step's success.
+  to `agent_skipped == 'true'` (the agent step was never entered) plus
+  nothing pushed — never the agent step's own outcome, the job's result or
+  an execution file; a cancellation alone, or missing outputs, keeps the
+  recorded count — evaluated over a shared case table (`REFUND_CASES`)
+  that `test_ci_fix_gate.py` runs against the CI-fix refund too, with the
+  Land step admitting a bundle-less hand-back only on the agent step's
+  success.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS` (the machine
