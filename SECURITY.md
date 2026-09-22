@@ -60,6 +60,18 @@ text are checked by the tests under `tests/`.
   job end.
 - Whether a comment, label or issue-body line is believed is decided by its
   author's login or verified write access, never by the text itself.
+- A label the machine account applies is a write, not a decision, and never
+  starts the dev agent: `claude.yml`'s trigger check refuses both of its
+  logins on the `auto`/`claude` label path as it does on text. The machine
+  account's `auto` label on a PR is accepted by the loop gates only because
+  it propagates an opt-in a write-access human made on the issue or in a
+  comment, verified before the label was written. Where a caller's agent
+  job is untrusted after it has read third-party input (the triage workflow
+  in `meridianlabs-ai/actions`), the land job's `allowed-issue-labels`,
+  `allowed-issue-assignees` and `max-issues` inputs are enforced by the
+  validator on the fresh runner, so its manifest cannot commission the
+  autonomous agent however the artifact was produced (Claude Security
+  finding 4628345, 2026-09-22).
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - The reviewer runs only when a trusted commenter asks for it, except inside

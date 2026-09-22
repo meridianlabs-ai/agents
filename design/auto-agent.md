@@ -118,8 +118,18 @@ finding 4121989) that is enforced in three layers rather than assumed:
   (`repos/{repo}/collaborators/{actor}/permission`, job token, fail-closed —
   a lookup error is `none`) for every event it accepts. The account judged is
   `github.actor`, which on the `issues` `labeled` path is whoever applied the
-  label (marvin for triage-applied labels; it holds write). An
-  unauthorized actor gets nothing: no 👀, no stage move, no label, no reset,
+  label. Neither of the machine account's logins passes, from text or from a
+  label (since 2026-09-22; Claude Security finding 4628345). Until then the
+  label path admitted marvin without a lookup because the triage pipeline in
+  the `actions` repo filed its bucket-C issues labelled `auto` as marvin —
+  but that label was chosen by an agent that had read test output anyone can
+  shape, and marvin only wrote it, so the writer requirement on `auto` was
+  routed around: an issue and its fix brief authored from untrusted input
+  commissioned the coding agent. The machine account writes what a trusted
+  job or a human decided and never decides for itself, so its label is not
+  an authorization; a triage-filed issue is read by a maintainer, who applies
+  `auto` themselves if the brief is worth automating (their label event is
+  then judged like any human's). An unauthorized actor gets nothing: no 👀, no stage move, no label, no reset,
   no checkout, no agent, and no refusal comment (the fork-head refusal is
   gated on the same `authorized` output).
 - **The stubs filter on `author_association`.** The `claude-auto` job in the
@@ -149,8 +159,11 @@ finding 4121989) that is enforced in three layers rather than assumed:
   notice; the CI-fix loop requires the PR the run names to be open). It reads the PR timeline and
   requires the most recent
   `labeled` event for `auto` to come from the machine account (claude.yml's
-  opt-in and PR-open propagation, or triage) or from an account with write
-  access, and returns one of three verdicts. `ok` runs the round. `disarmed`
+  opt-in on a PR a write-access human commented `@auto` on, and `land`'s
+  propagation to the PR it opens for a human-labelled issue — both behind
+  the trig check that verified that human, so the machine account is trusted
+  as the writer of a human's decision, never as a decider) or from an
+  account with write access, and returns one of three verdicts. `ok` runs the round. `disarmed`
   is positive evidence of an outsider — the label is removed as marvin and no
   round runs. `unverified` is no evidence either way — no labeled event, a
   GitHub App labeler (`*[bot]`, recognised from its login and never looked up:

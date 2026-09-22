@@ -106,6 +106,34 @@ inputs:
       no issue may be created.
     required: false
     default: ${{ github.repository }}
+  allowed-issue-labels:
+    description: >-
+      Comma-separated labels `issues[]` entries may carry (a comment on an
+      existing issue included), enforced by the validator on this fresh
+      runner. `*` (the default) leaves labels unrestricted, so callers that
+      set nothing keep their behaviour; an empty value allows none. A label
+      can be an authorization — `auto` starts the autonomous coding agent —
+      so a caller whose agent job is untrusted once it has read third-party
+      input (the triage workflow in the actions repo) passes an empty list:
+      the agent's manifest can then commission nothing however the
+      artifact was produced, and a human who reads the issue applies the
+      label. A policy that lived only in the caller's post-agent composing
+      step would be enforced on the runner whose compromise is assumed.
+    required: false
+    default: "*"
+  allowed-issue-assignees:
+    description: >-
+      Comma-separated logins `issues[].assignees` may name, the same way:
+      `*` (the default) unrestricted, empty none. The triage workflow pins
+      its issues' owner here rather than only in its composing step.
+    required: false
+    default: "*"
+  max-issues:
+    description: >-
+      Most `issues[]` entries a manifest may carry; empty (the default) is
+      no cap. The triage workflow allows one issue action per run.
+    required: false
+    default: ""
   pr-head-ref:
     description: >-
       headRefName of the PR `pr-number` names (`github.event.pull_request.head.ref`
@@ -282,6 +310,9 @@ runs:
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         BRANCH_PREFIX: ${{ inputs.branch-prefix }}
         REFUSE_BUNDLE: ${{ inputs.refuse-bundle == 'true' && '1' || '' }}
+        ALLOWED_LABELS: ${{ inputs.allowed-issue-labels }}
+        ALLOWED_ASSIGNEES: ${{ inputs.allowed-issue-assignees }}
+        MAX_ISSUES: ${{ inputs.max-issues }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
@@ -290,6 +321,8 @@ runs:
           --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
           --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} \
+          --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
+          --max-issues "$MAX_ISSUES" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.

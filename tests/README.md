@@ -158,10 +158,13 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   4085111). Also that the review step's `allowed_bots` is the caller's list
   plus `TRUSTED_LOGINS`.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
-  same way: the machine account's `auto` label kicks the dev agent off under
-  either login with no lookup, other Apps' labels and every bot's text
-  trigger are refused, a human is authorized by the permission lookup; and
-  the dev stubs name the App login on the label path only.
+  same way: neither of the machine account's logins kicks the dev agent off,
+  from text or from an `auto`/`claude` label (Claude Security finding
+  4628345 — its label was the triage agent's decision, only written by
+  marvin), other Apps' labels and every bot's text trigger are refused, a
+  human is authorized by the permission lookup and refused when it fails;
+  the workflow's agent steps carry no bot allow-list; and the dev stubs
+  exclude both machine logins on the label path like everywhere else.
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc

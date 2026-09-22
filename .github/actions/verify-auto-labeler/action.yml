@@ -4,8 +4,17 @@ description: >-
   opt-in and kill-switch, and before this check nothing asked who opted in: a
   label planted by an account without write access armed the loop exactly
   like a maintainer's. The most recent `labeled` event for the label must
-  come from the machine account (claude.yml's @auto opt-in and PR-open
-  propagation, or the triage pipeline) or from an account with write access.
+  come from the machine account or from an account with write access. The
+  machine account is trusted here as a WRITER of a human's decision, not as
+  a decider: the two places it labels a PR `auto` — claude.yml's gate, on
+  a PR a write-access human commented `@auto` on, and the `land` composite,
+  on the PR it opens for an issue a write-access human labelled `auto` —
+  both sit behind claude.yml's trig step, which verified that human before
+  anything ran. It is NOT trusted as a labeler of issues: claude.yml's trig
+  refuses the machine account on its label path (Claude Security finding
+  4628345 — the triage pipeline used to file issues labelled `auto` as
+  marvin from an untrusted agent's manifest), so no `auto` label of its own
+  making ever starts the chain this check sits at the end of.
   Shared by claude-auto.yml and claude-auto-review.yml, between their
   label check and their counting step, so the two gates cannot drift.
   Referenced fully-qualified
