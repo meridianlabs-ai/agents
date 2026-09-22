@@ -420,25 +420,42 @@ else
   # /import does in the other direction, then make sure a closing ref to THIS
   # issue is present (prepend one otherwise). The only bare ref that may
   # remain is the `Fixes #<up>` added from the validated import header. A
-  # bare ref is a `#M` GitHub would resolve against the tracker: preceded by
-  # nothing, whitespace or opening punctuation, not inside a URL token and
-  # not inside a link destination — a Markdown inline link or image
-  # (`](…)`, whitespace or a line break allowed after the paren), a
-  # reference definition (`[r]: …`) or an HTML href/src value, quoted or
-  # not. A `#M` glued to a word character, `/`, `-`, `.`, `&`, `=` … is the
-  # tail of a qualified `owner/repo#M`, an HTML entity or a URL fragment and
-  # is left alone.
+  # `#M` right after a closing keyword is ALWAYS qualified, whatever markup
+  # surrounds it — the guarantee does not rest on the heuristics below.
+  # Otherwise a bare ref is a `#M` GitHub would resolve against the tracker:
+  # preceded by nothing, whitespace or opening punctuation, not inside a URL
+  # token and not inside the destination of a syntactically complete
+  # Markdown inline link/image, reference definition or HTML href/src
+  # attribute (malformed lookalikes are prose and are qualified). A `#M`
+  # glued to a word character, `/`, `-`, `.`, `&`, `=` … is the tail of a
+  # qualified `owner/repo#M`, an HTML entity or a URL fragment and is left
+  # alone.
   BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
 n = os.environ["ISSUE_N"]
 src = os.environ["FPR_BODY"]
-dest = []  # spans of link destinations: never issue references
-for pat in (r"\]\(\s*(<[^>\n]*>|[^\s)]*)",
-            r"^ {0,3}\[[^\]\n]+\]:[ \t]*\n?[ \t]*(<[^>\n]*>|\S+)",
-            r"\b(?:href|src)\s*=\s*(\"[^\"]*\"|\x27[^\x27]*\x27|[^\s>]+)"):
-    dest += [m.span(1) for m in re.finditer(pat, src, re.M | re.I)]
+# Destination spans (group 1) of syntactically complete constructs only:
+# an inline link/image ("[text](dest)" with an optional title and balanced
+# parentheses in dest), a reference definition ("[label]: dest" alone on
+# its line, container prefixes allowed) and an href/src attribute inside
+# an HTML tag. Malformed lookalikes are ordinary text and are qualified.
+TITLE = r"(?:\"[^\"]*\"|\x27[^\x27]*\x27|\([^()]*\))"
+DEST = r"(<[^<>\n]*>|(?:[^\s()\\<]|\\.|\([^\s()]*\))*)"
+dest = []
+# The inline pattern is a lookahead so nested constructs ("[![img](a)](b)")
+# are all found (a lookahead is non-capturing, so the destination stays group 1).
+for pat, g in ((r"(?=\[(?:[^\[\]\\]|\\.|\[[^\[\]]*\])*\]\(\s*" + DEST + r"(?:\s+" + TITLE + r")?\s*\))", 1),
+               (r"^(?:[ \t]*(?:>|[-*+]|\d{1,9}[.)]))*[ \t]*\[(?!\s*\])(?:[^\[\]\\]|\\.)+\]:[ \t]*\n?[ \t]*"
+                r"(<[^<>\n]*>|[^\s<]\S*)(?:[ \t]*\n?[ \t]*" + TITLE + r")?[ \t]*(?=\n|$)", 1),
+               (r"<[a-zA-Z][^<>]*?\s(?:href|src)\s*=\s*(\"[^\"]*\"|\x27[^\x27]*\x27|[^\s\"\x27=<>`]+)[^<>]*>", 1)):
+    dest += [m.span(g) for m in re.finditer(pat, src, re.M | re.I)]
+kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
 def qualify(m):
     i = m.start()
+    # A closing keyword right before the ref is qualified whatever surrounds
+    # it: the guarantee never depends on the destination heuristics above.
+    if re.search(kw + r":?\s*$", src[max(0, i - 16):i], re.I):
+        return "meridianlabs-ai/inspect_ai#" + m.group(1)
     prev = src[i - 1] if i else " "
     if prev not in " \t\r\n([{\"\x27*~>|,;" or any(a <= i < b for a, b in dest):
         return m.group(0)
@@ -446,11 +463,10 @@ def qualify(m):
         return m.group(0)
     return "meridianlabs-ai/inspect_ai#" + m.group(1)
 body = re.sub(r"#(\d+)\b", qualify, src)
-kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
-if not re.search(kw + r"meridianlabs-ai/inspect_ai#%s\b" % n, body, re.I):
+if not re.search(kw + r"\s+meridianlabs-ai/inspect_ai#%s\b" % n, body, re.I):
     body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body
 up = os.environ["UP_ISSUE"]
-if up and not re.search(kw + r"UKGovernmentBEIS/inspect_ai#%s\b" % up, body, re.I):
+if up and not re.search(kw + r"\s+UKGovernmentBEIS/inspect_ai#%s\b" % up, body, re.I):
     body = "Fixes #%s\n" % up + body
 print(body)')
   # The operator sees the body as it will be published under their name —

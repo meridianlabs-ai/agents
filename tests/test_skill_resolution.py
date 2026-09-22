@@ -837,20 +837,49 @@ def test_promote_leaves_every_link_destination_form_alone(tmp_path):
         "[r]: #7-r", "[s]:\n  <#8-s>", "  [t]: #9-t \"title\"",
         "<a href=\"#10-h\">x</a>", "<a href=\x27#11-h\x27>y</a>", "<img src=\"#12-s\">", "<a href=#13-h>z</a>",
         "<a HREF = \"#14-h\">w</a>",
+        # review round 3: container prefixes, escaped and multiline labels,
+        # balanced parentheses in the destination, a nested image in a link
+        "> [q]: #15-q", "- [l]: #16-l", "1. [o]: #17-o", "[la\\]bel]: #18-e", "[la\nbel]: #19-m",
+        "[p](path(part),#20-p)", "![i](path(part),#21-i)", "[![img](#22-in)](#23-out)",
     ]
-    fork_body = "Summary.\n\n" + "\n".join(keep) + "\n\n[#21 in the text](#22-anchor)\n[#23]: #24-label\nsee #25\nCloses #26\n"
+    fork_body = "Summary.\n\n" + "\n".join(keep) + "\n\n[#31 in the text](#32-anchor)\n[#33]: #34-label\nsee #35\nCloses #36\n"
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
     r = s.run(PROMOTE, str(N), "--dry-run")
     assert r.returncode == 0, r.stderr
     body = published_body(r.stdout)
     for k in keep:
         assert k in body, (k, body)
-    assert "[meridianlabs-ai/inspect_ai#21 in the text](#22-anchor)" in body
-    assert "[meridianlabs-ai/inspect_ai#23]: #24-label" in body
-    assert "see meridianlabs-ai/inspect_ai#25\nCloses meridianlabs-ai/inspect_ai#26" in body
+    assert "[meridianlabs-ai/inspect_ai#31 in the text](#32-anchor)" in body
+    assert "[meridianlabs-ai/inspect_ai#33]: #34-label" in body
+    assert "see meridianlabs-ai/inspect_ai#35\nCloses meridianlabs-ai/inspect_ai#36" in body
     assert body.splitlines()[0] == f"Fixes meridianlabs-ai/inspect_ai#{N}"
     # Nothing in a destination was touched: the fork's name appears only where asserted above.
     assert body.count("meridianlabs-ai/inspect_ai#") == 5, body
+
+
+@pytest.mark.parametrize("text, ref", [
+    # review round 3: markup lookalikes that are not complete constructs
+    # must not exempt the closing directive inside them, and a closing
+    # keyword right before a ref is qualified even inside a real destination
+    ("The setting href=\"\nCloses #7\n\" is broken.", "Closes meridianlabs-ai/inspect_ai#7"),   # attribute outside a tag
+    ("src=\x27\nResolved #8\n\x27 too", "Resolved meridianlabs-ai/inspect_ai#8"),
+    ("Text ](<Closes #9>)", "Text ](<Closes meridianlabs-ai/inspect_ai#9>)"),                  # no link text
+    ("[x](<Fixes #10>", "[x](<Fixes meridianlabs-ai/inspect_ai#10>"),                          # unclosed link
+    ("[ ]: <Closed #11>", "[ ]: <Closed meridianlabs-ai/inspect_ai#11>"),                     # blank label
+    ("[r]: <Resolves #12> not-a-title", "[r]: <Resolves meridianlabs-ai/inspect_ai#12> not-a-title"),  # trailing text
+    ("[x](<Closes #13>)", "[x](<Closes meridianlabs-ai/inspect_ai#13>)"),                    # keyword inside a real destination
+    ("<a href=\"Fixes #14\">x</a>", "<a href=\"Fixes meridianlabs-ai/inspect_ai#14\">x</a>"),
+    ("Fixes:#15 and fixes: #16", "Fixes:meridianlabs-ai/inspect_ai#15 and fixes: meridianlabs-ai/inspect_ai#16"),  # colon spellings
+    ("href=\"#17-h\" mentioned in prose", "href=\"meridianlabs-ai/inspect_ai#17-h\" mentioned in prose"),  # no tag, no keyword
+], ids=["href-prose", "src-prose", "no-link-text", "unclosed-link", "blank-label", "trailing-text",
+        "keyword-in-destination", "keyword-in-href", "colon", "attr-no-tag"])
+def test_promote_qualifies_closing_refs_inside_markup_lookalikes(tmp_path, text, ref):
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Summary.\n\n{text}\n")]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    body = published_body(r.stdout)
+    assert ref in body, body
+    assert not re.search(r"(?<![\w/&.=-])#\d+", body), body  # no bare ref left anywhere
 
 
 @pytest.mark.parametrize("ref, prepended", [

@@ -494,9 +494,11 @@ lookup is untrusted), since the fork is public and an issue body stays
 editable by its author; any other occurrence is ignored and reported. For
 the same reason every bare `#M` in the fork PR body is qualified to
 `meridianlabs-ai/inspect_ai#M` before the body is republished upstream —
-closing keyword or not, in any case (an already-qualified `owner/repo#M`,
-an HTML entity, a URL fragment or a Markdown link destination is not a bare
-ref and stays verbatim) — so the only bare ref the upstream PR
+closing keyword or not, in any case (a `#M` right after a closing keyword
+is qualified whatever surrounds it; an already-qualified `owner/repo#M`,
+an HTML entity, a URL fragment or the destination of a well-formed
+Markdown link, image, reference definition or HTML `href`/`src` is not a
+bare ref and stays verbatim) — so the only bare ref the upstream PR
 carries is that `Fixes #<up>`; the script prints the body as it will be
 published, in `--dry-run` and in the real run (findings 4629156 and 4629152,
 fixed 2026-09-22).

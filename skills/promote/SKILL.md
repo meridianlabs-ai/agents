@@ -85,10 +85,12 @@ is rewritten to `meridianlabs-ai/inspect_ai#M`, closing keyword or not, in
 any case — republished on a PR based on upstream main they would rebind to
 upstream's tracker and a `Closes #M` would close upstream's issue M on
 merge; a closing keyword in any of GitHub's spellings before the qualified
-ref counts as the ref to the issue, else one is prepended. Bare means a
-`#M` GitHub would resolve against the tracker: already-qualified
-`owner/repo#M` refs, HTML entities, URL fragments and Markdown link
-destinations are left verbatim), plus a bare
+ref counts as the ref to the issue, else one is prepended. A `#M` right
+after a closing keyword is qualified whatever surrounds it; otherwise bare
+means a `#M` GitHub would resolve against the tracker: already-qualified
+`owner/repo#M` refs, HTML entities, URL fragments and the destinations of
+well-formed Markdown links, images, reference definitions and HTML
+`href`/`src` attributes are left verbatim), plus a bare
 `Fixes #<up>` when the fork issue was imported from upstream. That
 `Upstream issue:` line is believed ONLY as /import's machine-written header
 — the body's literal first line, with the `---` rule below it and the
