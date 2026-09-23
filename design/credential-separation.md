@@ -393,7 +393,20 @@ and passes (decision: Ransom, 2026-09-18); on a branch the push creates,
 only content equal to the base tip passes, since an issue run cuts its
 branch from that tip and a lower fork point cannot be told from one the
 agent chose — and the agent prompts say up
-front not to edit them.
+front not to edit them. Since 2026-09-23 the same step refuses the entry
+points and configuration files a later automated job on the branch
+executes or loads (Claude Security finding 4628446, criterion 2): anything
+under `.github/`, agent instructions and settings, and build and
+dependency configuration, at any depth, plus the symlink targets and
+`CLAUDE.md` imports they reach — the list and its rationale are in lib.sh
+and in SECURITY.md → Guarantees. GitHub's check covers only workflows, so
+for these the land job's refusal is the whole boundary: without it the
+machine account's push would launder an agent-written `claude-setup`
+composite or build hook into a same-repo branch the next run provisions
+from as `runner`. It does not close the class: an ordinary file that
+unchanged configuration executes still lands, an accepted gap (decision:
+Ransom, 2026-09-23) stated in SECURITY.md → Guarantees and left to the
+design follow-up named there.
 
 The app is not a member of `UKGovernmentBEIS`, so, like the PAT before it, it
 cannot open or push to upstream pull requests; promotion to upstream is a
@@ -872,6 +885,21 @@ results against the invariant each one tests.
   before the push with a plain report line, and the agent prompts say not
   to edit them (section 3.4). A run that needs a workflow change still
   spends itself before the refusal is posted.
+- **CI agents cannot change the entry points later automation executes**
+  (finding 4628446, criterion 2, 2026-09-23). The same step refuses
+  `.github/`, agent instructions and settings, and build and dependency
+  configuration at any depth. Accepted gap (decision: Ransom, 2026-09-23):
+  an ordinary file that unchanged configuration executes still lands, and
+  the next Claude-engine run executes it as `runner` during provisioning
+  or at agent start; closing that is the design follow-up SECURITY.md →
+  Guarantees names (approval gating, dependency following, or an
+  unprivileged Claude user). Price: a task that needs a dependency bump, a
+  `CLAUDE.md`/`AGENTS.md` edit or a composite-action change — most of this
+  repo's own code is under `.github/` — is done from a maintainer's
+  machine; so is a base-merge conflict the agent resolves in one of these
+  files, and a base merge combining a human's branch change with a base
+  change to the same file (the merged content matches neither trusted
+  reference), as for workflow files before.
 - **Secret delivery is per job — measured, not documented.** GitHub says a
   referenced secret can be harvested by code running in the job and that
   unreferenced ones are scrubbed; it does not say whether "referenced" is
@@ -899,7 +927,14 @@ results against the invariant each one tests.
   automated run on the branch it produced executes that branch's build
   hooks before the agent. What the split removes from that job is the
   OpenAI key; what remains is exactly what a prompt-injected Claude agent
-  already holds there. Refusing agent bundles that touch paths a later job
-  executes (`.github/actions/**`, `pyproject.toml` build configuration,
-  `.claude/**`, `CLAUDE.md`, `.mcp.json`) at the land job is the open
-  follow-up from finding 4628446, not done here.
+  already holds there. Since 2026-09-23 the land job refuses agent bundles
+  that touch paths a later job executes or loads as configuration
+  (`.github/`, build and dependency configuration, agent instructions and
+  settings; finding 4628446, criterion 2 — section 3.4), so an agent can no
+  longer add or change those entry points for the next run. It can still
+  change an ordinary file that unchanged configuration executes (a script
+  the `claude-setup` composite or a settings hook runs, a module the build
+  backend imports), which the next Claude-engine run executes as `runner`
+  before the agent — an accepted gap (decision: Ransom, 2026-09-23; see
+  SECURITY.md → Guarantees for the design follow-up that would close it);
+  a maintainer's own push to the branch still can do either, as before.

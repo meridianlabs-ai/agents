@@ -223,6 +223,38 @@ text are checked by the tests under `tests/`.
   manifest names: the manifest's `start_sha` is the agent job's to write,
   and origin serves any reachable commit — a fork PR's head, an old base
   commit — as a start (Claude Security finding 4628444, 2026-09-22).
+- The same refusal covers the entry points and configuration files a later
+  automated job on the branch executes or loads — not everything those
+  run (see the accepted gap below) — since the machine account's push would
+  otherwise move agent-written files into the same-repo tree the next run
+  provisions from as `runner` or reads as instructions
+  (Claude Security finding 4628446, criterion 2, 2026-09-23): anything
+  under `.github/` (the composite actions a workflow runs with `uses:
+  ./…`, the callers' `claude-setup` among them); agent instructions and
+  settings at any depth (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  `AGENTS.override.md`, `.claude/`, `.mcp.json`, `.claude.json`,
+  `.codex/`, `.agents/`, `.gitmodules`, `.ripgreprc`, `.husky/`); and
+  build and dependency configuration at any depth (`pyproject.toml`,
+  `setup.py`, `setup.cfg`, `uv.lock`, `uv.toml`, `.python-version`,
+  `requirements*.txt`, `package.json`, the npm, pnpm and yarn lockfiles,
+  `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc`,
+  `.yarnrc.yml`, `.yarn/`). Symlink targets and `CLAUDE.md` `@path`
+  imports reached from these paths are refused too. **Accepted gap**
+  (decision: Ransom, 2026-09-23): this does not close the class. The list
+  names entry points and loaded configuration, not the code they run, so
+  an agent's edit to an ordinary file that UNCHANGED configuration
+  executes still lands: a script a `claude-setup` step, a settings hook or
+  an MCP server command runs, a build backend on `backend-path`, a module
+  a `setup.py` or build hook imports, any file a caller's recipe reads.
+  The next automated run executes it during provisioning or at agent start
+  — as the codex user on codex jobs (finding 4628446, criterion 1), as
+  `runner` on Claude jobs, where the Claude agent itself already runs the
+  tree's code (tests, `conftest.py`) as `runner`. Closing it is a separate
+  design follow-up (Ransom, 2026-09-23) comparing approval gating (a head
+  the machine account pushed gets fork-head treatment in every later
+  automated job until a write-access human approves that exact head),
+  heuristic dependency following at landing, and running the Claude engine
+  as an unprivileged user that also provisions, as codex does.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The
