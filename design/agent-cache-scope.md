@@ -495,13 +495,10 @@ design changes none of them.
   - No job in those four files overrides the key.
   - Each calling job in `examples/*-stub.yml` and this repo's `*-stub.yml`
     carries `cache-mode: read`.
-  - Runs under `python3 -m pytest` from the root, locally. The
-    implementation PR and its review carry the result as evidence. No
-    active workflow runs the suite today: `tests/workflow-tests.yml` is
-    staged outside `.github/workflows/` (its own header says to move it
-    there), so its path filters are inert. The guard joins CI when that
-    existing staged workflow is activated. Activating it is not part of
-    this design.
+  - Runs under `python3 -m pytest` from the root, locally and in
+    `.github/workflows/tests.yml` on every PR and push to main. These
+    tests check the declarations and lifted scripts; the hosted
+    cache-mode canary below checks GitHub's enforcement.
 - **Canary: `cache-mode-canary.yml` plus `cache-mode-canary-reusable.yml`**
   in `.github/workflows/` (new; `workflow_dispatch` only, like #136's
   `engine-isolation-canary.yml`). It needs no secrets, no model and no
