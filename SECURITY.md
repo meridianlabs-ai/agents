@@ -33,7 +33,8 @@ Untrusted: the content of any pull request and every fork head; the text of
 issues and comments (the fork is public, so any GitHub account can write
 there); test output, CI logs and artifacts; dependency alerts and anything
 an agent reads or installs while it works; every file an agent job leaves
-behind, the landing manifest included.
+behind, the landing manifest included; Actions cache entries saved by any
+run an outsider can influence.
 
 Trusted: upstream `main` of `UKGovernmentBEIS/inspect_ai` and the default
 branches of Meridian repositories; the machine account under its two logins
@@ -49,6 +50,11 @@ text are checked by the tests under `tests/`.
   token minted from it; its own job token is read-only. The Claude action's
   own token, present while that step runs, is the exception described under
   "By design" below.
+- No job of the agent workflows can save to the GitHub Actions cache: every
+  reusable workflow declares `cache-mode: read`, which the platform enforces
+  on the job's token, so nothing an agent does or a caller's setup nests can
+  place content in a cache a trusted workflow restores (Claude Security
+  finding 4629157; design/agent-cache-scope.md).
 - A job that runs the Claude agent references no `OPENAI_API_KEY`. Each
   reusable workflow runs each engine in a job of its own (`agent` and
   `agent-codex`, `review` and `review-codex`, `fix` and `fix-codex`), the

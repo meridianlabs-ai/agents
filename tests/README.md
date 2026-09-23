@@ -442,6 +442,24 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `---` rule, qualified `#N` refs) survives, `--dry-run` previews the
   de-fanged title and creates nothing, and ordinary text is copied
   unchanged.
+- `test_cache_mode.py` — agent jobs get read-only Actions cache access
+  (Claude Security 4629157; design/agent-cache-scope.md), as structural
+  checks on the workflow text: each of the four agent workflows (and the
+  canary's called workflow) declares exactly one top-level `cache-mode:
+  read` before `jobs:` and no job overrides it; no `cache-mode` in
+  `.github/workflows/` or `examples/` is anything but `read` or `none`,
+  except the canary's `control` job, listed by file and job; every calling
+  job in the example stubs and this repo's stubs caps its call at `read`.
+  The enforcement itself is checked by the dispatch-only
+  `.github/workflows/cache-mode-canary.yml`: a called workflow under
+  `cache-mode: read`, on a trusted trigger its caller sets no mode for,
+  sees the mode, and neither a mode-aware client's save (skipped) nor a
+  mode-ignoring client's save (refused by the service) leaves an entry,
+  while a write-mode control job's save does. That workflow's `Check` step
+  is lifted and run here against a stub `gh` and `curl`: green only when
+  exactly the control entry exists and restores, each job's "Set up job"
+  line shows its mode, and the probe's log shows the client's skip and the
+  service's `cache write denied:` refusal; red, with the reason, otherwise.
 - `test_model_defaults.py` — the four Claude workflows' `model` input
   defaults to the `opus` alias (never a dated id) with `fallback_model`
   `default`, and both still reach Claude Code as `--model` /

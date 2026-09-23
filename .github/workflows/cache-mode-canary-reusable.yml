@@ -1,0 +1,65 @@
+# The called half of the cache-mode canary (design/agent-cache-scope.md →
+# Testing); `cache-mode-canary.yml` calls it and checks what it left. It
+# declares the same top-level key as the four agent workflows and probes
+# what a job of such a workflow can do with the cache: the mode a node step
+# sees, and a save from each kind of client. It needs no secrets, no model
+# and no network beyond GitHub.
+name: Cache-mode canary (reusable)
+
+on:
+  workflow_call:
+
+# The line under test, as the agent workflows declare it.
+cache-mode: read
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      KEY_PREFIX: canary-${{ github.run_id }}-${{ github.run_attempt }}-
+    steps:
+      # The runner exports the effective mode to node actions only (a `run:`
+      # step never sees ACTIONS_CACHE_MODE), so read it from one.
+      - name: Check the mode a node step sees
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const mode = process.env.ACTIONS_CACHE_MODE;
+            if (mode !== 'read') {
+              core.setFailed(`ACTIONS_CACHE_MODE is '${mode}', want 'read'`);
+            } else {
+              core.info(`ACTIONS_CACHE_MODE is '${mode}'`);
+            }
+
+      - name: Write the payload
+        run: |
+          mkdir -p canary-payload
+          echo "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" > canary-payload/payload
+
+      # A client that reads ACTIONS_CACHE_MODE skips the save itself. Pinned
+      # to actions/cache main at 3edfce9 (2026-07-15, "bump cache toolkit
+      # 6.2.0"): the first commit bundling @actions/cache 6.2.0, the version
+      # that reads the mode; no release tag carries it yet (v6.1.0 is the
+      # latest). The verify job expects this step's "Cache save skipped"
+      # line in the log.
+      - name: Save with a mode-aware client (must be skipped)
+        uses: actions/cache/save@3edfce9056124e459a23f683a21433670d47daca
+        with:
+          path: canary-payload
+          key: ${{ env.KEY_PREFIX }}new
+
+      # A client that ignores the mode tries the save, so this step checks
+      # the service's enforcement on the token: a skipped client save proves
+      # only that the client read the variable. v6.1.0 bundles
+      # @actions/cache 6.1.0, which speaks the v2 cache service (the v1
+      # service is retired) and predates 6.2.0's mode check; it reports a
+      # read-only token's refusal as a "cache write denied:" warning, which
+      # the verify job expects in the log. The control job saves with the
+      # same client, so the mode is the only difference.
+      - name: Save with a client that ignores the mode (the service must refuse)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: canary-payload
+          key: ${{ env.KEY_PREFIX }}old
