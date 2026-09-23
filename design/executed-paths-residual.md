@@ -190,8 +190,9 @@ v1.0.232, 2026-09-23) and the Agent SDK it depends on
   - in tag mode with a tracking comment (`claude.yml` only),
     `updateCommentLink` makes API calls with the App token. Its
     `checkAndCommitOrDeleteBranch` runs `git status`/`add`/`commit`/`push`
-    in the workspace only if the run's new issue branch exists on origin
-    with no commits (branch-cleanup.ts:39-103). `setupBranch` does not
+    in the workspace only if the branch the prepare created (`claudeBranch`:
+    set for an issue, and for a closed or merged PR, branch.ts:165-175)
+    exists on origin with no commits (branch-cleanup.ts:39-103). `setupBranch` does not
     guarantee that the name is free. It regenerates the name once if
     `git ls-remote` finds it on origin, and does not check the fallback. It
     treats any `ls-remote` error as "absent" (branch.ts:280-299). The
@@ -226,8 +227,9 @@ v1.0.232, 2026-09-23) and the Agent SDK it depends on
   `git reset` (restore-config.ts:327-338). After the CLI exits, tag mode's
   `updateCommentLink` → `checkAndCommitOrDeleteBranch` runs `git status`,
   `git add -A`, `git commit` and `git push` as `runner`. That happens only
-  when the issue branch exists on origin with no commits
-  (branch-cleanup.ts:39-103), which our flow never produces.
+  when the branch the prepare created exists on origin with no commits
+  (branch-cleanup.ts:39-103). The next bullet shows that absence is not
+  guaranteed.
 - **Workload Identity.** `setupWorkloadIdentity` (run.ts:250) fetches an
   OIDC JWT for audience `https://api.anthropic.com`. It writes the JWT to
   `$RUNNER_TEMP/claude-workload-identity/identity-token` (dir 0700, file
@@ -622,71 +624,130 @@ The launch path, in order:
    reviewer's fork and external heads) there is no re-grant. The checkout,
    its root and `.git` stay runner-owned and read-only to the agent's uid,
    so its unsandboxed Write/Edit tools cannot change them either.
-6. **Refuse a pre-existing issue branch** (tag-mode issue runs of
-   `claude.yml` only). The launcher has an input `issue-branch`, which
-   `claude.yml` sets from the gate's event facts (an issue, not a PR) and
-   which is recorded in the root-owned run directory. When it is set, the
-   wrapper reads the checked-out branch, which is the `claudeBranch`
-   `setupBranch` just chose, and runs `git ls-remote --exit-code origin
-   refs/heads/<branch>` as `runner` over the reclaimed `.git`, with the
-   job-token helper. Exit status 2 (no such ref) is the only one that lets
-   the launch proceed. Status 0 (the ref exists: a collision the fallback
-   did not avoid) and any other status (a lookup error) refuse the launch,
-   and the run fails before the agent starts. This replaces the
-   assumption, which does not hold (Current behaviour → What the action
-   does after the CLI), that `setupBranch` leaves the name free.
+6. **Refuse a pre-existing new branch** (every launch, every workflow).
+   The launcher (step 5, before the action step) records what the
+   workspace has checked out in the root-owned run directory: the symbolic
+   ref (`git symbolic-ref -q HEAD`), or `detached:<sha>`. That is the
+   default branch for an issue run, the PR head after `sync-branch` for a
+   PR run, and the pinned SHA for a review. At launch the wrapper reads
+   `HEAD` again. If it names a different branch, the action's prepare made
+   a new branch: `setupBranch`'s `checkout -b` for an issue, and also for a
+   closed or merged PR (branch.ts:165-175), including a PR that closed
+   between the gate and the prepare. That new branch is the `claudeBranch`
+   the post-CLI cleanup looks for. The wrapper then runs `git ls-remote
+   --exit-code origin refs/heads/<branch>` as `runner` over the reclaimed
+   `.git`, with the job-token helper:
+   - exit status 2 (no such ref) is the only one that lets the launch
+     proceed;
+   - status 0 (the ref exists: a collision the fallback did not avoid)
+     refuses the launch, and so does any other status (a lookup error).
+
+   The run then fails before the agent starts. An open-PR follow-up checks
+   out the PR's existing head, which equals the recorded ref, so it is
+   unaffected and leaves `claudeBranch` unset. So does a detached review
+   checkout. This replaces the assumption, which does not hold (Current
+   behaviour → What the action does after the CLI), that `setupBranch`
+   leaves the name free.
 7. **Exec into the agent namespace.** Write the rewritten argv and env
-   NUL-separated to a 0600 file under a runner-only 0700 dir. Then run
-   `exec sudo -n /usr/bin/unshare --pid --fork --kill-child --mount
-   --propagation private --mount-proc --
-   /opt/meridian-agent/bin/agent-ns-init <file>`. After the exec, the
-   wrapper's `/proc/<pid>/cmdline` and `environ` show only that, with no
-   App token (`sudo` and `unshare` carry the same clean argv).
+   NUL-separated to a 0600 file under a runner-only 0700 dir, and `cd /`.
+   Then run `exec sudo -n /opt/meridian-agent/bin/agent-ns-launch <file>
+   <action pid>`. `<action pid>` is the wrapper's parent, the action's
+   `bun` process. After the exec, the SDK-owned PID is `sudo`, and its
+   `/proc/<pid>/cmdline` and `environ` show only that, with no App token.
 
 **The agent namespace** gives the agent its own PID namespace and its own
 mount namespace. Root sets it up; it is not an unprivileged user
-namespace. `agent-ns-init` (root-owned) runs as the namespace's PID 1 and
-builds the agent's view before dropping privileges:
+namespace. Two root-owned scripts do it:
+
+- `agent-ns-launch` runs on the host side as `sudo`'s child. It checks that
+  `<action pid>` is the `bun` process of this job (its `/proc/<pid>/exe`
+  and its parent chain up to `Runner.Worker`), and opens a pidfd on it
+  (`pidfd_open`). It then `exec`s `setpriv --pdeathsig KILL -- unshare
+  --pid --fork --kill-child --mount --propagation private --mount-proc --
+  agent-ns-init <file>`, with the pidfd kept open as fd 3.
+- `agent-ns-init` is a Python 3 script (stdlib only, `-I`). It runs as the
+  namespace's PID 1 and stays root. It builds the agent's view, then starts
+  the CLI as its only child with privileges dropped.
+
+It builds the view in this order:
+
+1. It first `chdir`s to `/`, so it holds no reference to the old tree
+   through its working directory. The wrapper did the same before the
+   exec, so no process in the chain inherits a cwd inside `/home/runner`.
+2. It bind-mounts each directory the agent needs to a staging point under
+   a root-only `/run/agent-ns/`:
+   - the workspace;
+   - `$RUNNER_TEMP/claude-agent`;
+   - `$RUNNER_TEMP/scratch` (review `none` mode);
+   - `$RUNNER_TEMP/claude-workload-identity`.
+3. It mounts tmpfs over `/home/runner` and over `/tmp`. Then it
+   bind-mounts each staged directory back at its own path: the workspace
+   read-write in `workspace` mode and read-only in `none` mode, the
+   landing dir and scratch read-write, the WIF dir read-only (with the ACL
+   of launch step 3).
+4. It detaches every staging mount (`umount -l`) and removes
+   `/run/agent-ns/`, so no path reaches the original tree.
+5. It closes every descriptor except 0-2 and the pidfd (`close_range`), so
+   the CLI inherits no directory or setup descriptor.
+6. It opens the final workspace bind by its absolute path, freshly
+   resolved, and starts the child with that as its cwd. That is `setpriv
+   --reuid claude-agent --regid claude-agent --init-groups
+   --inh-caps=-all --bounding-set=-all -- env -i <env…> <real claude>
+   <args…>`, with the pidfd closed in the child. The child inherits the
+   SDK's stdio.
+
+From inside, the agent sees:
 
 - `/proc` is the namespace's own mount, from `--mount-proc`. The agent
-  sees only its own processes, so no host process's `cmdline` or `environ`
-  is visible to it. That covers the `sudo`/`unshare` chain, the action's
-  `bun`, `Runner.Worker` and the revoke step's `curl`.
-- A fresh tmpfs over `/tmp`, so no `.NET` diagnostic socket and no
+  sees only its own processes, so no host process's `cmdline`, `environ`
+  or `cwd` is visible to it: not the `sudo`/`unshare` chain, the action's
+  `bun`, `Runner.Worker` or the revoke step's `curl`. Its own
+  `/proc/self/cwd` and `/proc/self/fd/*` point only into the final binds.
+  So does PID 1's, since PID 1 also changed directory before the mounts.
+- `/tmp` is private, so no `.NET` diagnostic socket and no
   `/tmp/inline-comments-buffer.jsonl` is shared with the host.
-- A tmpfs over `/home/runner`. The workspace is bind-mounted back at its
-  own path (read-write in `workspace` mode, read-only in `none` mode),
-  binding from a staging mount taken before the tmpfs covers the source.
-  So
-  are `$RUNNER_TEMP/claude-agent` (read-write), `$RUNNER_TEMP/scratch`
-  (read-write, review `none` mode) and `$RUNNER_TEMP/claude-workload-identity`
-  (read-only, with the ACL of launch step 3). Nothing else under
-  `/home/runner` is reachable: not `$RUNNER_TEMP`'s step scripts and
-  command files, not `_actions`, not the runner's install directory.
-  `/opt/meridian-agent` and the agent's own home are outside
-  `/home/runner` and stay as they are.
-- Then it drops to `claude-agent` with `setpriv --reuid claude-agent
-  --regid claude-agent --init-groups --inh-caps=-all`, and runs
-  `env -i <env…> <real claude> <args…>` as its only child. The child
-  inherits the SDK's stdio, and PID 1 forwards `TERM`/`INT` to it.
+- Under `/home/runner` only the four binds exist. `$RUNNER_TEMP`'s step
+  scripts and command files, `_actions` and the runner's install directory
+  are unreachable by absolute path, and no relative path or inherited
+  descriptor leads back to them.
+- `/opt/meridian-agent` and the agent's own home are outside `/home/runner`
+  and stay as they are.
 
-The agent has no `CAP_SYS_ADMIN` in that namespace, so it cannot unmount,
-remount or re-mount `/proc`. It cannot `setns` into the host's namespaces
-either. Nothing outside can join the namespace, because only root could,
-and the pre-agent kill left no `claude-agent` process outside it.
+The agent has no capabilities in that namespace, so it cannot mount,
+unmount or re-mount anything, nor `setns` into the host's namespaces.
+Nothing outside can join the namespace, because only root could, and the
+pre-agent kill left no `claude-agent` process outside it.
 
-**The namespace's lifetime is the CLI's.** PID 1 exits when the CLI exits,
-and the kernel then kills every process left in the namespace, however it
-was started (`setsid`, `nohup`, double fork). `--kill-child` sends PID 1
-`SIGKILL` if `unshare` dies. The SDK's `SIGTERM` to the spawned process
-reaches `unshare` through `sudo`'s signal relay. If `sudo` were
-`SIGKILL`ed instead, the CLI loses its stdio and exits, which ends the
-namespace the same way. So agent processes cannot outlive the CLI by more
-than that.
+**The namespace's lifetime is enforced from the SDK-owned PID.** The
+namespace ends, and the kernel kills every process in it however it was
+started (`setsid`, `nohup`, double fork, a stopped process), in any of
+these events:
 
-**No supervisor process.** The wrapper execs straight into the namespace
-and keeps no host-side process after the CLI. So cleanup after the agent
-is step 7's alone: it kills, reclaims, removes the WIF ACL entries and
+- **The CLI exits.** PID 1 exits when its child does.
+- **The action process exits.** PID 1 polls the pidfd and, when the
+  action's `bun` is gone, `SIGKILL`s its child and exits.
+- **The SDK-owned PID (`sudo`) dies, whatever the signal.** `setpriv
+  --pdeathsig KILL` gave `unshare` a parent-death signal from `sudo`. The
+  pdeath signal survives the `exec` of the non-setuid `unshare`.
+  `unshare`'s death then fires `--kill-child`'s `SIGKILL` at PID 1.
+- **`unshare` or PID 1 is killed directly** (job cancellation kills the
+  step's processes). `--kill-child` covers `unshare`. PID 1's death ends
+  the namespace by definition.
+
+None of these relies on the CLI cooperating. A CLI that ignores EOF and
+`TERM`, or is stopped, still dies with the namespace. The SDK sends
+`TERM` and then, 5 seconds later, `KILL` to the PID it spawned
+(`sdk.mjs`, the process-exit handler). `unshare --fork` ignores `TERM`,
+so it is the `KILL` of `sudo` that ends the namespace, at most about 5
+seconds after the SDK gives up on the CLI. If the SDK never kills it (its
+timers are `unref`'d), the action process's exit does, through the
+pidfd. An earlier revision claimed that killing `sudo` closes the CLI's
+stdio. It does not: descendants keep their inherited pipe ends, which is
+why the chain above ties teardown to process death, not to EOF.
+
+**No supervisor process.** Nothing on the host side runs agent-related
+code after the CLI. Cleanup after the agent is step 7's alone: it kills
+any leftover (normally none), reclaims, removes the WIF ACL entries and
 deletes the agent's config dir (in its home).
 
 **Why this is enough while the action continues.** The action's error and
@@ -702,16 +763,17 @@ behaviour → What the action does after the CLI in turn:
   runner-owned execution file the SDK wrote. Its text is the agent's
   output, as today.
 - **The branch cleanup's git calls** are the only action code that runs git
-  in the workspace, and they need the chosen issue branch to exist on
-  origin. Launch step 6 has proven it absent, failing closed on a lookup
-  error. The agent cannot create it: it holds only the read-only job
+  in the workspace, and they need `claudeBranch` (a branch the prepare
+  created: an issue run, or a closed or merged PR) to exist on origin.
+  Launch step 6 has proven any such branch absent, failing closed on a
+  lookup error. The agent cannot create it: it holds only the read-only job
   token, the launch refuses any privileged token value in its argv or
   env, the URL is credential-free, and every App-token MCP server is
   dropped. So the ref can appear during the run only through a
   write-access human or the machine account, and neither acts for the
-  agent. Agent-mode workflows (the reviewer and both loops) and PR runs of
-  `claude.yml` have no new branch, so there this path does not exist at
-  all.
+  agent. Agent-mode workflows (the reviewer and both loops) and open-PR
+  runs of `claude.yml` create no new branch. For them `claudeBranch` is
+  unset and this path does not exist.
 - **`Post buffered inline comments`** is disabled by input (below). The
   agent's `/tmp` is private in any case.
 - **`Revoke app token`** puts the App token in `curl`'s argv and in a step
@@ -1087,11 +1149,19 @@ Untrusted input reaching the new code, and how each is handled:
   - The WIF JWT is readable by the agent through a named ACL and a
     read-only bind mount, both removed or gone at exit. That is the
     accepted model-credential exception.
-- **Survivors.** Agent processes end with the CLI: the namespace's PID 1
-  exits and the kernel kills the rest. Until then, the action's post-CLI
-  code is harmless to them by construction (Launcher → Why this is
-  enough). The only workspace git in it requires an issue branch that
-  launch step 6 proved absent, failing closed on a lookup error.
+- **Survivors.** Agent processes end with the namespace. The namespace
+  ends when the CLI exits, when the SDK-owned `sudo` dies (by any signal,
+  through a parent-death signal on `unshare` and `--kill-child`), or when
+  the action process exits (a pidfd PID 1 polls). No path depends on the
+  CLI cooperating. Until then, the action's post-CLI code is harmless to
+  them by construction (Launcher → Why this is enough). The only workspace
+  git in it requires a prepare-created branch that launch step 6 proved
+  absent, failing closed on a lookup error.
+- **Path escapes out of the namespace.** Every process in the chain
+  `chdir`s to `/` before the tmpfs covers `/home/runner`, the staging
+  binds are detached, descriptors other than stdio are closed, and the CLI
+  starts with a freshly resolved cwd inside the final bind. So no cwd,
+  descriptor or `/proc/*/cwd` link reaches the original tree.
 - **What the agent can do.** A compromised agent user can write a hostile
   landing manifest, commits and body files. The land job's validator, and
   #149's tier-1 refusal, handle those as today.
@@ -1118,12 +1188,19 @@ Untrusted input reaching the new code, and how each is handled:
     - `--version` passes through;
     - the env allow-list has no `ACTIONS_*`, command-file or App-token
       value, and `GH_TOKEN` is the job token.
-  - The issue-branch precondition, against a stub `git`:
-    - `ls-remote` exit 2 lets the launch proceed;
-    - exit 0 (the ref exists) and exit 128 (lookup error) refuse it;
+  - The new-branch precondition, against a stub `git`, with the recorded
+    pre-action ref and the post-prepare `HEAD` set for each case:
+    - an issue run (default branch recorded, a new `claude/issue-…`
+      checked out): `ls-remote` exit 2 proceeds; exit 0 (the ref exists)
+      and exit 128 (lookup error) refuse;
     - the reviewer's fixed-clock case, where `setupBranch`'s fallback name
       equals its first name and both exist, refuses;
-    - with `issue-branch` unset (PR runs, agent mode) no lookup happens.
+    - a closed PR and a merged PR (a new `claude/pr-…` checked out) are
+      checked the same way;
+    - a PR that was open at the gate and closed before the prepare, so a
+      new branch appears, is checked;
+    - an open-PR follow-up (the recorded head equals `HEAD`) and a detached
+      review checkout do no lookup and proceed.
   - `reclaim.sh` run twice (idempotence).
   - `import-codex-final` `dir` mode: symlinks, hardlinks, foreign owner,
     bad names, unreadable files, the per-file cap and aggregate exhaustion
@@ -1169,6 +1246,15 @@ Untrusted input reaching the new code, and how each is handled:
   - once the synthetic CLI exits, however it ends, no process of the
     namespace remains (checked from the host as root), including one the
     CLI started with `setsid nohup`;
+  - with a CLI that ignores EOF and `TERM`, and separately with a CLI
+    stopped by `SIGSTOP`:
+    - `TERM` then `KILL` to the SDK-owned PID (`sudo`), as the SDK sends
+      them, ends the namespace within 1 second of the `KILL`;
+    - a `KILL` alone does the same;
+    - exiting the harness process (standing in for the action's `bun`)
+      while leaving `sudo` alive ends the namespace through the pidfd;
+    - in each case the harness process itself terminates within a bound
+      (no wait on inherited pipes), and no namespace process remains;
   - the harness then runs the action's own post-CLI git sequence
     (`checkAndCommitOrDeleteBranch` with a stub octokit answering 404 for
     the branch, as origin does for a fresh name) and no marker appears;
@@ -1216,6 +1302,13 @@ Untrusted input reaching the new code, and how each is handled:
     process that plants a `core.fsmonitor` marker hook. No marker written
     as `runner` appears during the rest of the action step, and step 7's
     log shows the survivor killed before any later step's git;
+  - the probe runs from the cwd the CLI is given, and it is started, as in
+    production, by an SDK whose own cwd is the real workspace. It tries to
+    reach `$RUNNER_TEMP` and the runner's tree by relative paths
+    (`../../_temp/…`), by `openat` on every descriptor it holds, and
+    through `/proc/self/cwd/..` and `/proc/1/cwd`. It finds no step script,
+    command file or sentinel file that the job planted under
+    `$RUNNER_TEMP`, while absolute-path scans see only the four binds;
   - a second run of the job with `grant: "none"` (the fork-review shape):
     after the wrapper's preparation, the probe, as `claude-agent` and
     outside any sandbox, fails to overwrite a tracked file, create a root
@@ -1300,7 +1393,8 @@ Untrusted input reaching the new code, and how each is handled:
    mode. Unit tests. Files: `.github/actions/{create-codex-user,reclaim-codex-workspace,import-codex-final}/*`,
    `tests/test_codex_path.py`, `tests/test_import_codex_final.py`.
 4. **Launcher.** `.github/actions/claude-agent-launcher/` (action.yml, the
-   `claude` wrapper, `agent-ns-init`, the adapted isolation check). Add `tests/fixtures/claude-probe`, `tests/sdk_barrier/`, the
+   `claude` wrapper, `agent-ns-launch`, `agent-ns-init`, the adapted
+   isolation check). Add `tests/fixtures/claude-probe`, `tests/sdk_barrier/`, the
    canary's `claude-boundary`, `claude-revoke-window` and
    `claude-sandbox-review` jobs and the
    weekly schedule, and the wrapper and namespace tests. Run the canary
