@@ -75,7 +75,7 @@ text are checked by the tests under `tests/`.
 - In a codex job nothing from the checked-out tree executes as the runner:
   the caller's `claude-setup` action is not run there, and the shared
   provisioning recipe (uv and a dev-install of the checkout, the tree's own
-  build backend, or the caller stub's `codex_provision` recipe) runs as the
+  build backend, or the caller stub's `provision` recipe) runs as the
   unprivileged `codex` user after that user exists and before the
   codex-action step, so a head the pipeline itself produced from an
   outsider's issue text meets the same boundary as codex itself: no sudo,

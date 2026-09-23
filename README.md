@@ -205,14 +205,17 @@ dev-install recipe when the checkout has a `pyproject.toml`, executed as
 the unprivileged codex user, and never the repo's `claude-setup` action
 (which runs as the runner, ahead of the codex sandbox) — so a repo that
 pins a Python version or installs non-Python tooling in `claude-setup`
-sets the reusable workflows' `codex_provision` input in its stub instead —
+sets the reusable workflows' `provision` input in its stub instead —
 bash run as the codex user (`uv venv --python 3.11 && uv sync --dev`, or
 `corepack enable --install-directory ~/.local/bin && pnpm install
---frozen-lockfile`; the example stubs show the shape). Without it a
-non-Python repo gets no provisioning on codex runs (codex may install what
-it needs inside its sandbox, which has network). Claude runs keep using
-`claude-setup`, with the uv dev-install as the fallback when the checkout
-lacks it.
+--frozen-lockfile`; the example stubs show the shape). A stub that sets the
+earlier name, `codex_provision`, keeps working: it is used when `provision`
+is empty. Without either a non-Python repo gets no provisioning on codex
+runs (codex may install what it needs inside its sandbox, which has
+network). Claude runs keep using `claude-setup`, with the uv dev-install as
+the fallback when the checkout lacks it; when they move to an unprivileged
+agent user too, they will run the same `provision` recipe instead
+([design/executed-paths-residual.md](design/executed-paths-residual.md)).
 Details: [design/codex-engine.md](design/codex-engine.md).
 
 ## The inspect_ai fork

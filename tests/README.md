@@ -386,14 +386,16 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the gate's `engine` output at the job level and gate no step on it, the
   land job waits for both; the codex job `uses:` no action from the
   checkout, provisions with `provision-fallback` `user: codex` (and the
-  caller's `codex_provision` as `recipe`) after `Create codex user`, runs
-  `Reset codex home` (`create-codex-user` `mode: reset-home`) before the
+  caller's `provision`, else `codex_provision`, as `recipe`) after
+  `Create codex user`, runs `Reset codex home` (`create-codex-user`
+  `mode: reset-home`) before the
   codex-action step, writes nothing into the workspace after the codex user
   exists (prompt files in RUNNER_TEMP, the exclude lines appended by the
   prep step), and its prompts take the tool paths from the composite's
   `bin` directories; the Claude job keeps the runner-side `claude-setup`
-  and fallback; `codex_provision` is declared with a type and reaches only
-  the codex job. Also the composites, lifted and run against stubs:
+  and fallback; `provision` and `codex_provision` are declared with a type
+  and reach only the codex job. Also the composites, lifted and run
+  against stubs:
   `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
   codex -H` when `user` is set, the recipe directly otherwise, a caller
   recipe handed over as a `$RUNNER_TEMP` file and refused when it is not

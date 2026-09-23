@@ -130,32 +130,45 @@ on:
         required: false
         type: string
         default: "high"
+      provision:
+        description: >-
+          The caller's provisioning recipe (bash), run as the unprivileged
+          agent user in the checkout after that user exists and before the
+          agent starts. Today only CODEX runs use it (as the codex user):
+          Claude runs keep the repository's `.github/actions/claude-setup`
+          action, with the generic recipe as the runner-side fallback, until
+          they move to an agent user of their own and take this recipe too
+          (design/executed-paths-residual.md). It is the codex-run
+          counterpart of claude-setup, which the codex job never runs (a
+          composite action can only run as the runner, and nothing from the
+          checkout may run as the runner in that job: Claude Security
+          finding 4628446). Empty (the default) falls back to
+          `codex_provision`; with both empty the generic recipe runs — `uv
+          venv` and `uv pip install -e .[dev]` (`--group dev` when the
+          project declares one) — where the checkout has a pyproject.toml.
+          Set it to keep what the repository's claude-setup does: a Python
+          pin (`uv venv --python 3.11`), a lockfile sync (`uv sync --dev`),
+          Node tooling (`corepack enable --install-directory ~/.local/bin &&
+          pnpm install --frozen-lockfile`). The recipe runs with uv
+          bootstrapped on PATH and network on; it has no sudo, HOME is the
+          agent user's (/home/codex), PATH is sudo's default plus
+          ~/.local/bin, and it must create the project's `.venv` for the
+          prompts' tool discovery (which also looks in `node_modules/.bin`
+          and ~/.local/bin). It runs under `bash --noprofile --norc -eo
+          pipefail`, like a `shell: bash` step: a failing command fails
+          provisioning (handle an expected failure with `|| true`). A recipe
+          runs whether or not the checkout has a pyproject.toml — only the
+          generic recipe needs one. It comes from the caller's workflow
+          file, so it is trusted like every other input here; keep it free
+          of anything derived from the run's event.
+        required: false
+        type: string
+        default: ""
       codex_provision:
         description: >-
-          The caller's provisioning recipe for CODEX runs (bash), run as the
-          unprivileged codex user in the checkout after the codex user
-          exists and before codex starts — the codex-run counterpart of the
-          repository's `.github/actions/claude-setup` action, which the codex
-          job never runs (a composite action can only run as the runner, and
-          nothing from the checkout may run as the runner in that job:
-          Claude Security finding 4628446). Empty (the default) runs the
-          generic recipe — `uv venv` and `uv pip install -e .[dev]`
-          (`--group dev` when the project declares one) — where the checkout
-          has a pyproject.toml. Set it to keep what the repository's
-          claude-setup does: a Python pin (`uv venv --python 3.11`), a
-          lockfile sync (`uv sync --dev`), Node tooling (`corepack enable
-          --install-directory ~/.local/bin && pnpm install
-          --frozen-lockfile`). The recipe runs with uv bootstrapped on PATH
-          and network on; it has no sudo, HOME is /home/codex, PATH is
-          sudo's default plus ~/.local/bin, and it must create the project's
-          `.venv` for the prompts' tool discovery (which also looks in
-          `node_modules/.bin` and ~/.local/bin). It runs under `bash
-          --noprofile --norc -eo pipefail`, like a `shell: bash` step: a
-          failing command fails provisioning (handle an expected failure
-          with `|| true`). A recipe runs whether or not the checkout has a
-          pyproject.toml — only the generic recipe needs one. It comes from
-          the caller's workflow file, so it is trusted like every other input
-          here; keep it free of anything derived from the run's event.
+          The earlier name of `provision`, kept so the stubs that set it keep
+          working: used, with the same semantics, when `provision` is empty,
+          and ignored when `provision` is set.
         required: false
         type: string
         default: ""
@@ -1888,15 +1901,15 @@ jobs:
       - name: Provision project environment (as the codex user)
         id: setup
         timeout-minutes: 10
-        if: hashFiles('pyproject.toml') != '' || inputs.codex_provision != ''
+        if: hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != ''
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
         with:
           user: codex
-          # The caller's own recipe for codex runs, if its stub set one (the
-          # trusted counterpart of its claude-setup); empty runs the generic
-          # dev-install.
-          recipe: ${{ inputs.codex_provision }}
+          # The caller's own recipe, if its stub set one (the trusted
+          # counterpart of its claude-setup): `provision`, else the earlier
+          # `codex_provision`; both empty runs the generic dev-install.
+          recipe: ${{ inputs.provision || inputs.codex_provision }}
 
       # The boundary between provisioning-as-codex and codex-action (Claude
       # Security finding 4628446, review round 1): kill every process still

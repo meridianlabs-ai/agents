@@ -183,9 +183,9 @@ take effect on every repo's next run.
   job that runs the Claude agent: a referenced secret reaches the runner
   whatever the step's `if:` says. In a codex job nothing from the checkout
   runs as the runner: no `uses: ./...`, and provisioning is
-  `provision-fallback` with `user: codex` (plus the caller's
-  `codex_provision` as `recipe`), placed after `Create codex user`, and
-  followed by `Reset codex home` (`create-codex-user` with `mode:
+  `provision-fallback` with `user: codex` (plus the caller's `provision`,
+  else `codex_provision`, as `recipe`), placed after `Create codex user`,
+  and followed by `Reset codex home` (`create-codex-user` with `mode:
   reset-home`: codex processes killed, `~codex/.codex` re-created) before
   the codex-action step. Once the codex user exists the runner writes
   nothing into the workspace until the reclaim: prompt files go to

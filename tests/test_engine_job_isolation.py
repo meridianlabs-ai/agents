@@ -27,8 +27,10 @@ job is dispatched, and a skipped job gets no job message at all.
   codex-action's runner-side reads of that home (review round 1); the
   runner writes nothing into the workspace after the codex user exists
   (the prompt file lives in RUNNER_TEMP, the exclude lines are appended
-  before the user is created); the caller's own recipe (`codex_provision`)
-  reaches the provisioning step as the composite's `recipe`.
+  before the user is created); the caller's own recipe (`provision`, or
+  the earlier `codex_provision` when `provision` is empty) reaches the
+  provisioning step as the composite's `recipe`, and neither input reaches
+  the Claude job yet (design/executed-paths-residual.md, plan step 1).
 - The `provision-fallback` composite runs its recipe under `sudo -u <user>
   -H` from a copy in `$RUNNER_TEMP` when `user` is set, directly as the
   runner otherwise; a caller recipe replaces the default install after the
@@ -150,15 +152,18 @@ def test_the_codex_job_provisions_as_the_codex_user_after_the_boundary(name):
     assert "claude-setup" not in "\n".join(code_lines(codex_job))
     provision = step_with(codex_job, "provision-fallback@main")
     assert "        with:\n          user: codex\n" in provision
-    assert "          recipe: ${{ inputs.codex_provision }}\n" in provision
-    # Gate: a Python project (the generic recipe) OR a caller recipe — a
-    # Node repository's recipe must run without a pyproject.toml (review
-    # round 2); the reviewer keeps its `ok` clause.
+    # `provision` wins; the earlier `codex_provision` is the fallback when it
+    # is empty (design/executed-paths-residual.md → Provisioning).
+    assert "          recipe: ${{ inputs.provision || inputs.codex_provision }}\n" in provision
+    # Gate: a Python project (the generic recipe) OR a caller recipe under
+    # either name — a Node repository's recipe must run without a
+    # pyproject.toml (review round 2); the reviewer keeps its `ok` clause.
     cond = next(l for l in provision.splitlines() if l.startswith("        if: "))
+    recipe_set = "hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != ''"
     if name == "claude-review.yml":
-        assert cond == "        if: needs.gate.outputs.ok == 'true' && (hashFiles('pyproject.toml') != '' || inputs.codex_provision != '')"
+        assert cond == f"        if: needs.gate.outputs.ok == 'true' && ({recipe_set})"
     else:
-        assert cond == "        if: hashFiles('pyproject.toml') != '' || inputs.codex_provision != ''"
+        assert cond == f"        if: {recipe_set}"
     order = [s for s in steps(codex_job) if any(k in s for k in ("create-codex-user@main", "provision-fallback@main", CODEX_ACTION))]
     assert [("create-codex-user@main" in order[0], "provision-fallback@main" in order[1],
              "create-codex-user@main" in order[2], CODEX_ACTION in order[3])] == [(True, True, True, True)]
@@ -214,18 +219,21 @@ def test_the_runner_writes_nothing_into_the_workspace_after_the_codex_user_exist
 
 
 @pytest.mark.parametrize("name", REUSABLE)
-def test_the_caller_recipe_input_is_declared_and_reaches_only_the_codex_job(name):
+@pytest.mark.parametrize("input_name", ["provision", "codex_provision"])
+def test_the_caller_recipe_input_is_declared_and_reaches_only_the_codex_job(name, input_name):
     text = workflow_text(name)
-    decl = text[text.index("      codex_provision:\n"):]
+    decl = text[text.index(f"      {input_name}:\n"):]
     decl = decl[:re.search(r"\n      [a-z_]+:\n", decl).start()]
     assert "        required: false\n" in decl and "        type: string\n" in decl and decl.endswith('        default: ""')
+    ref = re.compile(rf"\binputs\.{input_name}\b")
     for job, block in jobs(text).items():
-        uses = [l.strip() for l in code_lines(block) if "inputs.codex_provision" in l]
+        uses = [l.strip() for l in code_lines(block) if ref.search(l)]
         if job == AGENT_JOBS[name][1]:
             # The provisioning step's gate and its `recipe` input, nothing else.
-            assert len(uses) == 2 and uses[1] == "recipe: ${{ inputs.codex_provision }}", uses
-            assert uses[0].startswith("if: ") and "inputs.codex_provision != ''" in uses[0], uses
+            assert len(uses) == 2 and uses[1] == "recipe: ${{ inputs.provision || inputs.codex_provision }}", uses
+            assert uses[0].startswith("if: ") and f"inputs.{input_name} != ''" in uses[0], uses
         else:
+            # No other job: the Claude job keeps claude-setup until plan step 5.
             assert uses == [], job
 
 
