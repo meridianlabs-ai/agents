@@ -12,7 +12,9 @@ Testing a change).
   / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
   workflow's actual land inputs, against forged manifests; the PR-label
   policy (`allowed-pr-labels`: the dev gate's read, which a manifest's
-  `pr.labels` may not exceed — Claude Security 4628441); the review fields
+  `pr.labels` may not exceed — Claude Security 4628441; the loops' land
+  jobs pass `[]` and the reviewer's `refuse-pr`, wiring included, issue
+  #138); the review fields
   refused on every caller but the reviewer's (`allow-review`), and the
   fix-agent fields (`pr`, `replies`, `resolve_threads`, `handoff_body_file`,
   `handback`) refused under `refuse-bundle`, each against the forged manifest

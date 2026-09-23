@@ -2733,6 +2733,12 @@ jobs:
           # The CI-fix manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""
+          # A loop round never labels a PR (issue #138): the round's PR is
+          # pinned by pr-number, and `auto` / `engine:*` are a trusted
+          # decider's, never the fix agent's — the loop gates accept the
+          # machine account as the labeler. An empty list makes the
+          # validator refuse any `pr.labels` a manifest carries.
+          allowed-pr-labels: "[]"
           # A re-review request on a manifest with NO bundle is honored only
           # when the agent step succeeded (`agent_outcome`, a step outcome
           # the agent can push only toward `failure`). This loop's composer
