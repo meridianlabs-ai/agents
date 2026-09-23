@@ -486,9 +486,13 @@ design changes none of them.
   - No job in those four files overrides the key.
   - Each calling job in `examples/*-stub.yml` and this repo's `*-stub.yml`
     carries `cache-mode: read`.
-  - Runs under `python3 -m pytest` from the root. The staged
-    `tests/workflow-tests.yml` already triggers on `tests/**` and the four
-    workflows.
+  - Runs under `python3 -m pytest` from the root, locally. The
+    implementation PR and its review carry the result as evidence. No
+    active workflow runs the suite today: `tests/workflow-tests.yml` is
+    staged outside `.github/workflows/` (its own header says to move it
+    there), so its path filters are inert. The guard joins CI when that
+    existing staged workflow is activated. Activating it is not part of
+    this design.
 - **Canary: `cache-mode-canary.yml` plus `cache-mode-canary-reusable.yml`**
   in `.github/workflows/` (new; `workflow_dispatch` only, like #136's
   `engine-isolation-canary.yml`). It needs no secrets, no model and no
@@ -529,11 +533,39 @@ design changes none of them.
   and the two loops when next exercised). Confirm that every job's "Set up
   job" log shows `Cache mode: read`, both engines included once #136 has
   landed.
-- **Caller PRs:** after merge, one `workflow_dispatch` of each changed
-  caller-owned workflow (inspect_flow `inspect-update.yml` with a dry run
-  where it has one, ts-mono `dependabot-fix.yml` with `dry_run`). Confirm
-  `Cache mode: read` and, where claude-setup missed its key, the skipped
-  or refused save in the post step.
+- **Caller PRs:** a caller change counts as validated only when an
+  actual execution of its agent job shows two things:
+  - that job's "Set up job" line `Cache mode: read`;
+  - that job's cache post-step lines: a hit ("not saving"), a skip for
+    the mode, or a service refusal. A setup action's generic "saved"
+    message is not evidence either way.
+
+  A preflight-only or skipped agent job proves nothing. ts-mono's
+  `dependabot-fix.yml` `dry_run: true` skips the agent and the landing
+  (its `dry_run` input description and the agent job's
+  `if: inputs.dry_run != true`, lines 77-83 and 167 at `866334d`), so it
+  checks only the gate. The evidence comes from one of two sources:
+
+  - **The next natural run (recommended).** It has no effects beyond the
+    workflow's normal ones:
+    - ts-mono `dependabot-fix.yml`: the daily 10:00 UTC schedule. Its
+      agent job runs when the gate finds work.
+    - inspect_flow `inspect-update.yml`: the Monday 18:00 UTC schedule.
+    - inspect_flow `inspect-ai-main-failure.yml`: `triage-agent` runs
+      only when a scheduled "Inspect AI Main CI" run fails and the gate
+      decides it needs triage.
+  - **A dispatch with normal effects,** if evidence is wanted sooner.
+    Each dispatch does real work:
+    - `dependabot-fix.yml` with `dry_run: false` runs the agent and may
+      land a PR.
+    - `inspect-update.yml` has no dry-run input. A dispatch runs the
+      agent and may open or update its update PR.
+    - `inspect-ai-main-failure.yml` needs the `run_id` of a failed main
+      CI run, and files or updates that failure's issue.
+
+  Where an execution's claude-setup hit its exact key, the post step
+  shows only "not saving". The mode line is then the evidence, and the
+  canary covers the save path.
 
 ## Implementation plan
 
