@@ -492,16 +492,16 @@ with the `---` rule below it — and only when the fork issue's author is a trus
 has write access on the fork (the same rule the fork PR passes; a failed
 lookup is untrusted), since the fork is public and an issue body stays
 editable by its author; any other occurrence is ignored and reported. For
-the same reason every bare `#M` in the fork PR body is qualified to
-`meridianlabs-ai/inspect_ai#M` before the body is republished upstream —
-closing keyword or not, in any case (a `#M` right after a closing keyword
-is qualified whatever surrounds it; an already-qualified `owner/repo#M`,
-an HTML entity, a URL fragment or the destination of a well-formed
-Markdown link, image, reference definition or HTML `href`/`src` is not a
-bare ref and stays verbatim) — so the only bare ref the upstream PR
-carries is that `Fixes #<up>`; the script prints the body as it will be
-published, in `--dry-run` and in the real run (findings 4629156 and 4629152,
-fixed 2026-09-22).
+the same reason the fork PR body's refs must not reach upstream bare: a
+`#M` at a line start or after whitespace is qualified to
+`meridianlabs-ai/inspect_ai#M`, then the body is rendered by GitHub's
+Markdown API in upstream's context and promote refuses (exit 5, before any
+write) if it resolves any upstream issue or PR other than `<up>` — so the
+only upstream reference the PR carries is that `Fixes #<up>`. GitHub's own
+parser decides what is a reference; a hand-written Markdown scanner was
+tried first and did not converge under review (agents#127, 2026-09-23).
+The script prints the body as it will be published, in `--dry-run` and in
+the real run (findings 4629156 and 4629152, fixed 2026-09-22).
 
 **Not the External-proxy mechanism.** Imports are our own work in the normal
 `Todo → Agent → Review → Sign-off → …` pipeline — no `External` label, no

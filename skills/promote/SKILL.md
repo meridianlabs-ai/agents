@@ -80,18 +80,20 @@ API — org-fork heads take no maintainer edits and these branches trail the
 fork's main mirror, so a fresh promotion usually opens behind; a conflict,
 commonly CHANGELOG, aborts with exit 5 BEFORE any upstream PR is opened, for
 a human to resolve on the branch) and creates it with the fully-qualified
-`Fixes meridianlabs-ai/inspect_ai#N` (EVERY bare `#M` in the fork PR body
-is rewritten to `meridianlabs-ai/inspect_ai#M`, closing keyword or not, in
-any case — republished on a PR based on upstream main they would rebind to
-upstream's tracker and a `Closes #M` would close upstream's issue M on
-merge; a closing keyword in any of GitHub's spellings before the qualified
-ref counts as the ref to the issue, else one is prepended. A `#M` right
-after a closing keyword is qualified whatever surrounds it; otherwise bare
-means a `#M` GitHub would resolve against the tracker: already-qualified
-`owner/repo#M` refs, HTML entities, URL fragments and the destinations of
-well-formed Markdown links, images, reference definitions and HTML
-`href`/`src` attributes are left verbatim), plus a bare
-`Fixes #<up>` when the fork issue was imported from upstream. That
+`Fixes meridianlabs-ai/inspect_ai#N` (a `#M` at a line start or after
+whitespace in the fork PR body is rewritten to `meridianlabs-ai/inspect_ai#M`
+— republished on a PR based on upstream main it would rebind to upstream's
+tracker and a `Closes #M` would close upstream's issue M on merge; a closing
+keyword in any of GitHub's spellings before the qualified ref counts as the
+ref to the issue, else one is prepended), plus a bare `Fixes #<up>` when the
+fork issue was imported from upstream. The result is then rendered by
+GitHub's Markdown API in upstream's context, and promote **refuses with exit
+5, before any write,** if GitHub resolves any upstream issue or PR other than
+`<up>` in it — spellings the rewrite leaves (`(#7)`, `Fixes:#7`, `GH-7`), a
+qualified `UKGovernmentBEIS/inspect_ai#7` or an upstream issue URL. The
+`ABORT:` line names each ref: qualify it as `meridianlabs-ai/inspect_ai#M`
+(or drop an upstream link) in the fork PR body and re-run. A failed render
+also exits 5. That
 `Upstream issue:` line is believed ONLY as /import's machine-written header
 — the body's literal first line, with the `---` rule below it and the
 upstream author's snapshot under that — and ONLY when the fork issue's author passes the same trust rule
@@ -124,8 +126,10 @@ hit the limit (re-run, or pin with `--pr`); the resolved PR's head is
 `main`/`meridian` (never promote it); the fork branch moved past the
 resolved PR's head (re-run — the PR data was stale, or someone pushed); a
 `REVIEWER` who is provably not a collaborator on upstream or on the ts-mono
-companion's repo; or a conflict merging upstream main into the branch
-(resolve on the branch and re-run). No upstream PR was opened in any of
+companion's repo; the upstream PR body references an upstream issue or PR
+other than the import's, or could not be rendered to check (qualify the
+named refs in the fork PR body and re-run); or a conflict merging upstream
+main into the branch (resolve on the branch and re-run). No upstream PR was opened in any of
 these; **6** ambiguous — more
 than one fork PR qualifies at the same step (stderr lists them): ask the
 user which one and re-run with `--pr <number>`. Never guess — the

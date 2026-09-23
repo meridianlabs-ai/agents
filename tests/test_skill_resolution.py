@@ -66,6 +66,26 @@ case "$args" in
     if [ -f "$STUB/comments_fail_$n" ]; then echo "gh: HTTP 502 fetching page 2" >&2; exit 1; fi ;;
   "pr checks "*) ;;
   "api repos/UKGovernmentBEIS/inspect_ai/commits/main "*) echo "0123abcd" ;;
+  "api markdown --input -")
+    # A stand-in for GitHub's renderer: an href per inline-link destination
+    # (destinations are not text), then one issue link per reference it
+    # recognises in the text (bare `#M` and `GH-M` in the request's context,
+    # qualified `owner/repo#M`, issue/PR URLs) — all promote.sh reads.
+    cat >"$STUB/markdown_in.json"
+    if [ -f "$STUB/markdown_fail" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+    python3 - "$STUB/markdown_in.json" <<'PY'
+import json, re, sys
+req = json.load(open(sys.argv[1]))
+text, ctx = req["text"], req["context"]
+for d in re.findall(r"\]\(([^)\s]*)", text):
+    print(f'<a href="{d}">link</a>')
+text = re.sub(r"\]\([^)]*\)", "]", text)
+for m in re.finditer(r"(?<![\w/&])(?:#|GH-)(\d+)\b|\b([\w.-]+/[\w.-]+)#(\d+)\b"
+                     r"|https://github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/(\d+)", text):
+    repo, num = (ctx, m[1]) if m[1] else (m[2], m[3]) if m[2] else (m[4], m[5])
+    print(f'<a class="issue-link" data-url="https://github.com/{repo}/issues/{num}">#{num}</a>')
+PY
+    ;;
   *) echo "stub gh: unexpected call: $args" >&2; exit 97 ;;
 esac
 """
@@ -119,7 +139,7 @@ def open_pr(number, *, author=MARVIN, head_repo=FORK, branch, body="", title=Non
 
 class Stub:
     def __init__(self, tmp_path, issue_json, *, perms=(), open_prs=(), pr_views=(), comments=None,
-                 branches=(), prlist_fail=False, comments_fail=()):
+                 branches=(), prlist_fail=False, comments_fail=(), markdown_fail=False):
         self.dir = tmp_path / "stub"
         self.dir.mkdir(parents=True)
         gh = tmp_path / "bin" / "gh"
@@ -137,6 +157,8 @@ class Stub:
         (self.dir / "branches").write_text("".join(f"{b}={sha}\n" for b, sha in branches))
         if prlist_fail:
             (self.dir / "prlist_fail").touch()
+        if markdown_fail:
+            (self.dir / "markdown_fail").touch()
         for number in comments_fail:
             (self.dir / f"comments_fail_{number}").touch()
         # checkout.sh resolves the issue's repo from the clone's remotes and
@@ -653,8 +675,10 @@ def test_promote_verdict_is_unavailable_when_the_comment_lookup_fails_part_way(t
 # fork PR body's bare `#M` refs (written for the fork's tracker, they rebind
 # to upstream's once republished on a PR based on upstream main). The line
 # is honoured only as /import's header — the body's first line — from an
-# author passing the trust rule; every bare ref is qualified to the fork; and
-# the body is printed as it will be published so the operator can see it.
+# author passing the trust rule; bare refs are qualified to the fork, and
+# GitHub's renderer (stubbed) must then find no upstream reference but the
+# header's, else promote refuses; the body is printed as it will be published
+# so the operator can see it.
 
 UP_N = 2615  # the upstream issue an import header names
 IMPORT_HEADER = f"Upstream issue: https://github.com/{UPSTREAM}/issues/{UP_N}"
@@ -782,141 +806,94 @@ def test_promote_issue_without_the_line_needs_no_author_lookup(tmp_path):
     assert not any("/permission" in c for c in s.calls())
 
 
-def test_promote_qualifies_every_bare_ref_in_the_upstream_body(tmp_path):
+def rendered_request(s):
+    """The JSON promote.sh sent to `gh api markdown`."""
+    return json.loads((s.dir / "markdown_in.json").read_text())
+
+
+def test_promote_qualifies_bare_refs_in_the_upstream_body(tmp_path):
     # The scanner's body: closing keywords in other cases and for other
-    # issues, a bare mention, and refs that are already qualified (never
-    # double-qualified) — including an upstream ref the agent copied from an
-    # import snapshot and an HTML entity.
-    fork_body = (f"Summary.\n\nCloses #7\nfixes #{N}\nsee #8, UKGovernmentBEIS/inspect_ai#5, "
-                 f"meridianlabs-ai/inspect_ai#9 and &#123; in step #1.\n")
+    # issues, bare mentions (after whitespace or at a line start), and refs
+    # the rewrite must leave alone — already qualified, an HTML entity, a
+    # section link, a URL fragment, another repository's ref.
+    fork_body = (f"Summary.\n\nCloses #7\nfixes #{N}\nsee #8, meridianlabs-ai/inspect_ai#9 and &#123; in step #1.\n"
+                 "#27 at the start of a line\nCloses\t#28\n"
+                 "[Reproduction](#1-reproduction) https://github.com/x/y/pull/5#issuecomment-6 other/repo#10\n")
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
     r = s.run(PROMOTE, str(N), "--dry-run")
     assert r.returncode == 0, r.stderr
     body = published_body(r.stdout)
-    assert not re.search(r"(?<![\w/&])#\d+", body), body  # no bare ref survives
     assert "Closes meridianlabs-ai/inspect_ai#7" in body
     assert f"fixes meridianlabs-ai/inspect_ai#{N}" in body
-    assert "see meridianlabs-ai/inspect_ai#8, UKGovernmentBEIS/inspect_ai#5, meridianlabs-ai/inspect_ai#9 and &#123; in step meridianlabs-ai/inspect_ai#1." in body
+    assert "see meridianlabs-ai/inspect_ai#8, meridianlabs-ai/inspect_ai#9 and &#123; in step meridianlabs-ai/inspect_ai#1." in body
+    assert "meridianlabs-ai/inspect_ai#27 at the start" in body
+    assert "Closes\tmeridianlabs-ai/inspect_ai#28" in body
+    assert "[Reproduction](#1-reproduction) https://github.com/x/y/pull/5#issuecomment-6 other/repo#10" in body
     # `fixes #N` counts as the closing ref to this issue: no second one is prepended.
     assert body.count(f"meridianlabs-ai/inspect_ai#{N}") == 1
     assert not body.startswith("Fixes")
+    # The check rendered exactly the printed body, in upstream's context.
+    req = rendered_request(s)
+    assert req == {"text": body, "mode": "gfm", "context": UPSTREAM}
     assert '-f body=<the body printed above>' in r.stdout
     assert promote_calls_wrote_nothing(s.calls())
 
 
-def test_promote_leaves_qualified_refs_link_destinations_and_urls_alone(tmp_path):
-    # Review round 1: a `#M` glued to a qualified repository name (whatever
-    # its last character), an HTML entity, a Markdown link destination or a
-    # URL fragment is not a bare issue reference and must survive verbatim,
-    # while bare refs next to punctuation are still qualified.
-    keep = ("[Reproduction](#1-reproduction) [fragment](https://example.test/?q=#123) "
-            "other/repo-#7 other/repo.#8 other/repo_x#9 repo1#10 UKGovernmentBEIS/inspect_ai#11 &#123; "
-            "https://github.com/x/y/pull/5#issuecomment-6 <https://e.test/#15> https://e.test/a#16")
-    bare = "(#21) **#22** |#23| a,#24 \"#25\" [#26]"
-    fork_body = f"Summary.\n\n{keep}\n{bare}\n#27 at the start of a line\nCloses\t#28\n"
-    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
-    r = s.run(PROMOTE, str(N), "--dry-run")
-    assert r.returncode == 0, r.stderr
-    body = published_body(r.stdout)
-    assert body.splitlines()[0] == f"Fixes meridianlabs-ai/inspect_ai#{N}"
-    assert keep in body  # every kept token verbatim, none double-qualified
-    for m in range(21, 29):
-        assert f"meridianlabs-ai/inspect_ai#{m}" in body, (m, body)
-    assert "Closes\tmeridianlabs-ai/inspect_ai#28" in body
-    assert not re.search(r"(?<![\w/&.=-])#\d+", body.replace("](#1-", "")), body  # no bare ref left
-
-
-def test_promote_leaves_every_link_destination_form_alone(tmp_path):
-    # Review round 2: destinations are not issue references whatever their
-    # CommonMark / HTML spelling — inline links and images with whitespace
-    # or a line break after the paren, angle-enclosed, reference
-    # definitions, quoted and unquoted href/src — while a bare ref in the
-    # link TEXT, a reference label or ordinary prose is still qualified.
-    keep = [
-        "[a]( #1-a)", "[b](\n#2-b)", "[c](<#3-c>)", "[d](#4-d \"title\")", "![e]( #5-e)", "![f](\n  #6-f)",
-        "[r]: #7-r", "[s]:\n  <#8-s>", "  [t]: #9-t \"title\"",
-        "<a href=\"#10-h\">x</a>", "<a href=\x27#11-h\x27>y</a>", "<img src=\"#12-s\">", "<a href=#13-h>z</a>",
-        "<a HREF = \"#14-h\">w</a>",
-        # review round 3: container prefixes, escaped and multiline labels,
-        # balanced parentheses in the destination, a nested image in a link
-        "> [q]: #15-q", "- [l]: #16-l", "1. [o]: #17-o", "[la\\]bel]: #18-e", "[la\nbel]: #19-m",
-        "[p](path(part),#20-p)", "![i](path(part),#21-i)", "[![img](#22-in)](#23-out)",
-        # review round 4: nested and escaped parentheses in the destination
-        "[n](path(part(inner)),#24-n)", "![m](a(b(c(d))),#25-m)", "[o](path(part\\(inner),#26-o)",
-        "[e](path(part\\)inner),#27-e)", "[t](#28-t \"title (1)\")",
-    ]
-    fork_body = "Summary.\n\n" + "\n".join(keep) + "\n\n[#31 in the text](#32-anchor)\n[#33]: #34-label\nsee #35\nCloses #36\n"
-    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
-    r = s.run(PROMOTE, str(N), "--dry-run")
-    assert r.returncode == 0, r.stderr
-    body = published_body(r.stdout)
-    for k in keep:
-        assert k in body, (k, body)
-    assert "[meridianlabs-ai/inspect_ai#31 in the text](#32-anchor)" in body
-    assert "[meridianlabs-ai/inspect_ai#33]: #34-label" in body
-    assert "see meridianlabs-ai/inspect_ai#35\nCloses meridianlabs-ai/inspect_ai#36" in body
-    assert body.splitlines()[0] == f"Fixes meridianlabs-ai/inspect_ai#{N}"
-    # Nothing in a destination was touched: the fork's name appears only where asserted above.
-    assert body.count("meridianlabs-ai/inspect_ai#") == 5, body
-
-
-@pytest.mark.parametrize("text, ref", [
-    # review round 3: markup lookalikes that are not complete constructs
-    # must not exempt the closing directive inside them, and a closing
-    # keyword right before a ref is qualified even inside a real destination
-    ("The setting href=\"\nCloses #7\n\" is broken.", "Closes meridianlabs-ai/inspect_ai#7"),   # attribute outside a tag
-    ("src=\x27\nResolved #8\n\x27 too", "Resolved meridianlabs-ai/inspect_ai#8"),
-    ("Text ](<Closes #9>)", "Text ](<Closes meridianlabs-ai/inspect_ai#9>)"),                  # no link text
-    ("[x](<Fixes #10>", "[x](<Fixes meridianlabs-ai/inspect_ai#10>"),                          # unclosed link
-    ("[ ]: <Closed #11>", "[ ]: <Closed meridianlabs-ai/inspect_ai#11>"),                     # blank label
-    ("[r]: <Resolves #12> not-a-title", "[r]: <Resolves meridianlabs-ai/inspect_ai#12> not-a-title"),  # trailing text
-    ("[x](<Closes #13>)", "[x](<Closes meridianlabs-ai/inspect_ai#13>)"),                    # keyword inside a real destination
-    ("<a href=\"Fixes #14\">x</a>", "<a href=\"Fixes meridianlabs-ai/inspect_ai#14\">x</a>"),
-    ("Fixes:#15 and fixes: #16", "Fixes:meridianlabs-ai/inspect_ai#15 and fixes: meridianlabs-ai/inspect_ai#16"),  # colon spellings
-    ("href=\"#17-h\" mentioned in prose", "href=\"meridianlabs-ai/inspect_ai#17-h\" mentioned in prose"),  # no tag, no keyword
-    # review round 4: any amount of whitespace between keyword and ref, in
-    # every protected destination family — the keyword is found over the
-    # whole body, not a fixed window before the ref
-    ("[x](<Closes" + " " * 20 + "#18>)", "[x](<Closes" + " " * 20 + "meridianlabs-ai/inspect_ai#18>)"),
-    ("<a href=\"Fixes" + " " * 20 + "#19\">x</a>", "<a href=\"Fixes" + " " * 20 + "meridianlabs-ai/inspect_ai#19\">x</a>"),
-    ("<img src=\x27Resolved" + " " * 20 + "#20\x27>", "<img src=\x27Resolved" + " " * 20 + "meridianlabs-ai/inspect_ai#20\x27>"),
-    ("[ref]: <Closed" + " " * 20 + "#21>", "[ref]: <Closed" + " " * 20 + "meridianlabs-ai/inspect_ai#21>"),
-    ("<a href=\"Fixes\n\n#22\">x</a>", "<a href=\"Fixes\n\nmeridianlabs-ai/inspect_ai#22\">x</a>"),
-    ("Fixes" + " " * 20 + "#23 in prose", "Fixes" + " " * 20 + "meridianlabs-ai/inspect_ai#23 in prose"),
-    ("[x](unbalanced(paren,#24-anchor", "[x](unbalanced(paren,meridianlabs-ai/inspect_ai#24-anchor"),  # not a destination
-], ids=["href-prose", "src-prose", "no-link-text", "unclosed-link", "blank-label", "trailing-text",
-        "keyword-in-destination", "keyword-in-href", "colon", "attr-no-tag",
-        "padded-angle-link", "padded-href", "padded-src", "padded-refdef", "newlines-href", "padded-prose",
-        "unbalanced-parens"])
-def test_promote_qualifies_closing_refs_inside_markup_lookalikes(tmp_path, text, ref):
+@pytest.mark.parametrize("text, refs", [
+    ("see (#7)", "#7"),                                                  # opening punctuation
+    ("Fixes:#8", "#8"),                                                  # colon, no space
+    ("**#9** and |#10|", "#9 #10"),
+    ("GH-11", "#11"),                                                    # GitHub's other bare form
+    (f"Fixes {UPSTREAM}#12", "#12"),                                     # already qualified — to upstream
+    (f"Fixes https://github.com/{UPSTREAM}/issues/13", "#13"),           # an issue URL
+    (f"[the report](https://github.com/{UPSTREAM}/pull/14)", "#14"),
+], ids=["paren", "colon", "emphasis", "gh-dash", "qualified-upstream", "issue-url", "link"])
+def test_promote_refuses_an_upstream_reference_the_rewrite_leaves(tmp_path, text, refs):
+    # Whatever the rewrite misses, GitHub's renderer resolves against
+    # upstream: promote refuses before any write instead of publishing it.
+    # A real run, not --dry-run: nothing upstream or on the fork is written.
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Summary.\n\n{text}\n")]))
-    r = s.run(PROMOTE, str(N), "--dry-run")
-    assert r.returncode == 0, r.stderr
-    body = published_body(r.stdout)
-    assert ref in body, body
-    assert not re.search(r"(?<![\w/&.=-])#\d+", body), body  # no bare ref left anywhere
+    r = s.run(PROMOTE, str(N))
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert f"ABORT: the upstream PR body references {UPSTREAM} issue(s)/PR(s) {refs} (" in r.stderr
+    assert "in fork PR #400's body" in r.stderr
+    assert text in published_body(r.stdout)  # the operator sees what was refused
+    assert not any("/merges" in c or c.startswith(f"api repos/{UPSTREAM}/pulls") for c in s.calls())
 
 
-def test_promote_keyword_suffix_of_a_longer_word_is_not_a_closing_keyword(tmp_path):
-    # Review round 4: a fixed lookback window invented a word boundary, so
-    # `discloses` read as `closes` and a genuine destination was rewritten.
-    # The keyword match runs over the whole body with a real \b.
-    fork_body = "Summary.\n\n[x](<discloses" + " " * 10 + "#7>) and discloses #8 in prose\n"
-    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)]))
+def test_promote_allows_the_import_header_upstream_issue_only(tmp_path):
+    # A genuine import's `Fixes #<up>` resolves upstream and is the one
+    # upstream reference allowed; the fork PR body may name the same issue.
+    fork_body = f"Summary.\n\nReported upstream: https://github.com/{UPSTREAM}/issues/{UP_N}\n"
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=fork_body)], author=MARVIN,
+                             body=import_body()))
     r = s.run(PROMOTE, str(N), "--dry-run")
     assert r.returncode == 0, r.stderr
-    body = published_body(r.stdout)
-    assert "[x](<discloses" + " " * 10 + "#7>)" in body, body            # a destination, no keyword: kept
-    assert "discloses meridianlabs-ai/inspect_ai#8 in prose" in body, body  # a bare mention: qualified
+    assert published_body(r.stdout).splitlines()[0] == f"Fixes #{UP_N}"
+    # Any other upstream reference is still refused next to it.
+    s2 = Stub(tmp_path / "b", issue([chip(400, branch="claude/issue-42-a", body=fork_body + "see (#7)\n")],
+                                    author=MARVIN, body=import_body()))
+    r2 = s2.run(PROMOTE, str(N), "--dry-run")
+    assert r2.returncode == 5, r2.stdout + r2.stderr
+    assert f"issue(s)/PR(s) #7 (" in r2.stderr
+
+
+def test_promote_refuses_when_the_body_cannot_be_rendered(tmp_path):
+    # The check fails closed: no rendering, no promotion.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body="Closes #7\n")]), markdown_fail=True)
+    r = s.run(PROMOTE, str(N))
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "ABORT: could not render the upstream PR body with GitHub's Markdown API" in r.stderr
+    assert not any("/merges" in c or c.startswith(f"api repos/{UPSTREAM}/pulls") for c in s.calls())
 
 
 @pytest.mark.parametrize("ref, prepended", [
     (f"Fixed #{N}", False), (f"RESOLVED #{N}", False), (f"closed #{N}", False), (f"Close #{N}", False),
-    (f"Resolves meridianlabs-ai/inspect_ai#{N}", False),
+    (f"Resolves meridianlabs-ai/inspect_ai#{N}", False), (f"Fixes: #{N}", False),
     (f"see #{N}", True),          # a mention is not a closing ref
     (f"Fixes #{N}0", True),       # #420 is another issue
     ("no ref at all", True),
-], ids=["Fixed", "RESOLVED", "closed", "Close", "qualified", "mention", "other-issue", "none"])
+], ids=["Fixed", "RESOLVED", "closed", "Close", "qualified", "colon", "mention", "other-issue", "none"])
 def test_promote_prepends_the_fixes_ref_only_when_no_closing_keyword_variant_names_the_issue(tmp_path, ref, prepended):
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Summary.\n\n{ref}\n")]))
     r = s.run(PROMOTE, str(N), "--dry-run")

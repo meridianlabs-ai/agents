@@ -17,10 +17,12 @@
 # that PR: its `Upstream issue:` line (which adds a bare `Fixes #<up>`
 # upstream) is believed only as /import's header — the body's first line,
 # with the `---` rule below it — and only from an author who passes the same
-# trust rule. Every bare `#M` in the fork PR body is qualified to the fork
+# trust rule. Bare `#M` refs in the fork PR body are qualified to the fork
 # before the body is published upstream, where bare refs resolve against
-# upstream's tracker; the body is printed as it will be published, in
-# --dry-run and in the real run.
+# upstream's tracker, and the result is checked with GitHub's own renderer:
+# any other reference to an upstream issue or PR is refused, not published.
+# The body is printed as it will be published, in --dry-run and in the real
+# run.
 #
 # Usage: promote.sh <issue-number> [--dry-run] [--pr <number>]
 #   --dry-run      print the candidates, each verdict, the decision and every
@@ -33,8 +35,10 @@
 # write (the open-PR listing the fallback needs failed or was truncated; the
 # resolved PR's head is a protected branch; the fork branch has moved past
 # the resolved PR's head; a REVIEWER who is provably not a collaborator on
-# upstream or on the ts-mono companion's repo; a conflict merging upstream
-# main into the branch); 6 ambiguous — more than one fork PR qualifies;
+# upstream or on the ts-mono companion's repo; the upstream PR body would
+# reference an upstream issue or PR other than the import's, or could not be
+# rendered to check; a conflict merging upstream main into the branch);
+# 6 ambiguous — more than one fork PR qualifies;
 # re-run with --pr <number>.
 set -euo pipefail
 
@@ -415,91 +419,46 @@ if [ -n "$M" ]; then
 else
   # The fork PR body was written for the fork's tracker; republished on a PR
   # based on upstream main, every bare `#M` rebinds to upstream issue M and a
-  # closing keyword before it (any case: close/fix/resolve and their forms)
-  # would close that issue on merge. Qualify every bare ref to the fork, as
-  # /import does in the other direction, then make sure a closing ref to THIS
-  # issue is present (prepend one otherwise). The only bare ref that may
-  # remain is the `Fixes #<up>` added from the validated import header. A
-  # `#M` after a closing keyword (any whitespace between, found over the
-  # whole body) is ALWAYS qualified, whatever markup surrounds it — the
-  # guarantee does not rest on the heuristics below. Otherwise a bare ref is
-  # a `#M` GitHub would resolve against the tracker: preceded by nothing,
-  # whitespace or opening punctuation, not inside a URL token and not inside
-  # the destination of a syntactically complete Markdown inline link/image
-  # (balanced and escaped parentheses honoured), reference definition or
-  # HTML href/src attribute (malformed lookalikes are prose and are
-  # qualified). A `#M` glued to a word character, `/`, `-`, `.`, `&`, `=` …
-  # is the tail of a qualified `owner/repo#M`, an HTML entity or a URL
-  # fragment and is left alone.
+  # closing keyword before it would close that issue on merge. Two steps:
+  #  1. Best effort: qualify the common spelling — a `#M` at the start of a
+  #     line or after whitespace — to the fork, as /import does in the other
+  #     direction, and make sure a closing ref to THIS issue is present
+  #     (prepend one otherwise), plus the bare `Fixes #<up>` from a validated
+  #     import header.
+  #  2. The guarantee: render the result with GitHub's own Markdown renderer
+  #     in upstream's context and refuse (exit 5, before any write) if it
+  #     resolves any reference to an upstream issue or PR other than <up> —
+  #     `(#M)`, `GH-M`, a qualified `UKGovernmentBEIS/inspect_ai#M`, an issue
+  #     URL. Deciding which `#M` GitHub treats as a reference is GitHub's
+  #     parser's job; re-implementing it did not converge (PR #127, rounds
+  #     1-4), so anything step 1 misses is refused for the operator to fix in
+  #     the fork PR body rather than published.
   BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
-n = os.environ["ISSUE_N"]
-src = os.environ["FPR_BODY"]
-kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
-# Every `#M` that follows a closing keyword (optional colon, any whitespace),
-# located over the whole source so the word boundary is real and the gap is
-# unbounded: these are qualified whatever markup surrounds them.
-closing = {m.start(1) for m in re.finditer(kw + r":?\s*(#\d+)\b", src, re.I)}
-# Destination spans of syntactically complete constructs only: a reference
-# definition ("[label]: dest" alone on its line, container prefixes allowed),
-# an href/src attribute inside an HTML tag, and — scanned by hand, since
-# regexes cannot balance parentheses — an inline link or image
-# ("[text](dest)" with an optional title). Malformed lookalikes are
-# ordinary text and are qualified.
-TITLE = r"(?:\"[^\"]*\"|\x27[^\x27]*\x27|\([^()]*\))"
-dest = []
-for pat in (r"^(?:[ \t]*(?:>|[-*+]|\d{1,9}[.)]))*[ \t]*\[(?!\s*\])(?:[^\[\]\\]|\\.)+\]:[ \t]*\n?[ \t]*"
-            r"(<[^<>\n]*>|[^\s<]\S*)(?:[ \t]*\n?[ \t]*" + TITLE + r")?[ \t]*(?=\n|$)",
-            r"<[a-zA-Z][^<>]*?\s(?:href|src)\s*=\s*(\"[^\"]*\"|\x27[^\x27]*\x27|[^\s\"\x27=<>`]+)[^<>]*>"):
-    dest += [m.span(1) for m in re.finditer(pat, src, re.M | re.I)]
-close_paren = re.compile(r"\s*(?:" + TITLE + r"\s*)?\)")
-# A lookahead, so nested constructs ("[![img](a)](b)") are all visited.
-for m in re.finditer(r"(?=(\[(?:[^\[\]\\]|\\.|\[[^\[\]]*\])*\]\())", src):
-    i = m.end(1)
-    while i < len(src) and src[i] in " \t\n":
-        i += 1
-    start = i
-    if i < len(src) and src[i] == "<":
-        j = src.find(">", i)
-        if j < 0 or "\n" in src[i:j]:
-            continue
-        i = j + 1
-    else:
-        depth = 0
-        while i < len(src):
-            c = src[i]
-            if c == "\\" and i + 1 < len(src):
-                i += 2
-                continue
-            if c in " \t\n" or (c == ")" and depth == 0):
-                break
-            depth += (c == "(") - (c == ")")
-            i += 1
-        if depth:
-            continue
-    if close_paren.match(src, i):
-        dest.append((start, i))
-def qualify(m):
-    i = m.start()
-    if i in closing:
-        return "meridianlabs-ai/inspect_ai#" + m.group(1)
-    prev = src[i - 1] if i else " "
-    if prev not in " \t\r\n([{\"\x27*~>|,;" or any(a <= i < b for a, b in dest):
-        return m.group(0)
-    if "://" in re.split(r"\s", src[:i])[-1]:
-        return m.group(0)
-    return "meridianlabs-ai/inspect_ai#" + m.group(1)
-body = re.sub(r"#(\d+)\b", qualify, src)
-if not re.search(kw + r"\s+meridianlabs-ai/inspect_ai#%s\b" % n, body, re.I):
+n, up = os.environ["ISSUE_N"], os.environ["UP_ISSUE"]
+kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+"
+body = re.sub(r"(?<!\S)#(\d+)\b", r"meridianlabs-ai/inspect_ai#\1", os.environ["FPR_BODY"])
+if not re.search(kw + r"meridianlabs-ai/inspect_ai#%s\b" % n, body, re.I):
     body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body
-up = os.environ["UP_ISSUE"]
-if up and not re.search(kw + r"\s+UKGovernmentBEIS/inspect_ai#%s\b" % up, body, re.I):
+if up and not re.search(kw + r"UKGovernmentBEIS/inspect_ai#%s\b" % up, body, re.I):
     body = "Fixes #%s\n" % up + body
 print(body)')
   # The operator sees the body as it will be published under their name —
   # every closing reference included — before (dry-run) or as it is created.
   echo "upstream PR body (as published):"
   sed 's/^/  | /' <<<"$BODY"
+  RENDERED=$(jq -n --arg t "$BODY" --arg c "$UPSTREAM" '{text: $t, mode: "gfm", context: $c}' \
+    | gh api markdown --input - 2>/dev/null) || {
+    echo "ABORT: could not render the upstream PR body with GitHub's Markdown API (gh api markdown failed) — its references cannot be checked; re-run. Nothing was written." >&2
+    exit 5
+  }
+  STRAY=$(grep -oiE "(data-url|href)=\"https://github\.com/$UPSTREAM/(issues|pull)/[0-9]+" <<<"$RENDERED" \
+    | grep -oE '[0-9]+$' | sort -un | grep -vxF "${UP_ISSUE:-none}" | sed 's/^/#/' | tr '\n' ' ' || true)
+  if [ -n "$STRAY" ]; then
+    echo "ABORT: the upstream PR body references $UPSTREAM issue(s)/PR(s) ${STRAY% } (GitHub resolves them there; a closing keyword before one would close it on merge)." >&2
+    echo "Qualify each as meridianlabs-ai/inspect_ai#M in fork PR #$FPR's body, or drop the upstream reference, and re-run — nothing was written." >&2
+    exit 5
+  fi
   # Sync the branch with upstream main before opening the PR. Org-fork PR
   # heads take no maintainer edits, and these branches are cut from the fork's
   # main mirror (which trails upstream), so a fresh promotion usually opens a
