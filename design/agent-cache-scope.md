@@ -1,8 +1,9 @@
 # Agent jobs get read-only Actions cache access
 
-Status: proposed, 2026-09-23. Issue: none (Claude Security finding 4629157,
-MEDIUM, privilege escalation, on the Security board). Author: agent (Claude),
-reviewed by Codex; see the PR.
+Status: proposed, 2026-09-23; the three design decisions are settled
+(Ransom, 2026-09-23; see "Decisions"). Issue: none (Claude Security finding
+4629157, MEDIUM, privilege escalation, on the Security board). Author: agent
+(Claude), reviewed by Codex; see the PR.
 
 ## Why
 
@@ -213,7 +214,7 @@ The key goes at workflow level, not on each agent job:
   them nothing, and they hold no runner-side agent to protect against.
 - A single line at column 0 is easy to check with a text test.
 
-The value is `read`, not `none`:
+The value is `read`, not `none` (decision: Ransom, 2026-09-23):
 
 - Restores keep working, so the caller's cache-backed claude-setup still
   hits the entries its trusted CI saves. Provisioning time does not change.
@@ -230,6 +231,11 @@ The value is `read`, not `none`:
 | (b) direct write with the job's token | Same as (a). | Refused: the token has no write permission in any scope. |
 
 ### Criterion 2 of the finding
+
+Decision (Ransom, 2026-09-23): criterion 2 counts as satisfied by removing
+cache-write authority from the token, even though runner-user code can
+still recover the token. This section is the reasoning, and it is recorded
+on the finding when the finding is closed (Implementation plan, step 4).
 
 The finding's second criterion asks that the agent "cannot obtain
 ACTIONS_ID_TOKEN_REQUEST_TOKEN, ACTIONS_RUNTIME_TOKEN or
@@ -275,7 +281,7 @@ the agents merge).
 | inspect_flow `inspect-update.yml`, agent job | `schedule`, `workflow_dispatch` | Write (trusted triggers). claude-setup (setup-uv@v7, `enable-cache: true`, key over `**/uv.lock`) saves the key `build.yaml`'s push jobs restore, and those jobs hold `contents: write`. Route (a) is live. | `cache-mode: read` on the job |
 | inspect_flow `inspect-ai-main-failure.yml`, `triage-agent` | `workflow_run` of scheduled CI, `workflow_dispatch` | Write, observed (run 35655501245). Same claude-setup and same restore targets. | `cache-mode: read` on the job |
 | ts-mono `dependabot-fix.yml`, agent job | `schedule`, `workflow_dispatch` | Write. setup-node `cache: pnpm` (pnpm store) and `actions/cache` `.turbo` under `turbo-${{ github.sha }}` with `restore-keys: turbo-`, before the agent. `ci.yaml` restores both, and `npm-publish.yml` restores the pnpm store before `npm publish` with `id-token: write`. | `cache-mode: read` on the job |
-| actions `inspect-ai-ci-perf.yml`, `triage-test-failures.yml` | `schedule` / `workflow_run`, `workflow_dispatch` | Write, but no cache action. The agent runs as its own unprivileged user (`isolated-agent`), so route (b) needs a boundary crossing first. | `cache-mode: read` at workflow level, defence in depth; low priority |
+| actions `inspect-ai-ci-perf.yml`, `triage-test-failures.yml` | `schedule` / `workflow_run`, `workflow_dispatch` | Write, but no cache action. The agent runs as its own unprivileged user (`isolated-agent`), so route (b) needs a boundary crossing first. | `cache-mode: read` at workflow level, defence in depth; low priority (decision: Ransom, 2026-09-23) |
 
 ### Per caller, for the reusable workflows
 
@@ -293,7 +299,7 @@ upstream `main` at `06537c3`) on 2026-09-23.
 | inspect_scout | No claude-setup | `build.yaml` pip cache with `restore-keys: Linux-pip-` (prefix), setup-uv default, setup-node pnpm; `npm-publish.yml` restores pnpm before publishing | (b) on review-event PR scope | Saves refused. No caller change. |
 | inspect_swe | No claude-setup | `build.yaml` pip cache with prefix `restore-keys` | (b) on review-event PR scope | Saves refused. No caller change. |
 | ts-mono | setup-node pnpm store; `actions/cache` `.turbo` with `restore-keys: turbo-` | `ci.yaml` (all jobs); `npm-publish.yml` restores the pnpm store | (a) and (b) on review-event PR scope, and via `dependabot-fix.yml` | Saves refused. Caller PR for `dependabot-fix.yml`. |
-| actions | No claude-setup, no `pyproject.toml` | None of its own; `release-please-vscode.yml` restores pnpm in its callers' build job | None | Nothing. Optional line on its own agent workflows (table above). |
+| actions | No claude-setup, no `pyproject.toml` | None of its own; `release-please-vscode.yml` restores pnpm in its callers' build job | None | Nothing for the reusable workflows. Its two agent workflows get the low-priority line (table above). |
 
 "Review-event PR scope" means the dev agent's `pull_request_review` and
 `pull_request_review_comment` triggers. They are in every stub surveyed
@@ -588,12 +594,28 @@ design changes none of them.
    - inspect_flow: `inspect-update.yml` and `inspect-ai-main-failure.yml`
      agent jobs.
    - ts-mono: `dependabot-fix.yml` agent job.
-   - actions: `inspect-ai-ci-perf.yml` and `triage-test-failures.yml`, if
-     Ransom takes the optional line.
+   - actions: `inspect-ai-ci-perf.yml` and `triage-test-failures.yml`,
+     workflow-level `cache-mode: read`. This is defence in depth (decision:
+     Ransom, 2026-09-23) and low priority: it lands after the inspect_flow
+     and ts-mono PRs, whose jobs run with write access and a live route (a)
+     today.
    - Each PR is one line per job, plus a comment pointing here.
-4. **Close the finding** once steps 1 to 3 are merged and the canary is
-   green. Ransom marks it fixed on the Security board, with this document
-   and the canary run as the evidence.
+4. **Close the finding** once steps 1 to 3 are merged, the canary is
+   green, and the caller jobs have shown their evidence (Testing). The
+   actions repository's line does not hold the close. Ransom marks it
+   fixed on the Security board, with this document and the canary run as
+   the evidence, and records the criterion 2 distinction on the finding.
+   Proposed note:
+
+   > Criteria 1 and 3 are met as written: no agent job can save a cache,
+   > and no agent-created entry exists to restore. Criterion 2 is met in
+   > purpose, not in text. Every agent job's token is cache-read-only
+   > (`cache-mode: read`, enforced by GitHub on the token), so a runtime
+   > token the agent obtains cannot create or overwrite an entry in any
+   > scope. The agent can still obtain that token: the Claude engine runs
+   > as the runner user, and on a hosted runner no environment filtering
+   > keeps the job's runtime token from code running as that user.
+   > Accepted by Ransom, 2026-09-23; design/agent-cache-scope.md.
 
 **Order with the open PRs.** Step 1 is independent of #136, #131 and #137
 and should land first. It closes a live write path in the smallest
@@ -612,20 +634,26 @@ and `env:`, and one bullet in each shared document.
 Documentation conflicts with #136 in `SECURITY.md`, `architecture.md` and
 `credential-separation.md` are one-bullet merges.
 
+## Decisions
+
+Ransom settled all three of the design's open questions on 2026-09-23,
+each as recommended.
+
+1. **Criterion 2.** It counts as satisfied by removing cache-write
+   authority from the token, although runner-user Claude code can still
+   recover the token. The distinction is recorded on the finding when it
+   is closed, with the note in Implementation plan step 4.
+2. **`read`, not `none`.** Agent jobs keep restoring caches. The
+   documented incompatibility is accepted: a caller that caps its calling
+   job at `none` or `write-only` fails validation (Compatibility). No
+   surveyed caller sets a cap.
+3. **The actions repository's two isolated-agent workflows get the line**
+   (`inspect-ai-ci-perf.yml`, `triage-test-failures.yml`). It is defence
+   in depth, low priority, step 3 of the Implementation plan.
+
 ## Open questions
 
-1. **Criterion 2 as written.** This design meets its purpose (no direct
-   cache writes) through the token's scope. It does not meet the text:
-   withholding the variables is not achievable for a `runner`-user agent,
-   for the reasons in Design. Recommendation: accept that and record it
-   on the finding when closing it. The alternative is the unprivileged-user
-   Claude engine, which is a separate design.
-2. **`read` or `none` for agent jobs.** Recommendation: `read`. It keeps
-   provisioning hits, and reading adds no exposure.
-3. **Caller-owned agent jobs in the actions repository.** Recommendation:
-   add the line in the same caller round. It costs nothing, but it is not
-   required, because the agent there already runs as its own user and no
-   cache action is involved.
+None.
 
 ## Not this design
 
