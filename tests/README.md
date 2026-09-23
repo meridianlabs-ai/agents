@@ -7,7 +7,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   (`.github/scripts/validate_manifest.py`): one valid manifest, one failing
   case per rule — including the per-caller issue policy (`allowed-issue-labels`
   / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
-  workflow's actual land inputs, against forged manifests.
+  workflow's actual land inputs, against forged manifests; the review fields
+  refused on every caller but the reviewer's (`allow-review`), and the
+  fix-agent fields (`pr`, `replies`, `resolve_threads`, `handoff_body_file`,
+  `handback`) refused under `refuse-bundle`, each against the forged manifest
+  its finding describes.
 - `test_import_codex_final.py` — the `import-codex-final` composite's
   script (`.github/scripts/import_codex_final.py`): a regular file owned by
   the expected user is copied byte for byte; a symlink (to a runner file, or

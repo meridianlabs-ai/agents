@@ -80,6 +80,15 @@ text are checked by the tests under `tests/`.
   commission the autonomous agent — through an issue label, or through a
   PR opened, adopted or labelled for a branch already on origin — however
   the artifact was produced (Claude Security finding 4628345, 2026-09-22).
+- Only the reviewer's land job (`claude-review.yml`, the one caller that
+  passes `land`'s `allow-review`) may carry a review: the validator refuses
+  `review_verdict`, a `review`-flagged comment and inline review comments on
+  every other caller, so a forged manifest on the dev agent's or a loop's
+  land job cannot post the machine account's verdict. Under the reviewer's
+  `refuse-bundle` it refuses the hand-back, hand-off, thread resolutions,
+  replies and PR operations a read-only reviewer never owes, so a forged
+  review manifest cannot re-trigger the reviewer from its own land job
+  (Claude Security findings 4628442 and 4628439, 2026-09-22).
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - The reviewer runs only when a trusted commenter asks for it, except inside

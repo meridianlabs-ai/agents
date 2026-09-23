@@ -141,11 +141,13 @@ inputs:
       `pr` (open or adopt a PR for `branch`, label it — `auto` opts it into
       the autonomous loops, whose gates accept the machine account as the
       labeler) or `handback: true` (the live `@review` comment), before any
-      step reads them. Distinct from `refuse-bundle`: a `pr.open` needs no
-      push, it adopts or opens a PR for a branch that already exists on
-      origin, so a read-only caller whose token reaches this repository's
-      pull requests (the PAT fallback) needs this too. Callers that open
-      PRs keep the default.
+      step reads them. `refuse-bundle` refuses both as well (since
+      2026-09-22); this flag states the PR-side policy on its own, and
+      exists because a `pr.open` needs no push — it adopts or opens a PR
+      for a branch that already exists on origin, so a read-only caller
+      whose token reaches this repository's pull requests (the PAT
+      fallback) needs the refusal whether or not bundles are refused.
+      Callers that open PRs keep the default.
     required: false
     default: "false"
   pr-head-ref:
@@ -242,8 +244,31 @@ inputs:
       `default-branch`, `refused-branches`) are off under this flag: the
       branch is the run's PR head ref — `main` on a fork-head PR, or any
       name git accepts — and only the head-ref pin / `branch-prefix` and a
-      control-character/length check apply. Pair with `emit-landing`'s
-      `read-only`, the convenience side.
+      control-character/length check apply. The validator also refuses
+      every field only a landed commit or a loop's fix agent owes — `pr`,
+      `replies`, `resolve_threads`, `handoff_body_file` and `handback:
+      true` — so a forged manifest cannot make this job post the live
+      `@review` (which would restart the reviewer on its own PR without
+      bound), the `auto-handoff` stop marker or resolve a human's review
+      threads with nothing landed (Claude Security finding 4628439,
+      2026-09-22). Pair with `emit-landing`'s `read-only`, the convenience
+      side.
+    required: false
+    default: "false"
+  allow-review:
+    description: >-
+      "true" for the reviewer's land job (claude-review.yml) and no other
+      caller: the validator accepts `review_verdict`, `comments[].review`
+      and `review_comments[]` only under it, and refuses a manifest
+      carrying any of them otherwise. Those fields make this action post a
+      review as the machine account — the fixed verdict body with the @auto
+      loop's live markers, the review-comment anchor, inline comments —
+      byte-identical to the reviewer's, and the steps that keep the other
+      callers' manifests free of them run in the agent job, so a forged
+      manifest on the dev agent's or a loop's PR-run land job would
+      otherwise converge or steer the loop with no review having run
+      (Claude Security finding 4628442, 2026-09-22). Default false: every
+      caller that pushes refuses them.
     required: false
     default: "false"
 
@@ -339,6 +364,7 @@ runs:
         BRANCH_PREFIX: ${{ inputs.branch-prefix }}
         REFUSE_BUNDLE: ${{ inputs.refuse-bundle == 'true' && '1' || '' }}
         REFUSE_PR: ${{ inputs.refuse-pr == 'true' && '1' || '' }}
+        ALLOW_REVIEW: ${{ inputs.allow-review == 'true' && '1' || '' }}
         ALLOWED_LABELS: ${{ inputs.allowed-issue-labels }}
         ALLOWED_ASSIGNEES: ${{ inputs.allowed-issue-assignees }}
         MAX_ISSUES: ${{ inputs.max-issues }}
@@ -349,7 +375,7 @@ runs:
           --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
           --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
-          --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} \
+          --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} ${ALLOW_REVIEW:+--allow-review} \
           --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
           --max-issues "$MAX_ISSUES" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }

@@ -23,7 +23,7 @@ manifest. Usage:
         [--pr-head-ref <headRefName of that PR, from the API>] \
         [--branch-prefix "claude/issue-$EVENT_ISSUE-"] [--refuse-bundle] \
         [--allowed-issue-labels ""] [--allowed-issue-assignees ransomr] \
-        [--max-issues 1] [--refuse-pr]
+        [--max-issues 1] [--refuse-pr] [--allow-review]
 
 `--refuse-bundle` is for callers whose agent never commits (the reviewer):
 a manifest that carries commits, claims HEAD moved, or ships a
@@ -35,7 +35,16 @@ branch, not on the refused list, not `refs/…`) do not apply under the flag:
 fork-head PR's `main` or a `+`/`@`/`#`/non-ASCII name must pass. The pin to
 `--pr-head-ref` (or `--branch-prefix`) still holds, and the value must
 still be safe to read into a shell variable and a step output (no control
-characters, bounded length).
+characters, bounded length). The flag also refuses every field only a
+landed commit or a loop's fix agent owes — `pr`, `replies`,
+`resolve_threads`, `handoff_body_file` and `handback: true`: a read-only
+reviewer never opens a PR, answers or resolves review threads, concludes a
+loop round or asks for its own re-review, so a manifest carrying any of
+them is forged, and the land job would otherwise post the live `@review`
+as the machine account and restart the reviewer on its own PR without
+bound, post the `auto-handoff` stop marker over agent text, or resolve a
+human's review threads with nothing landed (Claude Security finding
+4628439, 2026-09-22).
 
 `--event-pr-number` / `--event-issue-number` are the numbers the run's
 TRUSTED context names (the event payload, or a gate-job output computed
@@ -67,11 +76,12 @@ number of `issues[]` entries (empty, the default, is no cap).
 touch pull requests at all (the triage workflow): a manifest that carries
 `pr` (open or adopt a PR, label it — `auto` opts a PR into the autonomous
 loops, and the loop gates accept the machine account as the labeler) or
-`handback: true` (the live `@review` comment) is refused whole. It is a
-separate flag from `--refuse-bundle` because refusing bundles does not
-prevent using a branch that already exists on origin: `pr.open` adopts or
-opens a PR for `branch` whether or not this run pushed to it, so a
-read-only caller with a token that reaches the caller repository's pull
+`handback: true` (the live `@review` comment) is refused whole.
+`--refuse-bundle` refuses both as well (since 2026-09-22); this flag states
+the PR-side policy on its own, and exists because refusing bundles does not
+by itself prevent using a branch that already exists on origin: `pr.open`
+adopts or opens a PR for `branch` whether or not this run pushed to it, so
+a read-only caller with a token that reaches the caller repository's pull
 requests would otherwise let a forged manifest label an existing PR. The
 issue-label policy above does not cover `pr.labels`, and nothing here
 verifies where a manifest's `pr.labels` came from: for the callers that do
@@ -80,6 +90,21 @@ workflows copy the gate's trusted labels there; inspect_flow's scheduled
 workflows set `auto` as their own standing policy), which the land job
 accepts as that caller's policy, not as an independently trusted value.
 Callers that open PRs keep the default (accept `pr`).
+
+`--allow-review` marks the reviewer's land job (claude-review.yml), the only
+caller whose manifest may carry the review fields: `review_verdict` (one of
+two fixed verdict bodies carrying the @auto loop's live markers),
+`comments[].review` (the live `claude-review-comment` anchor the land job
+appends after the de-fang) and `review_comments` (inline review comments).
+Without the flag every one of them is refused, whatever the manifest says:
+their effect is a review posted as the machine account, byte-identical to
+the reviewer's, which the loop gates and Atlas believe — and the compose
+steps that keep the other callers' manifests free of them run in the agent
+job, the runner whose compromise this validator assumes, so a forged
+manifest on the dev agent's or a loop's PR-run land job would otherwise
+converge the @auto loop or feed it a fix round with no review having run
+(Claude Security finding 4628442, 2026-09-22). Like the other flags it is
+caller policy from the land job's trusted inputs; it relaxes no other rule.
 
 The schema is documented in .github/actions/emit-landing/README.md; keep
 the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
@@ -162,8 +187,9 @@ KNOWN_PR = {"open", "title", "body_file", "base", "labels", "issue"}
 # appends the `claude-review-comment` marker to it AFTER the de-fang (the
 # anchor pr-feedback-context keys the next fix round on, and the marker the
 # caller stubs skip), so the flag is accepted only on a manifest that also
-# carries a `review_verdict` — a reviewer's — and no other agent's comment
-# can pose as a review.
+# carries a `review_verdict` and only on a land job whose caller passes
+# `--allow-review` (the reviewer's) — no other agent's comment can pose as
+# a review.
 KNOWN_COMMENT = {"number", "body_file", "review"}
 KNOWN_REPLY = {"review_comment_id", "body_file"}
 # The reviewer's inline (line-level) review comments, posted on `pr_number`
@@ -209,6 +235,7 @@ class Validator:
         branch_prefix: str = "",
         refuse_bundle: bool = False,
         refuse_pr: bool = False,
+        allow_review: bool = False,
         allowed_issue_labels=None,
         allowed_issue_assignees=None,
         max_issues: int | None = None,
@@ -227,6 +254,7 @@ class Validator:
         self.branch_prefix = branch_prefix.strip()
         self.refuse_bundle = refuse_bundle
         self.refuse_pr = refuse_pr
+        self.allow_review = allow_review
         # None: unrestricted (the caller set no policy). A set, possibly
         # empty: the only values issues[] may carry. Labels are compared
         # case-insensitively (GitHub matches them that way); logins too.
@@ -497,6 +525,19 @@ class Validator:
                 self.err("manifest: this land job refuses bundles (--refuse-bundle) but the manifest carries commits (has_bundle / head_sha != start_sha)")
             if (self.dir / "commits.bundle").exists() or (self.dir / "commits.bundle").is_symlink():
                 self.err("manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact")
+            # Nothing ever lands here, so nothing a landed commit or a loop's
+            # fix agent owes may be carried either: a PR to open or adopt,
+            # replies to review threads, thread resolutions, the round's
+            # hand-off, the `@review` hand-back. The land job would act on
+            # each with the machine account (the hand-back re-triggers the
+            # reviewer on its own PR, without bound), and the only other
+            # thing keeping them out of a read-only manifest is the compose
+            # step in the agent job.
+            for key in ("pr", "replies", "resolve_threads", "handoff_body_file"):
+                if m.get(key) is not None:
+                    self.err(f"manifest: this land job refuses bundles (--refuse-bundle) but the manifest carries {key} (owed by a landed commit or a loop's fix agent, never by a read-only reviewer)")
+            if m.get("handback") is True:
+                self.err("manifest: this land job refuses bundles (--refuse-bundle) but the manifest sets handback (the live `@review`; nothing lands here to hand back)")
 
         if self.refuse_pr:
             # The caller's agent may not open, adopt or label a pull request,
@@ -510,6 +551,17 @@ class Validator:
                 self.err("manifest: this land job refuses pull-request fields (--refuse-pr) but the manifest carries `pr`")
             if m.get("handback") is True:
                 self.err("manifest: this land job refuses pull-request fields (--refuse-pr) but the manifest sets handback")
+
+        if not self.allow_review:
+            # Only the reviewer's land job may post a review: the fixed
+            # verdict body carries the @auto loop's live markers, the
+            # `review` flag earns the live review-comment anchor, and inline
+            # comments are a review too. Every other caller refuses them
+            # here, on the fresh runner — the compose steps that leave them
+            # out of those callers' manifests run in the agent job.
+            for key in ("review_verdict", "review_comments"):
+                if m.get(key) is not None:
+                    self.err(f"manifest: this land job does not accept review fields (--allow-review is not set) but the manifest carries {key}")
 
         if pr is not None:
             self._unknown_keys(pr, KNOWN_PR, "pr")
@@ -542,6 +594,8 @@ class Validator:
                     self._positive_int(c, "number", where, required=True)
                     self._file_ref(c, "body_file", where, required=True)
                     review = self._bool(c, "review", where, required=False)
+                    if review is True and not self.allow_review:
+                        self.err(f"{where}: review marks the reviewer's review comment; this land job does not accept review fields (--allow-review is not set)")
                     if review is True and m.get("review_verdict") is None:
                         self.err(f"{where}: review needs review_verdict (only a reviewer's manifest marks its review comment)")
 
@@ -749,7 +803,12 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--refuse-bundle",
         action="store_true",
-        help="refuse a manifest that carries commits (the caller's agent never commits — the reviewer); has_bundle must be false, head_sha must equal start_sha and no commits.bundle may be present. `branch` is then never pushed to, so only the head-ref pin / --branch-prefix and a control-character/length check apply to it (a fork-head PR's `main` passes)",
+        help="refuse a manifest that carries commits (the caller's agent never commits — the reviewer); has_bundle must be false, head_sha must equal start_sha and no commits.bundle may be present, and the fields only a landed commit or a loop's fix agent owes — pr, replies, resolve_threads, handoff_body_file, handback: true — are refused too. `branch` is then never pushed to, so only the head-ref pin / --branch-prefix and a control-character/length check apply to it (a fork-head PR's `main` passes)",
+    )
+    ap.add_argument(
+        "--allow-review",
+        action="store_true",
+        help="accept the review fields — review_verdict, comments[].review and review_comments — which only the reviewer's land job (claude-review.yml) may carry; without it a manifest carrying any of them is refused",
     )
     args = ap.parse_args(argv)
 
@@ -779,6 +838,7 @@ def main(argv=None) -> int:
             branch_prefix=args.branch_prefix,
             refuse_bundle=args.refuse_bundle,
             refuse_pr=args.refuse_pr,
+            allow_review=args.allow_review,
             allowed_issue_labels=allow_list(args.allowed_issue_labels),
             allowed_issue_assignees=allow_list(args.allowed_issue_assignees),
             max_issues=max_issues,
