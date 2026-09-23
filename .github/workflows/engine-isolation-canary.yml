@@ -58,11 +58,15 @@
 #                          pyproject.toml, the recipe-without-Python route):
 #                          this revision's composites provision the fixture
 #                          as codex with its `codex_provision` recipe, reset
-#                          the home, discover the tools the way the compose
-#                          steps do and run each as codex under
-#                          codex-action's launch shape, then the fixture's
-#                          own checks (interpreter/Node version, groups,
-#                          lockfile unchanged).
+#                          the home with the composite's `bin` directories
+#                          as codex's command PATH, discover the tools the
+#                          way the compose steps do and run each as codex
+#                          under codex-action's launch shape, by absolute
+#                          path and then by name under `codex sandbox`, run
+#                          the fixture's `gate` there (ts-mono-like's turbo
+#                          `pnpm check`), then the fixture's own checks
+#                          (interpreter/Node version, groups, lockfile
+#                          unchanged).
 #
 # Runs on pushes that touch the composites, the harness, the scanner or the
 # fixtures, by hand, and weekly on `main`: per-job secret delivery is the
@@ -243,10 +247,13 @@ jobs:
           user: codex
           recipe: ${{ steps.fx.outputs.recipe }}
 
+      # As the reusable workflows do: the provisioning's bin directories go
+      # on the PATH of codex's own commands (config.toml).
       - name: Reset codex home (this revision)
         uses: ./.github/actions/create-codex-user
         with:
           mode: reset-home
+          bin: ${{ steps.setup.outputs.bin }}
 
       # Tool discovery exactly as the compose steps do it (the composite's
       # `bin` directories, the same list), then every discovered tool runs
@@ -272,6 +279,52 @@ jobs:
             sudo -u codex -H -- "$path" --version >/dev/null 2>&1 || { echo "::error::$path does not run as codex"; exit 1; }
             echo "runs as codex: $path"
           done
+
+      # The tools by NAME inside codex's own command environment: the
+      # codex CLI codex-action installs, run as codex the way codex-action
+      # launches it (`sudo -u codex --`, sudo's reset PATH), with `codex
+      # sandbox`, which builds each command's environment from the
+      # config.toml the reset wrote (shell_environment_policy) and runs it
+      # under the workflows' workspace_net profile — so a tool resolves only
+      # through the PATH that file gives it. Then the fixture's `gate`, if
+      # it has one: a project script whose tools find one another by name
+      # (ts-mono-like: `pnpm check`, turbo looking pnpm up on PATH). The
+      # sysctls are codex-action's own bubblewrap step.
+      - name: Tools and gate by name under codex's command environment
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+          BIN: ${{ steps.setup.outputs.bin }}
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex >/dev/null
+          codex=$(command -v codex)
+          echo "codex: $codex ($("$codex" --version)); system bwrap: $(command -v bwrap || echo none)"
+          if [ "$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo 1)" != 1 ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 0 ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          grep -A1 '^\[shell_environment_policy.set\]$' /home/codex/.codex/config.toml
+          run() { sudo -u codex -- "$codex" sandbox -P workspace_net -C "$GITHUB_WORKSPACE" -- "$@"; }
+          IFS=: read -r -a dirs <<<"$BIN"
+          for t in pytest ruff mypy pyright python3 node pnpm npm; do
+            for d in "${dirs[@]}"; do
+              if [ -x "$d/$t" ]; then
+                got=$(run /bin/sh -c "command -v $t")
+                [ "$got" = "$d/$t" ] || { echo "::error::$t resolves to '$got' in codex's command environment, expected $d/$t"; exit 1; }
+                run "$t" --version >/dev/null || { echo "::error::$t --version failed in codex's command environment"; exit 1; }
+                echo "by name as codex: $t -> $got"
+                break
+              fi
+            done
+          done
+          gate="tests/fixtures/callers/$FIXTURE/gate"
+          if [ -f "$gate" ]; then
+            read -r -a cmd <"$gate"
+            echo "gate: ${cmd[*]}"
+            run "${cmd[@]}"
+          fi
 
       - name: The fixture's checks
         env:

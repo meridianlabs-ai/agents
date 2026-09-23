@@ -7,9 +7,13 @@
 # the proxy. Run by the composite on creation and again in `reset-home`
 # mode after provisioning ran as codex, so the home is exactly this at the
 # moment codex-action starts — whatever a process running as codex did to it
-# in between. Takes the user; runs everything through sudo.
+# in between. Takes the user and, optionally, the provisioning composite's
+# `bin` directories (colon-separated, absolute; the reset-home mode passes
+# them), which go on the PATH codex gives the commands it runs (below).
+# Runs everything through sudo.
 set -euo pipefail
 user="$1"
+bin="${2:-}"
 home="/home/$user"
 codex_home="$home/.codex"
 # Whatever is there goes (rm -rf on a symlink removes the link, not what it
@@ -45,6 +49,43 @@ printf '%s\n' \
   '[permissions.workspace_net.network]' \
   'enabled = true' \
   | sudo -u "$user" tee "$codex_home/config.toml" >/dev/null
+# The provisioned tools on the PATH of every command codex runs
+# (executed-paths follow-up, option B; decision: Ransom, 2026-09-23).
+# codex-action starts codex as `sudo -u <user> -- codex exec`, so codex
+# inherits sudo's reset PATH (secure_path), which has none of the
+# provisioning's bin directories: a tool named by absolute path runs, but one
+# that finds another by name does not (ts-mono's turbo-based `pnpm check`:
+# "Unable to find package manager binary", pnpm being only in
+# ~codex/.local/bin). codex builds each command's environment from
+# `shell_environment_policy`, whose `set` table overrides what codex
+# inherited; codex-action rejects that key in `codex-args`, so it goes in
+# this file like the profile above. The value is the bin directories ahead
+# of the PATH sudo gives the user, probed the way codex-action launches
+# codex. Only codex's commands see it: nothing here touches the job PATH
+# (GITHUB_PATH) the runner-side steps resolve through. Written as a TOML
+# literal string, so a character one cannot hold (a single quote, a control
+# character) is refused rather than escaped, and so is an entry that is not
+# an absolute directory (an empty one would mean the working directory).
+if [ -n "$bin" ]; then
+  base=$(sudo -u "$user" -- /usr/bin/printenv PATH) || base=""
+  if [ -z "$base" ]; then
+    echo "::error::could not read the PATH sudo gives $user" >&2
+    exit 1
+  fi
+  path="$bin:$base"
+  if [[ "$path" == *"'"* ]] || ! [[ "$path" =~ ^[[:print:]]+$ ]]; then
+    echo "::error::the codex command PATH has a character a TOML literal string cannot hold: $path" >&2
+    exit 1
+  fi
+  if [[ ":$path:" == *::* ]] || [[ ":$path:" =~ :[^/] ]]; then
+    echo "::error::the codex command PATH has an empty or relative entry: $path" >&2
+    exit 1
+  fi
+  printf '%s\n' \
+    '[shell_environment_policy.set]' \
+    "PATH = '$path'" \
+    | sudo -u "$user" tee -a "$codex_home/config.toml" >/dev/null
+fi
 sudo chmod 644 "$codex_home/config.toml"
 # What codex-action's runner-side writeProxyConfig will read and re-write:
 # a regular file with exactly this content, owned by the user.
@@ -56,4 +97,4 @@ if [ -L "$codex_home" ] || [ ! -d "$codex_home" ]; then
   echo "::error::$codex_home is not a directory after creating it" >&2
   exit 1
 fi
-echo "codex home $codex_home: config.toml written (workspace_net profile), $GITHUB_RUN_ID.json pre-touched"
+echo "codex home $codex_home: config.toml written (workspace_net profile${bin:+, command PATH $path}), $GITHUB_RUN_ID.json pre-touched"

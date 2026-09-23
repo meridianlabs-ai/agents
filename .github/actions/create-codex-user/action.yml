@@ -136,15 +136,23 @@ description: >-
   running as codex (the reclaim step's loop), delete `~codex/.codex`, and
   re-create it exactly as above. codex-action then starts from a home no
   codex process has touched, and the only files it reads before launching
-  codex are the ones this script wrote.
+  codex are the ones this script wrote. That pass also takes the `bin`
+  input, the provisioning composite's `bin` output, and writes it into
+  `config.toml` as `[shell_environment_policy.set] PATH`, ahead of the PATH
+  sudo gives codex: every command codex runs then finds the provisioned
+  tools by name, including a tool that looks up another (ts-mono's
+  turbo-based `pnpm check` needs `pnpm` on PATH), where sudo's reset PATH
+  had none of them. That is codex's own environment only; the job PATH is
+  unchanged (executed-paths follow-up, option B; decision: Ransom,
+  2026-09-23; design/codex-engine.md → Runner-side search path).
 
   Runs no git command against the checkout. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
   step (local composite actions with post steps break teardown on the
   fork). The create mode is three steps so that the PATH check sits between
   the user's creation and the grant; the workflows' `steps.codexuser.outcome`
-  is the composite's, failed if any of them fails. One input, `mode`; the
-  user name, home and the snapshot paths
+  is the composite's, failed if any of them fails. Two inputs, `mode` and
+  `bin` (reset-home only); the user name, home and the snapshot paths
   (`$RUNNER_TEMP/git-config.pre-codex`, `$RUNNER_TEMP/embedded-git.pre-codex`)
   are the convention the codex-action steps and `reclaim-codex-workspace`
   are written against.
@@ -171,6 +179,18 @@ inputs:
       no `protect`) and runs its own commands with the system PATH.
     required: false
     default: create
+  bin:
+    description: >-
+      `reset-home` only: the provisioning composite's `bin` output
+      (colon-separated absolute directories). Non-empty, it is written into
+      the re-created `config.toml` as the PATH of every command codex runs,
+      ahead of the PATH sudo gives the codex user; an empty or relative
+      entry, a single quote or a control character fails the step. Empty
+      (the default, and what a skipped provisioning step passes) leaves
+      codex's commands on sudo's PATH. Ignored by `create`, which runs
+      before provisioning.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -232,6 +252,7 @@ runs:
       env:
         HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
         SYSTEM_PATH: /usr/sbin:/usr/bin:/sbin:/bin
+        BIN: ${{ inputs.bin }}
       run: |
         set -euo pipefail
         # System tools only, whatever GITHUB_PATH prepended (see above).
@@ -261,6 +282,7 @@ runs:
           echo "::error::processes were still running as codex after repeated kills (a provisioning survivor?) — refusing to hand the workspace to codex-action."
           exit 1
         fi
-        # Then the home, from scratch.
-        bash "$HOME_SCRIPT" codex
+        # Then the home, from scratch, with the provisioned tools on the
+        # PATH of codex's commands.
+        bash "$HOME_SCRIPT" codex "$BIN"
         echo "codex home reset: no codex processes, ~codex/.codex re-created"

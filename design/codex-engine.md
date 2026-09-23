@@ -453,10 +453,10 @@ three layers:
   Since the engine split (One job per engine, below) a job runs one engine
   only. The codex jobs provision with `provision-fallback` `user: codex`,
   whose recipe runs as the codex user under `env -i` and cannot reach
-  `GITHUB_PATH` at all (the venv is still created at `.venv` — the compose
-  steps take the tools from the composite's `bin` directories by absolute
-  path, which is how codex was always told to run them), and they never
-  run a caller's `claude-setup`. `provision-fallback` also takes
+  `GITHUB_PATH` at all (the venv is still created at `.venv`, and codex's
+  own commands get the composite's `bin` directories on their PATH from
+  codex's `config.toml`, never from the job PATH: → Tools in the codex
+  sandbox, below), and they never run a caller's `claude-setup`. `provision-fallback` also takes
   `add-to-path` (default `true`, ignored under `user`): the Claude jobs
   keep the default, and a caller's `claude-setup` may keep putting its venv
   on the job PATH there — Claude runs as `runner` with the job PATH, so a
@@ -690,22 +690,35 @@ counterpart.
   failed compose step has its own clause in the Surface step. The de-fang
   also runs over the `review_prompt` text, which reached codex verbatim
   before — harmless, the codex adjustments restate both rules.
-- **Tools are named by absolute path in every codex prompt** (reviewer
-  since 2026-09-01; dev verb and loops since 2026-09-09): under the
-  `unprivileged-user` strategy codex-action launches codex via `sudo -u
-  codex` (no `-E`), and sudo's `env_reset`/`secure_path` replaces PATH
-  before codex starts, so a venv on `GITHUB_PATH` does not resolve as bare
-  names (inspect_flow#818: `command -v pytest ruff mypy` printed nothing;
-  only the `drop-sudo` strategy forwards the runner PATH). The compose
-  steps used to run as the runner with the provisioned PATH and discover
-  the paths there; since the provisioning runs as codex (2026-09-22) they
-  look the list (`pytest ruff mypy pyright python3 node pnpm npm`, in all
-  four workflows) up in the directories the `provision-fallback` composite
-  reports (`bin`: the venv's, `node_modules/.bin`, `~codex/.local/bin`),
-  never on a PATH, and splice the paths into the verification instruction.
-  The venv is never on the job PATH on a codex job (Runner-side search
-  path, above): the recipe runs as codex under `env -i` and cannot reach
-  `GITHUB_PATH`.
+- **Tools in the codex sandbox.** Under the `unprivileged-user` strategy
+  codex-action launches codex via `sudo -u codex` (no `-E`), and sudo's
+  `env_reset`/`secure_path` replaces PATH before codex starts, so a venv on
+  `GITHUB_PATH` does not resolve as bare names (inspect_flow#818: `command
+  -v pytest ruff mypy` printed nothing; only the `drop-sudo` strategy
+  forwards the runner PATH). From 2026-09-01 (reviewer) and 2026-09-09
+  (dev verb and loops) every codex prompt therefore named the tools by
+  absolute path. That runs a tool, but not a tool that finds another by
+  name: ts-mono's `pnpm check` is `turbo run check`, and turbo looks `pnpm`
+  up on PATH ("Unable to find package manager binary", ts-mono
+  scratch run 35923869548, 2026-09-23), where `~codex/.local/bin` is not.
+  Since 2026-09-23 (executed-paths follow-up, option B; decision: Ransom)
+  the codex jobs pass the `provision-fallback` composite's `bin` output
+  (the venv's, `node_modules/.bin`, `~codex/.local/bin`) to
+  `create-codex-user`'s `reset-home` mode, which writes it into codex's
+  `config.toml` as `[shell_environment_policy.set] PATH`, ahead of the PATH
+  sudo gives codex (probed with the same `sudo -u codex --`). codex builds
+  every command's environment from that policy, `set` overriding what it
+  inherited, so the tools resolve by name in codex's commands and in the
+  scripts they start. codex-action rejects `shell_environment_policy` in
+  `codex-args`, so the file is the only route, as for the network profile.
+  The compose steps still look the list (`pytest ruff mypy pyright python3
+  node pnpm npm`, in all four workflows) up in the same directories and
+  name what they found in the verification instruction. The job PATH is
+  untouched: the venv is never on it on a codex job (Runner-side search
+  path, above), and the recipe runs as codex under `env -i` and cannot
+  reach `GITHUB_PATH`. The canary's `caller-recipes` job runs every
+  discovered tool, and the ts-mono-like fixture's turbo gate, by name under
+  `codex sandbox` as codex.
 - **CI-trigger parity depends on the machine account's secrets**: codex-path
   pushes fall back to `github.token` where the app secrets are absent, and
   those pushes do not trigger CI (the Claude path pushes via the app token,

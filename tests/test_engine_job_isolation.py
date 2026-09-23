@@ -37,7 +37,10 @@ job is dispatched, and a skipped job gets no job message at all.
   uv bootstrap; the recipe appends to `GITHUB_PATH` only when that file is
   there (the runner case). `create-codex-user`'s `codex-home.sh` re-creates
   the home over whatever is there, and its reset mode refuses to proceed
-  while codex processes survive the kill loop.
+  while codex processes survive the kill loop; given the provisioning's
+  `bin` directories, the script writes them into `config.toml` as the PATH
+  of codex's commands, ahead of the PATH sudo gives the user, and refuses a
+  value a TOML literal string cannot hold or an empty or relative entry.
 """
 
 import os
@@ -169,6 +172,9 @@ def test_the_codex_job_provisions_as_the_codex_user_after_the_boundary(name):
              "create-codex-user@main" in order[2], CODEX_ACTION in order[3])] == [(True, True, True, True)]
     assert "\n        id: codexuser\n" in order[0] and "\n        id: setup\n" in order[1]
     assert "\n        id: codexhome\n" in order[2] and "        with:\n          mode: reset-home\n" in order[2]
+    # The provisioned tools on the PATH of codex's own commands (option B,
+    # 2026-09-23), taken from the provisioning step's output.
+    assert "          bin: ${{ steps.setup.outputs.bin }}\n" in order[2]
     assert "mode:" not in order[0]
     surface = step_with(codex_job, "\n        id: surface\n")
     assert "          CODEXHOME_OUTCOME: ${{ steps.codexhome.outcome }}\n" in surface
@@ -441,13 +447,13 @@ def home_env(tmp_path: Path, **extra):
             "GITHUB_RUN_ID": "4242", "HOME_ROOT": str(tmp_path), **extra}
 
 
-def run_home_script(tmp_path: Path, env: dict):
+def run_home_script(tmp_path: Path, env: dict, *args: str):
     """codex-home.sh addresses /home/<user>; the test rewrites that prefix to
     a scratch root through a copy of the script (the logic is the point, not
     the literal path)."""
     script = (CODEX_USER / "codex-home.sh").read_text().replace('home="/home/$user"', 'home="$HOME_ROOT/home/$user"')
     (tmp_path / "home" / "codex").mkdir(parents=True, exist_ok=True)
-    return sh("bash", "-c", script + "\n", "codex-home", "codex", check=False, env=env)
+    return sh("bash", "-c", script + "\n", "codex-home", "codex", *args, check=False, env=env)
 
 
 def test_codex_home_script_replaces_a_planted_symlink_with_the_profile(tmp_path):
@@ -469,6 +475,47 @@ def test_codex_home_script_replaces_a_planted_symlink_with_the_profile(tmp_path)
     assert marker.read_text() == "SECRET=1\n"                 # rm -rf removed the link, not its target
 
 
+PROFILE = ['[permissions.workspace_net]', 'extends = ":workspace"',
+           '[permissions.workspace_net.workspace_roots]', '"." = true',
+           '[permissions.workspace_net.network]', 'enabled = true']
+
+
+def test_codex_home_script_puts_the_bin_dirs_ahead_of_sudos_path(tmp_path):
+    # The fake sudo runs `printenv PATH` as the caller, so the PATH sudo
+    # "gives the user" is the test's own; the bin directories go first.
+    env = home_env(tmp_path)
+    bin_dirs = "/ws/.venv/bin:/ws/node_modules/.bin:/home/codex/.local/bin"
+    r = run_home_script(tmp_path, env, bin_dirs)
+    assert r.returncode == 0, r.stderr
+    lines = (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text().splitlines()
+    assert lines[1:] == PROFILE + ['[shell_environment_policy.set]', f"PATH = '{bin_dirs}:{env['PATH']}'"]
+    import tomllib
+    cfg = tomllib.loads("\n".join(lines))
+    assert cfg["shell_environment_policy"]["set"]["PATH"].split(":")[:3] == bin_dirs.split(":")
+    assert cfg["permissions"]["workspace_net"]["network"]["enabled"] is True
+
+
+def test_codex_home_script_writes_no_command_path_without_bin_dirs(tmp_path):
+    r = run_home_script(tmp_path, home_env(tmp_path), "")
+    assert r.returncode == 0, r.stderr
+    assert "shell_environment_policy" not in (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text()
+
+
+@pytest.mark.parametrize("bin_dirs, message", [
+    ("/ws/.venv/bin:relative/bin", "empty or relative entry"),
+    ("/ws/.venv/bin::/home/codex/.local/bin", "empty or relative entry"),
+    ("/ws/.venv/bin:", "empty or relative entry"),
+    (":/ws/.venv/bin", "empty or relative entry"),
+    ("/ws/it's/bin", "cannot hold"),
+    ("/ws/.venv/bin\n[x]", "cannot hold"),
+])
+def test_codex_home_script_refuses_a_command_path_it_cannot_write_safely(tmp_path, bin_dirs, message):
+    r = run_home_script(tmp_path, home_env(tmp_path), bin_dirs)
+    assert r.returncode != 0
+    assert message in r.stderr
+    assert "shell_environment_policy" not in (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text()
+
+
 def reset_step() -> str:
     text = (CODEX_USER / "action.yml").read_text()
     return lift_run(text, "      if: inputs.mode == 'reset-home'")
@@ -477,13 +524,15 @@ def reset_step() -> str:
 def test_reset_mode_kills_codex_processes_then_recreates_the_home(tmp_path):
     # SYSTEM_PATH: the step pins PATH to it before its first command; the
     # test points it at the stubs (and the real bash/sleep).
-    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin")
-    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
+    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin",
+                   BIN="/ws/.venv/bin:/home/codex/.local/bin")
+    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s bin=%s\\n" "$1" "$2" >>"$LOG"\n')
     bins = tmp_path / "bin"
     write_exe(bins / "id", "#!/usr/bin/env bash\nexit 0\n")
     r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert (tmp_path / "log").read_text() == "pkill pkill -KILL -u codex\nhome codex\n"
+    assert (tmp_path / "log").read_text() == "pkill pkill -KILL -u codex\nhome codex bin=/ws/.venv/bin:/home/codex/.local/bin\n"
+    assert "        BIN: ${{ inputs.bin }}\n" in (CODEX_USER / "action.yml").read_text()
 
 
 def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):

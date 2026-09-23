@@ -1326,7 +1326,12 @@ out different things on the inspect_ai fork:
   `drop-sudo` strategy, which this repo does not use, forwards the runner
   PATH. The prompts had asserted "the venv is on PATH"; the compose steps
   now run the discovery as the runner, where that PATH is in effect, and
-  splice the paths in.
+  splice the paths in. (Superseded twice: since 2026-09-22 the discovery
+  reads the provisioning composite's `bin` directories, the provisioning
+  running as codex; since 2026-09-23 those directories are on the PATH of
+  codex's own commands through its `config.toml`, so the tools resolve by
+  name, which turbo-based scripts need: design/codex-engine.md → Tools in
+  the codex sandbox.)
 
   Two details of a **fatal provisioning failure in the loops** are worth
   knowing when reading a "stalled" loop. The agent is skipped, but the
