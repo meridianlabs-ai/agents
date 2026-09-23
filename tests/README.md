@@ -407,10 +407,26 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the home script; refuses while `pkill` keeps finding codex processes).
   The four composer tests lift each engine's composer from its own job
   (`job_block` / `lift_run` in `test_land_helpers.py`).
-- `secret_delivery_scan.py`, `fixtures/hostile-checkout/` and
-  `fixtures/callers/` are not tests but the hosted canary's pieces
+- `test_secret_delivery_canary.py` — the hosted canary's pipeline probe
+  (`engine-isolation-canary-pipeline.yml`; finding 4629153, fix criterion
+  3) keeps the agent workflows' shape: in each of the four reusable
+  workflows the gate, Claude agent, codex agent and land jobs reference
+  the same secrets as the probe's job in that role and no other job
+  references any, the `workflow_call` secret declarations match, the agent
+  jobs are selected by the gate's `engine` output like the real ones and
+  the land job needs all three under `always()`; each probe job ends with
+  the memory scan its references imply, the canary calls the probe per
+  engine with the two sentinels only, the canary keeps a weekly off-the-hour
+  schedule beside its push and dispatch triggers, and the stand-in action
+  prints lengths, never values.
+- `secret_delivery_scan.py`, `fixtures/secret-input/`,
+  `fixtures/hostile-checkout/` and `fixtures/callers/` are not tests but
+  the hosted canary's pieces
   (`.github/workflows/engine-isolation-canary.yml`): the root-run scanner
   that counts synthetic sentinel secrets in the runner processes' memory,
+  the stand-in action through which the pipeline probe's gate, land and
+  codex jobs consume the sentinels as action inputs (printing lengths
+  only),
   the hostile `setup.py` build backend the provisioning-boundary job
   installs as the codex user, and the four representative caller projects
   (with the `codex_provision` recipe each caller's stub would set and the
