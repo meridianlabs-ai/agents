@@ -113,11 +113,23 @@ check_pr() {
   fi
 }
 
-# physpath <path>: the physical form of <path> — made absolute from $PWD,
-# every existing component resolved through symlinks (the last one
-# included), the not-yet-existing tail appended verbatim. Containment
+# phys_dir <dir>: sets PHYS to the physical path of the existing directory
+# <dir> (symlinks resolved). Set, not printed: `$(…)` strips every trailing
+# newline from a command's output, and a path may end in one — a registered
+# worktree named `line<newline>` captured through `$(pwd -P)` became `line`
+# and dropped out of the containment set (review round 3 of #130). The
+# sentinel keeps the capture lossless.
+phys_dir() {
+  PHYS=$(cd -P -- "$1" 2>/dev/null && printf '%sx' "$PWD") || return 1
+  PHYS=${PHYS%x}
+}
+# physpath <path>: sets PHYS to the physical form of <path> — made absolute
+# from $PWD, every existing component resolved through symlinks (the last
+# one included), the not-yet-existing tail appended verbatim. Containment
 # checks compare physical paths only: a lexical prefix test is defeated by
-# a relative root, a `..` or a symlinked ancestor (review of #130).
+# a relative root, a `..` or a symlinked ancestor (review of #130). The
+# caller has refused a newline in <path>, so basename/dirname on the tail
+# are lossless.
 physpath() {
   local p=$1 tail=""
   case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
@@ -125,7 +137,8 @@ physpath() {
     tail="/$(basename "$p")$tail"
     p=$(dirname "$p")
   done
-  printf '%s%s\n' "$(cd "$p" && pwd -P)" "$tail"
+  phys_dir "$p" || return 1
+  PHYS="$PHYS$tail"
 }
 
 # One GraphQL round trip: title, issue author + labels (the External-proxy
@@ -278,20 +291,28 @@ if [ -n "$EXTERNAL" ]; then
   case "$WT" in *$'\n'*)
     echo "REFUSED: External worktree path contains a newline — set CHECKOUT_WORKTREES to a plain absolute path" >&2; exit 1 ;;
   esac
-  WT=$(physpath "$WT")
+  physpath "$WT" || { echo "REFUSED: cannot resolve External worktree path $WT" >&2; exit 1; }
+  WT=$PHYS
+  # A symlinked ancestor may have brought a newline back in.
+  case "$WT" in *$'\n'*)
+    echo "REFUSED: External worktree path resolves to a path containing a newline — set CHECKOUT_WORKTREES elsewhere" >&2; exit 1 ;;
+  esac
   # Every registered worktree root of this clone (the clone itself
   # included), physical, in an array: a path may contain any byte but NUL,
   # a newline included, so the list is read NUL-delimited (`-z`) and a
   # root that cannot be resolved is a refusal, never silently dropped
   # (review round 2 of #130). Plus the common git dir.
-  COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
-  TOP=$(cd "$(git rev-parse --show-toplevel)" && pwd -P)
+  # --show-cdup (a relative `../` chain, never newline-terminated) rather
+  # than --show-toplevel, whose `$(…)` capture would lose a trailing
+  # newline in this clone's own path; the common dir ends in `.git`.
+  phys_dir "$(git rev-parse --git-common-dir)"; COMMON=$PHYS
+  phys_dir "./$(git rev-parse --show-cdup)"; TOP=$PHYS
   ROOTS=()
   while IFS= read -r -d '' rec; do
     case "$rec" in "worktree "*)
-      root=$(cd "${rec#worktree }" 2>/dev/null && pwd -P) ||
+      phys_dir "${rec#worktree }" ||
         { echo "REFUSED: cannot resolve registered worktree '${rec#worktree }' (run git worktree prune if it is gone)" >&2; exit 1; }
-      ROOTS+=("$root") ;;
+      ROOTS+=("$PHYS") ;;
     esac
   done < <(git worktree list --porcelain -z)
   case "$WT/" in "$TOP"/|"$COMMON"/|"$COMMON"/*)
@@ -390,7 +411,7 @@ if [ -n "$EXTERNAL" ]; then
     for root in "${ROOTS[@]}"; do [ "$root" = "$WT" ] && registered=1; done
     [ -n "$registered" ] ||
       { echo "REFUSED: $WT exists and is not a registered worktree of this clone — move it aside" >&2; exit 1; }
-    if [ "$(cd "$WT" && git rev-parse --show-toplevel | { IFS= read -r t; cd "$t" && pwd -P; })" != "$WT" ]; then
+    if ! phys_dir "$(git -C "$WT" rev-parse --show-toplevel)" || [ "$PHYS" != "$WT" ]; then
       echo "REFUSED: $WT is not the root of its own worktree — move it aside" >&2; exit 1
     fi
     if ON_BRANCH=$(git -C "$WT" symbolic-ref -q --short HEAD); then

@@ -70,9 +70,13 @@ directly (editor, `cat`, `grep`). Diff and remove it from the clone, by SHA,
 with nothing from the tree executed:
 
 ```sh
-git diff --no-ext-diff --no-textconv "$(git merge-base <base-remote>/<base> <sha>)" <sha>   # the PR's changes; objects are shared with the worktree
-rm -rf <path> && git worktree prune                                                         # when done: no status check, no hook, no filter
+git diff --no-ext-diff --no-textconv "$(git merge-base "<base-remote>/<base>" <sha>)" <sha>   # the PR's changes; objects are shared with the worktree
+rm -rf -- "<path>" && git worktree prune                                                      # when done: no status check, no hook, no filter
 ```
+
+Substitute `<path>` exactly as the `OK worktree=` line printed it and keep
+the double quotes and the `--`: unquoted, a path with a space, tab or glob
+character is split or expanded into other targets of `rm -rf`.
 
 Do not start an agent session inside it, install from it or run its tests
 on this machine — review and upstream CI are the substitute (as in

@@ -720,16 +720,23 @@ def test_checkout_external_neutralises_filters_the_worktrees_own_config_activate
     assert marker.exists()
 
 
-def test_checkout_external_containment_survives_newlines_in_registered_worktree_paths(tmp_path):
-    # Review round 2 of #130 (B2): `git worktree list --porcelain` prints a
-    # path with a newline across two lines; a newline-delimited parse dropped
-    # that root and let the destination land inside it. Read NUL-delimited.
+@pytest.mark.parametrize("name", ["line\ndir", "line\n", "line\n\n"])
+@pytest.mark.parametrize("parent_exists", [False, True])
+def test_checkout_external_containment_survives_newlines_in_registered_worktree_paths(tmp_path, name, parent_exists):
+    # Review rounds 2 and 3 of #130: `git worktree list --porcelain` prints a
+    # path with a newline across two lines, and `$(…)` strips a TRAILING
+    # newline from a captured path, so a newline-delimited parse or a plain
+    # `$(pwd -P)` dropped or truncated that root and let the destination land
+    # inside it. Read NUL-delimited and capture losslessly; refuse a resolved
+    # destination that carries a newline.
     s = external_stub(tmp_path, head_sha=None)
     q = external_repos(s, tmp_path)
     (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
-    odd = tmp_path / "line\ndir"
+    odd = tmp_path / name
     s.git("worktree", "add", "-q", str(odd), "meridian")
     odd_head = s.git("rev-parse", "HEAD", cwd=odd).stdout.strip()
+    if parent_exists:
+        (odd / "ext").mkdir()
     before = clone_state(s)
     # A destination whose own path carries the newline is refused outright...
     r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(odd / "ext")})
@@ -738,14 +745,15 @@ def test_checkout_external_containment_survives_newlines_in_registered_worktree_
     # containment must still know that root, from the clone and from inside
     # that worktree (where it is "this clone").
     (tmp_path / "alias").symlink_to(odd, target_is_directory=True)
-    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(tmp_path / "alias" / "ext")})
-    assert r.returncode == 1 and "would be inside" in r.stderr, r.stderr
-    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(tmp_path / "alias" / "ext")}, cwd=odd)
-    assert r.returncode == 1 and "would be inside" in r.stderr, r.stderr
+    for cwd in (None, odd):
+        r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(tmp_path / "alias" / "ext")}, cwd=cwd)
+        assert r.returncode == 1 and ("would be inside" in r.stderr or "containing a newline" in r.stderr), r.stderr
     assert clone_state(s) == before and s.git("rev-parse", "HEAD", cwd=odd).stdout.strip() == odd_head
-    for root in (s.clone, odd):
-        assert not (root / ".claude").exists() and not (root / "ext").exists(), root
+    for root in (s.clone, odd, tmp_path / "line"):  # `line`: where a truncated path would have landed
+        assert not (root / ".claude").exists() and not (root / "ext" / "UKGovernmentBEIS--inspect_ai").exists(), root
+    assert not (tmp_path / "line").exists() or name == "line"
     assert not q["marker"].exists()
+    assert s.git("worktree", "list", "--porcelain").stdout.count("worktree ") == 2
     # A plain destination still works with that worktree registered.
     r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})
     assert r.returncode == 0, r.stderr
@@ -773,18 +781,31 @@ def test_checkout_external_documented_diff_and_removal_run_nothing_from_the_tree
     s.git("config", "filter.cleany.clean", "./a-filter.sh")
     s.git("config", "diff.project.textconv", "./a-convert.sh")
     (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
-    assert s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])}).returncode == 0
-    assert not marker.exists()
-    # The recipes, as documented, with the placeholders filled in.
+    # A root with a space, a tab and a glob character (review round 3: the
+    # unquoted recipe split or expanded the path), and unrelated siblings
+    # that a split or expanded `rm -rf` would have hit.
+    root = tmp_path / "wts\tcopy*"
+    wt = root / "UKGovernmentBEIS--inspect_ai" / "pr-5001"
+    survivors = [tmp_path / "wts" / "keep.txt", tmp_path / "wts-unrelated" / "UKGovernmentBEIS--inspect_ai" / "pr-5001" / "keep.txt",
+                 tmp_path / "wts\tcopy-other" / "keep.txt", tmp_path / "copy*" / "keep.txt"]
+    for f in survivors:
+        f.parent.mkdir(parents=True)
+        f.write_text("keep\n")
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(root)})
+    assert r.returncode == 0, r.stderr
+    assert f"OK worktree={wt} " in r.stdout and not marker.exists()
+    # The recipes, as documented, with the placeholders filled in exactly as
+    # the OK line printed the path.
     block = (skill_follow_up_block().replace("<base-remote>/<base>", "upstream/main").replace("<sha>", q["tip"])
-             .replace("<path>", str(q["wt"])))
-    assert "git diff --no-ext-diff --no-textconv" in block and "git worktree prune" in block
+             .replace("<path>", str(wt)))
+    assert "git diff --no-ext-diff --no-textconv" in block and 'rm -rf -- "' in block and "git worktree prune" in block
     r = subprocess.run(["bash", "-e", "-c", block], cwd=s.clone, text=True, capture_output=True,
                        env={**os.environ, **GIT_ENV})
     assert r.returncode == 0, r.stderr
     assert not marker.exists()
     assert "+raw z" in r.stdout and "a-convert.sh" in r.stdout  # the PR's changes, unconverted
-    assert not q["wt"].exists() and f"worktree {q['wt']}" not in s.git("worktree", "list", "--porcelain").stdout
+    assert not wt.exists() and f"worktree {wt}" not in s.git("worktree", "list", "--porcelain").stdout
+    assert all(f.read_text() == "keep\n" for f in survivors)
     # The recipes the skill no longer gives are the potent ones: a plain
     # status in the worktree runs the clean filter, a plain diff the textconv.
     r2 = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})

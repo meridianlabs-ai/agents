@@ -203,14 +203,18 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   config untouched — including drivers an `includeIf gitdir:` condition
   defines only inside the linked worktree, discovered after `worktree add
   --no-checkout` and before the first checkout. Registered worktree paths
-  are read NUL-delimited, so a worktree whose path holds a newline still
-  bounds the destination (from the clone and from inside that worktree),
-  and a destination path with a newline is refused. The diff and removal
+  are read NUL-delimited and captured losslessly (a `$(…)` capture drops a
+  trailing newline), so a worktree whose path holds an embedded or one or
+  two trailing newlines still bounds the destination, reached through a
+  newline-free symlink alias from the clone and from inside that worktree,
+  with and without a pre-created parent, and a destination path with a
+  newline — lexical or after resolution — is refused. The diff and removal
   recipes SKILL.md gives the operator are lifted from its ```sh block and
-  run against an inherited clean filter and textconv driver: no marker,
-  the worktree gone and pruned; the plain in-worktree status the skill no
-  longer recommends does run the clean filter. Promotions keep
-  `gh pr checkout`.
+  run, with a worktree root holding a space, a tab and a glob character,
+  against an inherited clean filter and textconv driver: no marker, the
+  worktree gone and pruned, unrelated sibling files intact; the plain
+  in-worktree status the skill no longer recommends does run the clean
+  filter. Promotions keep `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
