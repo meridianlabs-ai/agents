@@ -33,7 +33,8 @@ Untrusted: the content of any pull request and every fork head; the text of
 issues and comments (the fork is public, so any GitHub account can write
 there); test output, CI logs and artifacts; dependency alerts and anything
 an agent reads or installs while it works; every file an agent job leaves
-behind, the landing manifest included.
+behind, the landing manifest included; Actions cache entries saved by any
+run an outsider can influence.
 
 Trusted: upstream `main` of `UKGovernmentBEIS/inspect_ai` and the default
 branches of Meridian repositories; the machine account under its two logins
@@ -49,6 +50,11 @@ text are checked by the tests under `tests/`.
   token minted from it; its own job token is read-only. The Claude action's
   own token, present while that step runs, is the exception described under
   "By design" below.
+- No job of the agent workflows can save to the GitHub Actions cache: every
+  reusable workflow declares `cache-mode: read`, which the platform enforces
+  on the job's token, so nothing an agent does or a caller's setup nests can
+  place content in a cache a trusted workflow restores (Claude Security
+  finding 4629157; design/agent-cache-scope.md).
 - A job that runs the Claude agent references no `OPENAI_API_KEY`. Each
   reusable workflow runs each engine in a job of its own (`agent` and
   `agent-codex`, `review` and `review-codex`, `fix` and `fix-codex`), the
@@ -62,7 +68,10 @@ text are checked by the tests under `tests/`.
   hosted canary (design/credential-separation.md → section 6) shows a
   referenced-but-skipped secret in the runner's memory and none in a job
   that references nothing, although the caller passed it and a sibling job
-  referenced it — delivery is scoped per job.
+  referenced it — delivery is scoped per job. The same canary, in the
+  agent workflows' own gate/agent/land shape, finds neither the App
+  secrets the gate and land jobs reference nor the OpenAI key in the
+  Claude agent job's runner memory.
 - In a codex job nothing from the checked-out tree executes as the runner:
   the caller's `claude-setup` action is not run there, and the shared
   provisioning recipe (uv and a dev-install of the checkout, the tree's own
@@ -78,6 +87,21 @@ text are checked by the tests under `tests/`.
   runner-side reads. A hosted canary exercises both this boundary and the
   secret delivery against a hostile checkout and synthetic secrets
   (design/credential-separation.md → section 6).
+- The uid an agent runs as has no passwordless sudo and no other route to
+  root when the agent step starts, on both engines. In a Claude job the
+  agent is the runner, so a `drop-runner-root` step between the last step
+  that needs root (checkouts, provisioning, the reviewer's sandbox install)
+  and the agent step raises `kernel.yama.ptrace_scope` to 2, makes the
+  docker socket root-only, makes root's default search path (`/usr/local/sbin`,
+  `/usr/local/bin`) root's alone, replaces the sudoers policy with one that grants
+  root alone, and fails the job — before the agent runs — unless `sudo -n
+  true` and `sudo -n -l` then fail from the runner and `Runner.Worker`'s
+  process memory does not open. In a codex job the agent is the `codex`
+  user, which never had sudo and cannot inspect the runner's processes; the
+  runner keeps its sudo there for the reclaim. A hosted smoke workflow
+  checks both from the real users (Claude Security finding 4629153,
+  criterion 2; design/architecture.md → No root for the agent uid, which
+  also lists what stays open: provisioning itself still runs with root).
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -223,6 +247,38 @@ text are checked by the tests under `tests/`.
   manifest names: the manifest's `start_sha` is the agent job's to write,
   and origin serves any reachable commit — a fork PR's head, an old base
   commit — as a start (Claude Security finding 4628444, 2026-09-22).
+- The same refusal covers the entry points and configuration files a later
+  automated job on the branch executes or loads — not everything those
+  run (see the accepted gap below) — since the machine account's push would
+  otherwise move agent-written files into the same-repo tree the next run
+  provisions from as `runner` or reads as instructions
+  (Claude Security finding 4628446, criterion 2, 2026-09-23): anything
+  under `.github/` (the composite actions a workflow runs with `uses:
+  ./…`, the callers' `claude-setup` among them); agent instructions and
+  settings at any depth (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  `AGENTS.override.md`, `.claude/`, `.mcp.json`, `.claude.json`,
+  `.codex/`, `.agents/`, `.gitmodules`, `.ripgreprc`, `.husky/`); and
+  build and dependency configuration at any depth (`pyproject.toml`,
+  `setup.py`, `setup.cfg`, `uv.lock`, `uv.toml`, `.python-version`,
+  `requirements*.txt`, `package.json`, the npm, pnpm and yarn lockfiles,
+  `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc`,
+  `.yarnrc.yml`, `.yarn/`). Symlink targets and `CLAUDE.md` `@path`
+  imports reached from these paths are refused too. **Accepted gap**
+  (decision: Ransom, 2026-09-23): this does not close the class. The list
+  names entry points and loaded configuration, not the code they run, so
+  an agent's edit to an ordinary file that UNCHANGED configuration
+  executes still lands: a script a `claude-setup` step, a settings hook or
+  an MCP server command runs, a build backend on `backend-path`, a module
+  a `setup.py` or build hook imports, any file a caller's recipe reads.
+  The next automated run executes it during provisioning or at agent start
+  — as the codex user on codex jobs (finding 4628446, criterion 1), as
+  `runner` on Claude jobs, where the Claude agent itself already runs the
+  tree's code (tests, `conftest.py`) as `runner`. Closing it is a separate
+  design follow-up (Ransom, 2026-09-23) comparing approval gating (a head
+  the machine account pushed gets fork-head treatment in every later
+  automated job until a write-access human approves that exact head),
+  heuristic dependency following at landing, and running the Claude engine
+  as an unprivileged user that also provisions, as codex does.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The
@@ -250,6 +306,9 @@ text are checked by the tests under `tests/`.
   checkout as the runner in a codex job: those jobs provision with
   `provision-fallback` `user: codex` after `create-codex-user`, and no
   `./`-local action.
+- In a job that runs the Claude agent, every step that needs root goes
+  before the `drop-runner-root` step, and nothing after it uses sudo or
+  docker; the drop keeps the agent step's `if:`.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
   The skills under `skills/` that a maintainer's local agent runs with their

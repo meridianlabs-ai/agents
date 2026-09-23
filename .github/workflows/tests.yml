@@ -15,8 +15,9 @@
 #
 # What this does NOT cover: the workflows are exercised here only as text
 # and as lifted step scripts against stubs. A live run is still validated by
-# triggering the agents and by the hosted canaries (codex-path-smoke.yml,
-# engine-isolation-canary.yml) — AGENTS.md → Testing a change.
+# triggering the agents and by the hosted canaries and smoke runs
+# (codex-path-smoke.yml, root-boundary-smoke.yml, engine-isolation-canary.yml,
+# cache-mode-canary.yml) — AGENTS.md → Testing a change.
 name: tests
 
 on:

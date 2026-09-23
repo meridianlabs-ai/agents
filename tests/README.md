@@ -410,10 +410,26 @@ Testing a change).
   the home script; refuses while `pkill` keeps finding codex processes).
   The four composer tests lift each engine's composer from its own job
   (`job_block` / `lift_run` in `test_land_helpers.py`).
-- `secret_delivery_scan.py`, `fixtures/hostile-checkout/` and
-  `fixtures/callers/` are not tests but the hosted canary's pieces
+- `test_secret_delivery_canary.py` — the hosted canary's pipeline probe
+  (`engine-isolation-canary-pipeline.yml`; finding 4629153, fix criterion
+  3) keeps the agent workflows' shape: in each of the four reusable
+  workflows the gate, Claude agent, codex agent and land jobs reference
+  the same secrets as the probe's job in that role and no other job
+  references any, the `workflow_call` secret declarations match, the agent
+  jobs are selected by the gate's `engine` output like the real ones and
+  the land job needs all three under `always()`; each probe job ends with
+  the memory scan its references imply, the canary calls the probe per
+  engine with the two sentinels only, the canary keeps a weekly off-the-hour
+  schedule beside its push and dispatch triggers, and the stand-in action
+  prints lengths, never values.
+- `secret_delivery_scan.py`, `fixtures/secret-input/`,
+  `fixtures/hostile-checkout/` and `fixtures/callers/` are not tests but
+  the hosted canary's pieces
   (`.github/workflows/engine-isolation-canary.yml`): the root-run scanner
   that counts synthetic sentinel secrets in the runner processes' memory,
+  the stand-in action through which the pipeline probe's gate, land and
+  codex jobs consume the sentinels as action inputs (printing lengths
+  only),
   the hostile `setup.py` build backend the provisioning-boundary job
   installs as the codex user, and the four representative caller projects
   (with the `codex_provision` recipe each caller's stub would set and the
@@ -429,6 +445,24 @@ Testing a change).
   `---` rule, qualified `#N` refs) survives, `--dry-run` previews the
   de-fanged title and creates nothing, and ordinary text is copied
   unchanged.
+- `test_cache_mode.py` — agent jobs get read-only Actions cache access
+  (Claude Security 4629157; design/agent-cache-scope.md), as structural
+  checks on the workflow text: each of the four agent workflows (and the
+  canary's called workflow) declares exactly one top-level `cache-mode:
+  read` before `jobs:` and no job overrides it; no `cache-mode` in
+  `.github/workflows/` or `examples/` is anything but `read` or `none`,
+  except the canary's `control` job, listed by file and job; every calling
+  job in the example stubs and this repo's stubs caps its call at `read`.
+  The enforcement itself is checked by the dispatch-only
+  `.github/workflows/cache-mode-canary.yml`: a called workflow under
+  `cache-mode: read`, on a trusted trigger its caller sets no mode for,
+  sees the mode, and neither a mode-aware client's save (skipped) nor a
+  mode-ignoring client's save (refused by the service) leaves an entry,
+  while a write-mode control job's save does. That workflow's `Check` step
+  is lifted and run here against a stub `gh` and `curl`: green only when
+  exactly the control entry exists and restores, each job's "Set up job"
+  line shows its mode, and the probe's log shows the client's skip and the
+  service's `cache write denied:` refusal; red, with the reason, otherwise.
 - `test_ci_workflow.py` — the CI workflow itself (`.github/workflows/tests.yml`):
   the full suite on every PR and push to main with no path filter, a
   read-only token, no `secrets.` reference, no `pull_request_target`, every

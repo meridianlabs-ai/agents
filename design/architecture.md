@@ -1059,6 +1059,95 @@ model floats with Opus releases.
   shell commands Claude will attempt. Largely shared between the agents; the
   token scope does the real separating.
 
+### No root for the agent uid
+
+Rule (Claude Security finding 4629153, criterion 2, 2026-09-23): on every
+engine path — the dev agent, the reviewer and both `@auto` loops, Claude and
+codex — the uid the agent runs as has no passwordless sudo and no other route
+to root when the agent step starts. Runner-side setup that needs root
+finishes before that point. Root matters beyond the VM itself because the
+runner's own process holds the job: `Runner.Worker` keeps every secret of
+the job message in its memory, and root (or the same uid, where the kernel
+allows it) can open its `/proc/<pid>/mem`.
+
+- **Claude jobs** (`agent`, `review`, `fix` in the two loops): the agent is
+  `runner` itself. The `drop-runner-root` composite runs after the last step
+  that needs root (the checkouts, the caller's `claude-setup`, the fallback
+  provisioning, the reviewer's "Install review sandbox") and before
+  `claude-code-action`, with the agent step's own `if:`. While sudo still
+  works it sets `kernel.yama.ptrace_scope` to 2 (attach-mode access to
+  another process — `mem`, `ptrace`, `process_vm_readv` — then needs
+  CAP_SYS_PTRACE; 1 would still honour a `PR_SET_PTRACER` exception a
+  process grants itself, 3 cannot be lowered again), takes the runner out
+  of the `docker` group and makes every docker socket under `/run`
+  `root:root` 0600 (the group edit alone does nothing for this job: every
+  later step is a child of `Runner.Worker` and keeps the groups it started
+  with), makes `/usr/local/sbin` and `/usr/local/bin` — root's and
+  systemd's default search path ahead of `/usr/bin`, shipped mode 777 on
+  the hosted image — `root:root` with nothing inside writable by group or
+  other (review round 1 of #151; decision: Ransom, 2026-09-23), and finally
+  replaces `/etc/sudoers` with a `visudo`-checked policy
+  that grants root alone, which removes every grant wherever the image or a
+  caller put it. It then fails the step unless, from the runner, `sudo -n
+  true` and `sudo -n -l` both fail, the scope reads back 2 or more, no docker
+  socket is writable, nothing but a symlink in those two directories is
+  writable, `Runner.Worker`'s `mem` does not open, and the job's
+  processes hold neither `disk` nor `lxd`. A failed drop skips the agent
+  (fail closed) and the Surface step says why. Nothing after the agent step
+  in these jobs uses sudo or docker; claude-code-action@v1 itself calls sudo
+  only when `allowed_non_write_users` is set, which no workflow here does.
+- **Codex jobs**: the agent is the `codex` user, created by
+  `create-codex-user` with no sudoers entry and no group but its own and
+  `runner`'s, and started by codex-action's `unprivileged-user` strategy
+  (`sudo -u codex`). The runner keeps its sudo — the reclaim and codex-usage
+  need it after codex — so the codex jobs do not run the drop; the runner's
+  sudo is protected there by the reclaim and the runner-side PATH boundary
+  (design/codex-engine.md → Hook-safe landing, → Runner-side search path),
+  and ptrace across uids needs CAP_SYS_PTRACE at every Yama scope.
+
+`tests/test_agent_root_boundary.py` checks the placement, the `if:`, that no
+step after the drop calls sudo or docker, the codex user's launch and grants,
+and the composite's fail-closed checks with stubs;
+`.github/workflows/root-boundary-smoke.yml` runs the composite and the probes
+on a hosted runner as `runner` and as `codex`, and shows the reviewer's
+bubblewrap sandbox still starting after the drop.
+
+What callers lose: Claude-engine agents have no sudo and no docker for the
+agent step and everything after it, and cannot attach a debugger (`gdb`,
+`strace`, `py-spy`) to their own processes. Nor can they install into
+`/usr/local/bin` or `/usr/local/sbin` (`npm install -g`, a copied binary):
+installs go to `~/.local/bin`, a venv or `node_modules`. A caller whose agent
+ran docker-based tests, whose agent installed tools globally, or whose setup
+needed root after provisioning, moves that work into `claude-setup`, which
+runs before the drop.
+
+What stays open:
+
+- **Provisioning still runs the tree with root.** The caller's
+  `claude-setup` and the fallback dev-install execute the checkout's build
+  code as the runner with sudo, before the drop, and on a branch the
+  pipeline itself produced that code may come from an earlier agent run
+  (design/credential-separation.md → section 7). A root foothold planted
+  there (a setuid file, a root process) is not something the drop looks
+  for. The fallback recipe needs no root (uv installs to `~/.local/bin`, the
+  venv is in the workspace), so running the drop before it would close this
+  for repositories without `claude-setup`; the drop sits after all
+  provisioning because that is where the task placed it.
+- **Other root-owned world-writable directories.** The drop protects the
+  two on root's default search path. The hosted image also ships the `/opt`
+  tree mode 777 (actions/runner-images, `configure-environment.sh`;
+  confirmed by the smoke run of 2026-09-23), and symlinks inside
+  `/usr/local/bin` are left as they are, so one that points into `/opt`
+  still reaches a runner-writable file. That matters only where a root
+  process executes from such a place during the job. No hosted test runs a
+  real root service against the protected directories: by decision
+  (Ransom, 2026-09-23), that coverage stays unverified.
+- **Read-mode inspection.** Yama restricts attach-mode access only: the
+  runner can still read `Runner.Worker`'s `/proc/<pid>/environ`, `cmdline`
+  and `status` (the service environment, not the job's secrets).
+- **The codex path** keeps relying on the runner's sudo after codex, behind
+  the reclaim and the PATH boundary.
+
 ### Why settings.json over `--allowedTools`
 
 We migrated from `--allowedTools` (a comma-string in `claude_args`) to inline
@@ -1134,11 +1223,18 @@ against the docs, not assumed):
 - **`uses:` must be a literal** — no `${{ … }}` interpolation — which is why the
   path is a fixed convention rather than a configurable input.
 - **The Actions cache is scoped to the run's repo** (the caller), even though
-  the step lives in our reusable workflow. So the caller's normal CI and these
-  runs share cache entries when keys match, and the default-branch (`main`)
-  cache is readable from feature branches, PR heads, and `issue_comment` runs —
-  i.e. all of our trigger types. Reuse of the cache is automatic; we don't
-  manage keys here.
+  the step lives in our reusable workflow. So these runs restore the caller's
+  normal CI entries when keys match, and the default-branch (`main`) cache is
+  readable from feature branches, PR heads, and `issue_comment` runs — i.e.
+  all of our trigger types. Agent runs **never save** one: every reusable
+  workflow declares top-level `cache-mode: read` (Claude Security 4629157,
+  2026-09-23; [agent-cache-scope.md](agent-cache-scope.md)), which GitHub
+  enforces on each job's token, so a claude-setup cache action's save is
+  skipped or refused and a runtime token the agent recovers can restore and
+  nothing more. Restores are automatic; we don't manage keys here. The
+  dispatch-only `cache-mode-canary.yml` checks the enforcement for a called
+  workflow on a trusted trigger; its first run is recorded here once it has
+  been dispatched from `main`.
 
 The step is **fatal on failure** (no `continue-on-error`): a broken setup config
 should surface loudly rather than silently degrade every run to static-only

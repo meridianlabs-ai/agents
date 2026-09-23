@@ -1,0 +1,82 @@
+# Hosted-runner smoke test for "no root for the agent uid" (Claude Security
+# finding 4629153, criterion 2; design/architecture.md → No root for the
+# agent uid). Not a caller stub and not an agent run: no secret, no model,
+# no claude-code-action or codex-action. Two jobs on the stock
+# `ubuntu-latest` image, each running THIS revision's composites from the
+# checkout (`uses: ./…`, not `@main`, so a branch is tested as itself):
+#
+#   claude   the Claude-engine shape: the agent is the runner. A control
+#            step shows sudo, the docker socket and (through root)
+#            Runner.Worker's memory reachable; drop-runner-root runs; then,
+#            from the runner, `sudo -n true`/`sudo -n -l` fail, the docker
+#            socket refuses the connection and Runner.Worker's
+#            /proc/<pid>/mem does not open, while unprivileged bubblewrap
+#            (the reviewer's sandbox, installed before the drop as the
+#            reviewer installs it) still starts. A report step lists what the
+#            composite does not cover (root-owned world-writable directories
+#            on root's search path, root's timers).
+#   codex    the codex-engine shape: the agent is the codex user and the
+#            runner keeps its sudo. create-codex-user makes the user; the
+#            same probes run as codex and fail, and the runner's sudo still
+#            works.
+#
+# tests/root_boundary_smoke.sh holds the probes. Runs on pushes that touch
+# the composites or the harness, and by hand.
+
+name: root boundary smoke
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/actions/drop-runner-root/**"
+      - ".github/actions/create-codex-user/**"
+      - "tests/root_boundary_smoke.sh"
+      - ".github/workflows/root-boundary-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: "Control: sudo, the docker socket and Runner.Worker's memory are reachable"
+        run: bash tests/root_boundary_smoke.sh before
+      # What claude-review.yml's "Install review sandbox" step does before
+      # the drop on fork-head and external reviews (the package installs
+      # and the user-namespace sysctl need root).
+      - name: Install bubblewrap as the reviewer's sandbox install does
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq bubblewrap socat
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Drop the runner's root access (this revision's composite)
+        uses: ./.github/actions/drop-runner-root
+      - name: "From the runner: no sudo, no docker socket, no Runner.Worker memory"
+        run: bash tests/root_boundary_smoke.sh runner
+      - name: "The reviewer's sandbox still starts: unprivileged bubblewrap after the drop"
+        run: bash tests/root_boundary_smoke.sh sandbox
+      - name: "Report: what the composite does not cover (not a check)"
+        if: always()
+        run: bash tests/root_boundary_smoke.sh report
+
+  codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: "Control: sudo, the docker socket and Runner.Worker's memory are reachable"
+        run: bash tests/root_boundary_smoke.sh before
+      - name: Create the codex user (this revision's composite)
+        uses: ./.github/actions/create-codex-user
+      - name: "As codex: no sudo, no docker socket, no Runner.Worker memory; the runner keeps sudo"
+        run: bash tests/root_boundary_smoke.sh codex

@@ -7,7 +7,9 @@ description: >-
   every field is data until it passes), and only then act on it with the
   privileged token: push the bundled commits (never --force, never over a
   branch that moved during the run, and never a bundle that changes files
-  under .github/workflows/, which the machine account may not push), open
+  under .github/workflows/, which the machine account may not push, or
+  another entry point or configuration file a later automated job executes
+  or loads), open
   or adopt the PR, post the
   de-fanged comments, inline review comments and review replies, resolve
   review threads that belong to that PR, file follow-up issues in
@@ -383,7 +385,7 @@ runs:
             base=$(jq -r '.baseRefName // ""' <<<"$pr")
           fi
           [ -n "$PR_HEAD_REF$ref" ] || echo "::warning::land: could not read PR #$EVENT_PR_NUMBER's head ref; the validator will refuse a manifest naming it."
-          [ -n "$base" ] || echo "::warning::land: could not read PR #$EVENT_PR_NUMBER's base ref; workflow files the base merge changed cannot be told from the agent's."
+          [ -n "$base" ] || echo "::warning::land: could not read PR #$EVENT_PR_NUMBER's base ref; workflow and other executed files the base merge changed cannot be told from the agent's."
         fi
         default=""
         if [ -z "$DEFAULT_BRANCH" ]; then
@@ -553,7 +555,7 @@ runs:
           base_sha=$(git rev-parse refs/land/base)
           echo "land: origin/$BASE is at $base_sha (the base the workflows check compares against)."
         else
-          echo "::warning::land: no base branch tip (base '${BASE:-?}'); workflow files the base merge changed cannot be told from the agent's, and a branch the push would create cannot be checked at all."
+          echo "::warning::land: no base branch tip (base '${BASE:-?}'); workflow and other executed files the base merge changed cannot be told from the agent's, and a branch the push would create cannot be checked at all."
         fi
         echo "base_sha=$base_sha" >>"$GITHUB_OUTPUT"
 
@@ -564,7 +566,19 @@ runs:
     # deep in the push step's log, after the agent had spent its whole run
     # (agents #114). Refuse it here, by name, before the push: workflow
     # changes are made from a maintainer's machine, never by a CI agent, and
-    # Report says so in one line. The paths checked are those the push
+    # Report says so in one line. The same holds, since Claude Security
+    # finding 4628446 (criterion 2, 2026-09-23), for the entry points and
+    # configuration files a later automated job on the branch EXECUTES or
+    # LOADS (lib.sh's PROTECTED_PATHSPECS and what they reach; not the
+    # ordinary files those run — an accepted gap stated there and in
+    # SECURITY.md): the machine account's push would move
+    # agent-written files into the same-repo tree the next run — the
+    # reviewer admitting the `@review` hand-back, a loop round, a `@claude`
+    # follow-up — provisions from as `runner` or hands its agent as
+    # instructions, with no human having read them. GitHub's check covers
+    # workflows only, so this step is the whole boundary for these. (The
+    # step keeps its `workflows` id, which Report and the Post gate name.)
+    # The paths checked are those the push
     # would CHANGE ON ORIGIN: head_sha against the branch's live tip (the
     # fetch step's ls-remote — an ancestor of head_sha, so held here), or,
     # when the push creates the branch, against origin's base tip. Never
@@ -612,6 +626,7 @@ runs:
         HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
         REMOTE_SHA: ${{ steps.fetch.outputs.remote_sha }}
         BASE_SHA: ${{ steps.fetch.outputs.base_sha }}
+        LIB: ${{ github.action_path }}/lib.sh
         GIT_CONFIG_GLOBAL: /dev/null
       run: |
         set -euo pipefail
@@ -626,23 +641,40 @@ runs:
           what="origin's base tip ($from)"
           new_branch=" (the branch is new on origin)"
         else
-          echo "::error::land: the push creates the branch and no base tip was fetched, so there is nothing trusted to list the bundle's workflow changes against; refusing the bundle unchecked."
+          echo "::error::land: the push creates the branch and no base tip was fetched, so there is nothing trusted to list the bundle's workflow and other executed-file changes against; refusing the bundle unchecked."
           exit 1
         fi
-        # --no-renames: a file moved out of the directory is listed as its
-        # deletion, which the push would be refused for just the same. The
-        # listings are written out and checked, not streamed: a process
+        # The paths later automated jobs on the branch execute or load as
+        # configuration: lib.sh's PROTECTED_PATHSPECS (the list, and why
+        # each entry is on it, are there) plus what the protected entries
+        # REACH, at the baseline and at head_sha — symlink targets (this
+        # repo's own `.claude/skills -> ../skills`) and CLAUDE.md `@path`
+        # imports (protected_reach) — so editing a link's target or an
+        # imported file changes loaded configuration no less than editing
+        # the protected path itself. A failed walk refuses unchecked.
+        . "$LIB"
+        reach=()
+        for rev in "$from" "$HEAD_SHA"; do
+          if ! protected_reach "$rev" "${PROTECTED_PATHSPECS[@]}" >"$RUNNER_TEMP/protected-reach"; then
+            echo "::error::land: could not follow the symlinks and imports of the protected paths at $rev (see above); refusing the bundle unchecked."
+            exit 1
+          fi
+          while IFS= read -r -d '' p; do reach+=(":(literal)$p"); done <"$RUNNER_TEMP/protected-reach"
+        done
+        # --no-renames: a file moved out of a protected path is listed as
+        # its deletion, which the push would be refused for just the same.
+        # The listings are written out and checked, not streamed: a process
         # substitution's exit status is invisible to set -e, and a failed
-        # diff must not read as "no workflow files". (A file, not a variable:
-        # the NUL separators a shell variable cannot hold.)
-        if ! git diff -z --name-only --no-renames "$from" "$HEAD_SHA" -- .github/workflows/ >"$RUNNER_TEMP/workflow-paths"; then
+        # diff must not read as "no protected files". (A file, not a
+        # variable: the NUL separators a shell variable cannot hold.)
+        if ! git diff -z --name-only --no-renames "$from" "$HEAD_SHA" -- "${PROTECTED_PATHSPECS[@]}" ${reach[@]+"${reach[@]}"} >"$RUNNER_TEMP/workflow-paths"; then
           echo "::error::land: could not list the paths the bundle changes (git diff failed, see above); refusing the bundle unchecked."
           exit 1
         fi
         paths=()
         while IFS= read -r -d '' p; do paths+=("$p"); done <"$RUNNER_TEMP/workflow-paths"
         if [ "${#paths[@]}" -eq 0 ]; then
-          echo "land: no workflow files between $what and $HEAD_SHA$new_branch."
+          echo "land: no workflow or other executed files between $what and $HEAD_SHA$new_branch."
           exit 0
         fi
         # The trusted references (above): the base tip and, on a branch that
@@ -688,10 +720,10 @@ runs:
           files="${files%, }"
           [ "${#agent[@]}" -le 20 ] || files="$files and $(( ${#agent[@]} - 20 )) more"
           echo "files=$files" >>"$GITHUB_OUTPUT"
-          echo "::error::land: the agent's commits change workflow files ($files), which the machine account may not push (it has no Workflows permission); refusing the bundle — changes under .github/workflows/ are made from a maintainer's machine."
+          echo "::error::land: the agent's commits change files later automated runs execute or load as configuration ($files) — workflows, which the machine account may not push (it has no Workflows permission), anything else under .github/, agent instructions and settings, or build and dependency configuration; refusing the bundle — such changes are made from a maintainer's machine, where a human reads them before automation runs them."
           exit 1
         fi
-        echo "land: ${#paths[@]} workflow file(s) between $what and $HEAD_SHA changed only by the base merge (matching origin's base at ${BASE_SHA}); not the agent's."
+        echo "land: ${#paths[@]} workflow or other executed file(s) between $what and $HEAD_SHA changed only by the base merge (matching origin's base at ${BASE_SHA}); not the agent's."
 
     # Push, part 2 (the write, privileged token). A separate step because
     # a step has one GIT_TOKEN; nothing but the push happens here.
@@ -1290,8 +1322,8 @@ runs:
         EVENT_PR_NUMBER: ${{ inputs.pr-number }}
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         PUSHED: ${{ steps.push.outputs.pushed }}
-        # The workflow files a refused bundle changes (agent-chosen paths;
-        # the hint de-fangs them).
+        # The workflow and other executed files a refused bundle changes
+        # (agent-chosen paths; the hint de-fangs them).
         WORKFLOW_FILES: ${{ steps.workflows.outputs.files }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
         # The PR step runs only after the push succeeded or was not needed,

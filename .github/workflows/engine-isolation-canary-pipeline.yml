@@ -1,0 +1,140 @@
+# The pipeline probe of the engine-isolation canary (Claude Security finding
+# 4629153, fix criterion 3; called by engine-isolation-canary.yml once per
+# engine). The probe in engine-isolation-canary-reusable.yml showed per-job
+# delivery with sibling jobs that share nothing; this one measures the shape
+# the four agent workflows actually have, so invariant I1 is checked against
+# the job message and not only the YAML text:
+#
+#   - the same three `workflow_call` secrets under the same names —
+#     MARVIN_APP_CLIENT_ID, MARVIN_APP_PRIVATE_KEY, OPENAI_API_KEY — which
+#     the caller fills with SYNTHETIC sentinels only: sentinel A
+#     (`CANARYA-<16 hex>`) for both App secrets, sentinel B
+#     (`CANARYB-<16 hex>`) for the OpenAI key;
+#   - `gate` references the App secrets the way the real gates do: in a
+#     job-level `env:` (claude.yml's HAS_APP_SECRETS) and as action inputs
+#     of a step that runs (the mint step), and publishes `ok` and `engine`;
+#   - `agent` and `agent-codex` both `needs: gate` and are selected by the
+#     gate's `engine` output at the job level, exactly one running; the
+#     Claude job references no secret, the codex job references the OpenAI
+#     key as an action input of a step that runs (the codex-action step);
+#   - `land` needs all three, runs `always()` after a successful gate,
+#     references the App secrets like the gate, and fails unless the
+#     selected agent job succeeded (so a skipped agent job cannot pass the
+#     canary without being measured).
+#
+# `tests/test_secret_delivery_canary.py` keeps this file's per-job secret
+# references and job selection equal to the four reusable workflows'.
+#
+# Each job's last step runs tests/secret_delivery_scan.py as root over the
+# memory of the runner processes (Runner.Worker and Runner.Listener) and
+# prints only match counts. Expected: gate and land hold A and not B; the
+# Claude agent job holds neither — no App secret although the gate and land
+# jobs of the same called workflow referenced them, before and after it, and
+# no OpenAI key although the caller passed it; the codex job holds B and not
+# A. Per-workflow delivery would put A into both agent jobs.
+
+name: engine isolation canary (pipeline probe)
+
+on:
+  workflow_call:
+    inputs:
+      engine:
+        type: string
+        required: true
+    secrets:
+      MARVIN_APP_CLIENT_ID:
+        required: true
+      MARVIN_APP_PRIVATE_KEY:
+        required: true
+      OPENAI_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
+    outputs:
+      ok: ${{ steps.trig.outputs.ok }}
+      engine: ${{ steps.trig.outputs.engine }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Trigger check stand-in
+        id: trig
+        env:
+          ENGINE: ${{ inputs.engine }}
+        run: |
+          set -euo pipefail
+          case "$ENGINE" in claude|codex) ;; *) echo "::error::engine must be claude or codex, got '$ENGINE'"; exit 1 ;; esac
+          echo "ok=true" >>"$GITHUB_OUTPUT"
+          echo "engine=$ENGINE" >>"$GITHUB_OUTPUT"
+      - name: Mint step stand-in (uses the App secrets)
+        id: mint
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: ./tests/fixtures/secret-input
+        with:
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+      - name: Scan runner memory (expect A present, B absent)
+        run: sudo python3 tests/secret_delivery_scan.py present absent
+
+  agent:
+    needs: gate
+    if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.engine != 'codex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Scan runner memory (expect neither sentinel)
+        run: sudo python3 tests/secret_delivery_scan.py absent absent
+
+  agent-codex:
+    needs: gate
+    if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.engine == 'codex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Codex-action step stand-in (uses the OpenAI key)
+        uses: ./tests/fixtures/secret-input
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+      - name: Scan runner memory (expect A absent, B present)
+        run: sudo python3 tests/secret_delivery_scan.py absent present
+
+  land:
+    needs: [gate, agent, agent-codex]
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
+      AGENT_RESULT: ${{ needs.gate.outputs.engine == 'codex' && needs.agent-codex.result || needs.agent.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Mint step stand-in (uses the App secrets)
+        id: mint
+        if: env.HAS_APP_SECRETS == 'true'
+        uses: ./tests/fixtures/secret-input
+        with:
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+      - name: The selected agent job ran and passed its scan
+        run: |
+          set -euo pipefail
+          echo "agent job result: $AGENT_RESULT"
+          [ "$AGENT_RESULT" = success ] || { echo "::error::the selected agent job did not succeed ($AGENT_RESULT)"; exit 1; }
+      - name: Scan runner memory (expect A present, B absent)
+        run: sudo python3 tests/secret_delivery_scan.py present absent

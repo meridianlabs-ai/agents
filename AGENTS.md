@@ -28,6 +28,7 @@ take effect on every repo's next run.
   `reclaim-codex-workspace`, `import-codex-final`,
   `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
+  `drop-runner-root`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
   Referenced fully-qualified
@@ -95,6 +96,12 @@ take effect on every repo's next run.
 - **Permissions live in the `settings` input** (inline Claude Code
   `settings.json`), not `--allowedTools`. Keep them allow-lists; the reviewer
   carries a `deny` overlay. See design/architecture.md → Permissions.
+- **Every reusable agent workflow declares top-level `cache-mode: read`**
+  (Claude Security 4629157; design/agent-cache-scope.md): agent jobs restore
+  the caller's caches and never save one. Never add a write-capable
+  `cache-mode` anywhere in `.github/workflows/` or `examples/`, and keep the
+  stubs' calling jobs capped at `read` (tests/test_cache_mode.py; the
+  canary's control job is its one listed exception).
 - **No git credential is ever written to the workspace** (issue #61,
   2026-09-09): every checkout runs `persist-credentials: false`, and every
   runner-side `git fetch`/`push` authenticates through a step-scoped
@@ -212,8 +219,9 @@ steps against stubs: the validator, the composites' scripts, the gates' trust
 decisions, the structural rules (engine-job isolation, token minting, the
 codex PATH boundary). What it does not cover is a live run — GitHub's
 expression evaluation, the real actions, auth, the models. Those are still
-validated by triggering the agents and by the hosted canaries
-(`codex-path-smoke.yml`, `engine-isolation-canary.yml`):
+validated by triggering the agents and by the hosted canaries and smoke
+runs (`codex-path-smoke.yml`, `root-boundary-smoke.yml`,
+`engine-isolation-canary.yml`, `cache-mode-canary.yml`):
 
 - Comment `@claude …` (or add the `claude` label) on an issue/PR in the
   inspect_ai fork to exercise the dev agent; `@review` on a PR for the reviewer.

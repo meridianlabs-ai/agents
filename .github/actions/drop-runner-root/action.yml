@@ -1,0 +1,173 @@
+name: drop-runner-root
+description: >-
+  Take root away from the runner user before the Claude agent runs as it
+  (Claude Security finding 4629153, criterion 2; design/architecture.md →
+  No root for the agent uid). The Claude-engine agent jobs (`agent` in
+  claude.yml, `review` in claude-review.yml, `fix` in claude-auto.yml and
+  claude-auto-review.yml) run claude-code-action as `runner`, which a
+  hosted Ubuntu runner gives three routes to root or to the runner's own
+  memory: passwordless sudo, membership of the `docker` group (the docker
+  socket is root), and same-uid inspection of the runner's processes —
+  `Runner.Worker` holds every secret of the job message in its memory, and
+  a same-uid process may open its `/proc/<pid>/mem`. This step runs
+  directly after the last step that needs root (the checkout, the caller's
+  `claude-setup`, the fallback provisioning, the reviewer's sandbox
+  install) and before the agent step, with the agent step's own `if:`, and
+  removes all three, and makes root's default search path root's alone,
+  while sudo still works, in this order:
+
+  1. `kernel.yama.ptrace_scope` to 2 (admin-only attach): opening another
+     process's `mem`, `process_vm_readv` and `ptrace` attach then need
+     CAP_SYS_PTRACE, which the runner no longer reaches once sudo is gone.
+     Not 1: scope 1 still admits a tracer a process names itself with
+     `PR_SET_PTRACER`, and whether a runtime does that is not this
+     workflow's to know. Not 3: that also locks out root and cannot be
+     lowered again before a reboot.
+  2. The docker socket: the runner user leaves the `docker` group in
+     `/etc/group`, and every socket under `/run` whose group is `docker`
+     becomes `root:root` mode 0600. The group edit alone would change
+     nothing for this job: a process keeps the supplementary groups it
+     started with, and every later step (the agent's included) is a child
+     of `Runner.Worker`, which started with `docker`. The socket's own
+     permissions are what the agent meets.
+  3. Root's default search path: `/usr/local/sbin` and `/usr/local/bin`,
+     which the hosted image ships mode 777 and which root's services search
+     ahead of `/usr/bin`, become `root:root`, the directory 0755 and nothing
+     inside writable by group or other (review round 1 of #151, B1;
+     decision: Ransom, 2026-09-23). The runner, and so the agent, can no
+     longer install into them (`npm install -g`, a copied binary) after
+     this step; symlinks inside are left as they are.
+  4. sudo: `/etc/sudoers` is replaced by a policy that grants root alone
+     (`root ALL=(ALL:ALL) ALL`, no `@includedir`), checked with `visudo -c`
+     before it is moved into place, so every grant the image or a caller's
+     `claude-setup` made is gone wherever it was written — `/etc/sudoers`,
+     a `sudoers.d` drop-in, a group rule. Last, because it ends this step's
+     own sudo.
+
+  Then it checks, fail-closed, from the runner user: `sudo -n true` and
+  `sudo -n -l` both fail (no passwordless rule is left, for any command);
+  the Yama scope reads back at least 2; no docker socket is writable;
+  nothing but a symlink in those two directories is writable; the
+  `mem` file of the `Runner.Worker` this step runs under does not open; and
+  the job's processes carry neither the `disk` nor the `lxd` group, each
+  of which is root by other means and cannot be dropped from a running
+  process. A failure fails the step, so the agent step (gated on success)
+  never starts, and the job's Surface step reports it. Nothing after the
+  agent step in these jobs uses sudo or docker (reset-origin-url,
+  model-provenance, the Surface and landing steps); the codex jobs do not
+  run this step, because the agent there is the separate `codex` user,
+  which never had sudo, and the runner needs its sudo after codex (the
+  reclaim, codex-usage).
+
+  Every command runs by the system PATH (`system-path`), pinned before the
+  first one: provisioning may have prepended a workspace venv to the job
+  PATH. What stays open is recorded in design/architecture.md: the
+  provisioning before this step still runs the tree's build code with
+  sudo, and the image's other world-writable trees (`/opt`) stay as they
+  are. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/drop-runner-root@main); no post
+  step. `tests/drop_runner_root_smoke.sh`, run by
+  `.github/workflows/root-boundary-smoke.yml`, exercises it on a hosted
+  runner.
+
+inputs:
+  system-path:
+    description: The root-owned system directories this step's commands resolve through.
+    required: false
+    default: /usr/sbin:/usr/bin:/sbin:/bin
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SYSTEM_PATH: ${{ inputs.system-path }}
+      run: |
+        set -euo pipefail
+        export PATH="$SYSTEM_PATH"
+        fail() { echo "::error::drop-runner-root: $*"; exit 1; }
+        me=$(id -un)
+        [ "$(id -u)" -ne 0 ] || fail "runs as the agent's user, not as root"
+        scope_file=/proc/sys/kernel/yama/ptrace_scope
+        [ -r "$scope_file" ] || fail "no Yama LSM ($scope_file): nothing would stop the agent reading the runner's process memory"
+
+        # 1. Same-uid process inspection.
+        if [ "$(cat "$scope_file")" -lt 2 ]; then
+          sudo -n sysctl -q -w kernel.yama.ptrace_scope=2
+        fi
+
+        # 2. The docker socket. Leaving the group first (for anything that
+        #    reads /etc/group from here on), then the sockets themselves,
+        #    which is what a process that already holds the group meets.
+        sockets=""
+        if getent group docker >/dev/null; then
+          case " $(id -nG "$me") " in *" docker "*) sudo -n gpasswd -d "$me" docker >/dev/null ;; esac
+          sockets=$(sudo -n find /run -xdev -type s -group docker 2>/dev/null || true)
+        fi
+        while IFS= read -r s; do
+          [ -n "$s" ] || continue
+          sudo -n chown root:root "$s"
+          sudo -n chmod 0600 "$s"
+          echo "docker socket $s is root-only"
+        done <<<"$sockets"
+
+        # 3. The world-writable directories on root's default search path
+        #    (review round 1, B1): root services resolve bare command names
+        #    there ahead of /usr/bin, so they become root's alone, contents
+        #    included. The runner cannot install into them after this.
+        root_dirs="/usr/local/sbin /usr/local/bin"
+        for d in $root_dirs; do
+          [ -d "$d" ] || continue
+          sudo -n chown -R root:root "$d"
+          sudo -n chmod -R go-w "$d"
+          sudo -n chmod 0755 "$d"
+          echo "$d is root's alone"
+        done
+
+        # 4. sudo, last: a root-only policy, validated before it replaces the
+        #    old one (a broken /etc/sudoers would also end sudo, but loudly
+        #    and for root too).
+        policy=$(mktemp)
+        printf '%s\n' '# drop-runner-root: root only; the job gave up sudo before the agent step.' \
+          'Defaults env_reset' 'Defaults secure_path="/usr/sbin:/usr/bin:/sbin:/bin"' 'root ALL=(ALL:ALL) ALL' >"$policy"
+        sudo -n install -o root -g root -m 0440 "$policy" /etc/sudoers.drop-runner-root
+        rm -f "$policy"
+        sudo -n visudo -c -q -f /etc/sudoers.drop-runner-root
+        sudo -n mv -f /etc/sudoers.drop-runner-root /etc/sudoers
+
+        # Checks, from here on as the runner with no sudo.
+        if sudo -n true >/dev/null 2>&1; then fail "sudo -n true still succeeds"; fi
+        if sudo -n -l >/dev/null 2>&1; then fail "sudo -n -l still lists a passwordless rule"; fi
+        scope=$(cat "$scope_file")
+        [ "$scope" -ge 2 ] || fail "kernel.yama.ptrace_scope is $scope, not 2 or more"
+        while IFS= read -r s; do
+          [ -n "$s" ] || continue
+          if [ -w "$s" ]; then fail "docker socket $s is still writable by $me"; fi
+        done <<<"$sockets"
+        for s in /run/docker.sock /var/run/docker.sock; do
+          if [ -e "$s" ] && [ -w "$s" ]; then fail "$s is still writable by $me"; fi
+        done
+        for d in $root_dirs; do
+          [ -d "$d" ] || continue
+          # A find failure fails the step (set -e): an unlisted entry is unchecked.
+          entries=$(find "$d" -xdev ! -type l)
+          while IFS= read -r f; do
+            if [ -w "$f" ]; then fail "$f (on root's default PATH) is still writable by $me"; fi
+          done <<<"$entries"
+        done
+        for g in $(id -nG); do
+          case "$g" in disk | lxd) fail "this job's processes hold the $g group, which reaches root without sudo" ;; esac
+        done
+        worker=""
+        pid=$$
+        while [ "$pid" -gt 1 ]; do
+          if [ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" = Runner.Worker ]; then worker=$pid; break; fi
+          pid=$(awk '/^PPid:/ { print $2 }' "/proc/$pid/status" 2>/dev/null || echo 1)
+        done
+        if [ -n "$worker" ]; then
+          if (exec 3<"/proc/$worker/mem") 2>/dev/null; then fail "/proc/$worker/mem (Runner.Worker) still opens"; fi
+          echo "/proc/$worker/mem (Runner.Worker) does not open"
+        else
+          echo "::warning::no Runner.Worker among this step's ancestors; the Yama scope ($scope) is the check"
+        fi
+        echo "$me has no sudo (sudo -n true and sudo -n -l refused), no writable docker socket, and ptrace_scope $scope."

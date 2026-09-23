@@ -1,0 +1,33 @@
+# Stand-in for the actions that consume the agent workflows' secrets as
+# inputs — `actions/create-github-app-token` (the gate's and land job's mint
+# step: `app-id`, `private-key`) and `openai/codex-action` (the codex job:
+# `openai-api-key`) — in the pipeline probe of the engine-isolation canary
+# (.github/workflows/engine-isolation-canary-pipeline.yml). It receives only
+# synthetic sentinel values there, uses each input so the reference is a live
+# one, and prints which inputs arrived and their lengths, never a value.
+
+name: secret input stand-in
+description: Consumes secret inputs the way the mint and codex-action steps do; prints presence and length only.
+
+inputs:
+  app-id:
+    required: false
+    default: ""
+  private-key:
+    required: false
+    default: ""
+  openai-api-key:
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        APP_ID: ${{ inputs.app-id }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
+        OPENAI_KEY: ${{ inputs.openai-api-key }}
+      run: |
+        set -euo pipefail
+        echo "app-id: ${#APP_ID} characters; private-key: ${#PRIVATE_KEY} characters; openai-api-key: ${#OPENAI_KEY} characters"

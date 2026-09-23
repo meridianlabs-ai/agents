@@ -1,0 +1,141 @@
+# Cache-mode canary (design/agent-cache-scope.md → Testing; Claude Security
+# 4629157). Proves that a called workflow declaring top-level
+# `cache-mode: read` cannot save to the Actions cache when its caller sets
+# no `cache-mode`, on a trusted trigger whose default is write: the one case
+# the platform's low-trust default does not cover, and the shape of every
+# caller stub's call into the agent workflows.
+#
+# Dispatch only; it needs no secrets and no model. Run it once per change to
+# the agent workflows' cache line and whenever GitHub changes cache-mode
+# semantics, and record the run in design/architecture.md beside the cache
+# bullet. Every entry it creates is deleted at the end, pass or fail.
+name: Cache-mode canary
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  # Called the way a caller stub calls an agent workflow: no `cache-mode` on
+  # the calling job, so only the called workflow's own key limits it.
+  probe:
+    uses: ./.github/workflows/cache-mode-canary-reusable.yml
+    permissions: {}
+
+  # Positive control: an explicit write job saving with the same client as
+  # the probe's refused save, so the canary can see a save when one happens.
+  # The one write-capable `cache-mode` in this repository
+  # (tests/test_cache_mode.py lists it by file and job).
+  control:
+    runs-on: ubuntu-latest
+    cache-mode: write
+    permissions: {}
+    steps:
+      - name: Write the payload
+        run: |
+          mkdir -p canary-payload
+          echo "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" > canary-payload/payload
+      - name: Save the control entry
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: canary-payload
+          key: canary-${{ github.run_id }}-${{ github.run_attempt }}-ctl
+
+  # What a default-branch workflow sees afterwards (the finding's criterion
+  # 3), then cleanup. Runs whatever the other two concluded, so a failed
+  # probe still leaves no entry behind.
+  verify:
+    needs: [probe, control]
+    if: always()
+    runs-on: ubuntu-latest
+    cache-mode: read
+    permissions:
+      actions: write   # list and read the jobs' logs and caches; delete the entries
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+      KEY_PREFIX: canary-${{ github.run_id }}-${{ github.run_attempt }}-
+    steps:
+      # The restore's version hashes the path, so it must match the saves'.
+      - name: Write the payload path
+        run: mkdir -p canary-payload
+      - name: Look up the control entry (must hit)
+        id: ctl
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: canary-payload
+          key: ${{ env.KEY_PREFIX }}ctl
+          lookup-only: true
+      - name: Look up the refused save (must miss)
+        id: old
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: canary-payload
+          key: ${{ env.KEY_PREFIX }}old
+          lookup-only: true
+      - name: Look up the skipped save (must miss)
+        id: new
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: canary-payload
+          key: ${{ env.KEY_PREFIX }}new
+          lookup-only: true
+
+      - name: Check
+        env:
+          PROBE_RESULT: ${{ needs.probe.result }}
+          CONTROL_RESULT: ${{ needs.control.result }}
+          CTL_HIT: ${{ steps.ctl.outputs.cache-hit }}
+          OLD_HIT: ${{ steps.old.outputs.cache-hit }}
+          NEW_HIT: ${{ steps.new.outputs.cache-hit }}
+        run: |
+          bad=0
+          fail() { echo "::error::$*"; bad=1; }
+
+          [ "$PROBE_RESULT" = success ] || fail "probe job concluded '$PROBE_RESULT'"
+          [ "$CONTROL_RESULT" = success ] || fail "control job concluded '$CONTROL_RESULT'"
+
+          # Exactly the control entry exists, whatever its ref or version.
+          keys=$(gh cache list --key "$KEY_PREFIX" --limit 100 --json key --jq '.[].key' | sort)
+          [ "$keys" = "${KEY_PREFIX}ctl" ] \
+            || fail "entries under $KEY_PREFIX: '${keys//$'\n'/ }' (want exactly ${KEY_PREFIX}ctl)"
+          [ "$CTL_HIT" = true ] || fail "the control entry did not restore"
+          [ "$OLD_HIT" != true ] || fail "the mode-ignoring client's save restored"
+          [ "$NEW_HIT" != true ] || fail "the mode-aware client's save restored"
+
+          # Each job's "Set up job" line and the probe's two save outcomes.
+          # Job logs are readable once the job has completed. They are
+          # fetched with curl: recent gh refuses to print a response that
+          # carries terminal escape sequences, as these logs do, and curl
+          # drops the Authorization header on the redirect to the log blob.
+          jobs=$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | "\(.id) \(.name)"')
+          job_log() {
+            local id
+            id=$(awk -v n="$1" '{ i = $1; sub(/^[^ ]+ /, ""); if ($0 == n) print i }' <<<"$jobs")
+            [ -n "$id" ] || { echo "no job named '$1' in: $jobs" >&2; return 1; }
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GH_REPO/actions/jobs/$id/logs"
+          }
+          probe_log=$(job_log "probe / probe") || { fail "cannot read the probe job's log"; probe_log=""; }
+          control_log=$(job_log "control") || { fail "cannot read the control job's log"; control_log=""; }
+          grep -aq 'Cache mode: read' <<<"$probe_log" \
+            || fail "the probe job's 'Set up job' did not log 'Cache mode: read'"
+          grep -aq 'Cache mode: write' <<<"$control_log" \
+            || fail "the control job's 'Set up job' did not log 'Cache mode: write'"
+          grep -aq "Cache save skipped: the effective cache-mode 'read' does not permit writes" <<<"$probe_log" \
+            || fail "the mode-aware client did not log its skip"
+          grep -aq 'cache write denied:' <<<"$probe_log" \
+            || fail "the service's refusal ('cache write denied:') is not in the probe job's log"
+
+          [ "$bad" = 0 ] && echo "canary green: saves skipped and refused under cache-mode read; control saved"
+          exit "$bad"
+
+      - name: Delete the canary's entries
+        if: always()
+        run: |
+          gh cache list --key "$KEY_PREFIX" --limit 100 --json id --jq '.[].id' |
+            while read -r id; do gh cache delete "$id"; done
