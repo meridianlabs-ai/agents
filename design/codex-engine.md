@@ -473,11 +473,11 @@ three layers:
   toolcache) is probed once — but a sticky directory accepted for one child
   is not: that acceptance is the child's, and round 3 of #131 showed a safe
   `T/runner-bin` vouching for a later `T/not-yet/bin`, for `T` itself and
-  for a dangling `bash -> T/not-yet/bash`. The probes are batched per
-  directory (three privileged `find` passes: what exists, what codex owns,
-  what codex can write via `-writable`), so the whole job PATH costs seconds
-  rather than the ~55 s the per-path probes took in round 3. On the stock
-  image that protects `/opt`, `/opt/pipx_bin`, the
+  for a dangling `bash -> T/not-yet/bash`. The check runs as one privileged process (it re-executes itself
+  under `sudo` once; probes are then plain `find`/`test` and `runuser -u
+  codex -- test -w`), because a separate `sudo` per probe cost ~40 ms on
+  the hosted runner and ~55 s per check in round 3. On the stock image that
+  protects `/opt`, `/opt/pipx_bin`, the
   toolcache chain, `/usr/local/bin` and `/usr/local/.ghcup`, the
   world-writable files in them and the targets their links reach, and
   keeps the runner user's own writes — npm's global bin, which

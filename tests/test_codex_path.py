@@ -35,9 +35,11 @@ nothing outside FAKE_ROOT is ever "writable", whatever the host's own
 quirks) or from FAKE_CODEX_OWNED (paths the user "owns": `find -user`
 positive, and writable when the owner write bit is set, as for a real
 owner); `chown` moves a path out of that list (logged to CHOWN_LOG) so
-protection of an owned path is observable too; the candidate and
-per-directory `find` passes get `-user` answered from the list and
-`-writable` (GNU-only) emulated the same way; `pkill` finds nothing. On macOS the same
+protection of an owned path is observable too; the candidate `find` gets
+`-user` answered from the list; `pkill` finds nothing. On the runner the
+check re-executes itself once under sudo and probes directly; the tests set
+ASSERT_RUNNER_ONLY_PATH_ELEVATED so it stays this user and goes through the
+stub instead. On macOS the same
 directory carries a `cp` shim for GNU's `--remove-destination`. The job
 PATH under test ends in the stub directory and `/bin` (`tail`), not this
 process's whole PATH: the check now follows every symlink in every entry,
@@ -125,16 +127,6 @@ if [ "$1" = -u ]; then
     if [ ! -L "$3" ] && owned "$3"; then [ -n "$(find "$3" -maxdepth 0 -perm -0200 2>/dev/null)" ]; exit; fi
     under_root "$3" || exit 1
     [ -n "$(find -L "$3" -maxdepth 0 -perm -0002 2>/dev/null)" ]; exit
-  fi
-  if [ "$1" = find ] && [ "$3" = -mindepth ] && [ "$7" = -writable ]; then
-    # The batched writability listing (GNU find -writable, absent on macOS):
-    # the same answers as the single probe, for every entry of the directory.
-    dir=$2
-    if under_root "$dir/x"; then find -L "$dir" -mindepth 1 -maxdepth 1 -perm -0002 2>/dev/null; fi
-    while IFS= read -r o; do
-      [ -n "$o" ] && [ "$(dirname "$o")" = "$dir" ] && [ ! -L "$o" ] && owned "$o" && [ -n "$(find "$o" -maxdepth 0 -perm -0200 2>/dev/null)" ] && printf '%s\n' "$o"
-    done <<<"${FAKE_CODEX_OWNED:-}"
-    exit 0
   fi
   exec "$@"
 fi
@@ -229,6 +221,9 @@ def world(tmp_path):
         "SUDO_LOG": str(sudo_log),
         "CHOWN_LOG": str(chown_log),
         "FAKE_ROOT": str(tmp_path),
+        # The check re-executes itself once under sudo on the runner; here it
+        # runs as this user against the stub, so the elevation is skipped.
+        "ASSERT_RUNNER_ONLY_PATH_ELEVATED": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
     }
@@ -334,12 +329,8 @@ def test_a_clean_path_passes_and_the_system_directories_are_checked_too(world):
     assert r.returncode == 0, r.stdout + r.stderr
     assert f"or owned or writable by {ME}" in r.stdout
     probes = w["sudo_log"].read_text().splitlines()
-    # `/` is probed on its own; everything below it is answered from a
-    # per-directory listing (three sudo passes per directory, not three per
-    # path).
-    assert f"-u {ME} test -w /" in probes
-    assert f"-u {ME} find / -mindepth 1 -maxdepth 1 -writable" in probes
-    assert f"-u {ME} test -w {os.path.dirname(shutil.which('cat'))}" not in probes
+    for d in (os.path.dirname(shutil.which("cat")), "/"):
+        assert f"-u {ME} test -w {d}" in probes
 
 
 def test_refuses_an_entry_or_ancestor_the_user_can_write(world):
@@ -384,7 +375,7 @@ def test_refuses_a_not_yet_existing_entry_the_user_could_create(world):
     assert r.returncode == 1 and f"'{missing}' is writable by the {ME} user (at {parent})" in r.stdout
     # Nobody can create it: accepted (the runner's own later addition) —
     # also when more than one level is missing (`~/.local/bin` before uv
-    # is installed: nothing to list at `~/.local`).
+    # is installed).
     parent.chmod(0o755)
     r = check(w, job, user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -665,8 +656,7 @@ def test_executables_inside_an_entry_are_checked_through_their_symlinks_and_owne
     r = check(w, job, user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
     probes = w["sudo_log"].read_text().splitlines()
-    assert probes.count(f"-u {ME} find {w['tmp']} -mindepth 1 -maxdepth 1 -writable") == 1
-    assert probes.count(f"-u {ME} find {rep} -mindepth 1 -maxdepth 1 -writable") == 1
+    assert probes.count(f"-u {ME} test -w {rep}") == 1
 
 
 def test_an_owned_read_only_directory_on_the_path_is_refused_or_protected(world):
@@ -722,6 +712,12 @@ def test_assert_runner_only_path_defaults():
     assert "default: codex" in text
     assert f"default: {SYSTEM_DIRS}" in text
     assert "-perm -0020" in text and '-user "$USER_NAME"' in text and "-type l" in text  # the candidate scan
+    # One sudo for the whole check: it re-executes itself as root with the
+    # job PATH and the step's user carried over, and never loops.
+    assert 'exec sudo JOB_PATH="$job_path" STEP_USER="$(id -un)" ASSERT_RUNNER_ONLY_PATH_ELEVATED=1' in text
+    # ... and the PATH pin comes before even that `id`/`sudo`.
+    assert ASSERT_SCRIPT.index('export PATH="$SYSTEM_PATH"') < ASSERT_SCRIPT.index('$(id -u)')
+    assert 'runuser -u "$USER_NAME" -- "$@"' in text
     assert 'default: "false"' in text  # protect is opt-in: the reclaim refuses
     assert "/usr/local" not in SYSTEM_DIRS  # the image ships /usr/local/bin mode 777
     # The script pins its own PATH before the first external command.

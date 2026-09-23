@@ -101,7 +101,8 @@ jobs:
           print("\n".join(body))
           PY
           )
-          if USER_NAME=nobody-here PROTECT=true SYSTEM_PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/bash -c "$script" >"$RUNNER_TEMP/refusal.log" 2>&1; then
+          # No user to probe as, so no elevation: the path rules alone refuse.
+          if ASSERT_RUNNER_ONLY_PATH_ELEVATED=1 USER_NAME=nobody-here PROTECT=true SYSTEM_PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/bash -c "$script" >"$RUNNER_TEMP/refusal.log" 2>&1; then
             cat "$RUNNER_TEMP/refusal.log"; echo "::error::the check passed a job PATH holding the workspace venv"; exit 1
           fi
           cat "$RUNNER_TEMP/refusal.log"

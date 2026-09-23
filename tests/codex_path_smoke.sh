@@ -82,9 +82,11 @@ for i, line in enumerate(lines):
 sys.stdout.write(blocks[int(sys.argv[2]) - 1])
 PY
 }
-ASSERT=$(lift assert-runner-only-path 1)
+# From a file, as the runner runs a step (`bash -e <file>`): the check
+# re-executes `$0` under sudo once.
+lift assert-runner-only-path 1 >"$RUNNER_TEMP/assert-runner-only-path.sh"
 run_assert() { # <PATH> <protect> [user]
-  PATH="$1" USER_NAME="${3:-codex}" PROTECT="$2" SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$ASSERT"
+  PATH="$1" USER_NAME="${3:-codex}" PROTECT="$2" SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -e "$RUNNER_TEMP/assert-runner-only-path.sh"
 }
 
 say "1. create-codex-user, step 1: snapshots, user, groups"

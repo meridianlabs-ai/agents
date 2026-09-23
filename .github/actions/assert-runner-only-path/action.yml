@@ -53,13 +53,13 @@ description: >-
   remembered — when found UNCONDITIONALLY safe: a sticky directory accepted
   for one child is not, that acceptance is the child's, and a safe sibling
   must not vouch for a missing one (round 3 of #131) — so a chain many
-  links share (`/etc/alternatives`, a toolcache) is probed once. The probes
-  are batched per directory: three privileged `find` passes list what
-  exists, what the user owns and what it can write (`-writable`, access(2)
-  as the user), so a directory with hundreds of entries costs three `sudo`
-  processes rather than hundreds — seconds on the hosted image for the
-  whole job PATH, not the minute the per-path probes took. Every probe runs
-  by absolute system path:
+  links share (`/etc/alternatives`, a toolcache) is probed once. The whole check runs as ONE privileged process — it re-executes
+  itself under `sudo` once, with the job PATH and the step's user carried
+  over — because its probes run by the thousand on the stock image and a
+  separate `sudo` for each costs ~40 ms on the hosted runner (round 3 of
+  #131 measured ~55 s per check); as root they are plain `find`/`test`
+  and "as the user" is a `runuser`. Every probe runs by absolute system
+  path:
   this step pins its OWN PATH to `system-path` first, so the check does not
   depend on the list it is checking.
 
@@ -137,9 +137,32 @@ runs:
         SYSTEM_PATH: ${{ inputs.system-path }}
       run: |
         set -euo pipefail
-        job_path="$PATH"
+        # The job PATH under test is saved and this step's own PATH pinned
+        # before the FIRST external command: even `id` and `sudo` below must
+        # not resolve through the list being checked.
+        job_path="${JOB_PATH:-$PATH}"
         export PATH="$SYSTEM_PATH"
-        me=$(id -un)
+        # One privileged process for the whole check. The probes below run
+        # by the thousand on the stock image (every hop, every file, every
+        # link's target), and a separate `sudo` for each costs ~40 ms on the
+        # hosted runner (round 3 of #131: ~55 s per check); as root they are
+        # plain `find`/`test`, and "as the user" is a `runuser`. The runner
+        # starts this step as `bash -e <script file>`, so `$0` is the file.
+        if [ "$(id -u)" -ne 0 ] && [ "${ASSERT_RUNNER_ONLY_PATH_ELEVATED:-}" != 1 ]; then
+          exec sudo JOB_PATH="$job_path" STEP_USER="$(id -un)" ASSERT_RUNNER_ONLY_PATH_ELEVATED=1 \
+            USER_NAME="$USER_NAME" PROTECT="$PROTECT" SYSTEM_PATH="$SYSTEM_PATH" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            /bin/bash -e "$0"
+        fi
+        me="${STEP_USER:-$(id -un)}"
+        # The launchers: direct as root; through sudo when not elevated (the
+        # unit tests run the script as an ordinary user against a stub sudo).
+        if [ "$(id -u)" -eq 0 ]; then
+          as_root() { "$@"; }
+          as_user() { runuser -u "$USER_NAME" -- "$@"; }
+        else
+          as_root() { sudo "$@"; }
+          as_user() { sudo -u "$USER_NAME" "$@"; }
+        fi
         ws=$(cd "$GITHUB_WORKSPACE" && pwd -P)
         # The physical path of a hop that may not exist yet: the nearest
         # existing directory resolved (symlinks and all), the rest appended
@@ -169,50 +192,22 @@ runs:
             groups_expr+=(-group "$g")
           done
         fi
-        # Newline-delimited sets: membership by exact line.
-        set_has() { [[ "$1" == *$'\n'"$2"$'\n'* ]]; }
-        # Answers for whole directories, three privileged passes each — what
-        # exists, what the user owns (lstat), what the user can write
-        # (access(2) as the user; GNU find's -writable) — so a directory with
-        # hundreds of entries costs three sudo processes, not hundreds. The
-        # per-path probes below are the fallback for a path whose directory
-        # was not listed, and the re-check after a protection.
-        listed=$'\n'; listed_w=$'\n'; exists_set=$'\n'; owned_set=$'\n'; writable_set=$'\n'
-        list_dir() { # <directory>
-          set_has "$listed" "$1" && return 0
-          local ex ow wr
-          # A directory that does not exist (an entry added before its tool
-          # is installed) has no entries: listed as empty.
-          if ! sudo test -d "$1"; then listed="$listed$1"$'\n'; listed_w="$listed_w$1"$'\n'; return 0; fi
-          ex=$(sudo find "$1" -mindepth 1 -maxdepth 1 2>&1) || { echo "::error::assert-runner-only-path: could not list $1 ($ex)"; exit 1; }
-          ow=$(sudo find "$1" -mindepth 1 -maxdepth 1 -user "$USER_NAME" 2>&1) || { echo "::error::assert-runner-only-path: could not list the $USER_NAME-owned entries of $1 ($ow)"; exit 1; }
-          listed="$listed$1"$'\n'
-          exists_set="$exists_set$ex"$'\n'
-          owned_set="$owned_set$ow"$'\n'
-          # As the user: a directory the user cannot read is not listed this
-          # way, and its entries fall back to the per-path probe.
-          if wr=$(sudo -u "$USER_NAME" find "$1" -mindepth 1 -maxdepth 1 -writable 2>/dev/null); then
-            listed_w="$listed_w$1"$'\n'
-            writable_set="$writable_set$wr"$'\n'
-          fi
-        }
-        # `/` has no listed parent: it is always probed on its own.
-        exists() { if [ "$1" != / ] && set_has "$listed" "$(dirname "$1")"; then set_has "$exists_set" "$1"; else sudo test -e "$1"; fi; }
+        exists() { as_root test -e "$1"; }
+        writable() { as_user test -w "$1"; }
         # lstat, not stat: a symlink the user owns is the user's to rename or
         # repoint, whatever its target's owner. Ownership is authority: an
         # owner can chmod a read-only directory or file writable again, so an
         # owned hop counts whatever its mode says now (review round 2 of #131).
-        owned_probe() { [ -n "$(sudo find "$1" -maxdepth 0 -user "$USER_NAME" 2>/dev/null)" ]; }
-        writable_probe() { sudo -u "$USER_NAME" test -w "$1"; }
-        owned() { if [ "$1" != / ] && set_has "$listed" "$(dirname "$1")"; then set_has "$owned_set" "$1"; else owned_probe "$1"; fi; }
-        writable() { if [ "$1" != / ] && set_has "$listed_w" "$(dirname "$1")"; then set_has "$writable_set" "$1"; else writable_probe "$1"; fi; }
+        owned() { [ -n "$(as_root find "$1" -maxdepth 0 -user "$USER_NAME" 2>/dev/null)" ]; }
         # Make a hop or file runner-only and say so; the caller re-probes.
         protect() {
-          sudo chown "$me" "$1"
-          sudo chmod go-w "$1"
+          as_root chown "$me" "$1"
+          as_root chmod go-w "$1"
           echo "protected job PATH ${2:-hop} $1 (was writable by or owned by $USER_NAME; now owned by $me, group/other write removed)"
         }
         protected=0
+        # Newline-delimited sets: membership by exact line.
+        set_has() { [[ "$1" == *$'\n'"$2"$'\n'* ]]; }
         # Hops and files already found UNCONDITIONALLY safe (or made safe): a
         # symlink target's chain is shared by many links (/etc/alternatives,
         # a toolcache), and every hop's ancestors were walked when the hop
@@ -233,21 +228,19 @@ runs:
             refuse "$e" "lies inside the workspace $GITHUB_WORKSPACE (at $a), which the codex user can write"
           fi
           [ -n "$have_user" ] || return 0
-          [ "$a" = / ] || list_dir "$(dirname "$a")"
           exists "$a" || return 0
           local why=""
           if owned "$a"; then why="is owned by the $USER_NAME user"
           elif [ -L "$a" ]; then
             # A symlink's writability is its target's, settled through the
             # target chain before this; the link itself is replaced only by
-            # its owner (above) or through its parent (a hop). Never ask the
-            # listing: it may predate the target's protection.
+            # its owner (above) or through its parent (a hop).
             return 0
           elif writable "$a"; then
             # Sticky (/tmp): creation only, so an EXISTING child not owned by
             # the user is safe there; a missing child, or one the user owns,
             # is not — and an owned sticky directory never is (handled above).
-            if [ "$kind" = hop ] && [ -n "$child" ] && sudo test -k "$a" && exists "$child" && ! owned "$child"; then
+            if [ "$kind" = hop ] && [ -n "$child" ] && as_root test -k "$a" && exists "$child" && ! owned "$child"; then
               contextual=1
               return 0
             fi
@@ -258,7 +251,7 @@ runs:
           if [ "$PROTECT" = "true" ] && [ ! -L "$a" ]; then
             protect "$a" "$kind"
             protected=$((protected + 1))
-            if owned_probe "$a" || writable_probe "$a"; then refuse "$e" "is still owned or writable by the $USER_NAME user after protection (at $a)"; fi
+            if owned "$a" || writable "$a"; then refuse "$e" "is still owned or writable by the $USER_NAME user after protection (at $a)"; fi
           else
             refuse "$e" "$why (at $a)"
           fi
@@ -319,11 +312,11 @@ runs:
           # write through its group or the world. Nothing else is the user's
           # to change (no ACLs on the hosted image).
           p=$(physical "$e")
-          if sudo test -d "$p"; then
+          if as_root test -d "$p"; then
             while IFS= read -r f; do
               [ -n "$f" ] || continue
               check_file "$e" "$f" 0
-            done < <(sudo find "$p" -mindepth 1 -maxdepth 1 \( -type l -o -user "$USER_NAME" -o -perm -0002 -o \( -perm -0020 \( "${groups_expr[@]}" \) \) \) 2>/dev/null)
+            done < <(as_root find "$p" -mindepth 1 -maxdepth 1 \( -type l -o -user "$USER_NAME" -o -perm -0002 -o \( -perm -0020 \( "${groups_expr[@]}" \) \) \) 2>/dev/null)
           fi
         done < <(printf '%s\n' "$job_path" | tr ':' '\n')
         echo "job PATH: $n entries, none inside the workspace${have_user:+ or owned or writable by $USER_NAME}${have_user:+ ($protected hop(s)/file(s) protected)}."
