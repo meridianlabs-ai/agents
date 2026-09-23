@@ -188,10 +188,13 @@ def test_the_codex_user_gets_no_sudo_and_no_group_that_reaches_root():
     text = (ROOT / ".github" / "actions" / "create-codex-user" / "action.yml").read_text()
     code = "\n".join(code_lines(text[text.index("\nruns:\n"):]))
     assert "sudoers" not in code and "visudo" not in code
-    assert "sudo adduser --system --home /home/codex --shell /bin/bash --group codex\n" in code
+    # The user is `codex` or `claude-agent` (the `user` input, validated
+    # before these lines); either gets the same system account and groups.
+    assert 'sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"\n' in code
     grants = [line.strip() for line in code.splitlines() if re.search(r"\b(usermod|gpasswd|adduser|addgroup)\b", line)]
-    assert grants == ["sudo adduser --system --home /home/codex --shell /bin/bash --group codex",
-                      "sudo usermod -a -G codex runner", "sudo usermod -a -G runner codex"], grants
+    assert grants == ['sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"',
+                      'sudo usermod -a -G "$AGENT_USER" runner', 'sudo usermod -a -G runner "$AGENT_USER"'], grants
+    assert "codex|claude-agent) ;;" in code
 
 
 # --- the composite -------------------------------------------------------------

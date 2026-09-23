@@ -12,6 +12,12 @@ produced no final message)" placeholder. The composite's own step is lifted
 from its action.yml and run against a symlinked final message, and a
 structural check pins the three write-path workflows to reading the
 imported copy only.
+
+The script's `dir` mode (the Claude agent's landing directory,
+design/executed-paths-residual.md → After the agent) is tested the same
+way: every passing entry copied into a fresh runner-only directory, every
+other entry skipped with a warning, and the caps refusing the whole import
+rather than truncating.
 """
 
 import os
@@ -186,6 +192,247 @@ def test_unknown_owner_is_a_configuration_error(paths):
     assert "::error::" in r.stdout and not paths["dest"].exists()
 
 
+# --- the script's dir mode ---------------------------------------------------
+
+
+@pytest.fixture
+def land(tmp_path):
+    src = tmp_path / "claude-agent"
+    src.mkdir()
+    return {"src": src, "dest": tmp_path / "landing", "tmp": tmp_path}
+
+
+def run_dir(land, owner=ME, **extra):
+    return run(land["src"], land["dest"], owner=owner, tmp_path=land["tmp"], mode="dir", **extra)
+
+
+def listing(d: Path) -> dict:
+    return {p.name: p.read_bytes() for p in sorted(d.iterdir())}
+
+
+def test_dir_mode_copies_every_regular_file_byte_for_byte(land):
+    files = {"manifest-extra.json": b'{"comments": []}\n', "review.md": "Looks good.\n\né".encode(),
+             "inline.json": b"[]", "comment-1.md": b"", "a_B-9.txt": b"x"}
+    for name, body in files.items():
+        (land["src"] / name).write_bytes(body)
+    r, outputs = run_dir(land)
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == files
+    assert stat_mode(land["dest"]) == 0o700
+    assert outputs == {"path": str(land["dest"])}
+    assert "::warning::" not in r.stdout and "imported 5 file(s)" in r.stdout
+
+
+def stat_mode(p: Path) -> int:
+    return p.stat().st_mode & 0o777
+
+
+def test_dir_mode_skips_symlinks_without_reading_the_target(land):
+    secret = land["tmp"] / "runner-private"
+    secret.write_text("GH_TOKEN=ghs_secret\n")
+    (land["src"] / "review.md").symlink_to(secret)
+    (land["src"] / "dangling.md").symlink_to(land["tmp"] / "nowhere")
+    (land["src"] / "subdir-link").symlink_to(land["tmp"])
+    (land["src"] / "ok.md").write_text("ok\n")
+    r, outputs = run_dir(land)
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == {"ok.md": b"ok\n"}
+    assert r.stdout.count("it is a symlink") == 3
+    assert "ghs_secret" not in r.stdout + r.stderr
+    assert outputs == {"path": str(land["dest"])}
+
+
+def test_dir_mode_skips_a_hard_link_even_with_the_expected_owner(land):
+    # The owner check alone would pass it (the test owns both names); a hard
+    # link is refused on its link count, since it may be a runner file the
+    # agent linked in where fs.protected_hardlinks is off.
+    target = land["tmp"] / "runner-file"
+    target.write_text("runner's\n")
+    os.link(target, land["src"] / "review.md")
+    (land["src"] / "ok.md").write_text("ok\n")
+    r, _ = run_dir(land)
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == {"ok.md": b"ok\n"}
+    assert "review.md: it has 2 links" in r.stdout
+
+
+def test_dir_mode_skips_files_of_another_owner(land):
+    (land["src"] / "review.md").write_text("looks fine\n")
+    r, outputs = run_dir(land, owner=OTHER)
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == {}
+    assert "owned by uid" in r.stdout and outputs == {"path": str(land["dest"])}
+
+
+@pytest.mark.parametrize("name", [".hidden", "a b.md", "x\n::error::forged", "caf\u00e9.md", "semi;colon", "-", "._x"])
+def test_dir_mode_skips_bad_names_and_logs_them_escaped(land, name):
+    (land["src"] / name).write_text("body\n")
+    (land["src"] / "ok.md").write_text("ok\n")
+    r, _ = run_dir(land)
+    expected = {"ok.md": b"ok\n"}
+    if name == "-":
+        expected["-"] = b"body\n"  # a plain name, no leading dot: allowed
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == expected
+    if name != "-":
+        assert "the name is not" in r.stdout
+    # No log line starts with anything the name carried: a newline in it
+    # would otherwise open a workflow command.
+    for line in r.stdout.splitlines():
+        assert line.startswith(("::warning::skipping ", "imported ")), line
+
+
+def test_dir_mode_skips_directories_and_fifos_without_blocking(land):
+    (land["src"] / "sub").mkdir()
+    (land["src"] / "sub" / "nested.md").write_text("nested\n")
+    os.mkfifo(land["src"] / "pipe")
+    (land["src"] / "ok.md").write_text("ok\n")
+    r, _ = run_dir(land)
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == {"ok.md": b"ok\n"}
+    assert r.stdout.count("not a regular file") == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_dir_mode_skips_an_unreadable_file(land):
+    (land["src"] / "secret.md").write_text("x\n")
+    (land["src"] / "secret.md").chmod(0)
+    (land["src"] / "ok.md").write_text("ok\n")
+    try:
+        r, _ = run_dir(land)
+    finally:
+        (land["src"] / "secret.md").chmod(0o600)
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == {"ok.md": b"ok\n"}
+    assert "secret.md: cannot open it" in r.stdout
+
+
+def test_dir_mode_skips_a_file_over_the_per_file_cap_rather_than_truncating(land):
+    (land["src"] / "big.md").write_bytes(b"x" * 65)
+    (land["src"] / "exact.md").write_bytes(b"y" * 64)
+    r, _ = run_dir(land, max_bytes=64)
+    assert r.returncode == 0, r.stderr
+    assert listing(land["dest"]) == {"exact.md": b"y" * 64}
+    assert "big.md: it exceeds 64 bytes" in r.stdout
+
+
+@pytest.mark.parametrize("caps", [{"max_total_bytes": 100}, {"max_files": 2}])
+def test_dir_mode_refuses_the_whole_import_when_the_caps_are_exhausted(land, caps):
+    for i in range(3):
+        (land["src"] / f"part-{i}.md").write_bytes(b"z" * 40)   # 120 bytes, 3 files
+    land["dest"].mkdir()
+    (land["dest"] / "stale.md").write_text("from an earlier step\n")
+    r, outputs = run_dir(land, **caps)
+    assert r.returncode == 0, r.stderr
+    assert not land["dest"].exists() and outputs == {"path": ""}
+    assert "refusing landing directory" in r.stdout and "nothing imported" in r.stdout
+
+
+def test_dir_mode_within_the_caps_imports_everything(land):
+    for i in range(3):
+        (land["src"] / f"part-{i}.md").write_bytes(b"z" * 40)
+    r, _ = run_dir(land, max_total_bytes=120, max_files=3)
+    assert r.returncode == 0, r.stderr
+    assert len(listing(land["dest"])) == 3
+
+
+def test_dir_mode_replaces_a_stale_destination_and_never_follows_it(land):
+    elsewhere = land["tmp"] / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.md").write_text("untouched\n")
+    land["dest"].symlink_to(elsewhere)
+    (land["src"] / "new.md").write_text("new\n")
+    r, _ = run_dir(land)
+    assert r.returncode == 0, r.stderr
+    assert not land["dest"].is_symlink() and listing(land["dest"]) == {"new.md": b"new\n"}
+    assert listing(elsewhere) == {"keep.md": b"untouched\n"}
+    # A stale directory is replaced wholesale: nothing from before survives.
+    (land["dest"] / "stale.md").write_text("old\n")
+    r, _ = run_dir(land)
+    assert listing(land["dest"]) == {"new.md": b"new\n"}
+
+
+def test_dir_mode_missing_directory_imports_nothing_quietly(land):
+    land["src"].rmdir()
+    r, outputs = run_dir(land)
+    assert r.returncode == 0, r.stderr
+    assert not land["dest"].exists() and outputs == {"path": ""}
+    assert "::warning::" not in r.stdout and "no landing directory" in r.stdout
+
+
+@pytest.mark.parametrize("shape", ["symlink", "file"])
+def test_dir_mode_refuses_a_source_that_is_not_a_plain_directory(land, shape):
+    real = land["tmp"] / "real"
+    real.mkdir()
+    (real / "review.md").write_text("redirected\n")
+    land["src"].rmdir()
+    if shape == "symlink":
+        land["src"].symlink_to(real)
+    else:
+        land["src"].write_text("not a directory\n")
+    r, outputs = run_dir(land)
+    assert r.returncode == 0, r.stderr
+    assert not land["dest"].exists() and outputs == {"path": ""}
+    assert "::warning::refusing landing directory" in r.stdout
+
+
+def test_dir_mode_unknown_owner_is_a_configuration_error(land):
+    (land["src"] / "review.md").write_text("x\n")
+    r, _ = run_dir(land, owner="no-such-user-4628447")
+    assert r.returncode == 2 and "::error::" in r.stdout and not land["dest"].exists()
+
+
+# --- the import-codex-final composite ----------------------------------------
+
+
+def import_step() -> str:
+    """The composite's single run block (its only `run: |`)."""
+    lines = IMPORT_ACTION.read_text().splitlines()
+    run_at = lines.index("      run: |")
+    body = []
+    for line in lines[run_at + 1:]:
+        if line.strip() == "":
+            body.append("")
+        elif line.startswith("        "):
+            body.append(line[8:])
+        else:
+            break
+    return "\n".join(body) + "\n"
+
+
+def run_import_step(tmp_path, **env_extra):
+    out = tmp_path / "github-output"
+    out.write_text("")
+    env = {**os.environ, "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "SCRIPT": str(SCRIPT),
+           "MODE": "file", "SOURCE": "", "DEST": "", "OWNER": "", **env_extra}
+    r = subprocess.run(["bash", "-c", import_step()], text=True, capture_output=True, env=env, timeout=20, check=False)
+    return r, dict(line.split("=", 1) for line in out.read_text().splitlines())
+
+
+def test_import_step_file_mode_defaults_are_the_codex_paths(tmp_path):
+    (tmp_path / "codex").mkdir()
+    (tmp_path / "codex" / "codex-final.md").write_text("done\n")
+    # The owner is overridden (no codex account here); the default owner is
+    # pinned by test_import_action_defaults_match_the_callers_paths.
+    r, outputs = run_import_step(tmp_path, OWNER=ME)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "codex-final.md").read_text() == "done\n" and outputs == {"path": f"{tmp_path}/codex-final.md"}
+
+
+def test_import_step_dir_mode_defaults_are_the_claude_agent_paths(tmp_path):
+    (tmp_path / "claude-agent").mkdir()
+    (tmp_path / "claude-agent" / "review.md").write_text("review\n")
+    r, outputs = run_import_step(tmp_path, MODE="dir", OWNER=ME)
+    assert r.returncode == 0, r.stderr
+    assert listing(tmp_path / "landing") == {"review.md": b"review\n"}
+    assert outputs == {"path": f"{tmp_path}/landing"}
+
+
+def test_import_step_refuses_an_unknown_mode(tmp_path):
+    r, _ = run_import_step(tmp_path, MODE="tree")
+    assert r.returncode == 1 and "mode must be file or dir" in r.stdout
+
+
 # --- the resolve-reported-threads composite ---------------------------------
 
 
@@ -306,3 +553,9 @@ def test_import_action_defaults_match_the_callers_paths():
     assert '--dest "${DEST:-$RUNNER_TEMP/codex-final.md}"' in text
     assert '--owner "${OWNER:-codex}"' in text
     assert "github.action_path }}/../../scripts/import_codex_final.py" in text
+    # The mode defaults to the single file, so today's callers are unchanged;
+    # dir mode has its own defaults (create-codex-user's claude-agent dir).
+    assert "  mode:\n" in text and "    default: file\n" in text
+    assert '--source "${SOURCE:-$RUNNER_TEMP/claude-agent}"' in text
+    assert '--dest "${DEST:-$RUNNER_TEMP/landing}"' in text
+    assert '--owner "${OWNER:-claude-agent}"' in text

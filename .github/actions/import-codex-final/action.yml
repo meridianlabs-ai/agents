@@ -29,19 +29,37 @@ description: >-
   fall back to their defaults when the copy is missing (the default commit
   subject, the "(codex produced no final message)" placeholder), which is
   exactly what a redirected message must yield. Only a misconfiguration
-  (unknown owner user, unwritable destination) fails the step. Runs no
-  git. Referenced fully-qualified
+  (unknown owner user, unwritable destination, unknown mode) fails the step.
+  The `dir` mode (input `mode`) brings the Claude agent's whole landing
+  directory across the same way. Runs no git. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/import-codex-final@main); NO post
   step (local composite actions with post steps break teardown on the
   fork).
 
 inputs:
+  mode:
+    description: >-
+      `file` (the default): the one final message, as above. `dir`: every
+      entry of the Claude agent's landing directory
+      (design/executed-paths-residual.md → After the agent) — each regular,
+      single-link file owned by `owner` directly under `source`, named
+      `[A-Za-z0-9._-]+` without a leading dot and within the per-file cap,
+      opened `O_NOFOLLOW` relative to the directory, is copied into a
+      freshly created runner-only `dest` directory; any other entry is
+      skipped with a `::warning::`, and entries over the aggregate byte or
+      file-count cap refuse the whole import (no `dest`). The defaults
+      below change with the mode.
+    required: false
+    default: file
   source:
     description: >-
       codex-action's `output-file`, inside the codex-owned directory.
       Defaults to `$RUNNER_TEMP/codex/codex-final.md`, the path the three
       write-path workflows pass codex-action. Resolved in the shell rather
       than as a runner.temp-context default so the metadata needs no context.
+      In `dir` mode, the landing directory; defaults to
+      `$RUNNER_TEMP/claude-agent` (create-codex-user with `user:
+      claude-agent`).
     required: false
     default: ""
   dest:
@@ -49,20 +67,24 @@ inputs:
       Runner-owned path to write the verified copy to; must be directly
       under `$RUNNER_TEMP`, never inside the codex-owned directory. Defaults
       to `$RUNNER_TEMP/codex-final.md`. Removed first, so a stale copy never
-      stands in for a message refused now.
+      stands in for a message refused now. In `dir` mode, the directory to
+      create; defaults to `$RUNNER_TEMP/landing`.
     required: false
     default: ""
   owner:
-    description: The user the source must be owned by. Defaults to `codex`.
+    description: >-
+      The user the source must be owned by. Defaults to `codex`; in `dir`
+      mode, `claude-agent`.
     required: false
     default: ""
 
 outputs:
   path:
     description: >-
-      The copy's path when the message was imported; empty when there was no
-      message or it was refused (the callers' readers also check the file
-      itself, so the constant `dest` path serves as well).
+      The copy's path when the message was imported (in `dir` mode, the
+      directory's); empty when there was no message or it was refused (the
+      callers' readers also check the file itself, so the constant `dest`
+      path serves as well).
     value: ${{ steps.import.outputs.path }}
 
 runs:
@@ -71,13 +93,23 @@ runs:
     - id: import
       shell: bash
       env:
+        MODE: ${{ inputs.mode }}
         SOURCE: ${{ inputs.source }}
         DEST: ${{ inputs.dest }}
         OWNER: ${{ inputs.owner }}
         SCRIPT: ${{ github.action_path }}/../../scripts/import_codex_final.py
       run: |
         set -euo pipefail
-        python3 "$SCRIPT" \
-          --source "${SOURCE:-$RUNNER_TEMP/codex/codex-final.md}" \
-          --dest "${DEST:-$RUNNER_TEMP/codex-final.md}" \
-          --owner "${OWNER:-codex}"
+        case "$MODE" in
+          file)
+            python3 "$SCRIPT" \
+              --source "${SOURCE:-$RUNNER_TEMP/codex/codex-final.md}" \
+              --dest "${DEST:-$RUNNER_TEMP/codex-final.md}" \
+              --owner "${OWNER:-codex}" ;;
+          dir)
+            python3 "$SCRIPT" --mode dir \
+              --source "${SOURCE:-$RUNNER_TEMP/claude-agent}" \
+              --dest "${DEST:-$RUNNER_TEMP/landing}" \
+              --owner "${OWNER:-claude-agent}" ;;
+          *) echo "::error::import-codex-final: mode must be file or dir, not '$MODE'"; exit 1 ;;
+        esac

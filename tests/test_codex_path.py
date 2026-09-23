@@ -762,15 +762,120 @@ def test_create_codex_user_checks_the_path_after_the_user_and_before_the_grant()
     for s in (reset_check, reset):
         assert "if: inputs.mode == 'reset-home'" in s
     assert ASSERT_USES in reset_check and "user: codex" in reset_check and "protect" not in reset_check
+    assert "inputs.user == 'codex'" in reset_check  # reset-home is codex-only
     assert f"SYSTEM_PATH: {SYSTEM_DIRS}" in reset and reset.index('export PATH="$SYSTEM_PATH"') < reset.index("sudo ")
-    assert "sudo adduser --system --home /home/codex --shell /bin/bash --group codex" in first
-    assert "sudo usermod -a -G runner codex" in first
+    assert 'sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"' in first
+    assert 'sudo usermod -a -G runner "$AGENT_USER"' in first
     assert "chown" not in first and "chmod" not in first
-    assert ASSERT_USES in check_step and "user: codex" in check_step and 'protect: "true"' in check_step
-    assert 'sudo chown -R runner:codex "$GITHUB_WORKSPACE"' in grant
+    # The check probes as the user being created, whichever it is.
+    assert ASSERT_USES in check_step and "user: ${{ inputs.user }}" in check_step and 'protect: "true"' in check_step
+    assert 'sudo chown -R "runner:$AGENT_USER" "$GITHUB_WORKSPACE"' in grant
     assert 'sudo chmod -R g+rwX "$GITHUB_WORKSPACE"' in grant
+    # The user validation precedes every command of the first step.
+    assert first.index("codex|claude-agent)") < first.index('cp "$GITHUB_WORKSPACE/.git/config"')
+    text = CREATE.read_text()
+    assert "  user:\n" in text and "    default: codex\n" in text
+    assert "  grant:\n" in text and "    default: workspace\n" in text
     # The snapshots stay the first thing, before any grant.
     assert first.index('cp "$GITHUB_WORKSPACE/.git/config"') < first.index("sudo adduser")
+
+
+CREATE_SUDO_STUB = r"""#!/bin/bash
+# Stand-in for /usr/bin/sudo in the create-mode tests: logs every call and
+# runs only the snapshot's `find`; everything else (adduser, install, chown,
+# git config --system, rm -rf /opt/...) is recorded, never executed.
+printf '%s\n' "$*" >>"$SUDO_LOG"
+if [ "$1" = find ]; then shift; exec find "$@"; fi
+exit 0
+"""
+
+
+def create_world(tmp_path):
+    """A workspace with a `.git/config`, stubs for sudo (log only), `stat`
+    (the /opt/meridian-agent check's answer) and a home script that logs
+    being run."""
+    ws = tmp_path / "ws"
+    (ws / ".git").mkdir(parents=True)
+    (ws / ".git" / "config").write_text("[core]\n\tbare = false\n")
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (bins / "sudo").write_text(CREATE_SUDO_STUB)
+    (bins / "stat").write_text("#!/bin/bash\necho 'root:root 755'\n")
+    home_script = tmp_path / "codex-home.sh"
+    home_script.write_text('printf "home %s\\n" "$1" >>"$SUDO_LOG"\n')
+    for f in (bins / "sudo", bins / "stat"):
+        f.chmod(0o755)
+    log = tmp_path / "sudo.log"
+    env = {"PATH": f"{bins}:{os.environ['PATH']}", "GITHUB_WORKSPACE": str(ws), "RUNNER_TEMP": str(temp),
+           "SUDO_LOG": str(log), "HOME_SCRIPT": str(home_script)}
+    return ws, temp, log, env
+
+
+def run_create(tmp_path, user, grant="workspace"):
+    """The create mode's two run blocks (the PATH check between them is its
+    own composite, tested above), as the composite runs them."""
+    ws, temp, log, env = create_world(tmp_path)
+    env = {**env, "AGENT_USER": user, "GRANT": grant}
+    first, grant_step = composite_runs(CREATE)[:2]
+    results = []
+    for script in (first, grant_step):
+        r = subprocess.run(["/bin/bash", "-e", "-c", script], text=True, capture_output=True, env=env, check=False)
+        results.append(r)
+        if r.returncode != 0:
+            break
+    calls = log.read_text().splitlines() if log.exists() else []
+    return results, calls, ws, temp
+
+
+def test_create_codex_user_defaults_keep_the_codex_sequence(tmp_path):
+    results, calls, ws, temp = run_create(tmp_path, "codex")
+    assert [r.returncode for r in results] == [0, 0], [r.stderr for r in results]
+    assert (temp / "git-config.pre-codex").read_text() == "[core]\n\tbare = false\n"
+    assert (temp / "embedded-git.pre-codex").read_text() == ""
+    assert calls == [
+        f"find {ws} -mindepth 2 -name .git",
+        "adduser --system --home /home/codex --shell /bin/bash --group codex",
+        "usermod -a -G codex runner",
+        "usermod -a -G runner codex",
+        f"chown -R runner:codex {ws}",
+        f"chmod -R g+rwX {ws}",
+        f"find {ws} -type d -exec chmod g+s {{}} +",
+        f"install -d -o codex -g codex -m 755 {temp}/codex",
+        f"-u codex -H git config --global --add safe.directory {ws}",
+        "home codex",
+    ], calls
+
+
+@pytest.mark.parametrize("grant", ["workspace", "none"])
+def test_create_codex_user_for_claude_agent(tmp_path, grant):
+    results, calls, ws, temp = run_create(tmp_path, "claude-agent", grant)
+    assert [r.returncode for r in results] == [0, 0], [r.stderr for r in results]
+    granted = [f"chown -R runner:claude-agent {ws}", f"chmod -R g+rwX {ws}", f"find {ws} -type d -exec chmod g+s {{}} +"]
+    assert calls == [
+        f"find {ws} -mindepth 2 -name .git",
+        "adduser --system --home /home/claude-agent --shell /bin/bash --group claude-agent",
+        "usermod -a -G claude-agent runner",
+        "usermod -a -G runner claude-agent",
+        *(granted if grant == "workspace" else []),
+        # The landing dir, the system safe.directory, the root-owned /opt dir.
+        f"install -d -o runner -g claude-agent -m 2775 {temp}/claude-agent",
+        f"git config --system --add safe.directory {ws}",
+        "rm -rf /opt/meridian-agent",
+        "install -d -o root -g root -m 755 /opt/meridian-agent",
+    ], calls
+    # None of the codex-only parts: no output dir, no codex home, nothing in
+    # the user's global git config.
+    assert not any(f"{temp}/codex" in c or "-u codex" in c or "--global" in c or c.startswith("home ") for c in calls)
+
+
+@pytest.mark.parametrize("user,grant", [("root", "workspace"), ("", "workspace"), ("codex", "partial")])
+def test_create_codex_user_refuses_an_unknown_user_or_grant_before_any_command(tmp_path, user, grant):
+    results, calls, _, temp = run_create(tmp_path, user, grant)
+    assert results[0].returncode == 1 and len(results) == 1
+    assert "::error::create-codex-user:" in results[0].stdout
+    assert calls == [] and not (temp / "git-config.pre-codex").exists()
 
 
 def test_assert_runner_only_path_defaults():
@@ -809,25 +914,42 @@ def reclaim_fixture(w):
     return snapshot, embedded
 
 
+RECLAIM_SH = RECLAIM.parent / "reclaim.sh"
+
+
+def reclaim(w, **more):
+    """The composite's reclaim step as the runner runs it: its run block,
+    which pins PATH and runs reclaim.sh."""
+    more.setdefault("AGENT_USER", "codex")
+    return run(composite_runs(RECLAIM)[0], w, RECLAIM_SCRIPT=RECLAIM_SH, **more)
+
+
 def test_reclaim_runs_the_nested_check_first_then_pins_its_path():
     steps = composite_steps(RECLAIM)
     assert len(steps) == 2
-    assert ASSERT_USES in steps[0] and "user: codex" in steps[0]
+    assert ASSERT_USES in steps[0] and "user: ${{ inputs.user }}" in steps[0]
     assert "system-path: ${{ inputs.system-path }}" in steps[0]
     assert "protect" not in steps[0]  # after codex a writable hop is refused, not fixed
+    text = RECLAIM.read_text()
+    assert "  user:\n" in text and "    default: codex\n" in text
+    assert "AGENT_USER: ${{ inputs.user }}" in steps[1]
+    assert "RECLAIM_SCRIPT: ${{ github.action_path }}/reclaim.sh" in steps[1]
+    # The step pins PATH before anything, then runs the script by the
+    # pinned `bash`; the script pins it again before its own first command.
     script = composite_runs(RECLAIM)[0]
     body = script[script.index("set -euo pipefail"):]
-    assert body.index('export PATH="$SYSTEM_PATH"') < body.index("sudo pkill")
-    # Nothing but comments and the shell options before the pin.
-    before = body[:body.index('export PATH="$SYSTEM_PATH"')]
-    assert all(line.startswith("#") or line == "set -euo pipefail" for line in before.splitlines() if line), before
-    assert f"default: {SYSTEM_DIRS}" in RECLAIM.read_text()
+    code = [line for line in body.splitlines() if line and not line.startswith("#")]
+    assert code == ["set -euo pipefail", 'export PATH="$SYSTEM_PATH"', 'bash "$RECLAIM_SCRIPT"'], code
+    sh_code = [line for line in RECLAIM_SH.read_text().splitlines() if line and not line.startswith("#")]
+    assert sh_code[:2] == ["set -euo pipefail", 'export PATH="${SYSTEM_PATH:-/usr/sbin:/usr/bin:/sbin:/bin}"'], sh_code[:2]
+    assert f"default: {SYSTEM_DIRS}" in text
+    assert os.access(RECLAIM_SH, os.X_OK)
 
 
 def test_reclaim_ignores_a_planted_venv_on_the_job_path(world):
     w = world
     snapshot, embedded = reclaim_fixture(w)
-    r = run(composite_runs(RECLAIM)[0], w, SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
+    r = reclaim(w, SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "reclaimed .git from codex" in r.stdout
     # The reclaim did its work with the system tools...
@@ -846,10 +968,73 @@ def test_reclaim_still_refuses_what_it_refused_before(world):
     w = world
     snapshot, embedded = reclaim_fixture(w)
     (w["ws"] / ".git" / "commondir").write_text("/tmp/x\n")
-    r = run(composite_runs(RECLAIM)[0], w, SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
+    r = reclaim(w, SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
     assert r.returncode == 1
     assert "redirected git dir" in r.stdout
     assert hijacked(w) == ""
+
+
+def test_reclaim_for_claude_agent_kills_and_names_that_user(world):
+    w = world
+    snapshot, embedded = reclaim_fixture(w)
+    r = reclaim(w, AGENT_USER="claude-agent", SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "reclaimed .git from claude-agent" in r.stdout
+    calls = w["sudo_log"].read_text()
+    assert "pkill -KILL -u claude-agent" in calls and "-u codex" not in calls
+    config = (w["ws"] / ".git" / "config").read_text()
+    assert "TAMPERED" not in config and "fsmonitor = false" in config
+    assert hijacked(w) == ""
+
+
+def gnu_mv() -> bool:
+    return subprocess.run(["mv", "--version"], capture_output=True, check=False).returncode == 0
+
+
+@pytest.mark.parametrize("user", ["codex", "claude-agent"])
+@pytest.mark.parametrize("hooks", [False, pytest.param(True, marks=pytest.mark.skipif(
+    not gnu_mv(), reason="the hooks branch uses GNU mv -T and find -printf"))])
+def test_reclaim_twice_is_idempotent(world, user, hooks):
+    # The Claude jobs reclaim before the agent and again after it; the second
+    # run must succeed and leave exactly what the first left (the snapshot
+    # restored afresh, the pins appended once), whatever the agent did in
+    # between.
+    w = world
+    snapshot, embedded = reclaim_fixture(w)
+    gitdir = w["ws"] / ".git"
+    if hooks:
+        (gitdir / "hooks").mkdir(exist_ok=True)
+        (gitdir / "hooks" / "post-checkout").write_text("#!/bin/sh\n")
+    r1 = reclaim(w, AGENT_USER=user, SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
+    assert r1.returncode == 0, r1.stdout + r1.stderr
+    after_first = (gitdir / "config").read_text()
+    # The agent runs in between: tampers again and plants a hook.
+    with open(gitdir / "config", "a") as f:
+        f.write('[core]\n\tfsmonitor = "echo TAMPERED"\n')
+    if hooks:
+        (gitdir / "hooks").mkdir()
+        (gitdir / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    r2 = reclaim(w, AGENT_USER=user, SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    config = (gitdir / "config").read_text()
+    assert config == after_first
+    assert config.count("hooksPath = ") == 1 and config.count("fsmonitor = false") == 1 and "TAMPERED" not in config
+    assert not (gitdir / "hooks").exists()
+    if hooks:
+        assert "::warning::.git/hooks/post-checkout found after" in r1.stdout
+        assert "::warning::.git/hooks/pre-commit found after" in r2.stdout
+    assert w["sudo_log"].read_text().count(f"pkill -KILL -u {user}") == 2
+    assert hijacked(w) == ""
+
+
+@pytest.mark.parametrize("user", ["root", "runner", "codex;id"])
+def test_reclaim_refuses_an_unknown_user_before_any_command(world, user):
+    w = world
+    snapshot, embedded = reclaim_fixture(w)
+    r = reclaim(w, AGENT_USER=user, SNAPSHOT=snapshot, EMBEDDED_SNAPSHOT=embedded)
+    assert r.returncode == 1 and "user must be codex or claude-agent" in r.stdout
+    assert not w["sudo_log"].exists() or "pkill" not in w["sudo_log"].read_text()
+    assert "TAMPERED" in (w["ws"] / ".git" / "config").read_text()
 
 
 # --- codex-usage --------------------------------------------------------------
