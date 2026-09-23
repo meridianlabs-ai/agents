@@ -128,17 +128,16 @@ inputs:
     description: >-
       JSON array of the labels `pr.labels` may carry, enforced by the
       validator on this fresh runner: a manifest naming any other label is
-      refused whole. `*` (the default) leaves them unrestricted, so callers
-      that set nothing keep their behaviour (inspect_flow's scheduled
-      workflows put `auto` on the PRs they open as their own standing
-      policy); `[]` or an empty value allows none. The default is a staged
-      rollout, not the end state: claude.yml passes its list now, and the
-      direct-land callers that open PRs (inspect_flow's two scheduled
-      workflows, the actions repo's triage workflow) get their own lists
-      in follow-up changes to those callers, after which the default can
-      tighten (decision: Ransom, 2026-09-23, agents PR #132); the loops'
-      land jobs pass `[]` and the reviewer's passes `refuse-pr` (issue
-      #138). A PR label this action
+      refused whole. `[]` (the default) or an empty value allows none, so a
+      caller that forgets the input gets no labels rather than any; `*`
+      leaves them unrestricted. Every direct caller whose manifest labels
+      the PR passes its own list: claude.yml its gate job's label read,
+      inspect_flow's scheduled workflows the labels they put on their PRs
+      as their own standing policy (`auto` among them). The default was `*`
+      while those lists were rolled out (agents PR #132) and became `[]`
+      once they were in place (decision: Ransom, 2026-09-23, issue #143);
+      the loops' land jobs pass `[]` and the reviewer's passes `refuse-pr`
+      (issue #138). A PR label this action
       applies is written by the machine account, and the loop gates accept
       that account's `auto` as a trusted decider's opt-in
       (verify-auto-labeler), so which labels reach the PR is an
@@ -149,7 +148,7 @@ inputs:
       the agent job after the composing step can neither arm the loop nor
       switch the engine (Claude Security finding 4628441).
     required: false
-    default: "*"
+    default: "[]"
   allowed-issue-assignees:
     description: >-
       Comma-separated logins `issues[].assignees` may name, the same way:

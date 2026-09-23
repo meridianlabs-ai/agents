@@ -199,7 +199,9 @@ def test_auto_kickoff_opens_pr_with_handback_and_validates(repo):
     assert "wrote=true" in output
     manifest = json.loads((landing / "manifest.json").read_text())
     assert manifest["has_bundle"] is True and manifest["handback"] is True and manifest["pr"]["labels"] == ["auto"]
-    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-", start_sha=repo["start"])
+    # The gate's read, which claude.yml's land job passes (the default allows none).
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-",
+                 "--allowed-pr-labels", '["auto"]', start_sha=repo["start"])
     assert v.returncode == 0, v.stdout
 
 

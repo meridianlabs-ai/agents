@@ -138,7 +138,11 @@ text are checked by the tests under `tests/`.
   gate's read passed verbatim), so a manifest rewritten in the agent job
   after the composing step cannot have the machine account label the PR
   `auto` or switch its engine (Claude Security findings 4628438 and
-  4628441, 2026-09-22). The loops' land jobs (`claude-auto.yml`,
+  4628441, 2026-09-22). The input defaults to none (`[]`), so a land
+  caller that does not pass it has every labelled `pr` refused rather
+  than applied, and a caller whose standing policy labels its PRs
+  (inspect_flow's scheduled workflows) names those labels in the input
+  (issue #143). The loops' land jobs (`claude-auto.yml`,
   `claude-auto-review.yml`) pass an empty `allowed-pr-labels`, since a
   round never labels a PR, and the reviewer's passes `refuse-pr`, since it
   never opens, adopts or labels one, so none of the three can have the

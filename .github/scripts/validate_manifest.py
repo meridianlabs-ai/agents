@@ -102,8 +102,8 @@ requests would otherwise let a forged manifest label an existing PR.
 Callers that open PRs keep the default (accept `pr`).
 
 `--allowed-pr-labels` is the PR-side label policy: a JSON array of the
-labels `pr.labels` may carry (`*`, the default, leaves them unrestricted;
-`[]` or an empty value allows none), compared case-insensitively like the
+labels `pr.labels` may carry (`[]`, the default, or an empty value allows
+none; `*` leaves them unrestricted), compared case-insensitively like the
 issue labels. The land job applies `pr.labels` as the machine account, and
 the loop gates accept that account's `auto` as a trusted decider's opt-in,
 so the list is an authorization the trusted side must choose: claude.yml
@@ -112,8 +112,11 @@ job's composer copies into `pr.labels`, made before the agent ran), and a
 manifest rewritten in the agent job after the composing step is refused
 rather than landed with an `auto` or `engine:*` label the gate never read
 (Claude Security finding 4628441). inspect_flow's scheduled workflows set
-`auto` as their own standing policy and pass nothing, so the default keeps
-them unchanged. A malformed list refuses the manifest (usage error).
+`auto` as their own standing policy and pass the labels they set. The
+default allows none, so a caller that forgets the flag has every labelled
+`pr` refused rather than applied (issue #143; it was `*` while the callers'
+lists were rolled out). A malformed list refuses the manifest (usage
+error).
 A label containing a comma, in `pr.labels` or `issues[]`, is refused under
 any policy: `land` applies labels through gh's comma-separated flags, which
 would split it into labels the list above never checked (issue #142).
@@ -863,8 +866,8 @@ def main(argv=None) -> int:
     )
     ap.add_argument(
         "--allowed-pr-labels",
-        default="*",
-        help="JSON array of the labels pr.labels may carry (claude.yml passes its gate job's label read verbatim); `*` (the default) leaves them unrestricted, `[]` or an empty value allows none",
+        default="[]",
+        help="JSON array of the labels pr.labels may carry (claude.yml passes its gate job's label read verbatim); `[]` (the default) or an empty value allows none, `*` leaves them unrestricted",
     )
     ap.add_argument(
         "--refuse-pr",
