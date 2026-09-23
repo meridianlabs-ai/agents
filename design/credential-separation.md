@@ -234,13 +234,26 @@ workflow) the validator additionally refuses any manifest that carries
 commits, claims HEAD moved or ships a bundle, whatever the agent job
 uploaded, and the push-side branch rules are off because nothing is pushed.
 `emit-landing`'s `read-only` input is the producing side of the same pair:
-no git runs, `head_sha` equals `start_sha`, no bundle. Refusing bundles does
-not refuse pull requests: `pr.open` adopts or opens a PR for a branch that
-already exists on origin and labels it, with no push. Under `refuse-pr` (the
-triage workflow, since 2026-09-22) the validator also refuses a manifest
-carrying `pr` or `handback: true`, so a caller whose token reaches the
-repository's pull requests (the `MARVIN_TOKEN` fallback) cannot be made to
-label an existing PR `auto` or post `@review` by a forged artifact.
+no git runs, `head_sha` equals `start_sha`, no bundle. Since 2026-09-22
+`refuse-bundle` also refuses every field only a landed commit or a loop's fix
+agent owes — `pr`, `replies`, `resolve_threads`, `handoff_body_file` and
+`handback: true` — because nothing lands there to owe them: a forged review
+manifest could otherwise make the land job post the live `@review` as the
+machine account and start another review of the same PR without bound, post
+the `auto-handoff` stop marker, or resolve a human's review threads (Claude
+Security finding 4628439). Under `refuse-pr` (the triage workflow, since
+2026-09-22) the validator refuses a manifest carrying `pr` or `handback:
+true` on its own, so a caller whose token reaches the repository's pull
+requests (the `MARVIN_TOKEN` fallback) cannot be made to label an existing
+PR `auto` or post `@review` by a forged artifact.
+
+The review fields — `review_verdict`, `comments[].review` and
+`review_comments` — are accepted only on a land job whose caller passes
+`allow-review`, which claude-review.yml alone does (Claude Security finding
+4628442, 2026-09-22). On every other caller the validator refuses a manifest
+carrying any of them: they make `land` post a review as the machine account,
+byte-identical to the reviewer's, and the compose steps that keep the other
+callers' manifests free of them run in the agent job.
 
 Every agent-authored body the land job posts passes through a de-fang step
 first (trigger tokens lose their `@`, loop markers are split,
@@ -363,13 +376,23 @@ push with GitHub's "refusing to allow a GitHub App to create or update
 workflow" error. That is the intended boundary: the workflows that hold the
 credentials are changed from a maintainer's machine, under a maintainer's
 review, never by an agent running in CI. Since 2026-09-18 the land job
-enforces it before the push: its `workflows` step lists the paths the
-bundle changes under `.github/workflows/` and refuses the bundle with a
+enforces it before the push: its `workflows` step lists the paths under
+`.github/workflows/` the push would change on origin — the bundle's tip
+against the branch's live tip, or against origin's base tip when the push
+creates the branch; trusted references the land job reads itself, never
+the manifest's `start_sha`, which the agent job writes and which origin
+would serve for any reachable commit, a fork PR's head or an old base
+commit included (Claude Security finding 4628444, 2026-09-22) — and
+refuses the bundle with a
 one-line report naming the files the agent itself changed — a change the
 runner's base merge brought in (the file's content at the bundle's tip
-equals the base branch's on origin, or that of the base as last merged into
+equals the base branch's on origin, or, on a branch that is on origin, that
+of the base as last merged into
 the branch: the merge base of the tip and origin's base) is not the agent's
-and passes (decision: Ransom, 2026-09-18) — and the agent prompts say up
+and passes (decision: Ransom, 2026-09-18); on a branch the push creates,
+only content equal to the base tip passes, since an issue run cuts its
+branch from that tip and a lower fork point cannot be told from one the
+agent chose — and the agent prompts say up
 front not to edit them.
 
 The app is not a member of `UKGovernmentBEIS`, so, like the PAT before it, it
@@ -504,8 +527,9 @@ files (it runs tests and Python, unsandboxed on same-repo heads, and its
 `gh` runs outside the sandbox on the sandboxed paths), and under
 `refuse-bundle` the validator still accepts `comments[]` on any thread of
 the caller repository, `issues[]` in the caller repository (create,
-comment, reopen, assign), a `stage` move and a `pr.open` for a branch that
-already exists on origin. A compromised review job can therefore have the
+comment, reopen, assign) and a `stage` move (since 2026-09-22 it refuses
+`pr`, `replies`, `resolve_threads`, `handoff_body_file` and `handback`
+there). A compromised review job can therefore have the
 machine account post those, de-fanged, on the caller repository; it cannot
 push through its landing job, and its manifest cannot reach another
 repository. The Claude action's own installation token in the review job is
@@ -801,14 +825,17 @@ results against the invariant each one tests.
   the land job refuses bundles. Its normal output is the three review files, landed as the
   review summary, the inline findings and a verdict that is one of two
   fixed bodies, after the de-fang. The enforced limits stop there: the
-  review job runs tests and Python (unsandboxed on same-repo heads), its
-  workspace stays writable on the sandboxed paths and `gh` runs outside
-  the sandbox there, and the landing manifest it uploads is data the
+  review job runs tests and Python (unsandboxed on same-repo heads), on the
+  sandboxed paths its scratch copy of the checkout stays writable while the
+  checkout itself is read-only to sandboxed commands (Claude Security
+  4628445) and `gh` runs outside the sandbox there, and the landing
+  manifest it uploads is data the
   validator checks for shape, not intent. Under `refuse-bundle` the
   validator accepts `comments[]` on any thread of the caller repository,
-  `issues[]` in the caller repository (create, comment, reopen, assign), a
-  `stage` move and a `pr.open` for a branch that already exists on origin,
-  all of which the land job would post as the machine account. So what a
+  `issues[]` in the caller repository (create, comment, reopen, assign) and
+  a `stage` move (since 2026-09-22 no `pr`, `replies`, `resolve_threads`,
+  `handoff_body_file` or `handback`), all of which the land job would post
+  as the machine account. So what a
   steered reviewer can cause through the landing is a wrong review and
   manifest-authorized writes on the caller repository, never a
   machine-account push and never a machine-account write outside it; a

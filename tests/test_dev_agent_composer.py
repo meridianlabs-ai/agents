@@ -201,6 +201,41 @@ def test_auto_kickoff_opens_pr_with_handback_and_validates(repo):
     assert v.returncode == 0, v.stdout
 
 
+def test_pr_labels_the_gate_did_not_read_are_refused_by_the_land_job(repo):
+    # Finding 4628441: the composer copies the gate's read into `pr.labels`,
+    # but it runs in the agent job after the agent, and emit-landing writes
+    # manifest.json there too. The land job passes the gate's read as the
+    # validator's allow-list, so the manifest the composer wrote passes and
+    # one grown afterwards — `auto` to arm the loop, an engine switch — is
+    # refused whole, before anything is pushed, labelled or handed back.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    gate_read = '["engine:codex"]'
+    m, _, _, out = compose(repo, is_pr=False, trigger="@claude", auto="false", pr_labels=gate_read)
+    assert m["pr"]["labels"] == ["engine:codex"] and "handback" not in m
+    extra = repo["tmp"] / "landing-extra.json"
+    res, landing, _ = run_emit_landing(repo["tmp"], cwd=repo["work"], read_only=False, start_sha=repo["start"],
+                                       extra=extra, branch=out["branch"], pr_number="", issue_number="12")
+    assert res.returncode == 0, res.stderr
+    pin = ("--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-",
+           "--allowed-pr-labels", gate_read)
+    assert validate(landing, *pin).returncode == 0
+    manifest = json.loads((landing / "manifest.json").read_text())
+    for grown in (["engine:codex", "auto"], ["auto"], ["engine:other"]):
+        manifest["pr"]["labels"] = grown
+        (landing / "manifest.json").write_text(json.dumps(manifest))
+        v = validate(landing, *pin)
+        assert v.returncode == 1 and "is not in the allowed pull-request labels (engine:codex)" in v.stdout, v.stdout
+    # A gate read that failed (an empty allow-list) lands the composer's
+    # empty label list and nothing else.
+    manifest["pr"]["labels"] = []
+    (landing / "manifest.json").write_text(json.dumps(manifest))
+    assert validate(landing, *pin[:-1], "").returncode == 0
+    manifest["pr"]["labels"] = ["auto"]
+    (landing / "manifest.json").write_text(json.dumps(manifest))
+    assert validate(landing, *pin[:-1], "").returncode == 1
+
+
 def test_claude_trigger_on_an_auto_labelled_issue_owes_the_handback(repo):
     # `@claude` (or the `claude` label) on an issue that carries `auto`: the
     # gate reads the label, the PR gets it, so the PR is the loop's and owes

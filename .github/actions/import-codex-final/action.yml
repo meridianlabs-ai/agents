@@ -1,0 +1,83 @@
+name: import-codex-final
+description: >-
+  Bring codex's final message across the user boundary, once, so no later
+  runner-side step opens the codex-owned output directory. codex-action's
+  `output-file` lives in `$RUNNER_TEMP/codex`, a directory the unprivileged
+  `codex` user owns (create-codex-user), and the codex CLI writes the file
+  there as that user; every step after codex runs as `runner` and used to
+  read that entry directly — `head -n1` for the commit subject, the
+  `resolve-reported-threads` composite's awk, the summary step's sed — with
+  primitives that follow symlinks. A codex that swapped the entry for a
+  symlink (a prompt-injected codex, via a background survivor acting after
+  the CLI wrote the file and before `reclaim-codex-workspace` kills it)
+  would have had the runner read the link's TARGET — the reading step's
+  environment, runner-home files codex itself cannot read — and the land
+  job publish those bytes on the PR as the machine account (finding
+  4628447). This action opens the entry exactly once, with `O_NOFOLLOW` and
+  an `fstat` of the descriptor it got (no second lookup by name), refuses
+  anything that is not a regular file owned by the codex user, and copies
+  what passes to a runner-owned file directly under `$RUNNER_TEMP` (755
+  `runner:runner`, so codex can plant nothing there). Callers point every
+  later reader — the commit step, `resolve-reported-threads`'s
+  `final-message`, the summary step — at that copy and nothing else at the
+  source. Runs right after `reclaim-codex-workspace`, whose kill loop has
+  ended every codex process by then, gated like the readers on the codex
+  step and the reclaim having succeeded.
+
+  A refusal or a missing message is a `::warning::` (an info line when
+  there is simply no file) and no copy — never a failed step: the readers
+  fall back to their defaults when the copy is missing (the default commit
+  subject, the "(codex produced no final message)" placeholder), which is
+  exactly what a redirected message must yield. Only a misconfiguration
+  (unknown owner user, unwritable destination) fails the step. Runs no
+  git. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/import-codex-final@main); NO post
+  step (local composite actions with post steps break teardown on the
+  fork).
+
+inputs:
+  source:
+    description: >-
+      codex-action's `output-file`, inside the codex-owned directory.
+      Defaults to `$RUNNER_TEMP/codex/codex-final.md`, the path the three
+      write-path workflows pass codex-action. Resolved in the shell rather
+      than as a runner.temp-context default so the metadata needs no context.
+    required: false
+    default: ""
+  dest:
+    description: >-
+      Runner-owned path to write the verified copy to; must be directly
+      under `$RUNNER_TEMP`, never inside the codex-owned directory. Defaults
+      to `$RUNNER_TEMP/codex-final.md`. Removed first, so a stale copy never
+      stands in for a message refused now.
+    required: false
+    default: ""
+  owner:
+    description: The user the source must be owned by. Defaults to `codex`.
+    required: false
+    default: ""
+
+outputs:
+  path:
+    description: >-
+      The copy's path when the message was imported; empty when there was no
+      message or it was refused (the callers' readers also check the file
+      itself, so the constant `dest` path serves as well).
+    value: ${{ steps.import.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - id: import
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+        DEST: ${{ inputs.dest }}
+        OWNER: ${{ inputs.owner }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/import_codex_final.py
+      run: |
+        set -euo pipefail
+        python3 "$SCRIPT" \
+          --source "${SOURCE:-$RUNNER_TEMP/codex/codex-final.md}" \
+          --dest "${DEST:-$RUNNER_TEMP/codex-final.md}" \
+          --owner "${OWNER:-codex}"
