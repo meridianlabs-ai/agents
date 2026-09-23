@@ -150,7 +150,9 @@ decided by the service before the job is dispatched, and a skipped job has
 no job message. Whether the service scopes referenced secrets per job or per
 called workflow is not documented; the split makes the Claude job's YAML
 reference no key, which is the documented condition for a secret not to be
-delivered, and section 7 records the remaining uncertainty.
+delivered, the hosted canary in section 6 measures per-job scoping in this
+gate/agent/land shape (App secrets included), and section 7 records the
+remaining uncertainty.
 
 The gate exists because some writes must happen before the agent runs (the
 acknowledgement, the stage move, the loop's attempt counter), and those are
@@ -793,6 +795,31 @@ results against the invariant each one tests.
   pnpm 11.22.0 via corepack in `~codex/.local/bin`, a frozen install and
   `prettier` in `node_modules/.bin`; every tool the compose steps' discovery
   found ran as codex under `sudo -u codex`.
+- I1 against the job message, in the agent workflows' own shape: the same
+  canary's `pipeline-probe` job (finding 4629153, fix criterion 3) calls
+  `engine-isolation-canary-pipeline.yml` once per engine. That workflow
+  declares the three `workflow_call` secrets under their real names
+  (`MARVIN_APP_CLIENT_ID`, `MARVIN_APP_PRIVATE_KEY`, `OPENAI_API_KEY`), and
+  the canary fills them with the synthetic sentinels only — A for both App
+  secrets, B for the OpenAI key; its `gate` and `land` jobs reference the
+  App secrets in job `env:` and as action inputs of a step that runs (the
+  mint step's shape, through the stand-in action in
+  `tests/fixtures/secret-input`), its `agent` and `agent-codex` jobs `need`
+  the gate and are selected by its `engine` output at the job level, the
+  Claude job referencing nothing and the codex job the OpenAI key at a step
+  that runs, and every job ends with the root memory scan.
+  `tests/test_secret_delivery_canary.py` keeps each job's secret references,
+  the workflow's secret declarations and the job selection equal to the
+  four reusable workflows', so the measurement stands for them. Run on
+  2026-09-23 against `8bf9170`, run 35891370879, all sixteen jobs green
+  (the two unselected agent jobs skipped): in both engine runs the gate and
+  land jobs held sentinel A (Listener 16–18, Worker 44–56 matches) and not
+  B; the Claude agent job held neither (Listener 709 and Worker 818
+  readable regions scanned) although the gate before it and the land job
+  after it referenced the App secrets and the caller passed the OpenAI key;
+  the codex job held B (9 and 21) and not A. So the App secrets are
+  delivered to the jobs that reference them and not to the agent jobs of
+  the same called workflow, and the OpenAI key reaches the codex job alone.
 
 ## 7. Costs and residual risks
 
@@ -879,10 +906,17 @@ results against the invariant each one tests.
   it on 2026-09-22: a job that references nothing received neither
   sentinel although the caller passed both to the called workflow and
   sibling jobs referenced each, and a job whose only reference sat in a
-  never-run step received its sentinel. So the engine split — a Claude job
-  whose YAML references no `OPENAI_API_KEY` — keeps the key out of that
-  job's message today, and the App secrets the gate and land jobs reference
-  stay out of the agent jobs' messages the same way. The stubs keep passing
+  never-run step received its sentinel; on 2026-09-23 its pipeline probe
+  repeated that in the agent workflows' own shape — gate, engine-selected
+  agent jobs, land — and the Claude agent job held no App secret and no
+  OpenAI key. So the engine split — a Claude job whose YAML references no
+  `OPENAI_API_KEY` — keeps the key out of that job's message today, and the
+  App secrets the gate and land jobs reference stay out of the agent jobs'
+  messages the same way, which is why the App-secret-referencing jobs can
+  share a workflow file with the agent jobs. What the canary does not do is
+  scan a real agent run: its jobs are stand-ins with the same references,
+  held to the real files by `tests/test_secret_delivery_canary.py`, and a
+  real run's memory is never dumped for real secret values. The stubs keep passing
   the key to every reusable workflow (the declaration is kept for backward
   compatibility: a stub naming an undeclared secret fails to load). What
   remains is that this is the platform's current behaviour, not a contract:

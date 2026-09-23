@@ -62,7 +62,10 @@ text are checked by the tests under `tests/`.
   hosted canary (design/credential-separation.md → section 6) shows a
   referenced-but-skipped secret in the runner's memory and none in a job
   that references nothing, although the caller passed it and a sibling job
-  referenced it — delivery is scoped per job.
+  referenced it — delivery is scoped per job. The same canary, in the
+  agent workflows' own gate/agent/land shape, finds neither the App
+  secrets the gate and land jobs reference nor the OpenAI key in the
+  Claude agent job's runner memory.
 - In a codex job nothing from the checked-out tree executes as the runner:
   the caller's `claude-setup` action is not run there, and the shared
   provisioning recipe (uv and a dev-install of the checkout, the tree's own
