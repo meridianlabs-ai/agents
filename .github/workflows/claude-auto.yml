@@ -1048,6 +1048,12 @@ jobs:
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
           user-email: ${{ needs.gate.outputs.git_user_email }}
+          # ...and the head the run tested, which "Record base SHA" above
+          # already required the checkout to be at: the same pin here, so the
+          # pre-merge start this step records is the
+          # gate's `head_sha` — the start the land job is pinned to
+          # (finding 4628444, criterion 2).
+          head-sha: ${{ needs.gate.outputs.head_sha }}
 
       # Provision the project environment BEFORE the fix agent starts, so its
       # pytest/ruff/pyright actually run — the same two steps the reviewer
@@ -1797,6 +1803,12 @@ jobs:
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
           user-email: ${{ needs.gate.outputs.git_user_email }}
+          # ...and the head the run tested, which "Record base SHA" above
+          # already required the checkout to be at: the same pin as the fix
+          # job's copy, so the pre-merge start this step records is the
+          # gate's `head_sha` — the start the land job is pinned to
+          # (finding 4628444, criterion 2).
+          head-sha: ${{ needs.gate.outputs.head_sha }}
 
       # ---- Codex engine CI-fix round (design/codex-engine.md) ----------------
       # The codex sandbox has no GitHub credentials, so the failing CI logs are
@@ -2725,9 +2737,21 @@ jobs:
           # and the validator's pin for the manifest's branch — no lookup of
           # its own needed.
           pr-head-ref: ${{ inputs.head_branch }}
+          # The head the run tested (the gate's bind, reproduced by the
+          # revalidation above): the run's start, which "Record base SHA"
+          # required the fix job's checkout to be at — so a manifest that
+          # carries commits must name exactly it as start_sha, or the
+          # validator refuses it before the fetch (finding 4628444).
+          start-sha: ${{ needs.gate.outputs.head_sha }}
           # The CI-fix manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""
+          # A loop round never labels a PR (issue #138): the round's PR is
+          # pinned by pr-number, and `auto` / `engine:*` are a trusted
+          # decider's, never the fix agent's — the loop gates accept the
+          # machine account as the labeler. An empty list makes the
+          # validator refuse any `pr.labels` a manifest carries.
+          allowed-pr-labels: "[]"
           # A re-review request on a manifest with NO bundle is honored only
           # when the agent step succeeded (`agent_outcome`, a step outcome
           # the agent can push only toward `failure`). This loop's composer

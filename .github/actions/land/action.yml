@@ -4,7 +4,8 @@ description: >-
   fresh runner that never checked out third-party code and installs nothing,
   download the `landing` artifact the agent job's `emit-landing` step
   uploaded, validate its manifest (.github/scripts/validate_manifest.py —
-  every field is data until it passes), and only then act on it with the
+  every field is data until it passes, and a bundle's `start_sha` must be
+  the caller's trusted `start-sha`), and only then act on it with the
   privileged token: push the bundled commits (never --force, never over a
   branch that moved during the run, and never a bundle that changes files
   under .github/workflows/, which the machine account may not push, or
@@ -133,10 +134,11 @@ inputs:
       policy); `[]` or an empty value allows none. The default is a staged
       rollout, not the end state: claude.yml passes its list now, and the
       direct-land callers that open PRs (inspect_flow's two scheduled
-      workflows, the actions repo's triage workflow, claude-review.yml's
-      external mode) get their own lists in follow-up changes to those
-      callers, after which the default can tighten (decision: Ransom,
-      2026-09-23, agents PR #132). A PR label this action
+      workflows, the actions repo's triage workflow) get their own lists
+      in follow-up changes to those callers, after which the default can
+      tighten (decision: Ransom, 2026-09-23, agents PR #132); the loops'
+      land jobs pass `[]` and the reviewer's passes `refuse-pr` (issue
+      #138). A PR label this action
       applies is written by the machine account, and the loop gates accept
       that account's `auto` as a trusted decider's opt-in
       (verify-auto-labeler), so which labels reach the PR is an
@@ -177,6 +179,31 @@ inputs:
       Callers that open PRs keep the default.
     required: false
     default: "false"
+  start-sha:
+    description: >-
+      The run's start SHA as the caller's TRUSTED context recorded it before
+      the agent ran (Claude Security finding 4628444, criterion 2): the base
+      tip an issue run branches from, or the PR head's live tip a PR run
+      checks out — read in the gate job, from the API, and pinned by the
+      agent job's own start step (claude.yml's "Record base SHA",
+      sync-branch's `head-sha`) so the checkout, the manifest and this job
+      agree on one revision by construction. The validator refuses a
+      manifest that carries commits but names any other `start_sha`, before
+      the fetch step reads it: the fetch takes `start_sha` from origin by
+      SHA, which serves every reachable commit, so an agent job could
+      otherwise name a fork PR's head or an old base commit as its start and
+      land history the run never began from. Empty refuses every bundle
+      (fail closed): every caller whose agent commits must pass it — the
+      reusable workflows pass their gate's read, and a direct caller of this
+      composite records the start in its own trusted job and pins its agent
+      job's checkout to it (the shape in examples/landing-smoke.yml and the
+      emit-landing README; inspect_flow's and ts-mono's callers were
+      updated with #137, decision: Ransom, 2026-09-23 — no compatibility
+      period for callers that pass none). A caller whose agent never commits
+      (`refuse-bundle`) needs none, and a manifest without commits is never
+      compared.
+    required: false
+    default: ""
   pr-head-ref:
     description: >-
       headRefName of the PR `pr-number` names (`github.event.pull_request.head.ref`
@@ -407,6 +434,7 @@ runs:
         REFUSED: ${{ inputs.refused-branches }}
         ALLOWED: ${{ inputs.allowed-issue-repos }}
         PR_HEAD_REF: ${{ inputs.pr-head-ref || steps.lookup.outputs.ref }}
+        START_SHA: ${{ inputs.start-sha }}
         EVENT_PR_NUMBER: ${{ inputs.pr-number }}
         EVENT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         BRANCH_PREFIX: ${{ inputs.branch-prefix }}
@@ -422,7 +450,7 @@ runs:
         set -uo pipefail
         python3 "$VALIDATOR" --dir "$DIR" --repo "$REPO" --run-id "$GITHUB_RUN_ID" \
           --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
-          --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
+          --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" --start-sha "$START_SHA" \
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
           --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} ${ALLOW_REVIEW:+--allow-review} \
           --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
@@ -474,7 +502,10 @@ runs:
     # (a) the bundle's tip is the manifest's head_sha, (b) it descends from
     # start_sha, (c) the branch on origin has not moved past what the agent
     # started from. `git fetch <bundle>` needs the bundle's prerequisite
-    # (start_sha) present, so that is fetched from origin first, by SHA.
+    # (start_sha) present, so that is fetched from origin first, by SHA —
+    # origin serves any reachable SHA here, which is why the validator has
+    # already pinned start_sha to the caller's `start-sha` (the trusted
+    # record of the run's start) before this step runs.
     # Also fetches the tip of the run's base branch (the PR's base, else the
     # caller's `base-branch`, else the default branch — trusted context, not
     # the manifest) as refs/land/base:
@@ -819,7 +850,8 @@ runs:
           # Every label here passed the validator's `allowed-pr-labels`
           # check, so under a caller that pins the list (claude.yml: the
           # gate's read) these are the trusted side's labels, not the
-          # manifest's choice.
+          # manifest's choice. `--add-label` splits on commas; the validator
+          # refuses a label containing one, so each $lbl is one label.
           while IFS= read -r lbl; do
             [ -n "$lbl" ] || continue
             gh pr edit "$number" --repo "$REPO" --add-label "$lbl" \
@@ -1135,6 +1167,7 @@ runs:
           fi
           title=$(defang_str "$(jq -r '.title' <<<"$it")")
           args=()
+          # `--label` splits on commas too; the validator refuses a label containing one.
           while IFS= read -r lbl; do [ -n "$lbl" ] && args+=(--label "$lbl"); done <<<"$(jq -r '.labels // [] | .[]' <<<"$it")"
           for a in "${assignees[@]}"; do args+=(--assignee "$a"); done
           if url=$(retry 3 "gh issue create in $irepo" gh issue create --repo "$irepo" --title "$title" \

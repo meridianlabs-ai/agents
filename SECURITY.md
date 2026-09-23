@@ -107,7 +107,10 @@ text are checked by the tests under `tests/`.
   no code; a refused manifest causes none of the actions it requested. The
   trusted gate's own writes before the agent runs (acknowledgement, stage,
   labels, counters) and the land job's final error report are deterministic
-  and not agent-controlled.
+  and not agent-controlled. The commits a manifest carries build on the
+  run's start as the gate read it before the agent ran, never on a start the
+  agent job names: the land job refuses a bundle whose `start_sha` is any
+  other commit before fetching it.
 - The machine account's tokens are minted per job, for one repository and the
   permissions that job uses, from the GitHub App's secrets, and are revoked at
   job end.
@@ -135,10 +138,15 @@ text are checked by the tests under `tests/`.
   gate's read passed verbatim), so a manifest rewritten in the agent job
   after the composing step cannot have the machine account label the PR
   `auto` or switch its engine (Claude Security findings 4628438 and
-  4628441, 2026-09-22). Where a caller's agent job is untrusted
-  after it has read third-party input (the triage workflow in
-  `meridianlabs-ai/actions`), the land job's `allowed-issue-labels`,
-  `allowed-issue-assignees`, `max-issues` and `refuse-pr` inputs are
+  4628441, 2026-09-22). The loops' land jobs (`claude-auto.yml`,
+  `claude-auto-review.yml`) pass an empty `allowed-pr-labels`, since a
+  round never labels a PR, and the reviewer's passes `refuse-pr`, since it
+  never opens, adopts or labels one, so none of the three can have the
+  machine account apply `auto` or an `engine:*` label (issue #138). Where
+  a caller's agent job is untrusted after it has read third-party input
+  (the triage workflow in `meridianlabs-ai/actions`), the land job's
+  `allowed-issue-labels`, `allowed-issue-assignees`, `max-issues` and
+  `refuse-pr` inputs are
   enforced by the validator on the fresh runner, so its manifest cannot
   commission the autonomous agent — through an issue label, or through a
   PR opened, adopted or labelled for a branch already on origin — however
@@ -151,7 +159,8 @@ text are checked by the tests under `tests/`.
   `refuse-bundle` it refuses the hand-back, hand-off, thread resolutions,
   replies and PR operations a read-only reviewer never owes, so a forged
   review manifest cannot re-trigger the reviewer from its own land job
-  (Claude Security findings 4628442 and 4628439, 2026-09-22).
+  (Claude Security findings 4628442 and 4628439, 2026-09-22); its
+  `refuse-pr` states the PR-side refusal on its own (issue #138).
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - No runner-side step after a Codex run resolves a command, or its shell
@@ -289,9 +298,10 @@ text are checked by the tests under `tests/`.
   directory, posted as the review after trigger tokens and loop markers are
   removed, with a verdict that is one of two fixed bodies. Its landing
   manifest is still data the land job acts on: a comment on another thread,
-  a caller-repository issue write, a stage move or the adoption of an
-  existing branch's PR that a compromised review job requested would post
-  as the machine account. A human reads every review.
+  a caller-repository issue write or a stage move that a compromised
+  review job requested would post as the machine account; opening,
+  adopting or labelling a PR is refused (`refuse-bundle`, `refuse-pr`).
+  A human reads every review.
 
 ## Adding or changing a workflow
 

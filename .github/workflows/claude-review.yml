@@ -2952,6 +2952,13 @@ jobs:
           # replies, resolve_threads, handoff_body_file, handback — a
           # read-only reviewer never owes (finding 4628439).
           allow-review: "true"
+          # The PR-side policy on its own (issue #138): the reviewer never
+          # opens, adopts or labels a PR, so a manifest carrying `pr` — or
+          # the hand-back — is refused whatever refuse-bundle says, and no
+          # forged review manifest can have the machine account label a PR
+          # `auto` or `engine:*` (the loop gates accept that account as the
+          # labeler).
+          refuse-pr: "true"
           # The same expressions emit-landing got above: the validator pins
           # the manifest's pr_number / issue_number to them, and they are
           # the trusted fallback target for the final report when the

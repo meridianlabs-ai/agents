@@ -1,7 +1,10 @@
 # tests/
 
-The repo's only unit tests. There is no other test suite here — the agent
-workflows are validated by triggering them (AGENTS.md → Testing a change).
+The repo's unit tests, run by CI (`.github/workflows/tests.yml`) on every PR
+and every push to main. They check the workflows as text and run their
+lifted `run:` steps against stubs; a live run of the agent workflows is
+still validated by triggering them and by the hosted canaries (AGENTS.md →
+Testing a change).
 
 - `test_validate_manifest.py` — the land job's manifest validator
   (`.github/scripts/validate_manifest.py`): one valid manifest, one failing
@@ -9,7 +12,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
   workflow's actual land inputs, against forged manifests; the PR-label
   policy (`allowed-pr-labels`: the dev gate's read, which a manifest's
-  `pr.labels` may not exceed — Claude Security 4628441); the review fields
+  `pr.labels` may not exceed — Claude Security 4628441; the loops' land
+  jobs pass `[]` and the reviewer's `refuse-pr`, wiring included, issue
+  #138); the review fields
   refused on every caller but the reviewer's (`allow-review`), and the
   fix-agent fields (`pr`, `replies`, `resolve_threads`, `handoff_body_file`,
   `handback`) refused under `refuse-bundle`, each against the forged manifest
@@ -38,6 +43,22 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   old base commit still names the file; Claude Security 4628444) — with a
   new branch cut from a configured non-default base (the fork's `main`
   under a `meridian` default) run through the lifted `fetch` step too.
+- `test_trusted_start.py` — the run's trusted start (Claude Security finding
+  4628444, criterion 2): the validator refuses a bundle whose `start_sha` is
+  not the land job's `start-sha`, or any bundle when that input is empty,
+  with the forged manifests run through the real script before any fetch
+  (a fork PR's head, an old base commit — both reachable on a local origin
+  and both refused); `sync-branch`'s `head-sha` pin and `claude.yml`'s
+  `Record base SHA`, lifted and run against local repos (a moved head fails
+  the sync before the merge; the base step fetches the live tip first —
+  actions/checkout leaves `origin/<base>` at the event commit, older than
+  the gate's read after a push in between — and a base that advanced keeps
+  the gate's tip, a rewritten base refuses, a failed fetch fails);
+  `claude.yml`'s gate `Record run start` step against a stub `gh`; and the
+  wiring — every land job that pushes passes its gate's read as
+  `start-sha`, every sync-branch call the same value as `head-sha`, the
+  reviewer passes none, and `examples/landing-smoke.yml` carries the
+  gate → checkout → land shape a direct `land@main` caller needs.
 - `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
   step, lifted the same way: a landed fix or merge-only attempt owes the
   re-review request and sets no stage (a hand-back is mid-flight; Review is
@@ -462,6 +483,14 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   exactly the control entry exists and restores, each job's "Set up job"
   line shows its mode, and the probe's log shows the client's skip and the
   service's `cache write denied:` refusal; red, with the reason, otherwise.
+- `test_ci_workflow.py` — the CI workflow itself (`.github/workflows/tests.yml`):
+  the full suite on every PR and push to main with no path filter, a
+  read-only token, no `secrets.` reference, no `pull_request_target`, every
+  checkout with `persist-credentials: false`, actions pinned at their major
+  tag and nothing that could start an agent; and the dogfood @auto stub
+  (`claude-auto-stub.yml`) equal to `examples/claude-auto-stub.yml` from
+  `name:` on, both halves included, except the `workflow_run` `workflows:`
+  line, which names that workflow's `name:`.
 - `test_model_defaults.py` — the four Claude workflows' `model` input
   defaults to the `opus` alias (never a dated id) with `fallback_model`
   `default`, and both still reach Claude Code as `--model` /
@@ -479,10 +508,7 @@ pip install pytest
 python3 -m pytest
 ```
 
-CI: `workflow-tests.yml` in this directory is the job that runs the same
-command on pushes and PRs touching the validator, the composites or the
-tests. It lives here rather than under `.github/workflows/` only because the
-agent that opened the plumbing PR cannot write there (GitHub App permission);
-move it to `.github/workflows/tests.yml` in a follow-up PR (a human-opened
-one, or one with a top-level `@review` — see CLAUDE.md on workflow-editing
-PRs).
+CI: `.github/workflows/tests.yml` (workflow `tests`, job `pytest`) runs the
+same command on Python 3.12 on every PR and every push to main, with no path
+filter, a read-only job token and no secrets. It is the CI workflow this
+repo's @auto stub watches (`test_ci_workflow.py`).
