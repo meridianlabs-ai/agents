@@ -12,7 +12,9 @@ Testing a change).
   / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
   workflow's actual land inputs, against forged manifests; the PR-label
   policy (`allowed-pr-labels`: the dev gate's read, which a manifest's
-  `pr.labels` may not exceed — Claude Security 4628441); the review fields
+  `pr.labels` may not exceed — Claude Security 4628441; the loops' land
+  jobs pass `[]` and the reviewer's `refuse-pr`, wiring included, issue
+  #138); the review fields
   refused on every caller but the reviewer's (`allow-review`), and the
   fix-agent fields (`pr`, `replies`, `resolve_threads`, `handoff_body_file`,
   `handback`) refused under `refuse-bundle`, each against the forged manifest
@@ -384,12 +386,19 @@ Testing a change).
   with write access (Claude Security 4628438) — a triage account's, a
   bot's or the machine account's own label, a timeline that names no
   labeler and a failed permission lookup all leave the run one-shot with
-  no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; an
-  `@auto` comment opts in without a label read. A PR's label makes a landed
-  commit owe the `@review` hand-back only when verify-auto-labeler would pass
-  it — a writer, or either machine-account login with no lookup — so a
-  non-writer's or an unverifiable label costs no reviewer run (agents#140).
-  Also that the land job pins the PR labels to the gate's read.
+  no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; a
+  decided refusal (a known labeler that is not a write-access human) also
+  removes the label and posts a note saying so, but only when a second
+  timeline read still shows the judged `labeled` event as the newest
+  `auto` event (a label re-applied or removed during the permission
+  lookup or its retry is left alone); a failed read or a run started by
+  applying `auto` writes nothing, and a failed removal is said (issue
+  #141); an `@auto` comment opts in without a label read. A PR's label
+  makes a landed commit owe the `@review` hand-back only when
+  verify-auto-labeler would pass it — a writer, or either machine-account
+  login with no lookup — so a non-writer's or an unverifiable label costs
+  no reviewer run, and nothing is written to the PR (agents#140). Also
+  that the land job pins the PR labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,
   from text or from an `auto`/`claude` label (Claude Security finding
