@@ -1348,12 +1348,14 @@ now compose, each holding on its own:
   `AGENTS.md`, `.claude` or `.mcp.json` must be a verified restore root or
   lie inside one. Last, what a verified configuration root *reaches* must
   stay inside the tree the comparison covered: the roots are walked
-  following symlinks and every entry resolved with the filesystem's own
-  semantics (`os.path.realpath`), and an entry resolving outside the
-  checkout, into `.git`, into the action's `.claude-pr/` copy (exempt from
-  the comparison) or into an embedded repository (hashed as a gitlink, its
-  files unseen), or a link with an absolute target, fails;
-  dangling and looping links reach nothing (the callers' `CLAUDE.md ->
+  following symlinks and every entry resolved component by component with
+  the filesystem's own semantics, every location the resolution passes
+  through checked (intermediate links included — a relay link in
+  unverified storage could otherwise redirect an in-tree target), and a
+  location outside the checkout, in `.git`, in the action's `.claude-pr/`
+  copy (exempt from the comparison) or in an embedded repository (hashed
+  as a gitlink, its files unseen), a link with an absolute target, or a
+  chain of more than 40 links (a loop) fails; dangling links reach nothing (the callers' `CLAUDE.md ->
   AGENTS.md` dangles after the strip's rename). Any failure — or a missing
   snapshot — fails the step, the landing prep is gated on it (nothing the
   reviewer wrote is posted), and the Surface step posts a withheld-review

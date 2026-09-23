@@ -640,6 +640,69 @@ def test_replant_check_rejects_reach_into_unverified_storage(tmp_path):
         assert f"{reported} is reached through a verified configuration root" in r.stdout, (links, r.stdout)
 
 
+def test_replant_check_verifies_every_link_on_the_way(tmp_path):
+    # Review round 7 (B7): checking only the final realpath let a relay link
+    # in unverified storage — .claude-pr/, .git, an embedded repository, or
+    # outside the checkout — redirect an in-tree target: repointing the relay
+    # from `safe` to `other` changed what CLAUDE.md reads while the final
+    # target stayed inside the verified tree. Every location the resolution
+    # passes through is now checked, so the unchanged relay already fails.
+    base = {k: v for k, v in BASE_FILES.items() if not k.startswith(".claude/") and k != "CLAUDE.md"}
+    base.update({"safe/content": "trusted\n", "other/content": "other\n", "skills/example/SKILL.md": "skill\n",
+                 ".claude/settings.json": "{}\n"})
+    head = {k: v for k, v in HEAD_FILES.items() if k != "CLAUDE.md" and not k.startswith(".claude/")}
+    shapes = {
+        "claude-pr": ({"CLAUDE.md": ".claude-pr/relay/content"}, "./CLAUDE.md"),
+        "git": ({"CLAUDE.md": ".git/relay/content"}, "./CLAUDE.md"),
+        "embedded": ({"CLAUDE.md": "payload/relay/content"}, "./CLAUDE.md"),
+        "outside": ({"CLAUDE.md": "../relay/content"}, "./CLAUDE.md"),
+        "caller-skills": ({".claude/skills": "../skills"}, "./.claude/skills/pr"),
+    }
+    for name, (links, reported) in shapes.items():
+        root = tmp_path / name
+        ws = make_checkout(root, base_files=base, head_files=head, base_links=links)
+        if name == "caller-skills":  # the PR adds a skill link through a relay in .claude-pr/
+            (ws / "skills/pr").symlink_to("../.claude-pr/relay")
+            git("add", "-A", cwd=ws)
+            git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pr link", cwd=ws)
+        if name == "embedded":
+            (ws / "payload").mkdir()
+            git("init", "-q", cwd=ws / "payload")
+            (ws / "payload/keep").write_text("x\n")
+            git("add", "-A", cwd=ws / "payload")
+            git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "e", cwd=ws / "payload")
+        strip(ws)
+        relay = {"claude-pr": ws / ".claude-pr/relay", "caller-skills": ws / ".claude-pr/relay",
+                 "git": ws / ".git/relay", "embedded": ws / "payload/relay", "outside": root / "relay"}[name]
+        relay.parent.mkdir(parents=True, exist_ok=True)
+        # A relative link back into the checkout's verified `safe/`.
+        back = "workspace/safe" if name == "outside" else "../safe"
+        if name == "caller-skills":
+            back = "../skills/example"
+        relay.symlink_to(back)
+        restore_from_base(ws)
+        target = ws / ("CLAUDE.md" if name != "caller-skills" else ".claude/skills/pr")
+        assert target.exists(), name  # the redirect really resolves
+        r = replant(ws)
+        assert r.returncode == 1, (name, r.stdout)
+        assert f"{reported} is reached through a verified configuration root" in r.stdout, (name, r.stdout)
+    # An in-tree relay (verified by the tree comparison) is fine.
+    ws = make_checkout(tmp_path / "intree", base_files=base, head_files=head,
+                       base_links={"CLAUDE.md": "relay/content", "relay": "safe"})
+    strip(ws)
+    restore_from_base(ws)
+    assert (ws / "CLAUDE.md").read_text() == "trusted\n"
+    r = replant(ws)
+    assert r.returncode == 0, r.stdout
+    # A link loop reached from a configuration root fails closed.
+    ws = make_checkout(tmp_path / "loop", base_files=base, head_files=head,
+                       base_links={"CLAUDE.md": "loop-a", "loop-a": "loop-b", "loop-b": "loop-a"})
+    strip(ws)
+    restore_from_base(ws)
+    r = replant(ws)
+    assert r.returncode == 1 and "./CLAUDE.md is reached through a verified configuration root" in r.stdout
+
+
 def test_replant_check_allows_the_clis_empty_cc_writes_dir(tmp_path):
     # Observed on Linux with the pinned CLI: Claude Code creates an empty
     # `.claude/.cc-writes/` in its working directory on every run, outside

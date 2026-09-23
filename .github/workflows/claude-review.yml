@@ -1448,13 +1448,17 @@ jobs:
       #      no `.claude/` was withheld — found in the Linux fixture).
       #   4. What a verified configuration root REACHES must stay inside the
       #      tree, where step 1 has verified it: the roots are walked
-      #      following symlinks, and every entry is resolved with the
-      #      filesystem's own semantics (`os.path.realpath`, so a link
-      #      followed by `..` resolves as the kernel would); an entry that
-      #      resolves outside the checkout, into `.git`, into the action's
-      #      `.claude-pr/` copy (exempt from step 1) or into an embedded
-      #      repository (hashed as a gitlink, its files unseen), or a link
-      #      with an absolute target, fails (review round 6). Dangling and looping links reach nothing
+      #      following symlinks, and every entry is resolved component by
+      #      component with the filesystem's own semantics (a link followed
+      #      by `..` resolves as the kernel would), EVERY location the
+      #      resolution passes through checked, intermediate links included
+      #      (review round 7: a relay link in unverified storage could
+      #      redirect an in-tree final target); a location outside the
+      #      checkout, in `.git`, in the action's `.claude-pr/` copy (exempt
+      #      from step 1) or in an embedded repository (hashed as a gitlink,
+      #      its files unseen), a link with an absolute target, or a chain
+      #      of more than 40 links (a loop) fails (review round 6). Dangling
+      #      links reach nothing
       #      (the callers' `CLAUDE.md -> AGENTS.md` dangles after the strip's
       #      rename).
       # No snapshot, no verification: the step fails. git runs pinned like
@@ -1582,22 +1586,61 @@ jobs:
                       return False
                   d = os.path.dirname(d)
               return True
+          class Unverified(Exception):
+              pass
+          def resolve(start, parts):
+              # Resolve `parts` from the real, verified directory `start` as
+              # the kernel does — component by component, `..` after the
+              # links before it, a link's target read relative to the link's
+              # own directory — and require EVERY location the resolution
+              # passes through, each intermediate link included, to be
+              # verified storage: checking only the final realpath let a
+              # relay link in `.claude-pr/`, `.git`, an embedded repository
+              # or outside the checkout redirect an in-tree target (review
+              # round 7). None when it reaches nothing (dangling).
+              cur, todo, links = start, list(parts), 0
+              while todo:
+                  c = todo.pop(0)
+                  if c in ("", "."):
+                      continue
+                  if c == "..":
+                      cur = os.path.dirname(cur)
+                      if not inside(cur):
+                          raise Unverified
+                      continue
+                  nxt = os.path.join(cur, c)
+                  if not inside(nxt):
+                      raise Unverified
+                  if os.path.islink(nxt):
+                      links += 1
+                      target = os.readlink(nxt)
+                      if links > 40 or os.path.isabs(target):
+                          raise Unverified
+                      todo = target.split("/") + todo
+                      continue
+                  if not os.path.lexists(nxt) or (todo and not os.path.isdir(nxt)):
+                      return None
+                  cur = nxt
+              return cur
           seen, bad = set(), []
-          def visit(rel, depth):
-              path = os.path.join(ws, rel)
-              if depth > 64 or (os.path.islink(path) and os.path.isabs(os.readlink(path))):
+          def visit(rel, parent, name, depth):
+              try:
+                  real = resolve(parent, [name])
+              except Unverified:
                   bad.append(rel)
                   return
-              real = os.path.realpath(path)
-              if not inside(real):
+              if real is None:
+                  return
+              if depth > 64:
                   bad.append(rel)
                   return
-              if os.path.isdir(path) and real not in seen:
+              if os.path.isdir(real) and real not in seen:
                   seen.add(real)
-                  for name in sorted(os.listdir(path)):
-                      visit(os.path.join(rel, name), depth + 1)
+                  for child in sorted(os.listdir(real)):
+                      visit(os.path.join(rel, child), real, child, depth + 1)
           for root in sys.argv[1:]:
-              visit(os.path.normpath(root), 0)
+              name = os.path.normpath(root)
+              visit(name, ws, name, 0)
           sys.stdout.write("".join("./%s\0" % rel for rel in bad))
           PY
             if python3 "$reachpy" "${reach[@]}" >"$reachout"; then
