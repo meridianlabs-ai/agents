@@ -974,17 +974,19 @@ job; a marvin-less caller's land job used to fall back to the job token
 posting step's fallback already did) until #114 retired that fallback with
 the stubs' write grant.
 
-## Model selection: prefer Fable, fall back gracefully
+## Model selection: prefer Opus, fall back gracefully
 
-Default is the `fable` alias with `--fallback-model default`. Claude Code's
-`--fallback-model` fires not just on overload but on an **unavailable/retired**
-primary, and `default` expands to the account default. So `--model fable
---fallback-model default` means "prefer Fable, degrade to the default if it's
-gone" in one invocation, with no pre-flight availability probe.
+Default is the `opus` alias with `--fallback-model default` (decision:
+Ransom, 2026-09-23, "I'd like everything to switch to Opus"; the default was
+the `fable` alias until then). Claude Code's `--fallback-model` fires not
+just on overload but on an **unavailable/retired** primary, and `default`
+expands to the account default. So `--model opus --fallback-model default`
+means "prefer Opus, degrade to the default if it's gone" in one invocation,
+with no pre-flight availability probe.
 
-This was verified the hard way: when Fable became unavailable, a run's init
-line still reported `claude-fable-5`, but `modelUsage` in the execution log
-showed every token served by `claude-opus-4-8` — the fallback fired
+This was verified the hard way, while the default was still `fable`: when
+Fable became unavailable, a run's init line still reported `claude-fable-5`,
+but `modelUsage` in the execution log showed every token served by `claude-opus-4-8` — the fallback fired
 correctly, and **the init line echoes the *requested* model, not the one that
 ran.** Always read `modelUsage` to know what actually executed. The
 `model-provenance` composite action does that on every Claude-path run: it
@@ -1011,8 +1013,8 @@ per-request fallback. It only judges the fallback when the log has an init
 line to compare against; without one it reports the table and says so.
 Best-effort: every path exits 0.
 
-The `fable` alias (not a pinned `claude-fable-5[1m]`) is used so the model
-auto-updates if Fable returns under a new version.
+The `opus` alias (not a pinned id such as `claude-opus-5-5`) is used so the
+model floats with Opus releases.
 
 ## Permissions: settings.json, allow-list, layered separation
 

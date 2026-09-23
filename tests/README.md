@@ -280,6 +280,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `---` rule, qualified `#N` refs) survives, `--dry-run` previews the
   de-fanged title and creates nothing, and ordinary text is copied
   unchanged.
+- `test_model_defaults.py` — the four Claude workflows' `model` input
+  defaults to the `opus` alias (never a dated id) with `fallback_model`
+  `default`, and both still reach Claude Code as `--model` /
+  `--fallback-model` (design/architecture.md → Model selection).
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc

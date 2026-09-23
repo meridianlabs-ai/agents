@@ -67,18 +67,18 @@ on:
       model:
         description: >-
           Preferred model, passed to Claude Code as --model (empty = Claude
-          Code's own default). Defaults to the Fable alias for all meridian
+          Code's own default). Defaults to the Opus alias for all meridian
           repos. claude-code-action@v1 has no first-class model input, so this
           is spliced into claude_args.
         required: false
         type: string
-        default: "fable"
+        default: "opus"
       fallback_model:
         description: >-
           Model used when the preferred model is overloaded or unavailable
           (e.g. retired), passed as --fallback-model. "default" expands to the
-          account default, so the Fable-preferred default degrades gracefully
-          if Fable is gone. Pass "" to disable fallback. Ignored when model is
+          account default, so the Opus-preferred default degrades gracefully
+          if Opus is gone. Pass "" to disable fallback. Ignored when model is
           empty.
         required: false
         type: string

@@ -18,7 +18,7 @@ the auto-review and permission tradeoffs — see [design/architecture.md](design
 | Tools | file edits + verify loop (tests/lint) + `gh` | verify loop + `gh` + inline comments; **denies** edits/git writes |
 
 Both authenticate the same way (Workload Identity Federation) and default to
-the same model (Fable, falling back to the account default). The hard
+the same model (Opus, falling back to the account default). The hard
 privilege boundary between them is the GitHub token scope, not the prompt —
 neither job that runs an agent holds a write token: the reviewer physically
 cannot push regardless of what it's asked to do, and the dev agent's commits
