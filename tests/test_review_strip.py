@@ -3,11 +3,13 @@ post-agent re-plant check (Claude Security 4628445).
 
 The strip step moves the checkout's instruction files aside and deletes its
 executable configuration; the scratch step copies the stripped tree to the
-one place sandboxed commands may write; the re-plant check re-runs the
-strip's predicates after the agent and fails when any such entry exists —
-except a ROOT entry byte-identical to `origin/<base>`, which is what
-claude-code-action's own prepare phase restores on PR events. All three
-steps' bash is lifted from the workflow and run against local repos.
+one place sandboxed commands may write; the post-agent check compares the
+whole checkout with the strip step's raw snapshot tree, accepting only what
+claude-code-action's own prepare phase does on PR events (restore roots
+object-identical to `origin/<base>`, its `.claude-pr/` copy), re-runs the
+strip's predicates, and keeps what configuration roots reach inside the
+tree. The steps' bash is lifted from the workflow and run against local
+repos.
 """
 
 import re
@@ -188,7 +190,7 @@ def test_replant_check_passes_on_a_clean_stripped_tree(tmp_path):
     strip(ws)
     r = replant(ws)
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "no re-planted project configuration" in r.stdout
+    assert "the checkout is the strip step's snapshot" in r.stdout
 
 
 def test_replant_check_exempts_the_actions_base_branch_restore(tmp_path):
@@ -328,7 +330,9 @@ def test_replant_check_requires_the_same_entry_type_and_mode(tmp_path):
     (ws / "CLAUDE.md").symlink_to("elsewhere.md")
     r = replant(ws)
     error = [l for l in r.stdout.splitlines() if l.startswith("::error::")]
-    assert r.returncode == 1 and len(error) == 1 and error[0].endswith(": ./CLAUDE.md — the review is withheld")
+    # The link differs from the base's file, and the new file is a change to
+    # the checkout in its own right.
+    assert r.returncode == 1 and len(error) == 1 and error[0].endswith(": ./CLAUDE.md ./elsewhere.md — the review is withheld")
     assert "root ./.claude matches" in r.stdout
     ws2 = make_checkout(tmp_path / "two")
     strip(ws2)
@@ -425,32 +429,119 @@ def test_replant_check_verifies_the_content_behind_a_trusted_link(tmp_path):
     # Changed settings behind the directory link: survivor.
     (ws / ".agents/settings.json").write_text('{"sandbox": {"enabled": false}}\n')
     r = replant(ws)
-    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./.claude — the review is withheld")
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./.agents/settings.json — the review is withheld")
     (ws / ".agents/settings.json").write_text('{"permissions": {"allow": ["Bash(pytest:*)"]}}\n')
     assert replant(ws).returncode == 0
     # An added file behind it: survivor.
     (ws / ".agents/settings.local.json").write_text('{"sandbox": {"enabled": false}}\n')
     r = replant(ws)
-    assert r.returncode == 1 and "./.claude" in r.stdout
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./.agents/settings.local.json — the review is withheld")
     (ws / ".agents/settings.local.json").unlink()
     # A changed skill behind the nested link, two links deep: survivor.
     (ws / "skills/example/SKILL.md").write_text("planted skill\n")
     r = replant(ws)
-    assert r.returncode == 1 and "./.claude" in r.stdout
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./skills/example/SKILL.md — the review is withheld")
     (ws / "skills/example/SKILL.md").write_text("the PR's skill\n")
     # Changed instructions behind the file link: survivor.
     (ws / "config").write_text("planted instructions\n")
     r = replant(ws)
-    assert r.returncode == 1 and "./CLAUDE.md" in r.stdout
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./config — the review is withheld")
     (ws / "config").write_text("trusted instructions\n")
     assert replant(ws).returncode == 0
-    # Without the strip's snapshot a link with a live referent fails closed;
-    # a dangling one still passes on its bytes (it reaches nothing).
-    r = replant(ws, strip_tree="")
-    assert r.returncode == 1 and "./.claude" in r.stdout and "./CLAUDE.md" in r.stdout
-    (ws / "config").unlink()
-    r = replant(ws, strip_tree="")
-    assert r.returncode == 1 and "root ./CLAUDE.md matches" in r.stdout and "./.claude" in r.stdout
+    # Without the strip's snapshot nothing can be verified: fail closed.
+    for tree in ("", "0" * 40, "not-a-sha"):
+        r = replant(ws, strip_tree=tree)
+        assert r.returncode == 1 and "snapshot of the checkout is unavailable" in r.stdout, tree
+
+
+def test_replant_check_resolves_referents_as_the_filesystem_does(tmp_path):
+    # Review round 5 (B7 remaining): lexical `..` collapsing compared `config`
+    # for `CLAUDE.md -> route/../config` although, with `route ->
+    # actual/sub`, the filesystem reaches `actual/config`; and a shell loop
+    # glob-expanded a `[a]` target to the decoy `a`. The whole checkout is
+    # now compared with the strip snapshot tree against tree, so what any
+    # link reaches inside the tree is verified whatever its path spelling.
+    base = {k: v for k, v in BASE_FILES.items() if k not in ("CLAUDE.md", "CLAUDE.local.md")}
+    base.update({"config": "decoy\n", "actual/config": "trusted instructions\n", "actual/sub/.keep": "",
+                 "[a]": "trusted literal\n", "a": "decoy a\n",
+                 "skills/example/SKILL.md": "base skill\n", "actual/payload/SKILL.md": "base payload\n"})
+    for k in list(base):
+        if k.startswith(".claude/"):
+            del base[k]
+    base[".claude/settings.json"] = "{}\n"
+    links = {"route": "actual/sub", "CLAUDE.md": "route/../config", "CLAUDE.local.md": "[a]",
+             ".claude/skills": "../skills"}
+    head = {k: v for k, v in HEAD_FILES.items()
+            if not k.startswith(".claude/") and k not in ("CLAUDE.md", "CLAUDE.local.md")}
+    ws = make_checkout(tmp_path, base_files=base, base_links=links, head_files=head)
+    # The PR adds a nested skill link spelled through the intermediate link.
+    (ws / "skills/extra").symlink_to("../route/../payload")
+    git("add", "-A", cwd=ws)
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "extra skill link", cwd=ws)
+    strip(ws)
+    restore_from_base(ws)
+    assert (ws / "CLAUDE.md").read_text() == "trusted instructions\n"  # the filesystem's referent
+    assert (ws / ".claude/skills/extra/SKILL.md").read_text() == "base payload\n"
+    r = replant(ws)
+    assert r.returncode == 0, r.stderr + r.stdout
+    for changed, body in (("actual/config", "planted\n"), ("[a]", "planted\n"), ("actual/payload/SKILL.md", "planted\n")):
+        original = (ws / changed).read_text()
+        (ws / changed).write_text(body)
+        r = replant(ws)
+        last = r.stdout.splitlines()[-1]
+        assert r.returncode == 1 and "the review is withheld" in last, changed
+        assert changed.replace("[", "\\[").replace("]", "\\]") in last, (changed, last)
+        (ws / changed).write_text(original)
+        assert replant(ws).returncode == 0, changed
+    # A link spelled to stay inside lexically but resolving outside through
+    # an intermediate link: `escape -> ../..` makes `skills/out ->
+    # ../escape/outside.md` leave the checkout. Unchanged PR content, but
+    # what a configuration root reaches must stay where step 1 verified it.
+    (tmp_path / "outside.md").write_text("outside\n")
+    ws2 = make_checkout(tmp_path / "two", base_files=base, base_links=links, head_files=head)
+    (ws2 / "escape").symlink_to("../..")
+    (ws2 / "skills/out").symlink_to("../escape/outside.md")
+    git("add", "-A", cwd=ws2)
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "escaping link", cwd=ws2)
+    strip(ws2)
+    restore_from_base(ws2)
+    assert (ws2 / ".claude/skills/out").read_text() == "outside\n"
+    r = replant(ws2)
+    assert r.returncode == 1 and "./.claude/skills/out is reached through a verified configuration root" in r.stdout
+    assert r.stdout.splitlines()[-1].endswith(": ./.claude/skills/out — the review is withheld")
+
+
+def test_replant_check_allows_the_actions_other_restores_and_its_snapshot_dir(tmp_path):
+    # The action's restore covers more than configuration (.gitmodules,
+    # .husky, ...) and it copies the PR's remaining sensitive paths to
+    # .claude-pr/ first; neither is a re-plant. A changed non-configuration
+    # file elsewhere is still a change to a read-only checkout.
+    base = dict(BASE_FILES, **{".gitmodules": "[submodule]\n", ".husky/pre-commit": "base hook\n"})
+    head = dict(HEAD_FILES, **{".gitmodules": "[submodule head]\n", ".husky/pre-commit": "head hook\n"})
+    ws = make_checkout(tmp_path, base_files=base, head_files=head)
+    strip(ws)
+    (ws / ".claude-pr/.husky").mkdir(parents=True)
+    (ws / ".claude-pr/.husky/pre-commit").write_text("head hook\n")
+    (ws / ".claude-pr/.gitmodules").write_text("[submodule head]\n")
+    # The action deletes every sensitive path before its fetch, then checks
+    # them out from the base.
+    import shutil
+    (ws / ".gitmodules").unlink()
+    shutil.rmtree(ws / ".husky")
+    restore_from_base(ws)
+    for p in (".gitmodules", ".husky"):
+        git("checkout", "origin/main", "--", p, cwd=ws)
+    r = replant(ws)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "root ./.gitmodules matches" in r.stdout and "root ./.husky matches" in r.stdout
+    # A config name inside .claude-pr is still a survivor.
+    (ws / ".claude-pr/CLAUDE.md").write_text("planted\n")
+    r = replant(ws)
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./.claude-pr/CLAUDE.md — the review is withheld")
+    (ws / ".claude-pr/CLAUDE.md").unlink()
+    (ws / "pkg/__init__.py").write_text("changed\n")
+    r = replant(ws)
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./pkg/__init__.py — the review is withheld")
 
 
 def test_replant_check_refuses_links_that_leave_the_tree(tmp_path):
@@ -487,6 +578,49 @@ def test_strip_snapshot_is_raw_and_leaves_the_checkout_as_it_was(tmp_path):
     assert not (ws / ".git/info/attributes").exists()
     assert git("status", "--porcelain", cwd=ws).stdout.count("\n") > 0  # the renames, nothing staged
     assert git("diff", "--cached", "--quiet", cwd=ws, check=False).returncode == 0
+
+
+def test_replant_check_allows_the_clis_empty_cc_writes_dir(tmp_path):
+    # Observed on Linux with the pinned CLI: Claude Code creates an empty
+    # `.claude/.cc-writes/` in its working directory on every run, outside
+    # the sandbox. With no `.claude/` in the base (nothing restored) that is
+    # the only `.claude` in the checkout, and it carries nothing.
+    base = {k: v for k, v in BASE_FILES.items() if not k.startswith(".claude/")}
+    ws = make_checkout(tmp_path, base_files=base)
+    strip(ws)
+    restore_from_base(ws)
+    assert not (ws / ".claude").exists()
+    (ws / ".claude/.cc-writes").mkdir(parents=True)
+    r = replant(ws)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "./.claude holds only empty directories" in r.stdout
+    # A file in it, a link as `.claude`, or an empty `.claude` elsewhere is
+    # not that shape.
+    (ws / ".claude/.cc-writes/settings.json").write_text("{}\n")
+    r = replant(ws)
+    # (A changed restore root is reported as the root.)
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./.claude — the review is withheld")
+    assert "holds only empty directories" not in r.stdout
+    (ws / ".claude/.cc-writes/settings.json").unlink()
+    (ws / ".claude/.cc-writes").rmdir()
+    (ws / ".claude").rmdir()
+    (ws / "emptydir").mkdir()
+    (ws / ".claude").symlink_to("emptydir")
+    r = replant(ws)
+    assert r.returncode == 1 and "./.claude" in r.stdout.splitlines()[-1]
+    (ws / ".claude").unlink()
+    (ws / "emptydir").rmdir()
+    (ws / "pkg/.claude").mkdir()
+    r = replant(ws)
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./pkg/.claude — the review is withheld")
+    # With a restored base `.claude/` the CLI's empty directory inside it is
+    # invisible to the tree comparison and the root still verifies.
+    ws2 = make_checkout(tmp_path / "two")
+    strip(ws2)
+    restore_from_base(ws2)
+    (ws2 / ".claude/.cc-writes").mkdir()
+    r = replant(ws2)
+    assert r.returncode == 0 and "root ./.claude matches" in r.stdout
 
 
 def test_replant_check_never_exempts_a_root_agents_md(tmp_path):

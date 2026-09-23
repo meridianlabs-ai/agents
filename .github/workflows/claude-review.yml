@@ -826,7 +826,8 @@ jobs:
           # .agents`, the `.claude/skills -> ../skills` several callers keep)
           # is ordinary PR content the action's base restore does not cover,
           # so "unchanged since the run started" is the only meaningful test
-          # for it (review round 4). Every file goes into a temporary index
+          # for it (review round 4), and the post-agent check compares the
+          # whole checkout against this tree. Every file goes into a temporary index
           # with the head's attributes switched off through the
           # highest-precedence attributes file — `git add` would otherwise
           # store clean-filtered, eol- or ident-normalised blobs, and the
@@ -834,13 +835,17 @@ jobs:
           # the checkout's object store, which sandboxed code cannot write.
           # The override is removed again so the action's restore and the
           # reviewer's git see the checkout as before.
+          # The post-agent check hashes the checkout again with this same
+          # recipe (keep the two in step) and compares the trees.
           attrs=$(git rev-parse --git-path info/attributes)
           mkdir -p "$(dirname "$attrs")"
+          [ ! -e "$attrs" ] || mv "$attrs" "$attrs.strip-bak"
           printf '* -text -ident -filter -eol -working-tree-encoding\n' >"$attrs"
           snapidx=$(mktemp); rm -f "$snapidx"
-          GIT_INDEX_FILE="$snapidx" git -c core.autocrlf=false -c core.safecrlf=false -c core.fsmonitor=false add -A -f -- .
-          tree=$(GIT_INDEX_FILE="$snapidx" git write-tree)
+          GIT_INDEX_FILE="$snapidx" git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.autocrlf=false -c core.safecrlf=false -c core.filemode=true -c core.symlinks=true add -A -f -- .
+          tree=$(GIT_INDEX_FILE="$snapidx" git -c core.hooksPath=/dev/null write-tree)
           rm -f "$snapidx" "$attrs"
+          [ ! -e "$attrs.strip-bak" ] || mv "$attrs.strip-bak" "$attrs"
           echo "tree=$tree" >>"$GITHUB_OUTPUT"
           echo "snapshot of the stripped tree: $tree"
 
@@ -1396,49 +1401,63 @@ jobs:
             exit 1
           fi
 
-      # After the agent, re-run the strip's predicates over the checkout
-      # (Claude Security 4628445): the sandbox made the tree read-only to
-      # every command the reviewer ran, so a CLAUDE.md, CLAUDE.local.md,
-      # AGENTS.md, .claude or .mcp.json that exists now, at any depth, means
-      # something wrote where nothing should have been able to — a sandbox
-      # that did not hold, or the agent's own unsandboxed `gh` (a shell
-      # redirect on an excluded command runs outside the sandbox; the
-      # conceded prompt-injection channel). Either way the review is
-      # WITHHELD: this step fails, `Prepare Claude review for landing` is
-      # gated on it, and the Surface step posts what happened. One exemption,
-      # for what claude-code-action itself does on PR events after the strip:
-      # its prepare phase restores the ROOT-level `.claude`, `.mcp.json`,
-      # `CLAUDE.md` and `CLAUDE.local.md` from the base branch (its
-      # restoreConfigFromBase: delete, `git fetch origin <base>`, `git
-      # checkout origin/<base> -- <path>`; the base is the PR's base ref on
-      # pull_request events, the repository default branch on comments — the
-      # same expression BASE_REF carries), so those entries are trusted
-      # content the caller reviewed, not a re-plant. A root entry is exempt
-      # only when it is byte-identical to `origin/<base>`, and never when
-      # that ref is not there (external mode restores nothing, and a
-      # different action behaviour fails closed). The comparison runs
-      # against a TEMPORARY INDEX holding the base tree, never the PR's
-      # index: the action's `git reset` after its restore leaves a file the
-      # PR deleted untracked, and against the PR's index that trusted
-      # restore read as a re-plant (review round 1). Against the base index,
-      # every path the base tracks under the entry is compared RAW — type,
-      # mode and bytes, the blob against the file with no attribute
-      # conversion (`git diff` would honour the head's `.gitattributes`:
-      # an `ident` attribute let a changed `$Id: … $` settings file compare
-      # equal, review round 2) — and `git ls-files --others` lists every
-      # path it does not track, honouring no ignore rules (`.gitignore` is
-      # the contributor's). The price is fail-closed: a head `.gitattributes`
-      # that makes `git checkout` transform one of these paths (ident, eol,
-      # a smudge filter) leaves the action's restore differing from the blob
-      # and the review is withheld; no caller carries such an attribute. A
-      # root entry that passes is verified as a whole subtree, so the
-      # configuration names inside a restored `.claude/` (`.claude/CLAUDE.md`,
-      # `.claude/rules/`, a nested `.claude/`) are exempt with it; every
-      # other nested entry, and a root `AGENTS.md` (not in the action's
-      # restore set), is a survivor. git runs pinned like the codex landing
-      # steps: the checkout's config and hooks are the contributor's
-      # (`GIT_DIR`, `GIT_WORK_TREE`, no global or system config, hooks path
-      # and fsmonitor off). Sandboxed paths only; skipped
+      # After the agent, verify the checkout (Claude Security 4628445): the
+      # sandbox made the tree read-only to every command the reviewer ran,
+      # so the tree must be exactly what the strip step left — its raw
+      # snapshot, `steps.strip.outputs.tree` — apart from what
+      # claude-code-action itself does on PR events after the strip. Anything
+      # else means something wrote where nothing should have been able to (a
+      # sandbox that did not hold, or the agent's own unsandboxed `gh`: a
+      # shell redirect on an excluded command runs outside the sandbox — the
+      # conceded prompt-injection channel), and the review is WITHHELD: this
+      # step fails, `Prepare Claude review for landing` is gated on it, and
+      # the Surface step posts what happened.
+      #
+      # How, and why this shape (review rounds 1–5 each found a hole in a
+      # per-entry comparison — the PR's index, the head's .gitattributes,
+      # command-substitution newlines, the content behind a symlink, lexical
+      # `..` and shell globs in link targets):
+      #   1. The checkout is hashed again with the strip step's recipe (a
+      #      temporary index, the head's attributes switched off, so blobs
+      #      are raw bytes and link blobs raw target bytes) and compared with
+      #      the snapshot TREE AGAINST TREE (`git diff-tree`, object ids
+      #      only): every file, link, mode and extra entry anywhere in the
+      #      tree, whatever links point at it. Only `.claude-pr/` (the
+      #      action's non-executed copy of the PR's sensitive paths) and the
+      #      action's restore roots may differ.
+      #   2. A restore root that differs from the snapshot must be the base
+      #      branch's, object for object: the action's restoreConfigFromBase
+      #      deletes `.claude`, `.mcp.json`, `.claude.json`, `.gitmodules`,
+      #      `.ripgreprc`, `CLAUDE.md`, `CLAUDE.local.md` and `.husky` and
+      #      checks them out from `origin/<base>` (the PR's base ref on
+      #      pull_request events, the repository default branch on comments —
+      #      the same expression BASE_REF carries). No such ref, or any
+      #      difference, and the root fails (external mode restores nothing
+      #      and differs in nothing). Fail-closed price, documented: a head
+      #      `.gitattributes` that makes `git checkout` transform one of these
+      #      paths (ident, eol, a smudge filter) leaves the action's restore
+      #      differing from the base blob; no caller carries such an
+      #      attribute.
+      #   3. The strip's own predicates: every CLAUDE.md, CLAUDE.local.md,
+      #      AGENTS.md, .claude or .mcp.json in the tree must be a verified
+      #      restore root or lie inside one — or be the empty root
+      #      `.claude/.cc-writes/` the CLI itself creates in its working
+      #      directory on every run (a root `.claude` of empty directories
+      #      only; without this every review of a repository whose base has
+      #      no `.claude/` was withheld — found in the Linux fixture).
+      #   4. What a verified configuration root REACHES must stay inside the
+      #      tree, where step 1 has verified it: the roots are walked
+      #      following symlinks, and every entry is resolved with the
+      #      filesystem's own semantics (`os.path.realpath`, so a link
+      #      followed by `..` resolves as the kernel would); an entry that
+      #      resolves outside the checkout or into `.git`, or a link with an
+      #      absolute target, fails. Dangling and looping links reach nothing
+      #      (the callers' `CLAUDE.md -> AGENTS.md` dangles after the strip's
+      #      rename).
+      # No snapshot, no verification: the step fails. git runs pinned like
+      # the codex landing steps: the checkout's config and hooks are the
+      # contributor's (`GIT_DIR`, `GIT_WORK_TREE`, no global or system
+      # config, hooks path and fsmonitor off). Sandboxed paths only; skipped
       # when the agent never launched.
       - name: Check for re-planted project configuration
         id: replant
@@ -1457,123 +1476,128 @@ jobs:
           set -uo pipefail
           cd "$GIT_WORK_TREE"
           git() { command git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
-          found=$(find . -path ./.git -prune -o \( -name CLAUDE.md -o -name CLAUDE.local.md -o -name AGENTS.md -o -name .mcp.json -o -name .claude \) -print | LC_ALL=C sort)
+          listed=()
+          if ! [[ "$STRIP_TREE" =~ ^[0-9a-f]{40,64}$ ]] || [ "$(git cat-file -t "$STRIP_TREE" 2>/dev/null)" != tree ]; then
+            echo "::error::the strip step's snapshot of the checkout is unavailable ('$STRIP_TREE'), so the checkout cannot be verified after the reviewer ran — the review is withheld"
+            exit 1
+          fi
+          # 1. The checkout now, hashed with the strip step's recipe.
+          attrs=$(git rev-parse --git-path info/attributes)
+          mkdir -p "$(dirname "$attrs")"
+          [ ! -e "$attrs" ] || mv "$attrs" "$attrs.replant-bak"
+          printf '* -text -ident -filter -eol -working-tree-encoding\n' >"$attrs"
+          nowidx=$(mktemp); rm -f "$nowidx"
+          now=""
+          if GIT_INDEX_FILE="$nowidx" git -c core.autocrlf=false -c core.safecrlf=false -c core.filemode=true -c core.symlinks=true add -A -f -- . >/dev/null 2>&1; then
+            now=$(GIT_INDEX_FILE="$nowidx" git write-tree 2>/dev/null)
+          fi
+          rm -f "$nowidx" "$attrs"
+          [ ! -e "$attrs.replant-bak" ] || mv "$attrs.replant-bak" "$attrs"
+          if [ -z "$now" ]; then
+            echo "::error::hashing the checkout after the reviewer ran failed, so it cannot be verified — the review is withheld"
+            exit 1
+          fi
           base=""
           if [[ "$BASE_REF" =~ ^[^[:space:]-][^[:space:]]*$ ]] && git rev-parse -q --verify "refs/remotes/origin/$BASE_REF^{commit}" >/dev/null 2>&1; then
             base="refs/remotes/origin/$BASE_REF"
           fi
-          # The base tree in a temporary index (never the PR's index), and the
-          # strip step's raw snapshot of the checkout in another — what a
-          # trusted symlink's referent is compared against. Either missing
-          # fails closed (the roots stay survivors; a link with a live
-          # referent stays a survivor).
-          tmpidx=$(mktemp); snapidx=$(mktemp)
-          trap 'rm -f "$tmpidx" "$snapidx"' EXIT
-          if [ -n "$base" ] && ! GIT_INDEX_FILE="$tmpidx" git read-tree "$base" 2>/dev/null; then
-            base=""
-          fi
-          if ! [[ "$STRIP_TREE" =~ ^[0-9a-f]{40,64}$ ]] || ! GIT_INDEX_FILE="$snapidx" git read-tree "$STRIP_TREE" 2>/dev/null; then
-            snapidx=""
-          fi
-          # A path relative to the work tree with `.` and `..` resolved
-          # lexically; fails when it would leave the tree or name its root.
-          normalize_rel() {
-            local IFS=/ c; local -a out=()
-            for c in $1; do
-              case "$c" in
-                ''|.) ;;
-                ..) [ "${#out[@]}" -gt 0 ] || return 1; unset 'out[${#out[@]}-1]' ;;
-                *) out+=("$c") ;;
-              esac
-            done
-            [ "${#out[@]}" -gt 0 ] || return 1
-            printf '%s' "${out[*]}"
-          }
-          # Raw comparison of one entry against an index: every path the
-          # index tracks under it must be present with the same type, mode
-          # and BYTES (the blob via `git cat-file`, the file via `cmp`; no
-          # attribute conversion is involved on either side — `git diff`
-          # would apply the head's .gitattributes, review round 2), a
-          # symlink's target must be the blob's exact bytes (hashed from
-          # `readlink -n` with `--no-filters`, so no command substitution
-          # strips a trailing newline that would let `target` and
-          # `target<LF>` compare equal — review round 3) AND what it reaches
-          # must be unchanged since the strip (review round 4: the link blob
-          # authenticates a pathname, not the content behind it — ts-mono's
-          # `.claude -> .agents`, the `.claude/skills -> ../skills` of
-          # several callers): the referent, resolved lexically from the
-          # link's directory, is compared the same way against the strip
-          # snapshot, links inside it recursively (depth-capped); an absolute
-          # target, one that leaves the tree or names `.git`, an unresolved
-          # or over-deep chain, or a missing snapshot is never exempt; a link
-          # that resolves to nothing (dangling, cyclic) reaches nothing and
-          # passes on its bytes alone — the callers' `CLAUDE.md -> AGENTS.md`
-          # dangles after the strip's rename. A gitlink is never exempt, and
-          # nothing the index does not track may be there.
-          identical_to_index() {
-            local idx=$1 entry=$2 depth=$3 rec mode sha rest path tracked=0
-            while IFS= read -r -d '' rec; do
-              tracked=1
-              mode=${rec%% *}; rest=${rec#* }; sha=${rest%% *}; rest=${rest#* }; path=${rest#*$'\t'}
-              case "$mode" in
-                120000)
-                  [ -L "$path" ] && [ "$(readlink -n "$path" | git hash-object --no-filters --stdin)" = "$sha" ] || return 1
-                  referent_unchanged "$path" "$depth" || return 1 ;;
-                100644|100755)
-                  [ -f "$path" ] && ! [ -L "$path" ] || return 1
-                  git cat-file blob "$sha" | cmp -s - "$path" || return 1
-                  if [ "$mode" = 100755 ]; then [ -x "$path" ] || return 1; else ! [ -x "$path" ] || return 1; fi ;;
-                *) return 1 ;;
-              esac
-            done < <(GIT_INDEX_FILE="$idx" git ls-files -s -z -- "$entry")
-            [ "$tracked" = 1 ] || return 1
-            [ -z "$(GIT_INDEX_FILE="$idx" git ls-files --others -z -- "$entry")" ]
-          }
-          referent_unchanged() {
-            local link=$1 depth=$2 target rel
-            [ -e "$link" ] || return 0
-            [ -n "$snapidx" ] && [ "$depth" -lt 8 ] || return 1
-            target=$(readlink -n "$link")
-            # The substitution drops a trailing newline; a target that ends
-            # in one would resolve to a different name, so refuse it.
-            [ "$(readlink -n "$link" | wc -c)" -eq "${#target}" ] || return 1
-            case "$target" in /*) return 1 ;; esac
-            rel=$(normalize_rel "${link#./}/../$target") || return 1
-            case "$rel" in .git|.git/*) return 1 ;; esac
-            identical_to_index "$snapidx" "./$rel" "$((depth + 1))"
-          }
-          # First pass, root entries: verified (identical to base) or survivor.
-          verified=""
-          survivors=""
-          while IFS= read -r p; do
-            [ -n "$p" ] || continue
-            case "$p" in
-              ./*/*) continue ;;
-              ./AGENTS.md) survivors="$survivors $p"; continue ;;
+          roots_changed=" "
+          while IFS= read -r -d '' path; do
+            top=${path%%/*}
+            case "$top" in
+              .claude|.mcp.json|.claude.json|.gitmodules|.ripgreprc|CLAUDE.md|CLAUDE.local.md|.husky)
+                case "$roots_changed" in *" $top "*) ;; *) roots_changed="$roots_changed$top " ;; esac ;;
+              .claude-pr) ;;
+              *) listed+=("./$path") ;;
             esac
-            if [ -n "$base" ] && identical_to_index "$tmpidx" "$p" 0; then
-              echo "root $p matches origin/$BASE_REF byte for byte: claude-code-action's base-branch restore, not a re-plant"
-              verified="$verified$p"$'\n'
+          done < <(git diff-tree -r --no-renames --name-only -z "$STRIP_TREE" "$now")
+          # 2. A changed restore root must be the base branch's.
+          verified=()
+          for top in .claude .mcp.json .claude.json .gitmodules .ripgreprc CLAUDE.md CLAUDE.local.md .husky; do
+            case "$roots_changed" in *" $top "*) ;; *) continue ;; esac
+            cur=$(git rev-parse -q --verify "$now:$top" 2>/dev/null)
+            want=""
+            [ -z "$base" ] || want=$(git rev-parse -q --verify "$base:$top" 2>/dev/null)
+            if [ -n "$base" ] && [ "$cur" = "$want" ]; then
+              if [ -n "$cur" ]; then
+                echo "root ./$top matches origin/$BASE_REF byte for byte: claude-code-action's base-branch restore, not a re-plant"
+                verified+=("./$top")
+              fi
             else
-              survivors="$survivors $p"
+              listed+=("./$top")
             fi
-          done <<<"$found"
-          # Second pass, nested entries: exempt only inside a verified root.
-          while IFS= read -r p; do
-            [ -n "$p" ] || continue
-            case "$p" in ./*/*) ;; *) continue ;; esac
-            inside=""
-            while IFS= read -r v; do
-              [ -n "$v" ] || continue
-              case "$p" in "$v"/*) inside=1 ;; esac
-            done <<<"$verified"
-            [ -n "$inside" ] || survivors="$survivors $p"
-          done <<<"$found"
-          if [ -n "$survivors" ]; then
-            echo "::error::project configuration reappeared in the untrusted checkout after the reviewer ran (the sandbox should have made the tree read-only):$survivors — the review is withheld"
+          done
+          # 3. The strip's predicates: configuration only in a verified root.
+          # One allowance: the Claude Code CLI itself (the unsandboxed parent,
+          # which the sandbox's write deny does not govern) creates an empty
+          # `.claude/.cc-writes/` in its working directory on every run —
+          # observed on the pinned 2.1.278 with and without the checkout on
+          # denyWrite — so a root `.claude` that is a real directory holding
+          # nothing but empty directories carries no configuration and passes
+          # (empty directories are not in the trees step 1 compared).
+          emptyroot=""
+          if [ -d ./.claude ] && ! [ -L ./.claude ] && ! printf '%s\n' ${verified[@]+"${verified[@]}"} | grep -qx './.claude' \
+             && [ -z "$(find ./.claude -mindepth 1 ! -type d -print -quit)" ]; then
+            emptyroot=./.claude
+            echo "./.claude holds only empty directories (Claude Code's own .claude/.cc-writes): no configuration"
+          fi
+          while IFS= read -r -d '' p; do
+            ok=""
+            for v in ${verified[@]+"${verified[@]}"} $emptyroot; do
+              case "$p" in "$v"|"$v"/*) ok=1 ;; esac
+            done
+            [ -n "$ok" ] || listed+=("$p")
+          done < <(find . -path ./.git -prune -o \( -name CLAUDE.md -o -name CLAUDE.local.md -o -name AGENTS.md -o -name .mcp.json -o -name .claude \) -print0)
+          # 4. What a verified configuration root reaches stays in the tree.
+          reach=()
+          for v in ${verified[@]+"${verified[@]}"}; do
+            case "$v" in ./.claude|./.mcp.json|./CLAUDE.md|./CLAUDE.local.md) reach+=("$v") ;; esac
+          done
+          if [ "${#reach[@]}" -gt 0 ]; then
+            reachpy=$(mktemp); reachout=$(mktemp)
+            cat >"$reachpy" <<'PY'
+          import os, sys
+          ws = os.path.realpath(".")
+          gitdir = os.path.join(ws, ".git")
+          def inside(p):
+              return (p == ws or p.startswith(ws + os.sep)) and not (p == gitdir or p.startswith(gitdir + os.sep))
+          seen, bad = set(), []
+          def visit(rel, depth):
+              path = os.path.join(ws, rel)
+              if depth > 64 or (os.path.islink(path) and os.path.isabs(os.readlink(path))):
+                  bad.append(rel)
+                  return
+              real = os.path.realpath(path)
+              if not inside(real):
+                  bad.append(rel)
+                  return
+              if os.path.isdir(path) and real not in seen:
+                  seen.add(real)
+                  for name in sorted(os.listdir(path)):
+                      visit(os.path.join(rel, name), depth + 1)
+          for root in sys.argv[1:]:
+              visit(os.path.normpath(root), 0)
+          sys.stdout.write("".join("./%s\0" % rel for rel in bad))
+          PY
+            if python3 "$reachpy" "${reach[@]}" >"$reachout"; then
+              while IFS= read -r -d '' p; do
+                echo "$(printf '%q' "$p") is reached through a verified configuration root and resolves outside the checkout or into .git, or is an absolute link"
+                listed+=("$p")
+              done <"$reachout"
+            else
+              echo "the reach check over the verified configuration roots failed to run"
+              listed+=("${reach[@]}")
+            fi
+            rm -f "$reachpy" "$reachout"
+          fi
+          if [ "${#listed[@]}" -gt 0 ]; then
+            list=$(printf '%s\0' "${listed[@]}" | LC_ALL=C sort -zu | tr '\0' '\n' | head -n 20 | while IFS= read -r p; do printf ' %q' "$p"; done)
+            n=$(printf '%s\0' "${listed[@]}" | LC_ALL=C sort -zu | tr -cd '\0' | wc -c | tr -d ' ')
+            [ "$n" -le 20 ] || list="$list (and $((n - 20)) more)"
+            echo "::error::project configuration reappeared in the untrusted checkout, or the checkout changed, after the reviewer ran (the sandbox should have made the tree read-only):$list — the review is withheld"
             exit 1
           fi
-          echo "no re-planted project configuration in the checkout after the reviewer ran."
+          echo "the checkout is the strip step's snapshot apart from the action's verified base-branch restore."
 
       # Prepare the Claude review for the land job (issue #114). The agent
       # holds no credential that may post as the reviewer, so it wrote its
@@ -2112,7 +2136,7 @@ jobs:
           # re-triggers.
           if [ -z "$err" ] && [ "${REPLANT_OUTCOME:-}" = "failure" ]; then
             echo "::error::Project configuration reappeared in the untrusted checkout after the reviewer ran (see the job log); the review is withheld and the land job posts the note and fails the run."
-            printf '⚠️ The review was withheld: after the reviewer ran, Claude Code project configuration (a `CLAUDE.md`, `AGENTS.md`, `.claude/` or `.mcp.json`) existed in the untrusted checkout although the sandbox makes that tree read-only to every command the reviewer runs. Something wrote where nothing should have been able to — the job log names the paths — and the reviewer may have been steered by it, so nothing it wrote was posted. Not transient: inspect the run and the PR before re-triggering.%s\n' "$cc" >"$ERROR_FILE"
+            printf '⚠️ The review was withheld: after the reviewer ran, the untrusted checkout was not what the workflow left before the run — Claude Code project configuration (a `CLAUDE.md`, `AGENTS.md`, `.claude/` or `.mcp.json`) had appeared or changed, or other files had — although the sandbox makes that tree read-only to every command the reviewer runs. Something wrote where nothing should have been able to — the job log names the paths — and the reviewer may have been steered by it, so nothing it wrote was posted. Not transient: inspect the run and the PR before re-triggering.%s\n' "$cc" >"$ERROR_FILE"
             exit 0
           fi
           # Sandbox file-mask version check (issue #70) is a different shape

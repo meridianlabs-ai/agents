@@ -1327,47 +1327,47 @@ now compose, each holding on its own:
   outside Claude Code's working directory, so nothing is loaded from it.
   A caller's `sandbox.filesystem.allowWrite` is not carried over on these
   paths (it would only widen).
-- **A post-agent re-plant check withholds the review.** After the agent, the
-  strip's predicates run again over the checkout; any `CLAUDE.md`,
-  `CLAUDE.local.md`, `AGENTS.md`, `.claude` or `.mcp.json`, at any depth,
-  fails the step, the landing prep is gated on it (nothing the reviewer
-  wrote is posted), and the Surface step posts a withheld-review note. One
-  exemption: the root-level `.claude`, `.mcp.json`, `CLAUDE.md` and
-  `CLAUDE.local.md` that claude-code-action's prepare phase restores from
-  the base branch on PR events, accepted only when byte-identical to
-  `origin/<base>` and never when that ref is absent (external mode
-  restores nothing; a changed action behaviour fails closed). The
-  comparison runs against a temporary index holding the base tree, never
-  the PR's index — the action's `git reset` after its restore leaves a
-  path the PR deleted untracked, which against the PR's index read as a
-  re-plant — and compares every path the base tracks under the entry
-  *raw*: type, mode and bytes, the blob (`git cat-file`) against the file
-  (`cmp`), with no attribute conversion, because `git diff` honours the
-  head's `.gitattributes` and an `ident` attribute let a changed
-  `$Id: … $` settings file compare equal (review round 2); `git ls-files
-  --others` lists every path the base does not track (`.gitignore` is the
-  contributor's and is not honoured). Fail-closed corollary: a head
-  `.gitattributes` that makes `git checkout` transform one of these paths
-  leaves the action's own restore differing from the blob and the review
-  is withheld — no caller carries such an attribute. A symlink's blob
-  authenticates only a pathname (review round 4), so what a trusted link
-  reaches — ts-mono's `.claude -> .agents`, the `.claude/skills ->
+- **A post-agent check withholds the review.** The strip step writes a
+  **raw snapshot tree of the stripped checkout** into the object store
+  (`git add -A -f` into a temporary index under a temporary
+  `.git/info/attributes` override, so the blobs are the files' bytes and
+  link blobs the targets' bytes, not clean-filtered or normalised ones).
+  After the agent the checkout is hashed again with the same recipe and
+  compared with the snapshot **tree against tree** (`git diff-tree`, object
+  ids only): every file, link, mode and extra entry, wherever it is and
+  whatever links point at it. The checkout is read-only to sandboxed
+  commands, so it must be unchanged apart from what claude-code-action's
+  prepare phase does on PR events after the strip — it copies the PR's
+  remaining sensitive paths to `.claude-pr/` and restores `.claude`,
+  `.mcp.json`, `.claude.json`, `.gitmodules`, `.ripgreprc`, `CLAUDE.md`,
+  `CLAUDE.local.md` and `.husky` from `origin/<base>`. A changed restore
+  root must equal the base's object for object, and never passes when that
+  ref is absent (external mode restores nothing and changes nothing). The
+  strip's own predicates then run: every `CLAUDE.md`, `CLAUDE.local.md`,
+  `AGENTS.md`, `.claude` or `.mcp.json` must be a verified restore root or
+  lie inside one. Last, what a verified configuration root *reaches* must
+  stay inside the tree the comparison covered: the roots are walked
+  following symlinks and every entry resolved with the filesystem's own
+  semantics (`os.path.realpath`), and an entry resolving outside the
+  checkout or into `.git`, or a link with an absolute target, fails;
+  dangling and looping links reach nothing (the callers' `CLAUDE.md ->
+  AGENTS.md` dangles after the strip's rename). Any failure — or a missing
+  snapshot — fails the step, the landing prep is gated on it (nothing the
+  reviewer wrote is posted), and the Surface step posts a withheld-review
+  note. This whole-tree shape replaced a per-entry comparison in which each
+  review round found a hole: the PR's index (a restored path the PR deleted
+  is untracked there), the head's `.gitattributes` (`git diff` let an
+  `ident`-contracted settings change compare equal), newline-stripping
+  command substitutions in link targets, the content behind a trusted
+  symlink (ts-mono's `.claude -> .agents`, the `.claude/skills ->
   ../skills` of agents, inspect_harbor, inspect_scout and the inspect_ai
-  fork — is compared the same way against a **raw snapshot tree of the
-  stripped checkout** that the strip step writes into the object store
-  (`git add -A -f` under an attributes override, so the blobs are the
-  files' bytes), the only meaningful reference for content the PR itself
-  supplies: unchanged since the run started passes, a changed or added
-  file behind the link does not; links inside the referent recurse
-  (lexical resolution from the link's directory, depth-capped), an
-  absolute, out-of-tree or `.git` target never passes, and a dangling
-  link reaches nothing and passes on its bytes (the callers'
-  `CLAUDE.md -> AGENTS.md` dangles after the strip's rename). A root that
-  passes is verified as a whole subtree, so the configuration names inside
-  a restored `.claude/` are exempt with it, and every other nested entry is
-  a survivor. The step's git runs pinned (`GIT_DIR`, `GIT_WORK_TREE`, no
-  global or system config, hooks path and fsmonitor off): the checkout's
-  config is the contributor's.
+  fork), and lexical `..` and shell globs in link paths. Fail-closed
+  corollary: a head `.gitattributes` that makes `git checkout` transform a
+  restore root (ident, eol, a smudge filter) leaves the action's own
+  restore differing from the base blob and the review is withheld — no
+  caller carries such an attribute. The step's git runs pinned (`GIT_DIR`,
+  `GIT_WORK_TREE`, no global or system config, hooks path and fsmonitor
+  off): the checkout's config is the contributor's.
 
 The alternative for the settings tier — managed policy settings at
 `/etc/claude-code/managed-settings.json`, which the sudo-capable runner could
