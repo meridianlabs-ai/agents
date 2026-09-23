@@ -732,6 +732,9 @@ jobs:
           # Review events carry the head ref in the payload; a PR comment
           # needs one read.
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # Whether this run's own event is `auto` being applied (the
+          # refused-label cleanup below skips it).
+          LABELED_AUTO: ${{ github.event.action == 'labeled' && github.event.label.name == 'auto' && 'true' || 'false' }}
         run: |
           engine=claude
           auto=false
@@ -772,11 +775,13 @@ jobs:
                 [ "$i" -lt 2 ] && sleep 5
               done
               labeler=""
+              refused=""
               [ -z "$timeline" ] || labeler=$(jq -rs '[.[][] | select(.event=="labeled" and .label.name=="auto")] | last | .actor.login // empty' <<<"$timeline" 2>/dev/null || true)
               if [ -z "$labeler" ]; then
                 echo "::warning::issue #$NUM carries 'auto', but who applied it could not be read from its timeline; not an opt-in — running one-shot."
               elif trusted_login "$labeler" || [[ "$labeler" == *"[bot]" ]]; then
                 echo "::warning::issue #$NUM's 'auto' label was applied by $labeler (a bot or the machine account), not by a write-access human; not an opt-in — running one-shot."
+                refused="a bot or the machine account"
               else
                 perm=""
                 for i in 1 2; do
@@ -786,8 +791,33 @@ jobs:
                 done
                 case "$perm" in
                   admin|maintain|write) auto=true ;;
-                  *) echo "::warning::issue #$NUM's 'auto' label was applied by $labeler, who does not have write access (permission: ${perm:-lookup failed}); not an opt-in — running one-shot." ;;
+                  *) echo "::warning::issue #$NUM's 'auto' label was applied by $labeler, who does not have write access (permission: ${perm:-lookup failed}); not an opt-in — running one-shot."
+                     if [ -n "$perm" ]; then refused="an account without write access"; fi ;;
                 esac
+              fi
+              # A refused label made visible (issue #141): left on the issue,
+              # it tells every reader an autonomous run was asked for. Only a
+              # DECIDED refusal — the labeler is known and is not a
+              # write-access human — removes it and says so on the issue; a
+              # read that failed (no labeler, no permission answer) stays
+              # warning-only, since the label may be a maintainer's. Skipped
+              # when this run's own event applied `auto`: that labeler passed
+              # the trig step, and a timeline that has not caught up would
+              # name an earlier one. The job token, like the fork-head
+              # refusal: github-actions writes start no workflows.
+              # Best-effort — never fails the run.
+              if [ -n "$refused" ] && [ "$LABELED_AUTO" != "true" ]; then
+                if gh api -X DELETE "repos/$REPO/issues/$NUM/labels/auto" --silent >/dev/null 2>&1; then
+                  echo "removed the refused 'auto' label from issue #$NUM"
+                  after='The label has been removed; a maintainer who wants an autonomous run can apply it again.'
+                else
+                  echo "::warning::could not remove the refused 'auto' label from issue #$NUM"
+                  after='Removing the label failed, so it is still on the issue; a maintainer who wants an autonomous run can remove it and apply it again.'
+                fi
+                body=$(printf 'This run is one-shot, not autonomous: the `auto` label on this issue was last applied by `%s` (%s), and only a write-access human'"'"'s `auto` label opts an issue into the autonomous loop. %s' "$labeler" "$refused" "$after")
+                gh issue comment "$NUM" --repo "$REPO" --body "$body" >/dev/null 2>&1 \
+                  && echo "posted the refused-label note on issue #$NUM" \
+                  || echo "::warning::could not post the refused-label note on issue #$NUM"
               fi
             fi
           fi

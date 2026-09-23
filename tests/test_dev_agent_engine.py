@@ -4,7 +4,8 @@ label decides whether it is the run's opt-in (Claude Security finding
 account's `auto` — refused as a kickoff by the trig step, but left on the
 issue — used to turn the next write-access human's plain `@claude` into an
 autonomous run: the PR labelled `auto` by the machine account, whose label
-the loop gates trust by login. Lifted from the workflow the way
+the loop gates trust by login. A decided refusal also removes the label
+and says so on the issue (issue #141). Lifted from the workflow the way
 test_dev_agent_trig.py lifts the trig step, run against a stub `gh`.
 """
 
@@ -49,6 +50,12 @@ gh() {
       [ -n "$p" ] || { echo '{"message":"Not Found"}'; return 1; }
       echo "$p" ;;
     "pr view 12 --repo o/r --json headRefName --jq .headRefName") echo feature ;;
+    "api -X DELETE repos/o/r/issues/12/labels/auto --silent")
+      echo unlabel >>"$STATE/writes"
+      [ ! -f "$STATE/unlabel-fails" ] || { echo '{"message":"Forbidden"}'; return 1; } ;;
+    "issue comment 12 --repo o/r --body "*)
+      echo comment >>"$STATE/writes"
+      printf '%s' "$7" >"$STATE/comment" ;;
     *) echo "unexpected gh call: $*" >&2; return 1 ;;
   esac
 }
@@ -66,8 +73,11 @@ def pages(*events_per_page):
 
 
 def run_engine(tmp_path, *, labels=("auto",), timeline=(), perms=None, phrase="@claude", is_pr=False,
-               timeline_fails=False, timeline_text=None, partial_text=None):
+               timeline_fails=False, timeline_text=None, partial_text=None, labeled_auto=False,
+               unlabel_fails=False):
     state = fresh_state(tmp_path)
+    if unlabel_fails:
+        (state / "unlabel-fails").write_text("")
     (state / "labels").write_text("".join(f"{x}\n" for x in labels))
     if partial_text is not None:
         (state / "timeline-partial.json").write_text(partial_text)
@@ -79,6 +89,7 @@ def run_engine(tmp_path, *, labels=("auto",), timeline=(), perms=None, phrase="@
     env = {
         "GITHUB_OUTPUT": str(out), "STATE": str(state), "REPO": "o/r", "NUM": "12", "PHRASE": phrase,
         "IS_PR": "true" if is_pr else "false", "HEAD_REF": "", "TRUSTED_LOGINS": TRUSTED_LOGINS,
+        "LABELED_AUTO": "true" if labeled_auto else "false",
     }
     r = sh(*STEP_BASH, GH_STUB + lift_step(WORKFLOW, "        id: engine"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -92,6 +103,16 @@ def timeline_reads(state):
     return f.read_text().split() if f.exists() else []
 
 
+def writes(state):
+    """The refused-label cleanup's writes, in order: `unlabel`, `comment`."""
+    f = state / "writes"
+    return f.read_text().split() if f.exists() else []
+
+
+def comment(state):
+    return (state / "comment").read_text()
+
+
 def test_a_write_access_humans_issue_label_is_the_opt_in(tmp_path):
     # The preserved route: a maintainer labelled the issue `auto`, and a
     # later `@claude` (or the `auto` label event itself) runs autonomously —
@@ -100,6 +121,7 @@ def test_a_write_access_humans_issue_label_is_the_opt_in(tmp_path):
                              perms={"alice": "write"})
     assert o["auto"] == "true" and o["pr_labels"] == ["auto", "engine:codex"] and o["engine"] == "codex"
     assert timeline_reads(state) == ["timeline"] and lookups(state) == ["alice"]
+    assert writes(state) == []
 
 
 def test_a_triage_accounts_issue_label_is_not_an_opt_in(tmp_path):
@@ -112,6 +134,10 @@ def test_a_triage_accounts_issue_label_is_not_an_opt_in(tmp_path):
     assert o["auto"] == "false" and o["pr_labels"] == ["engine:codex"] and o["engine"] == "codex"
     assert lookups(state) == ["mallory"]
     assert "applied by mallory, who does not have write access (permission: read)" in r.stdout
+    # Issue #141: the refused label comes off, and the issue says why.
+    assert writes(state) == ["unlabel", "comment"]
+    assert "last applied by `mallory` (an account without write access)" in comment(state)
+    assert "The label has been removed" in comment(state)
 
 
 def test_the_most_recent_labeler_decides(tmp_path):
@@ -142,24 +168,31 @@ def test_the_machine_accounts_own_issue_label_is_not_an_opt_in(tmp_path, login):
     assert o["auto"] == "false" and o["pr_labels"] == []
     assert lookups(state) == []
     assert f"applied by {login} (a bot or the machine account)" in r.stdout
+    assert writes(state) == ["unlabel", "comment"]
+    assert f"last applied by `{login}` (a bot or the machine account)" in comment(state)
 
 
 @pytest.mark.parametrize("bot", ["github-actions[bot]", "foo[bot]"])
 def test_another_apps_issue_label_is_not_an_opt_in(tmp_path, bot):
     _, o, state = run_engine(tmp_path, timeline=[labeled(bot)])
     assert o["auto"] == "false" and o["pr_labels"] == [] and lookups(state) == []
+    assert writes(state) == ["unlabel", "comment"]
 
 
 def test_an_unreadable_labeler_fails_closed(tmp_path):
     # No labeled event in the timeline (a shape drift, a label applied by a
     # path the timeline does not record), or a timeline read that fails:
     # not an opt-in.
-    r, o, _ = run_engine(tmp_path, timeline=[])
+    # Neither is a decided refusal, so the label (which may be a
+    # maintainer's) stays and nothing is posted.
+    r, o, state = run_engine(tmp_path, timeline=[])
     assert o["auto"] == "false" and o["pr_labels"] == []
     assert "who applied it could not be read from its timeline" in r.stdout
+    assert writes(state) == []
     _, o, state = run_engine(tmp_path, timeline_fails=True)
     assert o["auto"] == "false" and o["pr_labels"] == []
     assert timeline_reads(state) == ["timeline", "timeline"] and lookups(state) == []
+    assert writes(state) == []
 
 
 def test_a_timeline_read_that_fails_after_a_good_page_is_not_used(tmp_path):
@@ -176,6 +209,7 @@ def test_a_timeline_read_that_fails_after_a_good_page_is_not_used(tmp_path):
     assert o["auto"] == "false" and o["pr_labels"] == []
     assert timeline_reads(state) == ["timeline", "timeline"] and lookups(state) == []
     assert "who applied it could not be read from its timeline" in r.stdout
+    assert writes(state) == []
 
 
 def test_the_last_labeler_across_pages_wins(tmp_path):
@@ -197,6 +231,36 @@ def test_a_failed_permission_lookup_fails_closed_after_one_retry(tmp_path):
     assert o["auto"] == "false" and o["pr_labels"] == []
     assert lookups(state) == ["ghost", "ghost"]
     assert "permission: lookup failed" in r.stdout
+    assert writes(state) == []  # not a decided refusal: the label stays
+
+
+def test_a_failed_label_removal_is_said_and_does_not_fail_the_run(tmp_path):
+    r, o, state = run_engine(tmp_path, timeline=[labeled("mallory")], perms={"mallory": "triage"},
+                             unlabel_fails=True)
+    assert o["auto"] == "false"
+    assert writes(state) == ["unlabel", "comment"]
+    assert "could not remove the refused 'auto' label from issue #12" in r.stdout
+    assert "Removing the label failed, so it is still on the issue" in comment(state)
+    assert "has been removed" not in comment(state)
+
+
+def test_the_note_writes_no_bare_trigger_token(tmp_path):
+    # The body is posted where a bare trigger token could start a workflow
+    # (belt and braces: github-actions comments start none).
+    _, _, state = run_engine(tmp_path, timeline=[labeled("mallory")], perms={"mallory": "read"})
+    body = comment(state)
+    for token in ("@auto", "@claude", "@review"):
+        assert token not in body
+
+
+def test_a_run_started_by_applying_auto_removes_nothing(tmp_path):
+    # This run's own event applied `auto`, so its labeler passed the trig
+    # step; a timeline that has not caught up names an earlier labeler, and
+    # removing the label would undo the maintainer's opt-in. The run stays
+    # one-shot, as before, but writes nothing.
+    _, o, state = run_engine(tmp_path, timeline=[labeled("mallory")], perms={"mallory": "read"},
+                             labeled_auto=True)
+    assert o["auto"] == "false" and writes(state) == []
 
 
 def test_an_at_auto_comment_opts_in_without_reading_the_label(tmp_path):
@@ -209,7 +273,7 @@ def test_an_at_auto_comment_opts_in_without_reading_the_label(tmp_path):
     _, o, state = run_engine(tmp_path, labels=["auto"], timeline=[labeled("mallory")], perms={"mallory": "read"},
                              phrase="@auto")
     assert o["auto"] == "true" and o["pr_labels"] == ["auto"]
-    assert timeline_reads(state) == [] and lookups(state) == []
+    assert timeline_reads(state) == [] and lookups(state) == [] and writes(state) == []
 
 
 def test_an_unlabelled_issue_reads_no_timeline(tmp_path):
@@ -224,7 +288,7 @@ def test_a_prs_label_is_left_to_the_loop_gates(tmp_path):
     # is legitimate there); this step only reads the standing.
     _, o, state = run_engine(tmp_path, is_pr=True, timeline=[labeled("mallory")], perms={"mallory": "read"})
     assert o["auto"] == "true" and o["head_branch"] == "feature"
-    assert timeline_reads(state) == [] and lookups(state) == []
+    assert timeline_reads(state) == [] and lookups(state) == [] and writes(state) == []
 
 
 def test_land_job_pins_the_pr_labels_to_the_gates_read():
