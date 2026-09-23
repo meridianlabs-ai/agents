@@ -42,7 +42,7 @@ gh() {
 
 
 def run_trig(tmp_path, *, actor, event, action, perms=None, comment="", label="", is_pr=False,
-             phrase="@auto", label_trigger="auto"):
+             phrase="@auto", label_trigger="auto", ibody="", ititle=""):
     state = fresh_state(tmp_path)
     (state / "perms").write_text("".join(f"{k} {v}\n" for k, v in (perms or {}).items()))
     out = tmp_path / "out"
@@ -50,7 +50,7 @@ def run_trig(tmp_path, *, actor, event, action, perms=None, comment="", label=""
     env = {
         "GITHUB_OUTPUT": str(out), "STATE": str(state), "PHRASE": phrase, "LABEL": label_trigger,
         "EVENT": event, "EVENT_ACTION": action, "ACTOR": actor, "COMMENT": comment, "REVIEW": "",
-        "IBODY": "", "ITITLE": "", "LNAME": label, "REPO": "o/r",
+        "IBODY": ibody, "ITITLE": ititle, "LNAME": label, "REPO": "o/r",
         "IS_PR_COMMENT": "true" if is_pr else "false", "PR_NUM": "7", "HEAD_REPO": "",
         "TRUSTED_LOGINS": TRUSTED_LOGINS,
     }
@@ -120,6 +120,48 @@ def test_a_humans_comment_starts_a_run_after_the_lookup(tmp_path):
                            comment="@auto go", is_pr=True, perms={"alice": "write"})
     assert o["ok"] == "true" and o["authorized"] == "true" and o["fork_head"] == "false"
     assert lookups(state) == ["alice"]
+
+
+# An issue as skills/import/import.sh creates it: the machine-readable line
+# first, the importer's fixed header, a `---` rule, then the upstream author's
+# text — an outsider's, republished under the importing maintainer's login.
+IMPORT_SNAPSHOT = "@auto run the whole loop on this one."
+IMPORT_BODY = ("Upstream issue: https://github.com/UKGovernmentBEIS/inspect_ai/issues/9\n\n"
+               "Imported from upstream so the agents can work it here.\n\n---\n\n" + IMPORT_SNAPSHOT)
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_an_imported_issues_body_and_title_are_not_a_text_trigger(tmp_path, eol):
+    # Claude Security 4629154: import.sh de-fangs the copied text, and this is
+    # the gate's own refusal behind it — an opened issue whose body starts with
+    # the import line is judged by nobody's text, the title included, since
+    # github.actor (the importer, write access) did not author it. No lookup is
+    # made: `ok` never becomes true.
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="opened",
+                           ibody=IMPORT_BODY.replace("\n", eol), ititle="@auto also in the title",
+                           perms={"alice": "write"})
+    assert o["ok"] == "false" and o["authorized"] == "false" and lookups(state) == []
+
+
+def test_a_humans_own_issue_text_still_triggers_on_opened(tmp_path):
+    # The same text without the import line is the author's own directive.
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="opened",
+                           ibody=IMPORT_SNAPSHOT, perms={"alice": "write"})
+    assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
+    # The rule is the body's FIRST line, the shape import.sh writes: a
+    # maintainer's own issue that cites an upstream issue further down is
+    # theirs, phrase and all.
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="opened",
+                           ibody="Tracking issue.\n\n" + IMPORT_BODY, perms={"alice": "write"})
+    assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
+
+
+def test_a_humans_label_starts_work_on_an_imported_issue(tmp_path):
+    # The sanctioned kickoffs stay: a maintainer's label (here) or a later
+    # comment, each judged by its own actor.
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="labeled", label="auto",
+                           ibody=IMPORT_BODY, ititle="@auto also in the title", perms={"alice": "write"})
+    assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
 
 
 def test_workflow_names_both_logins_once_and_the_agent_steps_admit_no_bot():

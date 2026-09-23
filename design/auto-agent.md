@@ -899,8 +899,10 @@ are single-valued). Now `@auto`/`auto` is a **distinct kickoff that coexists
 with `@claude`**: a second dev-agent job (in the caller stub) invokes the same
 reusable `claude.yml` with `trigger_phrase: '@auto'`, `label_trigger: 'auto'`,
 and the dev agent's land job **propagates the `auto` label from the issue
-onto the new PR** (the manifest's `pr.labels`, read by the gate) so the loop
-engages. `claude`/`@claude` remains the
+onto the new PR** (the manifest's `pr.labels`, read by the gate — which
+counts the issue's label only when a write-access human applied it, and
+pinned by the land job's `allowed-pr-labels` to that read; Claude Security
+findings 4628438 and 4628441, 2026-09-22) so the loop engages. `claude`/`@claude` remains the
 one-shot assisted mode (PR opened, human drives); `auto`/`@auto` is the
 autonomous mode (PR opened, labeled `auto`, loop runs to handoff).
 

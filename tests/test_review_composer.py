@@ -36,7 +36,10 @@ PREP = lift_step(WORKFLOW, "        id: claudepost")
 COMPOSE = lift_step(WORKFLOW, "        id: landing")
 SETTINGS_STEP = lift_step(WORKFLOW, "        id: reviewsettings")
 SHA = "a" * 40
-OUT_DIR = "/home/runner/work/_temp/review"
+RUNNER_TEMP = "/home/runner/work/_temp"
+OUT_DIR = f"{RUNNER_TEMP}/review"
+SCRATCH = f"{RUNNER_TEMP}/scratch"
+WORKSPACE = "/home/runner/work/repo/repo"
 
 
 def outputs(path: Path) -> dict:
@@ -84,7 +87,7 @@ def validate(landing: Path, *, branch="claude/issue-81-review", pr="456", issue=
     return vm.validate(
         manifest, artifact_dir=landing, repo="meridianlabs-ai/agents", run_id="123", default_branch="main",
         allowed_issue_repos=["meridianlabs-ai/agents"], pr_head_ref=branch if pr else "", refused_branches=["main"],
-        event_pr_number=pr, event_issue_number=issue, branch_prefix=prefix, refuse_bundle=True,
+        event_pr_number=pr, event_issue_number=issue, branch_prefix=prefix, refuse_bundle=True, allow_review=True,
     )
 
 
@@ -102,8 +105,9 @@ def compose_settings(tmp_path, settings: dict, *, sandboxed: bool) -> dict:
     out = tmp_path / "settings-out.txt"
     out.write_text("")
     r = sh("bash", "-c", SETTINGS_STEP, check=False, env={
-        "SETTINGS": json.dumps(settings), "OUT_DIR": OUT_DIR, "SANDBOXED": "true" if sandboxed else "false",
-        "GITHUB_WORKSPACE": "/home/runner/work/repo/repo", "GITHUB_OUTPUT": str(out)})
+        "SETTINGS": json.dumps(settings), "OUT_DIR": OUT_DIR, "SCRATCH": SCRATCH, "RUNNER_TEMP": RUNNER_TEMP,
+        "SANDBOXED": "true" if sandboxed else "false",
+        "GITHUB_WORKSPACE": WORKSPACE, "GITHUB_OUTPUT": str(out)})
     assert r.returncode == 0, r.stderr
     lines = out.read_text().splitlines()
     assert lines[0] == "value<<SETTINGS_EOF" and lines[-1] == "SETTINGS_EOF"
@@ -136,19 +140,37 @@ def test_sandboxed_settings_deny_subprocess_writes_to_the_review_dir(tmp_path):
     # sandbox's denyWrite closes that; the deny holds inside the wider allow
     # and does not govern the in-process Write tool. Caller entries survive.
     caller = json.loads(json.dumps(CALLER_SETTINGS))
-    caller["sandbox"] = {"filesystem": {"denyWrite": ["~/.ssh"]},
+    caller["sandbox"] = {"filesystem": {"denyWrite": ["~/.ssh"], "allowWrite": ["~/.kube"]},
                          "credentials": {"files": [{"path": "~/.npmrc", "mode": "deny"}]},
                          "network": {"tlsTerminate": {"enabled": True}}}
+    caller["claudeMdExcludes"] = ["**/other-team/CLAUDE.md"]
     s = compose_settings(tmp_path, caller, sandboxed=True)
-    assert s["sandbox"]["filesystem"]["denyWrite"] == ["~/.ssh", OUT_DIR]
+    # Claude Security 4628445: the checkout is read-only to sandboxed
+    # commands — the strip's paths cannot be re-planted at any depth — and
+    # the scratch copy is the one writable tree; a caller's allowWrite would
+    # only widen and is not carried over.
+    assert s["sandbox"]["filesystem"]["denyWrite"] == ["~/.ssh", OUT_DIR, WORKSPACE]
+    assert s["sandbox"]["filesystem"]["allowWrite"] == [SCRATCH]
     assert s["sandbox"]["enabled"] is True and s["sandbox"]["allowUnsandboxedCommands"] is False
     assert s["sandbox"]["excludedCommands"] == ["gh *"]
     assert s["sandbox"]["credentials"]["files"][0] == {"path": "~/.npmrc", "mode": "deny"}
     assert "tlsTerminate" not in s["sandbox"]["network"]
     assert f"Edit(//{OUT_DIR.lstrip('/')}/**)" in s["permissions"]["allow"]
-    # Without caller sandbox settings the deny list is the output dir alone.
+    # The load side: no CLAUDE.md under the checkout or the runner temp is
+    # ever loaded (caller entries kept), and AGENTS.md is not read as
+    # project instructions.
+    assert s["claudeMdExcludes"] == ["**/other-team/CLAUDE.md", f"{WORKSPACE}/**", f"{RUNNER_TEMP}/**"]
+    assert s["pluginConfigs"] == {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}
+    assert s["disableAllHooks"] is True
+    # Without caller sandbox settings the lists are the overlay's alone.
     s = compose_settings(tmp_path, CALLER_SETTINGS, sandboxed=True)
-    assert s["sandbox"]["filesystem"]["denyWrite"] == [OUT_DIR]
+    assert s["sandbox"]["filesystem"]["denyWrite"] == [OUT_DIR, WORKSPACE]
+    assert s["sandbox"]["filesystem"]["allowWrite"] == [SCRATCH]
+    assert s["claudeMdExcludes"] == [f"{WORKSPACE}/**", f"{RUNNER_TEMP}/**"]
+    # Same-repo heads get none of it.
+    s = compose_settings(tmp_path, caller, sandboxed=False)
+    assert "claudeMdExcludes" not in s or s["claudeMdExcludes"] == ["**/other-team/CLAUDE.md"]
+    assert "pluginConfigs" not in s and s["sandbox"]["filesystem"]["allowWrite"] == ["~/.kube"]
 
 
 # --- Prepare Claude review for landing --------------------------------------
