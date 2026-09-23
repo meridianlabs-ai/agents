@@ -20,6 +20,9 @@ vm = importlib.util.module_from_spec(spec)
 sys.modules["validate_manifest"] = vm
 spec.loader.exec_module(vm)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_land_helpers import step_block  # noqa: E402
+
 REPO = "meridianlabs-ai/agents"
 RUN_ID = "123456"
 DEFAULT_BRANCH = "main"
@@ -844,12 +847,97 @@ def test_pr_labels_unrestricted_when_the_caller_sets_no_policy(tmp_path):
     assert run(tmp_path, m) == []
 
 
+# --- a label containing a comma (issue #142) ---------------------------------
+#
+# `land` applies each label through a comma-separated gh flag (`gh pr edit
+# --add-label`, `gh issue create --label`), so "engine:codex,auto" would land
+# as `engine:codex` and `auto`: labels the allow-list never checked. Refused
+# under every policy, the gate's own read of that label included.
+
+
+@pytest.mark.parametrize("allowed", [None, ["engine:codex,auto"]])
+def test_pr_label_containing_a_comma_is_refused(tmp_path, allowed):
+    m = base_manifest(tmp_path)
+    m["pr"]["labels"] = ["engine:codex,auto"]
+    errs = run(tmp_path, m, allowed_pr_labels=allowed)
+    assert any("pr: label 'engine:codex,auto' contains a comma" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("entry", [
+    {"labels": ["triage,auto"]},                     # a create: gh issue create --label splits it
+    {"labels": ["triage,auto"], "comment_on": 444},  # a comment (land applies none; the rule must not depend on that)
+])
+def test_issue_label_containing_a_comma_is_refused(tmp_path, entry):
+    m = base_manifest(tmp_path)
+    m["issues"][0].update(entry)
+    errs = run(tmp_path, m)
+    assert any("issues[0]: label 'triage,auto' contains a comma" in e for e in errs), errs
+
+
 def test_pr_label_policy_does_not_reach_issue_labels_and_vice_versa(tmp_path):
     m = base_manifest(tmp_path)
     m["pr"]["labels"] = ["engine:codex"]
     m["issues"][0]["labels"] = ["auto"]
     assert run(tmp_path, m, allowed_pr_labels=["engine:codex"]) == []
     assert run(tmp_path, m, allowed_labels=["auto"]) == []
+
+
+# --- the reviewer's and the loops' land jobs (issue #138): none of them may
+# have the machine account label a PR. The loops pass `allowed-pr-labels: []`
+# (a round keeps its hand-back, so refuse-pr would not do); the reviewer passes
+# `refuse-pr` on top of refuse-bundle. -------------------------------------------
+
+
+# workflow → the policy line its land step must carry.
+PR_LABEL_POLICY = {
+    "claude-review.yml": 'refuse-pr: "true"',
+    "claude-auto.yml": 'allowed-pr-labels: "[]"',
+    "claude-auto-review.yml": 'allowed-pr-labels: "[]"',
+}
+
+
+@pytest.mark.parametrize("name,line", sorted(PR_LABEL_POLICY.items()))
+def test_reviewer_and_loop_land_jobs_carry_their_pr_label_policy(name, line):
+    text = (ROOT / ".github" / "workflows" / name).read_text()
+    land = step_block(text, "land")
+    assert "uses: meridianlabs-ai/agents/.github/actions/land@main" in land
+    assert f"          {line}\n" in land
+
+
+def loop_run(d: Path, m: dict):
+    # claude-auto.yml's and claude-auto-review.yml's land inputs: the round's
+    # PR and head ref from the gate, no follow-up issues, no PR labels.
+    return run(d, m, event_issue="", allowed=[], allowed_pr_labels=[])
+
+
+@pytest.mark.parametrize("labels", [["auto"], ["engine:codex"], ["Engine:Claude"], ["bug"]])
+def test_a_forged_loop_manifest_cannot_label_the_pr(tmp_path, labels):
+    m = pr_run_manifest(tmp_path, pr={"open": True, "title": "t", "body_file": write(tmp_path, "b.md"), "labels": labels})
+    errs = loop_run(tmp_path, m)
+    assert errs == [f"pr: label {labels[0]!r} is not in the allowed pull-request labels (none)"]
+
+
+def test_the_loops_own_manifests_still_land(tmp_path):
+    # A round's hand-back and summary comment: no `pr`, so the empty list
+    # changes nothing a real round lands.
+    (tmp_path / "commits.bundle").write_bytes(b"# v2 git bundle\n")
+    m = pr_run_manifest(tmp_path, has_bundle=True, head_sha=HEAD, handback=True,
+                        comments=[{"number": 456, "body_file": write(tmp_path, "s.md")}])
+    assert loop_run(tmp_path, m) == []
+
+
+@pytest.mark.parametrize("pr", [
+    {"open": True, "title": "t", "body_file": "b.md", "labels": ["auto"]},    # adopt the branch's PR and arm the loop
+    {"open": True, "title": "t", "body_file": "b.md"},
+    None,                                                                   # `"pr": null`: refuse-bundle alone lets it through
+])
+def test_the_reviewers_land_job_refuses_pr_whatever_it_carries(tmp_path, pr):
+    write(tmp_path, "b.md")
+    m = review_manifest(tmp_path, pr=pr)
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True, refuse_pr=True, allow_review=True)
+    assert "manifest: this land job refuses pull-request fields (--refuse-pr) but the manifest carries `pr`" in errs, errs
+    # And the reviewer's own manifest still lands under the same inputs.
+    assert run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True, refuse_pr=True, allow_review=True) == []
 
 
 def triage_manifest(d: Path, **overrides) -> dict:

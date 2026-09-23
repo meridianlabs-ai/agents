@@ -142,10 +142,15 @@ text are checked by the tests under `tests/`.
   caller that does not pass it has every labelled `pr` refused rather
   than applied, and a caller whose standing policy labels its PRs
   (inspect_flow's scheduled workflows) names those labels in the input
-  (issue #143). Where a caller's agent job is untrusted
-  after it has read third-party input (the triage workflow in
-  `meridianlabs-ai/actions`), the land job's `allowed-issue-labels`,
-  `allowed-issue-assignees`, `max-issues` and `refuse-pr` inputs are
+  (issue #143). The loops' land jobs (`claude-auto.yml`,
+  `claude-auto-review.yml`) pass an empty `allowed-pr-labels`, since a
+  round never labels a PR, and the reviewer's passes `refuse-pr`, since it
+  never opens, adopts or labels one, so none of the three can have the
+  machine account apply `auto` or an `engine:*` label (issue #138). Where
+  a caller's agent job is untrusted after it has read third-party input
+  (the triage workflow in `meridianlabs-ai/actions`), the land job's
+  `allowed-issue-labels`, `allowed-issue-assignees`, `max-issues` and
+  `refuse-pr` inputs are
   enforced by the validator on the fresh runner, so its manifest cannot
   commission the autonomous agent — through an issue label, or through a
   PR opened, adopted or labelled for a branch already on origin — however
@@ -158,7 +163,8 @@ text are checked by the tests under `tests/`.
   `refuse-bundle` it refuses the hand-back, hand-off, thread resolutions,
   replies and PR operations a read-only reviewer never owes, so a forged
   review manifest cannot re-trigger the reviewer from its own land job
-  (Claude Security findings 4628442 and 4628439, 2026-09-22).
+  (Claude Security findings 4628442 and 4628439, 2026-09-22); its
+  `refuse-pr` states the PR-side refusal on its own (issue #138).
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - No runner-side step after a Codex run resolves a command, or its shell
@@ -296,9 +302,10 @@ text are checked by the tests under `tests/`.
   directory, posted as the review after trigger tokens and loop markers are
   removed, with a verdict that is one of two fixed bodies. Its landing
   manifest is still data the land job acts on: a comment on another thread,
-  a caller-repository issue write, a stage move or the adoption of an
-  existing branch's PR that a compromised review job requested would post
-  as the machine account. A human reads every review.
+  a caller-repository issue write or a stage move that a compromised
+  review job requested would post as the machine account; opening,
+  adopting or labelling a PR is refused (`refuse-bundle`, `refuse-pr`).
+  A human reads every review.
 
 ## Adding or changing a workflow
 

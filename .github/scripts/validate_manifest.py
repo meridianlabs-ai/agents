@@ -117,6 +117,9 @@ default allows none, so a caller that forgets the flag has every labelled
 `pr` refused rather than applied (issue #143; it was `*` while the callers'
 lists were rolled out). A malformed list refuses the manifest (usage
 error).
+A label containing a comma, in `pr.labels` or `issues[]`, is refused under
+any policy: `land` applies labels through gh's comma-separated flags, which
+would split it into labels the list above never checked (issue #142).
 
 `--allow-review` marks the reviewer's land job (claude-review.yml), the only
 caller whose manifest may carry the review fields: `review_verdict` (one of
@@ -428,6 +431,13 @@ class Validator:
         if not isinstance(labels, list) or not all(isinstance(x, str) and 0 < len(x) <= 50 for x in labels):
             self.err(f"{where}: labels must be a list of non-empty strings (≤ 50 chars)")
             return
+        # `land` passes each label to a comma-separated gh flag (`gh pr edit
+        # --add-label`, `gh issue create --label`), which would apply
+        # "engine:codex,auto" as two labels, neither of them the one checked
+        # against `allowed` below (issue #142).
+        for x in labels:
+            if "," in x:
+                self.err(f"{where}: label {x!r} contains a comma (land's gh label flags would split it into several labels)")
         if allowed is not None:
             for x in labels:
                 if x.lower() not in allowed:
