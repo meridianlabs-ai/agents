@@ -1,11 +1,11 @@
 # The agents repo's OWN reviewer stub (based on examples/claude-review-stub.yml;
 # -stub suffix because claude-review.yml is the reusable definition here).
 # PRs here are NOT auto-reviewed on open: the reviewer runs only on an explicit
-# @review comment (on a PR, or on an External-labeled proxy issue). Ransom is
-# moving review into local Orca-driven loops, so the GitHub-hosted review no
-# longer fires on every PR (decision: Ransom, 2026-09-11). This stub therefore
-# deliberately DIVERGES from examples/claude-review-stub.yml, which keeps the
-# pull_request trigger for caller repos; do not "re-sync" it.
+# @review comment (on a PR, or on an External-labeled proxy issue). Ransom
+# moved review into local Orca-driven loops, so the GitHub-hosted review no
+# longer fires on every PR (decision: Ransom, 2026-09-11; the reusable admits
+# issue_comment only since 2026-09-22 — its header names the two caller stubs
+# still to migrate), so this stub is the example minus this header.
 name: Review
 
 on:

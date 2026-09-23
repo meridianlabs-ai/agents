@@ -241,8 +241,17 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   permission lookup admits write-access collaborators and fails closed, the
   External-proxy body line is honoured only on a genuine proxy, and promote
   refuses ambiguity without `--pr`, resolves with it, and falls back to
-  closing refs / the branch convention when no chip exists. Acceptance paths
-  run through `--dry-run` only; the test clone's remote is non-routable.
+  closing refs / the branch convention when no chip exists. The upstream PR
+  body: the `Upstream issue:` header is believed only in /import's shape from
+  a trusted author, bare refs are qualified, and a stub `gh api markdown`
+  (standing in for GitHub's renderer) finding any other upstream reference,
+  or rendering the qualified fork PR body differently from the original in
+  the fork's context (code, link destinations; the stub mints fresh math,
+  diagram and footnote identifiers per render, as GitHub does, and those
+  alone do not count), makes promote refuse before
+  any write; a trusted header's `Fixes #<up>` is prepended even when the
+  body quotes one. Acceptance paths run through
+  `--dry-run` only; the test clone's remote is non-routable.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
@@ -275,7 +284,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the caller's `allowed_bots` names (same-repo heads only) — with the fork
   head admitted sandboxed and a failed lookup refused (Claude Security
   4085111). Also that the review step's `allowed_bots` is the caller's list
-  plus `TRUSTED_LOGINS`.
+  plus `TRUSTED_LOGINS`, and that `issue_comment` is the only event the step
+  admits: a `pull_request` / `pull_request_target` run fails it red with an
+  error naming the caller stub (the path was removed 2026-09-22), and no
+  expression in the workflow or the stubs reads the PR-event payload.
 - `test_codex_path.py` — the codex path's runner-side search path (Claude
   Security 4628448): the `assert-runner-only-path` check `create-codex-user`
   runs before its grant and `reclaim-codex-workspace` runs after codex

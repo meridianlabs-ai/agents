@@ -23,7 +23,7 @@ take effect on every repo's next run.
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
   `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
   `reclaim-codex-workspace`, `import-codex-final`,
-  `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
+  `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
