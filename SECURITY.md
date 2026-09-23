@@ -78,6 +78,20 @@ text are checked by the tests under `tests/`.
   runner-side reads. A hosted canary exercises both this boundary and the
   secret delivery against a hostile checkout and synthetic secrets
   (design/credential-separation.md → section 6).
+- The uid an agent runs as has no passwordless sudo and no other route to
+  root when the agent step starts, on both engines. In a Claude job the
+  agent is the runner, so a `drop-runner-root` step between the last step
+  that needs root (checkouts, provisioning, the reviewer's sandbox install)
+  and the agent step raises `kernel.yama.ptrace_scope` to 2, makes the
+  docker socket root-only, replaces the sudoers policy with one that grants
+  root alone, and fails the job — before the agent runs — unless `sudo -n
+  true` and `sudo -n -l` then fail from the runner and `Runner.Worker`'s
+  process memory does not open. In a codex job the agent is the `codex`
+  user, which never had sudo and cannot inspect the runner's processes; the
+  runner keeps its sudo there for the reclaim. A hosted smoke workflow
+  checks both from the real users (Claude Security finding 4629153,
+  criterion 2; design/architecture.md → No root for the agent uid, which
+  also lists what stays open: provisioning itself still runs with root).
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -250,6 +264,9 @@ text are checked by the tests under `tests/`.
   checkout as the runner in a codex job: those jobs provision with
   `provision-fallback` `user: codex` after `create-codex-user`, and no
   `./`-local action.
+- In a job that runs the Claude agent, every step that needs root goes
+  before the `drop-runner-root` step, and nothing after it uses sudo or
+  docker; the drop keeps the agent step's `if:`.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
   The skills under `skills/` that a maintainer's local agent runs with their

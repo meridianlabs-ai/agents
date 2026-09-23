@@ -942,9 +942,11 @@ jobs:
       # Claude engine only: this job runs the caller's composite (and the
       # fallback below) as the runner, which is exactly how the Claude
       # reviewer itself runs on a same-repo head — unsandboxed, as the
-      # runner, over a tree whose tests it then executes — so code from the
-      # tree gains nothing here it does not already have once the agent
-      # starts; and this job names no OPENAI_API_KEY (Claude Security finding
+      # runner, over a tree whose tests it then executes — except root: this
+      # step still has the runner's sudo, which the "Drop the runner's root
+      # access" step below removes before the agent (finding 4629153,
+      # criterion 2; the residual is recorded in design/architecture.md →
+      # No root for the agent uid); and this job names no OPENAI_API_KEY (Claude Security finding
       # 4629153: the key is the codex job's alone). The codex job provisions
       # differently: the shared fallback recipe, run as the unprivileged
       # codex user AFTER the codex user boundary exists, never the caller's
@@ -985,6 +987,19 @@ jobs:
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+
+      # Root ends here (Claude Security finding 4629153, criterion 2): the
+      # agent runs as the runner, so the runner's passwordless sudo, its
+      # docker socket and same-uid inspection of the runner's processes are
+      # removed after the last step that needs root and before the agent
+      # step, with the agent step's own `if:`, and the composite checks from
+      # the runner that `sudo -n true` fails. A failure skips the agent and
+      # the Surface step says why. Nothing after the agent step uses sudo or
+      # docker. design/architecture.md → No root for the agent uid.
+      - name: Drop the runner's root access before the agent
+        id: noroot
+        if: needs.gate.outputs.ok == 'true'
+        uses: meridianlabs-ai/agents/.github/actions/drop-runner-root@main
 
       # The review is FILES, not posts (issue #114): the OUTPUT block appended
       # here names the directory ($OUT_DIR, created by this step — outside
@@ -1868,6 +1883,7 @@ jobs:
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
+          NOROOT_OUTCOME: ${{ steps.noroot.outcome }}
           SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
           STRIP_OUTCOME: ${{ steps.strip.outcome }}
           SCRATCH_OUTCOME: ${{ steps.scratch.outcome }}
@@ -1900,6 +1916,10 @@ jobs:
             err="copying the checkout to the scratch directory the sandboxed reviewer installs and tests in (external mode / fork-head PR) failed before the reviewer started — usually disk space (see the job log); re-trigger to retry."
           elif [ "${SANDBOX_OUTCOME:-}" = "failure" ]; then
             err="the review sandbox install (external mode / fork-head PR) failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
+          elif [ "${NOROOT_OUTCOME:-}" = "failure" ]; then
+            # drop-runner-root failed: the reviewer step is SKIPPED (the
+            # boundary fails closed). Probably not transient.
+            err="removing the runner's root access (sudo, the docker socket, process inspection) failed before the reviewer started, so no review ran — the job log names the check that failed. This is probably not transient: re-triggering fails the same way until the runner image or the drop-runner-root step changes."
           fi
           # The agent's own error text is free-form (and unbounded — it is
           # the final message when is_error is set); cap it so the manifest's

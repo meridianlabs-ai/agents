@@ -892,14 +892,19 @@ results against the invariant each one tests.
 - **The Claude job still executes the checkout as the runner.** Its
   provisioning (the caller's `claude-setup`, the fallback dev-install) and
   the agent's own test runs execute the tree's code unsandboxed, as the
-  runner, with sudo, the OIDC request token and the Claude action's
-  installation token in reach — the concession SECURITY.md makes for
+  runner, with the OIDC request token and the Claude action's installation
+  token in reach, and the provisioning with sudo as well: since 2026-09-23
+  the `drop-runner-root` step takes the runner's sudo, docker socket and
+  same-uid process inspection away between provisioning and the agent
+  (finding 4629153, criterion 2; architecture.md → No root for the agent
+  uid), so the agent and its test runs no longer have root, but a build
+  hook that ran during provisioning did — the concession SECURITY.md makes for
   same-repo heads, now stated for heads the pipeline itself authored as
   well: an outsider's issue text steers the first run's agent, and a second
   automated run on the branch it produced executes that branch's build
   hooks before the agent. What the split removes from that job is the
-  OpenAI key; what remains is exactly what a prompt-injected Claude agent
-  already holds there. Refusing agent bundles that touch paths a later job
+  OpenAI key; what remains is what a prompt-injected Claude agent already
+  holds there, plus root while provisioning runs. Refusing agent bundles that touch paths a later job
   executes (`.github/actions/**`, `pyproject.toml` build configuration,
   `.claude/**`, `CLAUDE.md`, `.mcp.json`) at the land job is the open
   follow-up from finding 4628446, not done here.

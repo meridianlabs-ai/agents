@@ -1018,9 +1018,11 @@ jobs:
       # find a fork's action. Claude engine only: this job runs the caller's
       # composite (and the fallback below) as the runner, which is exactly
       # how the Claude agent itself runs — unsandboxed, as the runner, over a
-      # same-repo tree whose tests it then executes — so code from the tree
-      # gains nothing here it does not already have once the agent starts;
-      # and this job names no OPENAI_API_KEY (Claude Security finding
+      # same-repo tree whose tests it then executes — except root: this step
+      # still has the runner's sudo, which the "Drop the runner's root
+      # access" step below removes before the agent (finding 4629153,
+      # criterion 2; the residual is recorded in design/architecture.md →
+      # No root for the agent uid); and this job names no OPENAI_API_KEY (Claude Security finding
       # 4629153: the key is the codex job's alone, below). The codex job
       # provisions differently: the shared fallback recipe, run as the
       # unprivileged codex user AFTER the codex user boundary exists, never
@@ -1052,6 +1054,18 @@ jobs:
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+
+      # Root ends here (Claude Security finding 4629153, criterion 2): the
+      # agent runs as the runner, so the runner's passwordless sudo, its
+      # docker socket and same-uid inspection of the runner's processes are
+      # removed after the last step that needs root and before the agent
+      # step, with the agent step's own `if:`, and the composite checks from
+      # the runner that `sudo -n true` fails. A failure skips the agent and
+      # the Surface step says why. Nothing after the agent step uses sudo or
+      # docker. design/architecture.md → No root for the agent uid.
+      - name: Drop the runner's root access before the agent
+        id: noroot
+        uses: meridianlabs-ai/agents/.github/actions/drop-runner-root@main
 
       # Compose the appended-system-prompt sources into ONE value, so we emit a
       # single --append-system-prompt flag. Multiple flags would force a bet on
@@ -1312,6 +1326,7 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
+          NOROOT_OUTCOME: ${{ steps.noroot.outcome }}
           AGENTSETTINGS_OUTCOME: ${{ steps.agentsettings.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
@@ -1361,6 +1376,13 @@ jobs:
             err="environment provisioning (claude-setup) failed before the agent started — usually a transient dependency-download/network error; re-trigger to retry."
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (that one fails identically on every trigger: check the job logs and fix it by hand); re-trigger if it looks transient."
+          fi
+          # Taking root away from the runner failed (drop-runner-root): the
+          # agent step is SKIPPED, not failed — the boundary fails closed —
+          # so without this clause nothing would say why. Probably not
+          # transient (a runner image change), so no plain re-trigger advice.
+          if [ -z "$err" ] && [ "${NOROOT_OUTCOME:-}" = "failure" ]; then
+            err="removing the runner's root access (sudo, the docker socket, process inspection) failed before the agent started, so the agent did not run — the job log names the check that failed. This is probably not transient: re-triggering fails the same way until the runner image or the drop-runner-root step changes."
           fi
           # The settings composer failed (a caller's `settings` that is
           # neither a JSON object nor a path to a file holding one): the
