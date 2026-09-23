@@ -209,7 +209,19 @@ payload names, and fails the run. It requires:
   the event payload, so the agent job cannot steer a push, a reply or a
   hand-back at a thread of its choosing.
 - `start_sha` and `head_sha` 40 hex, with `has_bundle` true exactly when they
-  differ.
+  differ; when they do, `start_sha` equal to the land job's `start-sha`
+  input — the run's start as the caller's gate read it from the API before
+  the agent ran (the base tip an issue run branches from, the PR head's live
+  tip a PR run checks out), and refused when the input is empty. The agent
+  job pins its own start to the same value before the agent runs
+  (`claude.yml`'s `Record base SHA` takes the gate's tip and requires the
+  base's live tip — fetched again there, since actions/checkout leaves
+  `origin/<base>` at the event commit — to descend from it; `sync-branch`'s `head-sha`
+  fails the sync when the tip it checked out is not the gate's), so the
+  checkout, the manifest and the push agree on one revision, and the land
+  job's fetch — by SHA, which origin answers for any reachable commit —
+  cannot be pointed at a fork PR's head or an old base commit (Claude
+  Security finding 4628444, criterion 2).
 - Every `*_file` a plain relative name of a regular, non-symlinked file
   inside the artifact, under 64 KiB.
 - `issues[].repo` on the land job's `allowed-issue-repos` list (empty for the
@@ -276,7 +288,8 @@ cannot (a rebased HEAD, a bundle failure), recording why in the manifest's
 `error`, so a bare `@review` is never posted over lost work.
 
 The land job materializes the bundle in an empty bare repository: fetch the
-start SHA from origin by SHA with the read token, `git bundle verify`,
+start SHA — pinned by the validator to the caller's trusted `start-sha`,
+above — from origin by SHA with the read token, `git bundle verify`,
 unbundle, assert the tip equals `head_sha` and descends from `start_sha`,
 read the branch's live tip with `ls-remote` and refuse unless it is an
 ancestor of `head_sha` ("moved during the run"), then push

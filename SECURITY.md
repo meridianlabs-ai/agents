@@ -107,7 +107,10 @@ text are checked by the tests under `tests/`.
   no code; a refused manifest causes none of the actions it requested. The
   trusted gate's own writes before the agent runs (acknowledgement, stage,
   labels, counters) and the land job's final error report are deterministic
-  and not agent-controlled.
+  and not agent-controlled. The commits a manifest carries build on the
+  run's start as the gate read it before the agent ran, never on a start the
+  agent job names: the land job refuses a bundle whose `start_sha` is any
+  other commit before fetching it.
 - The machine account's tokens are minted per job, for one repository and the
   permissions that job uses, from the GitHub App's secrets, and are revoked at
   job end.

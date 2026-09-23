@@ -347,6 +347,18 @@ jobs:
       # The PR's live head branch (PR runs): the land job's pin for the
       # manifest's branch, read here before any untrusted code ran.
       head_branch: ${{ steps.engine.outputs.head_branch }}
+      # The run's START, read here before any untrusted code ran (Claude
+      # Security finding 4628444, criterion 2): the base branch's tip on an
+      # issue run (the commit the new branch is cut from), the PR head's
+      # live tip on a PR run (the commit sync-branch checks out). The agent
+      # job pins its own start to it ("Record base SHA", sync-branch's
+      # `head-sha`), and the land job refuses a manifest whose bundle claims
+      # any other start (`land`'s `start-sha`) — so the checkout, the
+      # manifest and the push agree on one revision, and the agent job
+      # cannot name a fork PR's head or an old base commit as where it
+      # began. Empty when the read failed: the run proceeds unpinned and
+      # the land job then refuses its commits (comments still land).
+      start_sha: ${{ steps.start.outputs.sha }}
       # `true` when this run is in the @auto loop's hands: the trigger is
       # @auto, or the issue/PR carries the `auto` label (an issue's only
       # when a write-access human applied it — the Detect engine step). A PR
@@ -801,6 +813,55 @@ jobs:
             echo "head_branch=$head_branch"
           } >>"$GITHUB_OUTPUT"
 
+      # The run's start (the gate's `start_sha` output, rationale there): one
+      # API read of the branch the agent job will start from — the PR's
+      # head branch on a PR run, the base branch on an issue run — taken
+      # here, before the agent job checks anything out. Retried, since a
+      # transient error would otherwise leave the run unpinned. Best-effort
+      # past that: an empty value fails no run here (a closed PR's deleted
+      # head 404s legitimately, and a comment-only run needs no start);
+      # the agent job warns and the land job refuses the commits — an
+      # agent run spent for nothing on that path is accepted (decision:
+      # Ransom, 2026-09-23), as is the sync refusing a head that moved
+      # between this read and the checkout (sync-branch's head-sha).
+      - name: Record run start
+        id: start
+        if: steps.trig.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          HEAD_BRANCH: ${{ steps.engine.outputs.head_branch }}
+          # The same resolution "Record base SHA" and claude-code-action make.
+          BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          if [ "$IS_PR" = "true" ]; then
+            ref="$HEAD_BRANCH"
+            what="the head branch of PR #$NUM (${HEAD_BRANCH:-unknown})"
+          else
+            ref="$BASE"
+            what="the base branch $BASE"
+          fi
+          sha=""
+          if [ -n "$ref" ]; then
+            for i in 1 2 3; do
+              sha=$(gh api "repos/$REPO/branches/$ref" --jq '.commit.sha' 2>/dev/null) && break
+              sha=""
+              [ "$i" -lt 3 ] && sleep $((i * 5))
+            done
+            # `gh api` prints the error body to STDOUT on a non-2xx, so the
+            # value is hex-validated rather than trusted.
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || sha=""
+          fi
+          if [ -n "$sha" ]; then
+            echo "run start: $what is at $sha"
+          else
+            echo "::warning::could not read the tip of $what; the run starts unpinned, and the land job refuses any commits it produces (comments still land)."
+          fi
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+
       - name: Acknowledge trigger (eyes)
         if: steps.trig.outputs.ok == 'true'
         env:
@@ -962,19 +1023,60 @@ jobs:
       # out itself there, as it always had to). The base branch name is the
       # caller's input or the event's default branch — the same resolution
       # claude-code-action makes — and the fetch-depth-0 checkout already
-      # holds every remote branch, so this is a local read. rev-parse on its
-      # own line under -e, so a failure is this step's; the Surface step
-      # names it, and the emit step falls back to github.sha so the manifest
-      # carrying that error still validates.
+      # holds every remote branch, so this is a local read.
+      #
+      # The value is the GATE's read of that tip (`start_sha`, taken before
+      # this job ran: the trusted start the land job is pinned to — finding
+      # 4628444), not this job's own, which the agent could rewrite along
+      # with the rest of this job's outputs. The checkout must agree with
+      # it, so origin/<base> is first REFRESHED from origin: actions/checkout
+      # resets the event ref's remote-tracking ref to the event commit
+      # (github.sha) even at fetch-depth 0, so on a default-base run
+      # origin/<base> is where the base stood when the comment was posted —
+      # older than the gate's read whenever a push landed in between, or on
+      # a re-run of an older event; after the refresh it is the live tip,
+      # which is the gate's tip or a descendant (the base advanced in the
+      # seconds between; the branch is cut from the live tip and the bundle
+      # above the gate's tip then carries the base's newer commits too —
+      # harmless, and what the workflows guard exempts as the base's own). A tip that does NOT
+      # descend from it means the base was rewritten since the gate read
+      # it: refused, nothing is attempted. With no gate read (its API call
+      # failed) this falls back to the live tip with a warning: the agent
+      # still runs — a comment-only run needs no start — and the land job
+      # refuses any commits, since it holds no trusted start to pin them
+      # to. Each git call on its own line under -e, so a failure is this
+      # step's; the Surface step names it, and the emit step falls back to
+      # github.sha so the manifest carrying that error still validates. The
+      # fetch authenticates through the step-scoped credential helper every
+      # runner-side git network call uses (AGENTS.md; a read, so the job
+      # token) — the checkout persisted none.
       - name: Record base SHA
         id: base
         if: github.event.issue.pull_request == '' && github.event.pull_request == ''
         env:
           BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}
+          GATE_SHA: ${{ needs.gate.outputs.start_sha }}
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -euo pipefail
-          sha=$(git rev-parse "origin/$BASE")
-          echo "base branch $BASE is at $sha"
+          git fetch --quiet origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          tip=$(git rev-parse "origin/$BASE")
+          if [ -z "$GATE_SHA" ]; then
+            echo "::warning::the gate did not record the tip of base branch $BASE; starting from $tip unpinned — the land job refuses any commits this run produces (comments still land)."
+            sha="$tip"
+          elif git merge-base --is-ancestor "$GATE_SHA" "$tip"; then
+            sha="$GATE_SHA"
+            [ "$tip" = "$GATE_SHA" ] || echo "base branch $BASE advanced from $GATE_SHA to $tip since the gate read it; the run starts from the gate's tip."
+          else
+            echo "::error::the gate read $GATE_SHA as the tip of base branch $BASE, but origin/$BASE is now $tip, which does not descend from it — the base was rewritten since; refusing to start. Re-trigger."
+            exit 1
+          fi
+          echo "base branch $BASE: the run starts at $sha"
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
 
       # ---- Deterministic base-branch sync (design/architecture.md) ---------
@@ -1008,6 +1110,12 @@ jobs:
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
           user-email: ${{ needs.gate.outputs.git_user_email }}
+          # The head tip the gate read (its `start_sha`; the land job's pin —
+          # finding 4628444): the tip checked out here must be it, or the
+          # sync fails before merging and the agent never starts on code the
+          # gate never saw. Empty (the read failed) pins nothing; the land
+          # job then refuses the run's commits.
+          head-sha: ${{ needs.gate.outputs.start_sha }}
 
       # Provision the project environment so the agent's allow-listed
       # pytest/ruff/mypy can actually run (a bare runner has neither the deps
@@ -1364,7 +1472,7 @@ jobs:
           # Issue runs: the base branch's tip could not be read (the caller's
           # base_branch input names a branch that is not on origin?).
           if [ -z "$err" ] && [ "${BASE_OUTCOME:-}" = "failure" ]; then
-            err="reading the tip of the base branch failed before the agent started (the base_branch the caller configured is not on origin? — see the job logs); nothing was attempted."
+            err="recording the run's start on the base branch failed before the agent started (the base_branch the caller configured is not on origin, its live tip could not be fetched, or that tip no longer descends from the one the gate read — see the job logs); nothing was attempted."
           fi
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every
@@ -1933,19 +2041,61 @@ jobs:
       # out itself there, as it always had to). The base branch name is the
       # caller's input or the event's default branch — the same resolution
       # claude-code-action makes — and the fetch-depth-0 checkout already
-      # holds every remote branch, so this is a local read. rev-parse on its
-      # own line under -e, so a failure is this step's; the Surface step
-      # names it, and the emit step falls back to github.sha so the manifest
-      # carrying that error still validates.
+      # holds every remote branch, so this is a local read.
+      #
+      # The value is the GATE's read of that tip (`start_sha`, taken before
+      # this job ran: the trusted start the land job is pinned to — finding
+      # 4628444), not this job's own, which the agent could rewrite along
+      # with the rest of this job's outputs. The checkout must agree with
+      # it, so origin/<base> is first REFRESHED from origin: actions/checkout
+      # resets the event ref's remote-tracking ref to the event commit
+      # (github.sha) even at fetch-depth 0, so on a default-base run
+      # origin/<base> is where the base stood when the comment was posted —
+      # older than the gate's read whenever a push landed in between, or on
+      # a re-run of an older event — and the codex prep cuts its branch from
+      # origin/<base>; after the refresh both are the live tip, which is the
+      # gate's tip or a descendant (the base advanced in the seconds between;
+      # the branch is cut from the live tip and the bundle above the gate's
+      # tip then carries the base's newer commits too — harmless, and what
+      # the workflows guard exempts as the base's own). A tip that does NOT
+      # descend from it means the base was rewritten since the gate read
+      # it: refused, nothing is attempted. With no gate read (its API call
+      # failed) this falls back to the live tip with a warning: the agent
+      # still runs — a comment-only run needs no start — and the land job
+      # refuses any commits, since it holds no trusted start to pin them
+      # to. Each git call on its own line under -e, so a failure is this
+      # step's; the Surface step names it, and the emit step falls back to
+      # github.sha so the manifest carrying that error still validates. The
+      # fetch authenticates through the step-scoped credential helper every
+      # runner-side git network call uses (AGENTS.md; a read, so the job
+      # token) — the checkout persisted none.
       - name: Record base SHA
         id: base
         if: github.event.issue.pull_request == '' && github.event.pull_request == ''
         env:
           BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}
+          GATE_SHA: ${{ needs.gate.outputs.start_sha }}
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: |
           set -euo pipefail
-          sha=$(git rev-parse "origin/$BASE")
-          echo "base branch $BASE is at $sha"
+          git fetch --quiet origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          tip=$(git rev-parse "origin/$BASE")
+          if [ -z "$GATE_SHA" ]; then
+            echo "::warning::the gate did not record the tip of base branch $BASE; starting from $tip unpinned — the land job refuses any commits this run produces (comments still land)."
+            sha="$tip"
+          elif git merge-base --is-ancestor "$GATE_SHA" "$tip"; then
+            sha="$GATE_SHA"
+            [ "$tip" = "$GATE_SHA" ] || echo "base branch $BASE advanced from $GATE_SHA to $tip since the gate read it; the run starts from the gate's tip."
+          else
+            echo "::error::the gate read $GATE_SHA as the tip of base branch $BASE, but origin/$BASE is now $tip, which does not descend from it — the base was rewritten since; refusing to start. Re-trigger."
+            exit 1
+          fi
+          echo "base branch $BASE: the run starts at $sha"
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
 
       # ---- Deterministic base-branch sync (design/architecture.md) ---------
@@ -1979,6 +2129,12 @@ jobs:
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
           user-email: ${{ needs.gate.outputs.git_user_email }}
+          # The head tip the gate read (its `start_sha`; the land job's pin —
+          # finding 4628444), as in the agent job's copy: the tip checked out
+          # here must be it, or the sync fails before merging and codex never
+          # starts on code the gate never saw. Empty (the read failed) pins
+          # nothing; the land job then refuses the run's commits.
+          head-sha: ${{ needs.gate.outputs.start_sha }}
 
       # ---- Codex engine (design/codex-engine.md) ----------------------------
       # The codex sandbox has no GitHub credentials, so the agent only edits
@@ -3192,6 +3348,13 @@ jobs:
           # runs. Empty on issue runs (and when the gate's read failed —
           # the composite then looks it up itself).
           pr-head-ref: ${{ needs.gate.outputs.head_branch }}
+          # The run's start, read by the gate before any untrusted code ran
+          # (finding 4628444, criterion 2): a manifest that carries commits
+          # must name exactly it as start_sha, or the validator refuses it
+          # before the fetch. The agent job pinned its own start to the same
+          # value (Record base SHA, sync-branch's head-sha), so an honest run
+          # always matches; empty (the gate's read failed) refuses bundles.
+          start-sha: ${{ needs.gate.outputs.start_sha }}
           # Issue runs have no PR head ref to pin the branch to; the prefix
           # claude-code-action (and the codex prep step) give issue branches,
           # composed from the trusted issue number, keeps the push off the

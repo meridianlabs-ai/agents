@@ -116,9 +116,11 @@ def test_codex_commit_with_no_thread_ids_lands(repo):
     manifest = json.loads((landing / "manifest.json").read_text())
     assert manifest["has_bundle"] is True and manifest["handback"] is True
     head = git("rev-parse", "HEAD", cwd=repo["work"]).stdout.strip()
+    # As the land composite calls it: `start-sha` is the gate's read of the
+    # PR head's tip, which the fixture's start is.
     v = sh(sys.executable, str(VALIDATOR), "--dir", str(landing), "--repo", "meridianlabs-ai/agents",
            "--run-id", "123", "--default-branch", "main", "--event-pr-number", "456",
-           "--pr-head-ref", "claude/issue-81-review", check=False)
+           "--pr-head-ref", "claude/issue-81-review", "--start-sha", repo["start"], check=False)
     assert v.returncode == 0, v.stdout
     assert manifest["head_sha"] == head
 

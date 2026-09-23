@@ -75,7 +75,7 @@ to this document together.
 | `repo` | emit-landing (`$GITHUB_REPOSITORY`) | must equal the repo the land job operates on (case-insensitive) |
 | `run_id` | emit-landing (`$GITHUB_RUN_ID`) | must equal the land job's `$GITHUB_RUN_ID` — an artifact from another run cannot be replayed |
 | `branch` | emit-landing (`branch` input) | `^[A-Za-z0-9._/-]{1,200}$`, no `..`, not `refs/…`, not the default branch (the land job's `default-branch` input, looked up with the read token when the event carries none; an empty default branch refuses the manifest rather than skip the rule), not on the land job's `refused-branches` list (`main` by default — so the inspect_ai fork's pristine `main`, which is not its default branch, is refused by the validator and not only by its ruleset), not `pr.base`; when `pr_number` is set, must equal that PR's live `headRefName`; when the run names no PR and the land job's `branch-prefix` is set, must start with it (an issue run's `claude/issue-N-`) — with no PR and no prefix the branch is agent-chosen within the bounds above. Under the land job's `refuse-bundle` (the reviewer) nothing is ever pushed to `branch`, so the shape, default-branch and refused-list rules do not apply — a fork-head PR's `main`, or any head ref git accepts, passes; only the head-ref pin / `branch-prefix` and a no-control-characters, ≤ 1000 chars check remain |
-| `start_sha`, `head_sha` | emit-landing | 40 lowercase hex; equal iff `has_bundle` is false |
+| `start_sha`, `head_sha` | emit-landing | 40 lowercase hex; equal iff `has_bundle` is false. When the manifest carries commits, `start_sha` **must equal the land job's `start-sha` input** — the run's start as the caller's TRUSTED context recorded it before the agent ran (the gate's API read of the base tip on an issue run, of the PR head's live tip on a PR run), which the agent job's own start step pinned itself to (claude.yml's Record base SHA, sync-branch's `head-sha`) — and is refused when that input is empty: `land` fetches `start_sha` from origin by SHA, which serves any reachable commit, so an agent job could otherwise name a fork PR's head or an old base commit as its start (Claude Security finding 4628444, criterion 2). A manifest without commits pushes nothing and its `start_sha` is not compared (the callers fall back to `github.sha` there when their own start step failed, so the error report still validates) |
 | `has_bundle` | emit-landing | boolean; when true `commits.bundle` must exist and its tip must be `head_sha` and descend from `start_sha` (checked by `land`, in an empty repo) |
 | `pr_number` | emit-landing (`pr-number` input) | positive integer or null; **must equal the land job's `pr-number` input** (null when that is empty) — the PR the run's trusted context names, so on a PR run an agent job cannot steer the push, replies, thread resolutions and hand-back at a PR of its choosing, nor drop the number to skip the head-ref rule and let `pr.open` adopt another PR (on a run that names no PR, `branch-prefix` is what keeps the push off the branches of PRs opened for other issues; a still-open PR from an earlier run on the same issue carries the prefix and is adopted). Required by `replies` and `resolve_threads` |
 | `issue_number` | emit-landing (`issue-number` input) | positive integer or null; **must equal the land job's `issue-number` input** the same way; where `land` posts the error report / hand-off / provenance when there is no PR |
@@ -214,13 +214,23 @@ failed early:
           manifest-extra: ${{ runner.temp }}/landing-extra.json   # composed by an earlier step
 ```
 
-Land job (`needs: agent`, `if: always()`, a fresh runner, **no checkout**):
+Land job (`needs: [gate, agent]`, `if: always()`, a fresh runner, **no
+checkout**):
 
 ```yaml
       - uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
           token: <the machine account's token — minted by the land job; the agent job never sees it>
           allowed-issue-repos: ${{ github.repository }}
+          # The run's start as the GATE read it before the agent job ran (the
+          # base tip an issue run branches from, the PR head's live tip a PR
+          # run checks out) — never the agent job's own record: a manifest
+          # that carries commits must name exactly it as start_sha, or the
+          # validator refuses it before the fetch; a land job given none
+          # refuses every bundle (finding 4628444, criterion 2). The agent
+          # job pins its own start to the same value before the agent runs
+          # (claude.yml's Record base SHA, sync-branch's `head-sha`).
+          start-sha: ${{ needs.gate.outputs.start_sha }}
           # The same expressions as above: the validator pins the manifest's
           # pr_number / issue_number to them, and they are the trusted
           # fallback target for the final report when the manifest never

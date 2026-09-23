@@ -1196,6 +1196,15 @@ jobs:
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
           user-email: ${{ needs.gate.outputs.git_user_email }}
+          # The head tip the gate read (its `head`: headRefOid on an open
+          # PR, the live branch tip on a closed-PR continuation) — the
+          # checkout above was by branch NAME, so a push between the gate
+          # and this step would otherwise start the round on code the gate
+          # never saw. The sync fails before merging instead (the agent is
+          # skipped and the round refunded), and the pre-merge start it
+          # records is the gate's — the start the land job is pinned to
+          # (finding 4628444, criterion 2).
+          head-sha: ${{ needs.gate.outputs.head }}
 
       # Provision the project environment BEFORE the fix agent starts, so its
       # pytest/ruff/pyright actually run — the same two steps the reviewer
@@ -2026,6 +2035,13 @@ jobs:
           # it minted (bot on the app path, User on the PAT).
           user-name: ${{ needs.gate.outputs.git_user_name }}
           user-email: ${{ needs.gate.outputs.git_user_email }}
+          # The head tip the gate read (its `head`), as in the fix job's
+          # copy: the checkout was by branch NAME, so a push between the gate
+          # and this step would otherwise start the round on code the gate
+          # never saw. The sync fails before merging instead, and the
+          # pre-merge start it records is the gate's — the start the land
+          # job is pinned to (finding 4628444, criterion 2).
+          head-sha: ${{ needs.gate.outputs.head }}
 
       # ---- Codex engine fix round (design/codex-engine.md) -------------------
       # No GitHub credentials in the codex sandbox, so the review feedback is
@@ -3026,6 +3042,12 @@ jobs:
           # before any PR code ran: the validator's pin for the manifest's
           # branch — no lookup of its own needed.
           pr-head-ref: ${{ needs.gate.outputs.head_branch }}
+          # The branch tip the gate read before any PR code ran (`head`):
+          # the run's start, which the fix job's sync required its checkout
+          # to be at — so a manifest that carries commits must name exactly
+          # it as start_sha, or the validator refuses it before the fetch
+          # (finding 4628444, criterion 2).
+          start-sha: ${{ needs.gate.outputs.head }}
           # The review-fix manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""

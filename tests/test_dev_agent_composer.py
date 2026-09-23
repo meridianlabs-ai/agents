@@ -130,9 +130,11 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
     return json.loads(extra.read_text()), res, landing, outputs
 
 
-def validate(landing, *args):
+def validate(landing, *args, start_sha):
+    # As the land composite calls it: `start-sha` is the gate's read of the
+    # run's start (an issue run's base tip), which the fixture's start is.
     return sh(sys.executable, str(VALIDATOR), "--dir", str(landing), "--repo", "meridianlabs-ai/agents",
-              "--run-id", "123", "--default-branch", "main", *args, check=False)
+              "--run-id", "123", "--default-branch", "main", "--start-sha", start_sha, *args, check=False)
 
 
 # --- issue runs: the PR is the land job's -------------------------------------
@@ -160,7 +162,7 @@ def test_issue_run_with_commit_opens_pr_and_validates(repo):
     assert "wrote=true" in output
     manifest = json.loads((landing / "manifest.json").read_text())
     assert manifest["has_bundle"] is True and manifest["pr"]["open"] is True
-    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-", start_sha=repo["start"])
     assert v.returncode == 0, v.stdout
 
 
@@ -197,7 +199,7 @@ def test_auto_kickoff_opens_pr_with_handback_and_validates(repo):
     assert "wrote=true" in output
     manifest = json.loads((landing / "manifest.json").read_text())
     assert manifest["has_bundle"] is True and manifest["handback"] is True and manifest["pr"]["labels"] == ["auto"]
-    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-", start_sha=repo["start"])
     assert v.returncode == 0, v.stdout
 
 
@@ -219,21 +221,21 @@ def test_pr_labels_the_gate_did_not_read_are_refused_by_the_land_job(repo):
     assert res.returncode == 0, res.stderr
     pin = ("--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-",
            "--allowed-pr-labels", gate_read)
-    assert validate(landing, *pin).returncode == 0
+    assert validate(landing, *pin, start_sha=repo["start"]).returncode == 0
     manifest = json.loads((landing / "manifest.json").read_text())
     for grown in (["engine:codex", "auto"], ["auto"], ["engine:other"]):
         manifest["pr"]["labels"] = grown
         (landing / "manifest.json").write_text(json.dumps(manifest))
-        v = validate(landing, *pin)
+        v = validate(landing, *pin, start_sha=repo["start"])
         assert v.returncode == 1 and "is not in the allowed pull-request labels (engine:codex)" in v.stdout, v.stdout
     # A gate read that failed (an empty allow-list) lands the composer's
     # empty label list and nothing else.
     manifest["pr"]["labels"] = []
     (landing / "manifest.json").write_text(json.dumps(manifest))
-    assert validate(landing, *pin[:-1], "").returncode == 0
+    assert validate(landing, *pin[:-1], "", start_sha=repo["start"]).returncode == 0
     manifest["pr"]["labels"] = ["auto"]
     (landing / "manifest.json").write_text(json.dumps(manifest))
-    assert validate(landing, *pin[:-1], "").returncode == 1
+    assert validate(landing, *pin[:-1], "", start_sha=repo["start"]).returncode == 1
 
 
 def test_claude_trigger_on_an_auto_labelled_issue_owes_the_handback(repo):
@@ -389,7 +391,7 @@ def test_renamed_branch_after_a_successful_run_is_an_error(repo):
     assert res.returncode == 0 and "wrote=true" in output
     manifest = json.loads((landing / "manifest.json").read_text())
     assert manifest["has_bundle"] is False and manifest["error"]["fail_run"] is True and "pr" not in manifest
-    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-", start_sha=repo["start"])
     assert v.returncode == 0, v.stdout
 
 
@@ -419,7 +421,7 @@ def test_detached_head_at_the_run_branch_tip_still_lands(repo):
     assert res.returncode == 0 and "wrote=true" in output
     manifest = json.loads((landing / "manifest.json").read_text())
     assert manifest["has_bundle"] is True
-    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
+    v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-", start_sha=repo["start"])
     assert v.returncode == 0, v.stdout
 
 

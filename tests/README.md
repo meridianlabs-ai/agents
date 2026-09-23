@@ -41,6 +41,22 @@ Testing a change).
   old base commit still names the file; Claude Security 4628444) — with a
   new branch cut from a configured non-default base (the fork's `main`
   under a `meridian` default) run through the lifted `fetch` step too.
+- `test_trusted_start.py` — the run's trusted start (Claude Security finding
+  4628444, criterion 2): the validator refuses a bundle whose `start_sha` is
+  not the land job's `start-sha`, or any bundle when that input is empty,
+  with the forged manifests run through the real script before any fetch
+  (a fork PR's head, an old base commit — both reachable on a local origin
+  and both refused); `sync-branch`'s `head-sha` pin and `claude.yml`'s
+  `Record base SHA`, lifted and run against local repos (a moved head fails
+  the sync before the merge; the base step fetches the live tip first —
+  actions/checkout leaves `origin/<base>` at the event commit, older than
+  the gate's read after a push in between — and a base that advanced keeps
+  the gate's tip, a rewritten base refuses, a failed fetch fails);
+  `claude.yml`'s gate `Record run start` step against a stub `gh`; and the
+  wiring — every land job that pushes passes its gate's read as
+  `start-sha`, every sync-branch call the same value as `head-sha`, the
+  reviewer passes none, and `examples/landing-smoke.yml` carries the
+  gate → checkout → land shape a direct `land@main` caller needs.
 - `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
   step, lifted the same way: a landed fix or merge-only attempt owes the
   re-review request and sets no stage (a hand-back is mid-flight; Review is

@@ -21,6 +21,7 @@ manifest. Usage:
         --allowed-issue-repos owner/name,owner/other \
         --event-pr-number "$EVENT_PR" --event-issue-number "$EVENT_ISSUE" \
         [--pr-head-ref <headRefName of that PR, from the API>] \
+        [--start-sha <the run's start, from the caller's trusted context>] \
         [--branch-prefix "claude/issue-$EVENT_ISSUE-"] [--refuse-bundle] \
         [--allowed-issue-labels ""] [--allowed-issue-assignees ransomr] \
         [--max-issues 1] [--refuse-pr] [--allow-review] \
@@ -59,6 +60,20 @@ composes it from trusted context — an issue run's `claude/issue-N-`), which
 keeps the push off the branches of PRs opened for other issues (an earlier
 run's still-open PR for the same issue carries the same prefix; reaching it
 is the adopt path, not a breach).
+
+`--start-sha` is the run's start SHA as the caller's TRUSTED context
+recorded it before the agent ran — the base tip an issue run branches from,
+or the PR head's live tip a PR run checks out, read in the gate job (Claude
+Security finding 4628444, criterion 2). A manifest that carries commits
+(`has_bundle`, or `head_sha` differing from `start_sha`) must name exactly
+that SHA as `start_sha`, and is refused when the land job was given none:
+the land job fetches `start_sha` from origin by SHA and accepts any
+reachable commit there, so without this pin an agent job could name a
+fork PR's head or an old base commit as its start and have the landing
+build on history the run never began from. Checked here, before the fetch.
+A manifest without commits pushes nothing, so its `start_sha` is not
+compared (the callers fall back to a well-formed placeholder there so the
+error report still lands).
 
 `--allowed-issue-labels`, `--allowed-issue-assignees` and `--max-issues`
 are per-caller policy on `issues[]`, enforced here — on the land job's fresh
@@ -238,6 +253,7 @@ class Validator:
         default_branch: str,
         allowed_issue_repos,
         pr_head_ref: str = "",
+        start_sha: str = "",
         refused_branches=(),
         event_pr_number: str = "",
         event_issue_number: str = "",
@@ -259,6 +275,7 @@ class Validator:
         self.refused_branches = {b.strip() for b in refused_branches if b.strip()}
         self.allowed_issue_repos = {r.strip().lower() for r in allowed_issue_repos if r.strip()}
         self.pr_head_ref = pr_head_ref
+        self.start_sha = start_sha.strip()
         self.event_pr_number = event_pr_number.strip()
         self.event_issue_number = event_issue_number.strip()
         self.branch_prefix = branch_prefix.strip()
@@ -528,6 +545,23 @@ class Validator:
             bundle = self.dir / "commits.bundle"
             if bundle.is_symlink() or not bundle.is_file():
                 self.err("manifest: has_bundle is true but commits.bundle is missing or not a regular file")
+        # The start the bundle builds on is the caller's trusted record of
+        # where the run began (--start-sha), never the agent job's word: the
+        # land job fetches it from origin by SHA, which serves every
+        # reachable commit — a fork PR's head, an old base commit — so a
+        # forged start_sha would let a bundle land history the run never
+        # began from. Only a manifest that carries commits is held to it:
+        # one without pushes nothing, and the callers fill in a placeholder
+        # there when their own start step failed so the error still lands.
+        # Under --refuse-bundle the commit claim is already refused above.
+        carries_commits = bool(has_bundle) or bool(start_sha and head_sha and head_sha != start_sha)
+        if carries_commits and not self.refuse_bundle:
+            if not self.start_sha:
+                self.err("manifest: the manifest carries commits but this land job was given no trusted start SHA (--start-sha); refusing the bundle")
+            elif not SHA_RE.fullmatch(self.start_sha):
+                self.err("manifest: the trusted start SHA this land job was given (--start-sha) is not 40 lowercase hex; refusing the bundle")
+            elif start_sha and start_sha != self.start_sha:
+                self.err(f"manifest: start_sha {start_sha} is not the run's start the caller's trusted context recorded ({self.start_sha}); refusing the bundle")
         if self.refuse_bundle:
             # The caller's agent never commits (the reviewer: contents:read,
             # git commit denied). Its land job must never become a push
@@ -783,6 +817,11 @@ def main(argv=None) -> int:
         help="headRefName of manifest.pr_number as read from the API (required when pr_number is set)",
     )
     ap.add_argument(
+        "--start-sha",
+        default="",
+        help="the run's start SHA from the caller's trusted context (the gate's read of the base tip on an issue run, of the PR head's live tip on a PR run); a manifest that carries commits must name exactly it as start_sha, and is refused when this is empty",
+    )
+    ap.add_argument(
         "--event-pr-number",
         default="",
         help="the PR the run's event names (trusted); manifest.pr_number must equal it, and be null when it is empty",
@@ -870,6 +909,7 @@ def main(argv=None) -> int:
             default_branch=args.default_branch,
             allowed_issue_repos=args.allowed_issue_repos.split(","),
             pr_head_ref=args.pr_head_ref,
+            start_sha=args.start_sha,
             refused_branches=args.refused_branches.split(","),
             event_pr_number=args.event_pr_number,
             event_issue_number=args.event_issue_number,
