@@ -922,5 +922,9 @@ results against the invariant each one tests.
   that touch paths a later job executes or loads as configuration
   (`.github/`, build and dependency configuration, agent instructions and
   settings; finding 4628446, criterion 2 — section 3.4), so an agent can no
-  longer plant those hooks for the next run; a maintainer's own push to the
-  branch still can, as before.
+  longer add or change those entry points for the next run. It can still
+  change an ordinary file that unchanged configuration executes (a script
+  the `claude-setup` composite or a settings hook runs, a module the build
+  backend imports), which the next Claude-engine run executes as `runner`
+  before the agent (SECURITY.md → Guarantees); a maintainer's own push to
+  the branch still can do either, as before.

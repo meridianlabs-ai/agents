@@ -238,11 +238,12 @@ landing_failure_hint() {
 #     `uv sync` (uv.lock), pip requirements files, or `pnpm install`, which
 #     runs every package.json lifecycle script, .pnpmfile.cjs hooks and
 #     yarn's .yarn/ plugins, from the registries .npmrc / .yarnrc name.
-# What the list cannot see: a module a build backend imports from the tree
-# it builds (a setup.py's own imports, a hatch build hook's file), and files
-# a caller's own claude-setup or recipe reads beyond these — a change to
-# either still lands. Links and CLAUDE.md imports out of these paths are
-# followed by protected_reach below.
+# What the list cannot see: ordinary files UNCHANGED configuration executes
+# — a script a claude-setup step, a settings hook or an MCP server command
+# runs, a build backend on `backend-path`, a module a setup.py or build hook
+# imports, any file a caller's recipe reads — an agent's change to one still
+# lands (SECURITY.md → Guarantees states the residual). Links and CLAUDE.md
+# imports out of these paths are followed by protected_reach below.
 # shellcheck disable=SC2034  # read by the land composite's `workflows` step
 PROTECTED_PATHSPECS=(
   .github
@@ -263,11 +264,15 @@ PROTECTED_PATHSPECS=(
 # (relative to the link's directory) substituted in place, `.` dropped, `..`
 # taking the resolved prefix back a level. Prints, NUL-terminated, every
 # symlink location the walk passes through, then the path it ends at (which
-# need not exist). Stops printing when the walk leaves the tree — an absolute
-# target, `..` past the root — or follows more than 40 links (a loop): no
-# bundle can change what lies outside the tree. Returns 1 on a failed read.
+# need not exist) — `.` when that is the repository root, whose pathspec
+# covers the whole tree (review round 1: `.claude/rules -> ..` exposes every
+# file as a rule) — and sets RTP_END to that end. Stops printing, with
+# RTP_END empty, when the walk leaves the tree — an absolute target, `..`
+# past the root — or follows more than 40 links (a loop): no bundle can
+# change what lies outside the tree. Returns 1 on a failed read.
 resolve_tree_path() {
   local rev="$1" rest="$2" at="" comp cand out oid target hops=0
+  RTP_END=""
   while [ -n "$rest" ]; do
     comp="${rest%%/*}"
     if [ "$comp" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
@@ -293,7 +298,36 @@ resolve_tree_path() {
       at="$cand"
     fi
   done
-  [ -z "$at" ] || printf '%s\0' "$at"
+  RTP_END="${at:-.}"
+  printf '%s\0' "$RTP_END"
+}
+
+# logical_names PATH — sets LN_NAMES to PATH and the names it is also
+# reachable under through the directory links protected_reach has resolved
+# so far (LINK_ENDS[i] reached from LINK_AT[i]; `.` is the root): a file
+# under `.agents/` read through `.claude -> .agents` is `.claude/...` to
+# Claude Code, and is classified by that name (review round 1). Capped at
+# 20 names — a link to the root makes the names endless.
+logical_names() {
+  local i=0 k n r l c y seen
+  LN_NAMES=("$1")
+  while [ "$i" -lt "${#LN_NAMES[@]}" ] && [ "${#LN_NAMES[@]}" -lt 20 ]; do
+    n="${LN_NAMES[$i]}"
+    k=0
+    while [ "$k" -lt "${#LINK_ENDS[@]}" ]; do
+      r="${LINK_ENDS[$k]}" l="${LINK_AT[$k]}" c=""
+      if [ "$r" = "." ]; then c="$l/$n"
+      elif [ "$n" = "$r" ]; then c="$l"
+      else case "$n" in "$r"/*) c="$l/${n#"$r"/}" ;; esac
+      fi
+      k=$((k + 1))
+      [ -n "$c" ] || continue
+      seen=""
+      for y in "${LN_NAMES[@]}"; do [ "$y" != "$c" ] || { seen=1; break; }; done
+      [ -n "$seen" ] || LN_NAMES+=("$c")
+    done
+    i=$((i + 1))
+  done
 }
 
 # protected_reach REV PATHSPEC... — the in-tree paths REV's entries under
@@ -302,16 +336,20 @@ resolve_tree_path() {
 # end), and the `@path` imports Claude Code expands in instruction files —
 # CLAUDE.md, CLAUDE.local.md, AGENTS.md, anything under .claude/rules/, and
 # every file reached by an import — resolved relative to the importing
-# file (`~/` and absolute imports are outside the tree). To a fixed point:
-# what a reached path contains is walked too, so a link inside a linked
-# directory or an import of an import is followed; more than 20 rounds
-# fails. Over-matching is the safe direction: an `@` word that is not an
-# import (a mention) names a path that is normally absent, and the imports
-# of code spans are taken too. Returns 1 on a failed read.
+# file. A file is classified by every name it is reachable under
+# (logical_names: `.agents/rules/x.md` behind `.claude -> .agents` is a
+# rule), and an import is resolved against the directory of each of those
+# names as well as its physical one; `~/` and absolute imports are outside
+# the tree. To a fixed point: what a reached path contains is walked too, so
+# a link inside a linked directory or an import of an import is followed;
+# more than 20 rounds fails. Over-matching is the safe direction: an `@` word
+# that is not an import (a mention) names a path that is normally absent,
+# and the imports of code spans are taken too. Returns 1 on a failed read.
 protected_reach() {
-  local rev="$1" empty meta path mode oid dir content round=0 added imp seen f g x y _
+  local rev="$1" empty meta path mode oid content round=0 added imp seen f g x y d n _
   shift
-  local -a specs=("$@") found=() imported=() cands=()
+  local -a specs=("$@") found=() imported=() cands=() dirs=()
+  LINK_ENDS=() LINK_AT=()
   empty=$(git hash-object -t tree /dev/null) || return 1
   f=$(mktemp) && g=$(mktemp) || return 1
   while :; do
@@ -326,29 +364,46 @@ protected_reach() {
     # shellcheck disable=SC2094  # the loop removes its input only on the way out (return 1)
     while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
       read -r _ mode _ oid _ <<<"$meta"
+      logical_names "$path"
       imp=""
-      case "/$path" in
-        */CLAUDE.md | */CLAUDE.local.md | */AGENTS.md | */.claude/rules/*) imp=1 ;;
-        *) for x in ${imported[@]+"${imported[@]}"}; do [ "$x" != "$path" ] || { imp=1; break; }; done ;;
-      esac
+      for n in "${LN_NAMES[@]}"; do
+        case "/$n" in */CLAUDE.md | */CLAUDE.local.md | */AGENTS.md | */.claude/rules/*) imp=1; break ;; esac
+      done
+      [ -n "$imp" ] || for x in ${imported[@]+"${imported[@]}"}; do [ "$x" != "$path" ] || { imp=1; break; }; done
       cands=()
       if [ "$mode" = "120000" ]; then
         # A link's resolution; an instruction file's link target is read
-        # for imports like the file it stands in for.
+        # for imports like the file it stands in for, and what lies under a
+        # directory link is known by the link's name too.
         resolve_tree_path "$rev" "$path" >"$g" || { rm -f "$f" "$g"; return 1; }
+        if [ -n "$RTP_END" ]; then
+          seen=""
+          for x in ${LINK_AT[@]+"${LINK_AT[@]}"}; do [ "$x" != "$path" ] || { seen=1; break; }; done
+          # A new name for a directory: walk again, so files listed before
+          # the link in this round are classified by it too.
+          [ -n "$seen" ] || { LINK_ENDS+=("$RTP_END"); LINK_AT+=("$path"); added=1; }
+        fi
         while IFS= read -r -d '' x; do
           cands+=("$x")
           [ -z "$imp" ] || imported+=("$x")
         done <"$g"
       elif [ -n "$imp" ]; then
         content=$(git cat-file blob "$oid") || { rm -f "$f" "$g"; return 1; }
-        case "$path" in */*) dir="${path%/*}/" ;; *) dir="" ;; esac
+        dirs=()
+        for n in "${LN_NAMES[@]}"; do
+          case "$n" in */*) d="${n%/*}/" ;; *) d="" ;; esac
+          seen=""
+          for x in ${dirs[@]+"${dirs[@]}"}; do [ "$x" != "$d" ] || { seen=1; break; }; done
+          [ -n "$seen" ] || dirs+=("$d")
+        done
         while IFS= read -r y; do
           y="${y#"${y%%[![:space:]]*}"}"
           y="${y#@}"
           case "$y" in "" | /* | "~"*) continue ;; esac
-          resolve_tree_path "$rev" "$dir$y" >"$g" || { rm -f "$f" "$g"; return 1; }
-          while IFS= read -r -d '' x; do cands+=("$x"); imported+=("$x"); done <"$g"
+          for d in "${dirs[@]}"; do
+            resolve_tree_path "$rev" "$d$y" >"$g" || { rm -f "$f" "$g"; return 1; }
+            while IFS= read -r -d '' x; do cands+=("$x"); imported+=("$x"); done <"$g"
+          done
         done < <(printf '%s\n' "$content" | grep -oE '(^|[[:space:]])@[^[:space:]]+' || true)
       fi
       for x in ${cands[@]+"${cands[@]}"}; do

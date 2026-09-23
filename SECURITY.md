@@ -237,10 +237,17 @@ text are checked by the tests under `tests/`.
   `setup.py`, `setup.cfg`, `uv.lock`, `uv.toml`, `.python-version`,
   `requirements*.txt`, `package.json`, the npm, pnpm and yarn lockfiles,
   `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc`,
-  `.yarnrc.yml`, `.yarn/`). The list names entry points, not everything
-  they reach: a module a build backend imports from the tree it builds (a
-  `setup.py`'s own imports, a hatch build hook's file) and files a caller's
-  own `claude-setup` or provisioning recipe reads beyond these still land.
+  `.yarnrc.yml`, `.yarn/`). Symlink targets and `CLAUDE.md` `@path`
+  imports reached from these paths are refused too. **Not covered:** the
+  list names entry points and loaded configuration, not the code they run.
+  An agent's edit to an ordinary file that UNCHANGED configuration executes
+  still lands: a script a `claude-setup` step, a settings hook or an MCP
+  server command runs, a build backend on `backend-path`, a module a
+  `setup.py` or build hook imports, any file a caller's recipe reads. The
+  next automated run then executes it during provisioning or agent start —
+  as the codex user on codex jobs (finding 4628446, criterion 1), as
+  `runner` on Claude jobs, where the agent itself already runs the tree's
+  code (tests, `conftest.py`) as `runner`.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The

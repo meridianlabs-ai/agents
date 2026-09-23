@@ -1729,6 +1729,63 @@ def test_imports_of_a_linked_claude_md_are_followed(repos):
     assert outputs["files"] == "`docs/rules.md`"
 
 
+@pytest.mark.parametrize("links,files", [
+    # A linked `.claude` root (ts-mono's `.claude -> .agents`): the rule is
+    # read as `.claude/rules/policy.md`.
+    ({".claude": ".agents"}, {".agents/rules/policy.md": "@../../payload.md\n"}),
+    # A linked rules directory.
+    ({".claude/rules": "../shared-rules"}, {"shared-rules/policy.md": "@../payload.md\n"}),
+])
+def test_imports_of_rules_behind_a_directory_link_are_followed(repos, links, files):
+    # Review round 1, B2: the rule file is classified by the name Claude
+    # Code reads it under, not only its physical one, so its import of an
+    # ordinary file protects that file.
+    r = repos
+    for path, text in files.items():
+        commit_path(r, path, text)
+    commit_path(r, "payload.md", "safe\n")
+    for path, target in links.items():
+        commit_link(r, path, target)
+    on_base(r)
+    commit_path(r, "payload.md", "hostile instructions\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`payload.md`"
+
+
+@pytest.mark.parametrize("link,path", [(".claude/rules", "policy.md"), (".claude/skills", "skill/SKILL.md")])
+def test_protected_link_to_the_repository_root_protects_the_whole_tree(repos, link, path):
+    # Review round 1, B3: `.claude/rules -> ..` exposes every file of the
+    # tree as a rule (or a skill); resolving back to the root must protect
+    # the root's descendants, not nothing.
+    r = repos
+    commit_path(r, path, "safe\n")
+    commit_link(r, link, "..")
+    on_base(r)
+    commit_path(r, path, "hostile\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == f"`{path}`"
+
+
+def test_protected_link_leaving_the_tree_protects_only_the_link(repos):
+    # The outside-tree control: `.claude/skills -> ../../elsewhere` reaches
+    # nothing a bundle can change, so ordinary work beside it lands.
+    r = repos
+    commit_link(r, ".claude/skills", "../../elsewhere")
+    on_base(r)
+    commit_path(r, "src/agent.py")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+
+
 def test_unimported_docs_and_mentions_in_code_do_not_protect_ordinary_files(repos):
     # An e-mail address or a backticked `@name` is not an import, and a doc
     # nobody imports is ordinary.
@@ -1784,6 +1841,8 @@ def resolve(work, path):
     ("./a/../a/b", ["a/b"]),
     (".claude/skills/x", [".claude/skills", "skills/x"]),
     ("hop/x", ["hop", "via", "skills/x"]),          # a chain of links
+    (".claude/rules", [".claude/rules", "."]),      # back to the root: the whole tree
+    ("toroot/a/b", ["toroot", "a/b"]),
     ("up/x", ["up"]),                              # `..` past the root: outside the tree
     ("abs/x", ["abs"]),                            # absolute target: outside the tree
     ("loop1", ["loop1", "loop2"] * 20 + ["loop1"]),  # more than 40 links: a loop
@@ -1791,7 +1850,7 @@ def resolve(work, path):
 ])
 def test_resolve_tree_path(tmp_path, path, expected):
     work = tree_repo(tmp_path, files={"skills/x": "x\n", "a/b": "b\n"},
-                     links={".claude/skills": "../skills", "hop": "via", "via": "skills",
+                     links={".claude/skills": "../skills", ".claude/rules": "..", "toroot": ".", "hop": "via", "via": "skills",
                             "up": "../outside", "abs": "/etc", "loop1": "loop2", "loop2": "loop1"})
     assert resolve(work, path) == expected
 
