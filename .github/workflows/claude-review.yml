@@ -1426,7 +1426,8 @@ jobs:
       #      action's non-executed copy of the PR's sensitive paths) and the
       #      action's restore roots may differ.
       #   2. A restore root that differs from the snapshot must be the base
-      #      branch's, object for object: the action's restoreConfigFromBase
+      #      branch's, tree entry for tree entry (mode, type and object id —
+      #      a file and a symlink can share a blob): the action's restoreConfigFromBase
       #      deletes `.claude`, `.mcp.json`, `.claude.json`, `.gitmodules`,
       #      `.ripgreprc`, `CLAUDE.md`, `CLAUDE.local.md` and `.husky` and
       #      checks them out from `origin/<base>` (the PR's base ref on
@@ -1450,8 +1451,10 @@ jobs:
       #      following symlinks, and every entry is resolved with the
       #      filesystem's own semantics (`os.path.realpath`, so a link
       #      followed by `..` resolves as the kernel would); an entry that
-      #      resolves outside the checkout or into `.git`, or a link with an
-      #      absolute target, fails. Dangling and looping links reach nothing
+      #      resolves outside the checkout, into `.git`, into the action's
+      #      `.claude-pr/` copy (exempt from step 1) or into an embedded
+      #      repository (hashed as a gitlink, its files unseen), or a link
+      #      with an absolute target, fails (review round 6). Dangling and looping links reach nothing
       #      (the callers' `CLAUDE.md -> AGENTS.md` dangles after the strip's
       #      rename).
       # No snapshot, no verification: the step fails. git runs pinned like
@@ -1515,9 +1518,12 @@ jobs:
           verified=()
           for top in .claude .mcp.json .claude.json .gitmodules .ripgreprc CLAUDE.md CLAUDE.local.md .husky; do
             case "$roots_changed" in *" $top "*) ;; *) continue ;; esac
-            cur=$(git rev-parse -q --verify "$now:$top" 2>/dev/null)
+            # The whole tree entry — mode, type and object id — not the id
+            # alone: a regular file and a symlink can share one blob (review
+            # round 6), and an executable bit is a mode.
+            cur=$(git --literal-pathspecs ls-tree -z "$now" -- "$top" 2>/dev/null | tr '\0' '\n')
             want=""
-            [ -z "$base" ] || want=$(git rev-parse -q --verify "$base:$top" 2>/dev/null)
+            [ -z "$base" ] || want=$(git --literal-pathspecs ls-tree -z "$base" -- "$top" 2>/dev/null | tr '\0' '\n')
             if [ -n "$base" ] && [ "$cur" = "$want" ]; then
               if [ -n "$cur" ]; then
                 echo "root ./$top matches origin/$BASE_REF byte for byte: claude-code-action's base-branch restore, not a re-plant"
@@ -1559,8 +1565,23 @@ jobs:
           import os, sys
           ws = os.path.realpath(".")
           gitdir = os.path.join(ws, ".git")
+          claudepr = os.path.join(ws, ".claude-pr")
+          def under(p, d):
+              return p == d or p.startswith(d + os.sep)
           def inside(p):
-              return (p == ws or p.startswith(ws + os.sep)) and not (p == gitdir or p.startswith(gitdir + os.sep))
+              # Inside the checkout, and in storage the tree comparison
+              # verified: not .git, not the action's .claude-pr/ copy (its
+              # changes are exempt from the comparison), and not inside an
+              # embedded repository (hashed as a gitlink, its working files
+              # unseen) — review round 6.
+              if not under(p, ws) or under(p, gitdir) or under(p, claudepr):
+                  return False
+              d = p
+              while d != ws and under(d, ws):
+                  if os.path.lexists(os.path.join(d, ".git")):
+                      return False
+                  d = os.path.dirname(d)
+              return True
           seen, bad = set(), []
           def visit(rel, depth):
               path = os.path.join(ws, rel)
@@ -1581,7 +1602,7 @@ jobs:
           PY
             if python3 "$reachpy" "${reach[@]}" >"$reachout"; then
               while IFS= read -r -d '' p; do
-                echo "$(printf '%q' "$p") is reached through a verified configuration root and resolves outside the checkout or into .git, or is an absolute link"
+                echo "$(printf '%q' "$p") is reached through a verified configuration root and resolves outside the verified checkout (outside it, into .git or .claude-pr/, or into an embedded repository), or is an absolute link"
                 listed+=("$p")
               done <"$reachout"
             else

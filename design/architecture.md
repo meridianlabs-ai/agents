@@ -1341,7 +1341,8 @@ now compose, each holding on its own:
   remaining sensitive paths to `.claude-pr/` and restores `.claude`,
   `.mcp.json`, `.claude.json`, `.gitmodules`, `.ripgreprc`, `CLAUDE.md`,
   `CLAUDE.local.md` and `.husky` from `origin/<base>`. A changed restore
-  root must equal the base's object for object, and never passes when that
+  root must equal the base's tree entry — mode, type and object id, since a
+  file and a symlink can share a blob — and never passes when that
   ref is absent (external mode restores nothing and changes nothing). The
   strip's own predicates then run: every `CLAUDE.md`, `CLAUDE.local.md`,
   `AGENTS.md`, `.claude` or `.mcp.json` must be a verified restore root or
@@ -1349,7 +1350,9 @@ now compose, each holding on its own:
   stay inside the tree the comparison covered: the roots are walked
   following symlinks and every entry resolved with the filesystem's own
   semantics (`os.path.realpath`), and an entry resolving outside the
-  checkout or into `.git`, or a link with an absolute target, fails;
+  checkout, into `.git`, into the action's `.claude-pr/` copy (exempt from
+  the comparison) or into an embedded repository (hashed as a gitlink, its
+  files unseen), or a link with an absolute target, fails;
   dangling and looping links reach nothing (the callers' `CLAUDE.md ->
   AGENTS.md` dangles after the strip's rename). Any failure — or a missing
   snapshot — fails the step, the landing prep is gated on it (nothing the

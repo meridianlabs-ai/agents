@@ -580,6 +580,66 @@ def test_strip_snapshot_is_raw_and_leaves_the_checkout_as_it_was(tmp_path):
     assert git("diff", "--cached", "--quiet", cwd=ws, check=False).returncode == 0
 
 
+def test_replant_check_compares_the_restore_roots_mode_and_type(tmp_path):
+    # Review round 6 (B8): the object id alone let a symlink whose target
+    # bytes equal the base file's contents pass, and an executable bit.
+    base = dict(BASE_FILES, **{"CLAUDE.md": "target", "target": "trusted\n"})
+    ws = make_checkout(tmp_path, base_files=base)
+    strip(ws)
+    restore_from_base(ws)
+    assert replant(ws).returncode == 0
+    # Same blob (the link's target bytes are the file's contents), other type;
+    # `target` itself is unchanged, so only the entry's type differs.
+    (ws / "CLAUDE.md").unlink()
+    (ws / "CLAUDE.md").symlink_to("target")
+    r = replant(ws)
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./CLAUDE.md — the review is withheld")
+    ws2 = make_checkout(tmp_path / "two")
+    strip(ws2)
+    restore_from_base(ws2)
+    (ws2 / ".mcp.json").chmod(0o755)
+    r = replant(ws2)
+    assert r.returncode == 1 and r.stdout.splitlines()[-1].endswith(": ./.mcp.json — the review is withheld")
+
+
+def test_replant_check_rejects_reach_into_unverified_storage(tmp_path):
+    # Review round 6 (B7): the action's .claude-pr/ copy is exempt from the
+    # tree comparison and an embedded repository is hashed as a gitlink, so
+    # content reached there was never verified. Direct root links and a
+    # skill link behind the callers' `.claude/skills -> ../skills` alike.
+    base = {k: v for k, v in BASE_FILES.items() if not k.startswith(".claude/") and k != "CLAUDE.md"}
+    base["skills/example/SKILL.md"] = "skill\n"
+    base[".claude/settings.json"] = "{}\n"
+    cases = (
+        ({"CLAUDE.md": ".claude-pr/content"}, ".claude-pr/content", "./CLAUDE.md"),
+        ({"CLAUDE.md": "payload/data"}, "payload/data", "./CLAUDE.md"),
+        ({".claude/skills": "../skills", "skills/pr": "../.claude-pr/payload"}, ".claude-pr/payload/SKILL.md", "./.claude/skills/pr"),
+        ({".claude/skills": "../skills", "skills/pr": "../payload"}, "payload/data", "./.claude/skills/pr"),
+    )
+    for n, (links, referent, reported) in enumerate(cases):
+        head = {k: v for k, v in HEAD_FILES.items() if k != "CLAUDE.md" and not k.startswith(".claude/")}
+        ws = make_checkout(tmp_path / str(n), base_files=base, head_files=head,
+                           base_links={k: v for k, v in links.items() if k != "skills/pr"})
+        if "skills/pr" in links:
+            (ws / "skills/pr").symlink_to(links["skills/pr"])
+            git("add", "-A", cwd=ws)
+            git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pr link", cwd=ws)
+        if referent.startswith("payload/"):
+            (ws / "payload").mkdir()
+            git("init", "-q", cwd=ws / "payload")
+            (ws / "payload/data").write_text("inside an embedded repository\n")
+            git("add", "-A", cwd=ws / "payload")
+            git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "embedded", cwd=ws / "payload")
+        strip(ws)
+        if referent.startswith(".claude-pr/"):
+            (ws / referent).parent.mkdir(parents=True, exist_ok=True)
+            (ws / referent).write_text("in the action's copy\n")
+        restore_from_base(ws)
+        r = replant(ws)
+        assert r.returncode == 1, (links, r.stdout)
+        assert f"{reported} is reached through a verified configuration root" in r.stdout, (links, r.stdout)
+
+
 def test_replant_check_allows_the_clis_empty_cc_writes_dir(tmp_path):
     # Observed on Linux with the pinned CLI: Claude Code creates an empty
     # `.claude/.cc-writes/` in its working directory on every run, outside
