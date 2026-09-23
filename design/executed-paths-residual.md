@@ -160,9 +160,27 @@ v1.0.232, 2026-09-23) and the Agent SDK it depends on
   present, with `GITHUB_TOKEN: <App token>` in its env
   (install-mcp-server.ts:114-121). In agent mode it is present only when
   comment tools are allowed. `github_inline_comment` and `github_file_ops`
-  carry the App token the same way. `github_ci` carries the job token.
+  carry the App token the same way. `github`, added when `claude_args`
+  allow `mcp__github` tools, runs `docker run … github-mcp-server` with the
+  App token as `env.GITHUB_PERSONAL_ACCESS_TOKEN`
+  (install-mcp-server.ts:213-229). `github_ci` carries the job token
+  and runs `bun` by name (install-mcp-server.ts:197-208).
   `/proc/<pid>/cmdline` is world-readable, so any local user can read that
   argv while the process lives.
+- **Completion.** The action breaks out of the SDK iterator on the first
+  `result` message (run-claude-sdk.ts:198). The SDK's cleanup then waits at
+  most about 2 seconds for the CLI process to exit before the action goes
+  on to its tracking-comment update, branch cleanup and step outputs. So
+  the action does not wait for the spawned process to finish. The reviewer
+  measured this with SDK 0.3.280 and a synthetic CLI: `query()` returned
+  after 2,237 ms while simulated post-exit work was still running.
+- **Post-steps after the CLI.** The composite runs `Post buffered inline
+  comments` (action.yml:431, unless `classify_inline_comments` is
+  `'false'`) with the App token. It reads the fixed path
+  `/tmp/inline-comments-buffer.jsonl` with no owner check, and without an
+  `ANTHROPIC_API_KEY` (our WIF jobs) posts every record whose `confirmed`
+  is not false (post-buffered-inline-comments.ts:1-16). Any local user can
+  create that file. `Revoke app token` follows (`curl`, found by `PATH`).
 - **Git.** `configureGitAuth` writes the App token into `remote.origin.url`
   (git-config.ts:132). Prepare runs git as `runner` in the workspace:
   `setupBranch` fetches and checks out (branch.ts:214-216, 315-337),
@@ -220,14 +238,20 @@ because `/home/runner` is 0750.
   `[tool.inspect_flow] inspect-reconciled-version` in `pyproject.toml` and
   run `uv lock --upgrade`. #149 refuses both paths, so every run is refused.
 - **inspect_flow `inspect-ai-main-failure.yml`.** Same shape (`Start the fix
-  branch` from the default branch). Its fixes often touch `pyproject.toml`
-  and `uv.lock`, which #149 refuses.
-- **ts-mono `dependabot-fix.yml`.** It edits `package.json` overrides and
-  `pnpm-lock.yaml`, so #149 refuses every run. When `continuing`, it checks
-  out its own earlier agent branch and runs `pnpm install
-  --frozen-lockfile` and claude-code-action as `runner`. That is this
-  residual inside a direct caller, and a fix in the reusable workflows does
-  not reach it.
+  branch` from the default branch). #149 refuses the runs whose fix touches
+  `pyproject.toml` or `uv.lock` (a version pin, a re-lock). A source-only
+  fix still lands.
+- **ts-mono `dependabot-fix.yml`** (`origin/main` 53250ae). It edits
+  `package.json` overrides and `pnpm-lock.yaml`, so #149 refuses every run.
+  When `continuing`, it checks out its own earlier agent branch and merges
+  the default branch (195-230). It skips its runner-side `pnpm install` on
+  that path (260). The claude-code-action step (267, as `runner`, with the
+  job token passed as `github_token`, so no App token exists in that job)
+  then runs `pnpm install`, build and test itself. That is this residual
+  inside a direct caller, in the agent step itself, and a fix in the
+  reusable workflows does not reach it. The batch branch's PR is also open
+  to the reusable workflows (`@claude` follow-ups, reviews), which land on
+  the same branch the next continuation executes.
 - **actions `triage-test-failures.yml`.** `refuse-bundle: "true"`, so no
   path refusal applies. It already runs its agent isolated.
 
@@ -328,7 +352,7 @@ Each of the four Claude jobs changes from checkout → sync → provision
 | 3 | `provision-fallback` with `user: claude-agent`, `recipe: inputs.provision` | claude-agent | replaces `claude-setup` and the runner fallback |
 | 4 | `reclaim-codex-workspace` with `user: claude-agent` (pre-agent) | runner | new position: before the action |
 | 5 | `claude-agent-launcher` | runner (sudo) | new composite |
-| 6 | claude-code-action with `path_to_claude_code_executable` | runner (action); CLI as claude-agent | input added |
+| 6 | claude-code-action with `path_to_claude_code_executable` and `classify_inline_comments: "false"` | runner (action); CLI as claude-agent | two inputs added |
 | 7 | `reclaim-codex-workspace` with `user: claude-agent` (post-agent) | runner | new; first step after the action |
 | 8 | `reset-origin-url` | runner | now after 7 |
 | 9 | `import-codex-final` in directory mode (landing and review files) | runner | composite gains a directory mode |
@@ -347,8 +371,17 @@ unchanged for any user. It does the following:
 - adds the system user, with the same cross-enrolment of the user and
   `runner` groups;
 - runs `assert-runner-only-path` with `protect: "true"` for that user;
-- makes the group grant with setgid;
-- sets `safe.directory` in the user's global git config.
+- makes the group grant with setgid, unless the new `grant: "none"` input
+  is set (the reviewer's fork and external heads; Per-workflow notes);
+- sets `safe.directory`.
+
+For `codex` the `safe.directory` entry stays in the user's global git
+config, as now. For `claude-agent` it goes in the root-owned system config
+(`git config --system --add safe.directory <workspace>`). The reviewer's
+sandbox denies reads of the user's `~/.gitconfig` (claude-review.yml:1295),
+and git as `claude-agent` over the runner-owned checkout would otherwise
+refuse it as dubious ownership. The system file is not the agent's to
+change, and the entry names only the checkout.
 
 The codex-only parts are guarded on `user == 'codex'`: the codex home
 bootstrap `codex-home.sh`, the `$RUNNER_TEMP/codex` output dir and the
@@ -455,17 +488,27 @@ env and the CLI argv) has two paths:
 The launch path, in order:
 
 1. **Rewrite the argv.** Parse the arguments as data and never `eval`.
-   Rewrite the one `--mcp-config` value with `jq`: drop every server whose
-   `env.GITHUB_TOKEN` equals the App token (`$GH_TOKEN`).
-   That removes `github_comment`, `github_inline_comment` and
-   `github_file_ops` and keeps `github_ci` (job token). Refuse an argv that
-   starts with `plugin` (we pass no plugins; installing one would run as the
-   agent without this path's preparation). Append `--settings
+   Rewrite the one `--mcp-config` value with `jq`. Drop the five servers
+   the action composes (`github_comment`, `github_inline_comment`,
+   `github_file_ops`, `github`, `github_ci`) by name. Also drop any other
+   server whose JSON contains the App token value (`$GH_TOKEN`) as a
+   substring anywhere: env, args or command. Dropping `github_ci` as well,
+   although it carries only the job token, avoids trusting a `bun` path for
+   the agent. The agent reads CI through `gh` with the job token (`actions:
+   read`) as it already can. A parse failure aborts the launch. Refuse an
+   argv that starts with `plugin` (we pass no plugins; installing one would
+   run as the agent without this path's preparation). Append `--settings
    /opt/meridian-agent/run/settings.json`.
+
+   **Then check, and refuse to launch** (the wrapper exits non-zero and the
+   agent never starts) if the App token value occurs anywhere in the
+   rewritten argv or the built env. The check is by value, whatever key or
+   server it sits under, so a server or variable a future `@v1` adds cannot
+   carry it through unnoticed.
 2. **Build the agent env as an allow-list**, as `env -i` input:
    - `HOME=/home/claude-agent`;
    - `PATH`: the provisioning `bin` dirs, the real CLI's dir and the
-     system dirs;
+     system dirs (no `bun`: no action MCP server is started);
    - `LANG`;
    - the `CLAUDE_CODE_*`, `DETAILED_PERMISSION_MESSAGES` and
      `GITHUB_ACTION_INPUTS` values the action set;
@@ -506,32 +549,89 @@ The launch path, in order:
    commit.
 6. **Exec the supervisor.** Write the rewritten argv and env NUL-separated
    to a 0600 file under a runner-only 0700 dir, then `exec env -i
-   PATH=/usr/bin:/bin /bin/bash /opt/meridian-agent/bin/claude-supervise
-   <file>`. After the exec, `/proc/<pid>/cmdline` and `environ` show only
-   that. No `claude-agent` process exists before this point, so none could
-   read the original argv with the App token in its `--mcp-config`.
+   PATH=/usr/bin:/bin /usr/bin/python3 -I
+   /opt/meridian-agent/bin/claude-supervise <file>`. After the exec,
+   `/proc/<pid>/cmdline` and `environ` show only that. No `claude-agent`
+   process exists before this point, so none could read the original argv
+   with the App token in its `--mcp-config`.
 
-**The supervisor** reads the file and runs `sudo -n -u claude-agent -H --
-env -i <env…> <real claude> <args…>` as its child, with stdio inherited
-(the SDK's stream-json pipes). It forwards `TERM` and `INT` to the child
-and waits. Then:
+**The supervisor** is a small root-owned Python script (the image's
+`/usr/bin/python3`, isolated mode, stdlib only). It sits between the SDK
+and the CLI rather than handing the CLI the SDK's pipes, because it has to
+be a **completion barrier**. The action resumes privileged runner-side work
+as soon as it reads the CLI's `result` message, and does not wait for the
+process to exit (Current behaviour → Completion). That work is the
+tracking-comment update, the branch cleanup, its step outputs and the
+buffered-comment and revoke post-steps. So the supervisor controls when
+that message arrives:
 
-- it kills every `claude-agent` process until a pass finds none;
-- it runs `reclaim.sh` with the fresh snapshot, so the action's own
-  post-CLI code runs no git over a `.git` the agent owns;
-- it removes the ACL entries and the agent's config dir;
-- it exits with the CLI's status.
+1. It starts `sudo -n -u claude-agent -H -- env -i <env…> <real claude>
+   <args…>` with its own pipes. It relays the SDK's stdin to the child's
+   stdin and the child's stderr through unchanged. It relays the child's
+   stdout line by line: the CLI's stream-json output is one JSON object per
+   line.
+2. While relaying stdout it parses each line. It forwards every message
+   except one whose `type` is `result`, which it holds.
+3. When it holds the result, or the child's stdout ends without one, it
+   closes the child's stdin. The CLI in streaming-input mode then has no
+   further turn to wait for and exits, so withholding the result cannot
+   deadlock it. The supervisor waits up to 30 seconds for the child to
+   exit.
+4. Whatever happened, it then kills every `claude-agent` process with
+   `sudo pkill -KILL -u claude-agent`, repeated until a pass finds none. It
+   runs `reclaim.sh` with the fresh snapshot, removes the WIF ACL entries
+   and the agent's config dir, and deletes
+   `/tmp/inline-comments-buffer.jsonl` if it exists.
+5. **Only if all of step 4 succeeded** does it write the held `result` line
+   to its stdout and exit with the CLI's status. The action reads the
+   result only after the tree is reclaimed and no agent process is left.
+6. **If the reclaim refuses or fails** (a redirected git dir, an embedded
+   repository, a failed chown), the supervisor quarantines the git dir: it
+   moves `.git` to a runner-only directory under `$RUNNER_TEMP`, so any git
+   the action or a later step runs in the workspace fails with "not a git
+   repository" instead of executing agent-written configuration. It also
+   writes a marker file that step 7 reads to fail the job. It withholds the
+   result and exits non-zero. The SDK's iterator then ends without a
+   result, `runClaude` throws, and the action records a failure. Its
+   `finally` block still runs, but finds no git dir to act on.
+7. **On `TERM`/`INT`** (SDK abort, job cancellation) it forwards the signal
+   to the child and runs steps 3-6 with the same ordering. A `KILL` of the
+   supervisor reaches the action's own process in the same step, so no
+   action code runs after it. Step 7's `always()` reclaim then covers the
+   tree.
 
-`claude-code-action` then finishes as today (tracking-comment update, step
-outputs). The branch-cleanup git calls stay unreachable: the agent holds no
-token that can create the remote issue branch. The reclaim means they would
-be safe anyway.
+Two ordering facts make this enough:
+
+- Every privileged action path after the CLI runs only after the SDK hands
+  over a result, or after the iterator ends without one. The supervisor
+  decides both.
+- No `claude-agent` process exists after step 4. So nothing the agent left
+  can race the post-steps: no process rewrites a hook, the git config or a
+  file in a directory on `PATH` after the reclaim. The directories the action step adds to
+  `GITHUB_PATH` (setup-bun's under `~runner`, the launcher's) are created
+  by runner or root. `/home/runner` is 0750, so the agent cannot pre-create
+  them.
+
+The branch-cleanup git calls stay unreachable for a second reason: the
+agent holds no token that can create the remote issue branch they require.
+
+**The buffered inline-comment post-step is disabled.** All four workflows
+pass `classify_inline_comments: "false"` to the action. That input skips
+the action's `Post buffered inline comments` step, which would otherwise
+post, with the App token, any records a local process left in
+`/tmp/inline-comments-buffer.jsonl`. The reviewer's inline findings reach
+the PR only through `inline.json` and the landing manifest, as today. The
+supervisor's deletion of the file is belt and braces.
+`test_engine_job_isolation.py` requires the input on every
+claude-code-action step.
 
 ### After the agent
 
 - **Step 7** runs `reclaim-codex-workspace` with `if: always() &&
   steps.agentuser.outcome == 'success'`. It is idempotent after the
-  supervisor's, and it covers a supervisor that was killed.
+  supervisor's, and it covers a supervisor that was killed. If it finds the
+  supervisor's quarantine marker, or no `.git`, it fails. Every git-running
+  step below is then skipped, exactly as when the codex reclaim refuses.
 - **Every later git-running step is gated on step 7, as on the codex
   path**: `reset-origin-url`, Surface (`!= success` skips its git), the
   composers, the reviewer's re-planted-configuration check (1480) and
@@ -562,12 +662,46 @@ be safe anyway.
   So `manifest-extra.json` on this path accepts `resolve_threads` alongside
   `comments`, with the same `^PRRT_…` filtering `claude-auto-review.yml`
   applies (1741). `REVIEW_ETIQUETTE` says to list the threads there.
-- **`claude-review.yml`.** Same-repo heads get steps 2-4. Fork heads keep
-  the strip, scratch copy and sandbox install, with no provisioning, and
-  run as `claude-agent` too. `srt`/bubblewrap run fine unprivileged once
-  the install step (root, trusted, before the grant) has lifted the AppArmor
-  userns restriction. The sandbox overlay's `.git/config` mask becomes
-  redundant, because no token sits there during the agent's run. It stays.
+- **`claude-review.yml`, same-repo heads.** Steps 2-10 as in the table.
+  The workspace grant is needed because provisioning writes `.venv` at the
+  root. The reviewer lands no bundle, so what the agent edits in the tree
+  goes nowhere.
+- **`claude-review.yml`, fork heads and external mode.** These keep their
+  existing protections: the strip, the read-only checkout for sandboxed
+  commands, the writable scratch copy, `OUT_DIR` on `denyWrite`,
+  `--setting-sources user`, and the re-planted-configuration check. The
+  agent's uid changes, so the setup changes too. In order:
+  1. checkout, `Record checkout SHA` and the strip, as now (runner);
+  2. `create-codex-user` with `user: claude-agent` and `grant: "none"`.
+     This takes the snapshots, creates the user, runs the PATH check and
+     writes the system `safe.directory`. The checkout gets no group grant:
+     it stays runner-owned and read-only to the agent's uid. So the agent's
+     own Write/Edit tools, which the sandbox does not govern, can no longer
+     edit it either, which is a tightening;
+  3. the scratch copy, as now (`cp -a` into `$RUNNER_TEMP/scratch/src`),
+     then `sudo chown -R claude-agent:claude-agent "$RUNNER_TEMP/scratch"`.
+     The copy is untrusted content that no runner-side step reads again
+     (the re-planted check compares the checkout, not the copy). So the
+     agent's uid, and the sandboxed commands it runs, can install and test
+     there. The copy's `.git` is agent-owned, so git there needs no
+     `safe.directory`;
+  4. `Install review sandbox`, as now (root; it lifts the AppArmor userns
+     restriction bubblewrap needs for an unprivileged user);
+  5. the launcher and the action step, then steps 7-10. Step 4 of the
+     table (the pre-agent reclaim) is skipped, since no provisioning ran and
+     nothing was granted. The kill is still needed and moves into the
+     launcher's start.
+
+  **The sandbox overlay's `.git/config` mask is removed on these paths.**
+  It uses `extract` and `onExtractNoMatch: "deny"`, so a config with no
+  token becomes unreadable to sandboxed commands, and git in the checkout
+  (the reviewer's `git diff`) would break. Its job moves into the wrapper,
+  which refuses to launch unless `.git/config` is free of the App token
+  (launch step 5 resets the URL first, and the by-value check covers it).
+  The overlay keeps denying `~/.gitconfig`. `safe.directory` now comes
+  from the system config, which the sandbox does not deny. A hosted test
+  (Testing) runs `git diff` in the checkout and an install and test in
+  scratch as `claude-agent` under the real sandbox with this overlay.
 - **`claude-auto.yml`, `claude-auto-review.yml` (agent mode).** No
   `github_*` server is composed unless the caller's `claude_args` allow
   those tools. If they do, the wrapper drops the App-token servers. The
@@ -583,15 +717,39 @@ instructions and settings, with the symlink and `@import` reach computed
 from them. It is refused as now. Tier 2 is the build and dependency group
 and is not checked. The inputs are fixed values in trusted workflow YAML.
 
-- The four reusable land jobs pass `allow-build-config: "true"` in the same
-  PR that moves their Claude jobs to `claude-agent` (implementation step 5),
-  never before.
-- A direct caller may pass it when every automated job that later
-  provisions a branch it lands does so as a non-runner user. For
-  inspect_flow's two workflows that holds today: they start from the
-  default branch, and their PRs' later runs are the reusable workflows.
-  ts-mono's `dependabot-fix.yml` qualifies only after its continuing run
-  provisions as an agent user.
+A land job may pass the opt-in only when **every automated consumer of the
+branches it pushes** runs both its provisioning and its agent (the CLI and
+every tool call) as a non-runner user. Provisioning alone is D-lite, which
+this design rejects. A consumer is any job that later checks out and runs
+code from such a branch. The rule is per repository, not per workflow.
+Several writers push to the same branches: a `@claude` follow-up or a
+review-fix round on a Dependabot batch PR lands on the branch the next
+`dependabot-fix` continuation checks out. So:
+
+- **The reusable workflows gain an input `allow_build_config`**, default
+  `false`, which their land jobs pass through as `allow-build-config`. It
+  is honoured only from implementation step 6 on, after step 5 has moved
+  the Claude jobs to `claude-agent`. It is a trusted per-caller decision:
+  the stub is a workflow file on the default branch. A caller's stubs set
+  it to `true` only when no other automation in that repository executes
+  agent-landed branches as `runner`. Callers' CI is out of scope here, as
+  under Goals.
+- **Direct callers pass `allow-build-config` under the same rule.**
+  inspect_flow's `inspect-update.yml` and `inspect-ai-main-failure.yml`
+  start from the default branch every run. inspect_flow's only other
+  consumers of its agent branches are the reusable workflows. So
+  inspect_flow can set it in both direct workflows and in its stubs once
+  step 6 is in.
+- **ts-mono sets neither until `dependabot-fix.yml` is migrated whole.**
+  Its continuation must provision the batch branch as an agent user
+  (`create-codex-user`, then `provision-fallback` with `user` and its pnpm
+  recipe, then the pre-agent reclaim). It must also launch its agent
+  through `claude-agent-launcher` with the post-agent reclaim. Only then do
+  its `dependabot-fix` land job and its stubs opt in. Until then its stubs
+  keep `allow_build_config: false`. So neither a follow-up on a batch PR
+  nor the scheduled run can land build files that a runner-uid
+  continuation would execute. This is a companion change in ts-mono and a
+  prerequisite for ts-mono's opt-in, not for anyone else's.
 - The refusal message and the Report hint name the tier-2 files only when
   the input is off.
 
@@ -610,6 +768,14 @@ and is not checked. The inputs are fixed values in trusted workflow YAML.
   validated) and the network. Codex has the same boundary.
 - **Direct callers' own agent jobs** keep their current shape until each
   adopts the launcher (Compatibility).
+- **Drift of `claude-code-action@v1`.** The wrapper depends on the action's
+  launch contract: the custom-executable path, the argv, the MCP server
+  set, and the post-steps after the CLI. `@v1` moves without a push here.
+  The by-value token check fails closed on a new token-bearing channel in
+  the argv or env. A new post-step, or a change to completion handling,
+  would show up only at the next weekly canary. That is an operational
+  risk Ransom should keep in view. Pinning the action is the remedy, under
+  Not this design.
 
 ## Alternatives considered
 
@@ -632,10 +798,13 @@ and is not checked. The inputs are fixed values in trusted workflow YAML.
   The exec and the empty window after the pre-agent kill are enough.
   Possible later hardening.
 - **Pass `github_token: ${{ github.token }}` so no App token exists in the
-  job.** It works for agent mode in principle. Tag mode's
-  `createInitialComment` needs issues write, which the job token lacks,
-  and the action's actor-permission lookup with the job token is
-  unverified. Not needed once the wrapper keeps the App token runner-side.
+  job.** ts-mono's `dependabot-fix.yml` already runs agent mode this way
+  (267), so it works there. Tag mode's `createInitialComment` needs issues
+  write, which the job token lacks, so `claude.yml` cannot follow. Agent
+  mode's actor-permission lookup with the job token is unverified for the
+  reviewer's and loops' bot actors. This is a worthwhile simplification for
+  the three agent-mode workflows, but not needed once the wrapper keeps
+  the App token runner-side (Not this design).
 - **A separate `create-claude-user` composite.** Parity with codex is the
   goal, and the snapshot, PATH check, grant, reclaim and import are
   identical. Parametrising keeps one body.
@@ -669,9 +838,12 @@ but its tools are missing, as on codex today.
 - The agent cannot `sudo` (no `apt-get` of a missing tool) and cannot
   reach Docker.
 - `gh` writes fail, because the agent holds the read-only job token and not
-  the App token. That ends the `claude[bot]` write channel SECURITY.md →
-  By design describes, so that entry shrinks to "the action's token
-  runner-side only".
+  the App token. The same goes for every other channel to a `claude[bot]`
+  write that the agent can drive: MCP servers dropped, buffered inline
+  comments disabled, the URL reset, and the result withheld until the
+  reclaim. So the `claude[bot]` write channel SECURITY.md → By design
+  describes ends, and that entry shrinks to "the action's token, used by
+  the action's own runner-side code only".
 - In `claude.yml` the tracking comment is not updated mid-run, and thread
   resolution goes through the manifest.
 - Its files are `claude-agent`-owned, and its home, caches and git identity
@@ -683,15 +855,18 @@ the agent user is the route if a caller needs it (Not this design).
 
 **Direct `land@main` callers.**
 
-- inspect_flow's `inspect-update.yml` and `inspect-ai-main-failure.yml`:
-  refused on every run by #149, and working again with `allow-build-config:
-  "true"` (a companion PR after plan step 6). Their own agent jobs start from
-  the default branch and are unchanged.
-- ts-mono's `dependabot-fix.yml`: refused by #149. To use the opt-in, it
-  must first provision its continuing branch as an agent user
-  (`create-codex-user`, then `provision-fallback` with `user` and its pnpm
-  recipe), and ideally launch its agent through the launcher. That is a
-  ts-mono companion.
+- inspect_flow's `inspect-update.yml` is refused on every run by #149.
+  `inspect-ai-main-failure.yml` is refused whenever its fix touches
+  `pyproject.toml` or `uv.lock`. Both work again with `allow-build-config:
+  "true"` (a companion PR after plan step 6, together with
+  `allow_build_config: true` in inspect_flow's stubs). Their own agent jobs
+  start from the default branch and are unchanged.
+- ts-mono's `dependabot-fix.yml` is refused on every run by #149. Before
+  ts-mono opts in anywhere, its continuation must run both provisioning and
+  the agent as an agent user, with both reclaims (Land: tier-2 opt-in).
+  That is a ts-mono companion. Until it lands, ts-mono's stubs and
+  `dependabot-fix` keep the default, so build files stay refused on every
+  ts-mono branch.
 - actions' `triage-test-failures.yml`: unaffected.
 
 The default of `allow-build-config` keeps #149's behaviour, so no caller
@@ -737,7 +912,20 @@ Untrusted input reaching the new code, and how each is handled:
   It is handled as an array, never evaluated. `--mcp-config` is parsed as
   JSON with `jq`, and a parse failure aborts the launch rather than passing
   the value through. The env is rebuilt from a fixed allow-list of names.
-  The handoff file is runner-only.
+  The App token's value must then occur nowhere in the result. The handoff
+  file is runner-only.
+- **The CLI's stdout** (agent-controlled JSON lines) is parsed by the
+  supervisor only to find the `result` message. It is relayed byte for
+  byte otherwise, as the SDK reads it today. A line that is not JSON is
+  relayed, not interpreted. A `result` the agent emits early only ends the
+  run early, since the barrier applies to any result.
+- **The completion barrier.** The action's runner-side code after the CLI
+  runs only after the supervisor has killed every agent process and
+  reclaimed or quarantined `.git`. That code is the tracking-comment
+  update, the branch cleanup, the step outputs and the post-steps
+  (Launcher → supervisor). The one post-step that read an agent-writable
+  file with the App token, `Post buffered inline comments`, is disabled by
+  input in every workflow.
 - **The job PATH.** The launcher's directory, the one the action appends to
   `GITHUB_PATH`, is root-owned. `assert-runner-only-path` runs for
   `claude-agent` before the grant and in the reclaim.
@@ -757,29 +945,62 @@ Untrusted input reaching the new code, and how each is handled:
 
 - **Unit (pytest, lifted `run:` blocks and scripts, as the existing
   suites do).**
-  - The wrapper: `--mcp-config` rewriting drops exactly the App-token
-    servers and keeps `github_ci`. A malformed value aborts. `plugin` argv
-    is refused. `--version` passes through. The env allow-list has no
-    `ACTIONS_*`, command-file or App-token value, and `GH_TOKEN` is the job
-    token.
-  - The supervisor's post-exit sequence, against a fake CLI and a stub
-    `sudo`.
+  - The wrapper, over synthetic instances of all five servers the action
+    composes (`github_comment`, `github_inline_comment`, `github_file_ops`,
+    `github` with `GITHUB_PERSONAL_ACCESS_TOKEN`, `github_ci`), plus a
+    caller-style server carrying the App token in an arg:
+    - every one of them is dropped;
+    - an unrelated caller server with no token survives;
+    - an App-token value planted in any other argv position or env
+      variable refuses the launch;
+    - a malformed `--mcp-config` aborts;
+    - `plugin` argv is refused;
+    - `--version` passes through;
+    - the env allow-list has no `ACTIONS_*`, command-file or App-token
+      value, and `GH_TOKEN` is the job token.
   - `reclaim.sh` run twice (idempotence).
   - `import-codex-final` `dir` mode: symlinks, hardlinks, foreign owner,
-    bad names, size caps.
+    bad names, unreadable files, the per-file cap and aggregate exhaustion
+    (the whole import refuses rather than truncating). The existing
+    single-file mode keeps its defaults.
   - `test_land_helpers.py`: tier 2 refused by default and landed with
     `allow-build-config`, while tier 1 and its reach stay refused with it.
   - `test_engine_job_isolation.py` extended to the Claude jobs:
     - no `./` action;
+    - every claude-code-action step sets `classify_inline_comments:
+      "false"`;
     - provisioning with `user: claude-agent` between `create-codex-user`
       and the action step;
     - the pre-agent reclaim between them;
     - `path_to_claude_code_executable` set;
     - the post-agent reclaim first after the action;
     - every git-running step gated on it;
-    - the land jobs pass `allow-build-config`.
+    - the land jobs pass `allow-build-config` only from the
+      `allow_build_config` input, whose default is `false`.
   - `test_dev_agent_composer.py` covers `resolve_threads` from the Claude
     manifest-extra.
+- **The completion barrier, against the real SDK.** `tests/sdk_barrier/` is
+  a small Node harness pinned to the SDK version the action's lockfile
+  resolves (0.3.280 today). It runs the canary job, and it runs locally when
+  `node` is present (skipped otherwise). It drives `query()` exactly as
+  `run-claude-sdk.ts` does, breaking on the result, through the real
+  supervisor. The supervisor gets a synthetic CLI that answers the
+  initialize handshake, emits a result, and then either exits, keeps
+  running, or ignores stdin close, and a `reclaim.sh` stand-in that sleeps
+  10 seconds, fails, or succeeds.
+
+  Asserted:
+  - `query()` yields the result only after the stand-in reclaim has
+    finished (a timestamp comparison);
+  - after a failed reclaim, no result is yielded, the iterator errors and
+    `.git` is quarantined;
+  - a CLI that ignores stdin close is killed after the timeout, and nothing
+    hangs;
+  - a `TERM` to the supervisor mid-run still runs the kill and the reclaim
+    before exit.
+
+  This is the reviewer's round-1 probe (2,237 ms, reclaim incomplete),
+  turned into a regression test.
 - **Hosted canary.** `engine-isolation-canary.yml` gains a `claude-boundary`
   job, which runs the real claude-code-action at `@v1` on this repository
   (the Claude App is installed here and WIF matches `meridianlabs-ai`). It
@@ -794,17 +1015,37 @@ Untrusted input reaching the new code, and how each is handled:
   - the survivor was dead before the action step;
   - no hook or fsmonitor ran as `runner` during the action's prepare
     (marker files record `id -un`);
-  - the probe's report (written as `claude-agent`) shows none of the
-    following: a `ghs_` value in its env; in any readable
-    `/proc/*/cmdline` or `environ`; in `.git/config`; in its `--mcp-config`;
+  - the probe's report (written as `claude-agent`) contains the raw strings
+    from its env and argv, every readable `/proc/*/cmdline` and `environ`,
+    `.git/config` and its `--mcp-config`. A later runner-side step compares
+    them by value against the App token (the action's `github_token` step
+    output) and the job token (`github.token`). Both are `ghs_` installation
+    tokens, so a prefix test cannot tell them apart. The App token must
+    appear nowhere, and the job token must appear as `GH_TOKEN`;
   - it also shows no `ACTIONS_ID_TOKEN_REQUEST_TOKEN` or
     `ACTIONS_RUNTIME_TOKEN`, no sudo, no Docker, no readable runner
     process memory and no connectable `.NET` socket;
   - positive controls: the probe can read the identity-token file (and
     still can after a forced refresh), and it sees the job token and its
     rewritten argv;
+  - the probe, before exiting, writes a valid-looking record to
+    `/tmp/inline-comments-buffer.jsonl`: the file is gone after the step
+    (the supervisor's deletion). The disabled post-step itself is checked
+    structurally (unit tests) and live in the same-repo review run below;
+  - the probe claims a result early and then keeps a background process
+    alive: the action's step log shows the tracking-comment update only
+    after the supervisor's reclaim line;
   - after the step, no `claude-agent` process remains, and `.git` and the
     root are back to `drwxr-sr-x` runner-owned.
+
+  A second job, `claude-sandbox-review`, sets up a fork-head-shaped review
+  with this revision's steps: the strip, `grant: "none"`, the chowned
+  scratch copy, the sandbox install and the overlay as composed without the
+  `.git/config` mask. Then, as `claude-agent`, under `srt` with that overlay
+  (no model), it runs `git diff origin/main` in the checkout, `uv venv && uv
+  pip install -e .` and `pytest` in scratch, and a write into the checkout
+  and into `OUT_DIR`. Asserted: the first three succeed and the two writes
+  are refused.
 
   The job needs no model call: the probe exits after its report, and the
   action's failure is expected and asserted. The `caller-recipes` matrix
@@ -817,7 +1058,11 @@ Untrusted input reaching the new code, and how each is handled:
   it in this repository, never on live PRs:
   - an issue run of `claude.yml` that commits and lands, with a thread
     resolution via the manifest;
-  - a same-repo and a fork-head review;
+  - a same-repo and a fork-head review (the fork-head one runs `git diff`
+    and a scratch test inside the sandbox). The same-repo review's scratch
+    PR carries a test that writes a valid inline-comment record to
+    `/tmp/inline-comments-buffer.jsonl` when run; afterwards no inline
+    comment by `claude[bot]` may appear on the PR;
   - a review-fix and a CI-fix round on a scratch `auto` PR.
 
   Check model provenance and that settings denies are in effect (a denied
@@ -840,23 +1085,34 @@ Untrusted input reaching the new code, and how each is handled:
    mode. Unit tests. Files: `.github/actions/{create-codex-user,reclaim-codex-workspace,import-codex-final}/*`,
    `tests/test_codex_path.py`, `tests/test_import_codex_final.py`.
 4. **Launcher.** `.github/actions/claude-agent-launcher/` (action.yml, the
-   `claude` wrapper, `claude-supervise`, the adapted isolation check). Add
-   `tests/fixtures/claude-probe`, the canary's `claude-boundary` job and
-   its weekly schedule, and the wrapper unit tests. Run the canary green
-   before step 5.
+   `claude` wrapper, the Python `claude-supervise`, the adapted isolation
+   check). Add `tests/fixtures/claude-probe`, `tests/sdk_barrier/`, the
+   canary's `claude-boundary` and `claude-sandbox-review` jobs and the
+   weekly schedule, and the wrapper and supervisor tests. Run the canary
+   green before step 5.
 5. **Switch the Claude jobs.** In the four workflows, remove
    `claude-setup` and the runner fallback. Add steps 2-4, the launcher, the
    executable input, the post-agent reclaim, the moved `reset-origin-url`,
-   the landing import, the gating and env pins, and `claude.yml`'s
-   `resolve_threads` and prompt sentence. The same PR updates SECURITY.md,
+   the landing import, the gating and env pins,
+   `classify_inline_comments: "false"`, the reviewer's fork and external
+   setup order (`grant: "none"`, the scratch chown, the overlay without the
+   mask), and `claude.yml`'s `resolve_threads` and prompt sentence. The same PR updates SECURITY.md,
    credential-separation.md, codex-engine.md, architecture.md, README.md
    and AGENTS.md, and extends `test_engine_job_isolation.py`. Then do the
    real-model runs.
 6. **Tier-2 opt-in** (after #149 and step 5 have merged). Add `land`'s
-   `allow-build-config` and the `lib.sh` split, and have the reusable land
-   jobs pass it. Update tests and SECURITY.md. Then open the inspect_flow
-   companion that passes it in its two workflows. ts-mono follows when its
-   `dependabot-fix` provisions as an agent user.
+   `allow-build-config` and the `lib.sh` split, and the reusable workflows'
+   `allow_build_config` input (default `false`) that their land jobs pass
+   through. Update tests, examples/ and SECURITY.md. Then open the companion
+   PRs that opt in: inspect_flow (its stubs and its two direct workflows),
+   the inspect_ai fork, inspect_harbor, inspect_swe, inspect_sandboxes,
+   inspect_scout, actions, and this repository's dogfood stubs. Each PR
+   first confirms that no other automation in that repository runs
+   agent-landed branches as `runner`.
+7. **ts-mono** (companion, any time after step 5): `dependabot-fix.yml`'s
+   continuation provisions and runs its agent as an agent user with both
+   reclaims. Only then does a ts-mono PR opt in, in its stubs and in
+   `dependabot-fix`.
 
 ## Open questions
 
@@ -870,10 +1126,15 @@ Untrusted input reaching the new code, and how each is handled:
 3. **Keep the `runner`-group cross-enrolment for `claude-agent`, as codex
    has?** Recommendation: yes for parity now, with the isolation check as
    the proof. Moving both engines to ACL traversal is a separate change.
-4. **Does D plus the tier-2 opt-in meet the finding's criterion 2 as
-   written?** Criterion 2 lists `pyproject.toml` among the paths to refuse.
-   Under D those files execute only as the agent user, so criterion 1's
-   intent holds. Recommendation: yes, and record it with the finding.
+4. **Revise criterion 2's acceptance for build files?** As written,
+   criterion 2 requires refusal, or a human approval before further
+   automation, for build configuration such as `pyproject.toml`. D plus
+   the tier-2 opt-in does not satisfy that literally. Instead it
+   guarantees those files execute only as an unprivileged user with no
+   token but the read-only job token, which is criterion 1's remedy.
+   Recommendation: accept that as the revised acceptance for tier 2 and
+   record it with the finding. Without it, keep tier 2 refused: D alone
+   still closes the residual.
 
 ## Not this design
 
@@ -886,6 +1147,9 @@ Untrusted input reaching the new code, and how each is handled:
 - Moving both engines from `runner`-group traversal to ACL traversal.
 - Pinning claude-code-action to a SHA, so the wrapper's contract with it
   cannot drift silently.
+- Passing `github_token: ${{ github.token }}` in the three agent-mode
+  workflows (as ts-mono's `dependabot-fix` already does), so no App token
+  is minted there at all.
 - Callers' CI runs agent-authored same-repo branches with CI's secrets.
   This is pre-existing and not agent-specific.
 - The direct callers' own agent jobs (inspect_flow's two, ts-mono's
