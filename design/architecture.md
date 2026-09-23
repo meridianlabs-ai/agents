@@ -1223,11 +1223,18 @@ against the docs, not assumed):
 - **`uses:` must be a literal** — no `${{ … }}` interpolation — which is why the
   path is a fixed convention rather than a configurable input.
 - **The Actions cache is scoped to the run's repo** (the caller), even though
-  the step lives in our reusable workflow. So the caller's normal CI and these
-  runs share cache entries when keys match, and the default-branch (`main`)
-  cache is readable from feature branches, PR heads, and `issue_comment` runs —
-  i.e. all of our trigger types. Reuse of the cache is automatic; we don't
-  manage keys here.
+  the step lives in our reusable workflow. So these runs restore the caller's
+  normal CI entries when keys match, and the default-branch (`main`) cache is
+  readable from feature branches, PR heads, and `issue_comment` runs — i.e.
+  all of our trigger types. Agent runs **never save** one: every reusable
+  workflow declares top-level `cache-mode: read` (Claude Security 4629157,
+  2026-09-23; [agent-cache-scope.md](agent-cache-scope.md)), which GitHub
+  enforces on each job's token, so a claude-setup cache action's save is
+  skipped or refused and a runtime token the agent recovers can restore and
+  nothing more. Restores are automatic; we don't manage keys here. The
+  dispatch-only `cache-mode-canary.yml` checks the enforcement for a called
+  workflow on a trusted trigger; its first run is recorded here once it has
+  been dispatched from `main`.
 
 The step is **fatal on failure** (no `continue-on-error`): a broken setup config
 should surface loudly rather than silently degrade every run to static-only

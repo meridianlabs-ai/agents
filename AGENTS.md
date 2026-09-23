@@ -93,6 +93,12 @@ take effect on every repo's next run.
 - **Permissions live in the `settings` input** (inline Claude Code
   `settings.json`), not `--allowedTools`. Keep them allow-lists; the reviewer
   carries a `deny` overlay. See design/architecture.md → Permissions.
+- **Every reusable agent workflow declares top-level `cache-mode: read`**
+  (Claude Security 4629157; design/agent-cache-scope.md): agent jobs restore
+  the caller's caches and never save one. Never add a write-capable
+  `cache-mode` anywhere in `.github/workflows/` or `examples/`, and keep the
+  stubs' calling jobs capped at `read` (tests/test_cache_mode.py; the
+  canary's control job is its one listed exception).
 - **No git credential is ever written to the workspace** (issue #61,
   2026-09-09): every checkout runs `persist-credentials: false`, and every
   runner-side `git fetch`/`push` authenticates through a step-scoped

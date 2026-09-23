@@ -250,8 +250,47 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   diagram and footnote identifiers per render, as GitHub does, and those
   alone do not count), makes promote refuse before
   any write; a trusted header's `Fixes #<up>` is prepended even when the
-  body quotes one. Acceptance paths run through
-  `--dry-run` only; the test clone's remote is non-routable.
+  body quotes one. Acceptance paths
+  run through `--dry-run` only; the test clone's remote is non-routable.
+  Except checkout's External path (Claude Security 4629158, 4629155), run
+  for real against local repos: an outsider's upstream PR head named
+  `meridian`, carrying `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, a `post-checkout` hook the clone's
+  `core.hooksPath` would resolve, and a `.gitmodules` adding a submodule
+  and an out-of-tree "ts-mono" path, lands detached in a worktree outside
+  the clone at the SHA the API reported — the local `meridian`, HEAD,
+  branch config and `.git/config` unchanged, nothing of the tree in the
+  clone, the hook never run, the submodule never initialised, the ts-mono
+  companion never looked up (the stub's `gh pr checkout` emulation shows
+  the unfixed behaviour fast-forwarding `meridian` and running the hook);
+  a head that moved since the read and a non-SHA `headRefOid` are refused;
+  a rerun reuses a clean worktree and refuses a dirty one. Destination
+  aliases are refused with the clone and every other worktree unchanged: a
+  relative root, a `..` traversal, a symlinked ancestor or a symlink at the
+  path resolving into the clone, a directory inside another linked worktree
+  (pre-created or not), a stranger's directory and a registered worktree on
+  a branch. Inherited command-running configuration is inert on the first
+  run and on reuse: a relative `core.fsmonitor`, and `filter.*` smudge,
+  clean and process drivers (one `required`) selected by the contributor's
+  `.gitattributes`, all pointing at scripts the tip supplies (a plain
+  worktree add of the same tip runs them), leave no marker and the clone's
+  config untouched — including drivers an `includeIf gitdir:` condition
+  defines only inside the linked worktree, discovered after `worktree add
+  --no-checkout` and before the first checkout. Registered worktree paths
+  are read NUL-delimited and captured losslessly (a `$(…)` capture drops a
+  trailing newline), so a worktree whose path holds an embedded or one or
+  two trailing newlines still bounds the destination, reached through a
+  newline-free symlink alias from the clone and from inside that worktree,
+  with and without a pre-created parent, and a destination path with a
+  newline — lexical or after resolution — is refused. The diff and removal
+  recipes SKILL.md gives the operator are lifted from its ```sh block and
+  run, with a worktree root holding a space, a tab, a glob character, a
+  `$VAR`, both command-substitution forms, both quote characters and
+  backslashes (the path enters the recipe as heredoc data, never as
+  command text), against an inherited clean filter and textconv driver:
+  no marker, no substitution run, the worktree gone and pruned, unrelated
+  sibling files intact; the plain in-worktree status the skill no longer
+  recommends does run the clean filter. Promotions keep `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
@@ -368,10 +407,26 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the home script; refuses while `pkill` keeps finding codex processes).
   The four composer tests lift each engine's composer from its own job
   (`job_block` / `lift_run` in `test_land_helpers.py`).
-- `secret_delivery_scan.py`, `fixtures/hostile-checkout/` and
-  `fixtures/callers/` are not tests but the hosted canary's pieces
+- `test_secret_delivery_canary.py` — the hosted canary's pipeline probe
+  (`engine-isolation-canary-pipeline.yml`; finding 4629153, fix criterion
+  3) keeps the agent workflows' shape: in each of the four reusable
+  workflows the gate, Claude agent, codex agent and land jobs reference
+  the same secrets as the probe's job in that role and no other job
+  references any, the `workflow_call` secret declarations match, the agent
+  jobs are selected by the gate's `engine` output like the real ones and
+  the land job needs all three under `always()`; each probe job ends with
+  the memory scan its references imply, the canary calls the probe per
+  engine with the two sentinels only, the canary keeps a weekly off-the-hour
+  schedule beside its push and dispatch triggers, and the stand-in action
+  prints lengths, never values.
+- `secret_delivery_scan.py`, `fixtures/secret-input/`,
+  `fixtures/hostile-checkout/` and `fixtures/callers/` are not tests but
+  the hosted canary's pieces
   (`.github/workflows/engine-isolation-canary.yml`): the root-run scanner
   that counts synthetic sentinel secrets in the runner processes' memory,
+  the stand-in action through which the pipeline probe's gate, land and
+  codex jobs consume the sentinels as action inputs (printing lengths
+  only),
   the hostile `setup.py` build backend the provisioning-boundary job
   installs as the codex user, and the four representative caller projects
   (with the `codex_provision` recipe each caller's stub would set and the
@@ -387,6 +442,24 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `---` rule, qualified `#N` refs) survives, `--dry-run` previews the
   de-fanged title and creates nothing, and ordinary text is copied
   unchanged.
+- `test_cache_mode.py` — agent jobs get read-only Actions cache access
+  (Claude Security 4629157; design/agent-cache-scope.md), as structural
+  checks on the workflow text: each of the four agent workflows (and the
+  canary's called workflow) declares exactly one top-level `cache-mode:
+  read` before `jobs:` and no job overrides it; no `cache-mode` in
+  `.github/workflows/` or `examples/` is anything but `read` or `none`,
+  except the canary's `control` job, listed by file and job; every calling
+  job in the example stubs and this repo's stubs caps its call at `read`.
+  The enforcement itself is checked by the dispatch-only
+  `.github/workflows/cache-mode-canary.yml`: a called workflow under
+  `cache-mode: read`, on a trusted trigger its caller sets no mode for,
+  sees the mode, and neither a mode-aware client's save (skipped) nor a
+  mode-ignoring client's save (refused by the service) leaves an entry,
+  while a write-mode control job's save does. That workflow's `Check` step
+  is lifted and run here against a stub `gh` and `curl`: green only when
+  exactly the control entry exists and restores, each job's "Set up job"
+  line shows its mode, and the probe's log shows the client's skip and the
+  service's `cache write denied:` refusal; red, with the reason, otherwise.
 - `test_model_defaults.py` — the four Claude workflows' `model` input
   defaults to the `opus` alias (never a dated id) with `fallback_model`
   `default`, and both still reach Claude Code as `--model` /

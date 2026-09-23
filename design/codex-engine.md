@@ -853,11 +853,12 @@ which are empty when the codex job ran). Two Claude Security findings
   decided by the service before dispatch and a skipped job gets no job
   message, so the Claude job now references no key at all; the codex job
   references it at its codex-action step and nowhere else
-  (`tests/test_engine_job_isolation.py`). What is not settled — and cannot
-  be from this repository — is whether the service scopes referenced
-  secrets per job or per called workflow; design/credential-separation.md
-  → section 7 carries that residual and section 6 the canary that would
-  settle it.
+  (`tests/test_engine_job_isolation.py`). Whether the service scopes
+  referenced secrets per job or per called workflow is not documented; the
+  hosted canary below measures it — per job, in the agent workflows' own
+  gate/agent/land shape too — and design/credential-separation.md →
+  section 7 carries the residual that this is measured platform behaviour,
+  not a contract.
 - **4628446 — provisioning ran head code as the runner ahead of the codex
   boundary.** The caller's `./.github/actions/claude-setup` and the
   fallback's `uv pip install -e` (the checkout's build backend) executed
@@ -967,7 +968,11 @@ the stubs keep passing it; only the codex job reads it. The example stubs
 carry the `codex_provision` guidance as comments.
 
 **The hosted canary** (`.github/workflows/engine-isolation-canary.yml`,
-`workflow_dispatch` and pushes touching the composites or the harness) is
+`workflow_dispatch`, pushes touching the composites or the harness, and a
+weekly schedule on `main` that would catch a change in the platform's
+secret delivery; a failed scheduled run is emailed to whoever last edited
+the cron line, and GitHub disables the schedule after 60 days without
+repository activity) is
 the evidence for both findings on a real `ubuntu-latest` runner, with no
 real secret and no model. Its `probe` job calls a reusable workflow shaped
 like the agent workflows with two synthetic repository secrets
@@ -985,9 +990,17 @@ codex` over `tests/fixtures/hostile-checkout` (a `setup.py` build backend
 that plants the config.toml symlink, leaves a survivor process and tries
 runner-only reads and writes), then `create-codex-user` in `reset-home`
 mode, asserting the positive controls before the reset and the pristine
-boundary after it, then a caller `recipe` as codex. Results per run are in
-the run's logs; the round-2 run's are recorded in
-design/credential-separation.md → section 6.
+boundary after it, then a caller `recipe` as codex. Its `pipeline-probe`
+job repeats the secret-delivery measurement in the agent workflows' own
+shape (`engine-isolation-canary-pipeline.yml`, once per engine): the three
+secrets under their real names carrying the sentinels, a gate and a land
+job referencing the App secrets in job env and as action inputs, and the
+two agent jobs selected by the gate's `engine` output; the Claude agent job
+is expected to hold neither sentinel, the codex job the OpenAI stand-in
+alone, and `tests/test_secret_delivery_canary.py` keeps the probe's
+per-job references equal to the reusable workflows'. Results per run are in
+the run's logs; the recorded runs are in design/credential-separation.md →
+section 6.
 
 ## Network inside the codex sandbox
 
