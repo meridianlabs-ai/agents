@@ -588,7 +588,16 @@ the model for the review-fix loop and the dev agent:
   agent step did not succeed, produced no execution output, and the landing
   pushed nothing" — a skipped agent is refunded whatever skipped it *unless
   a base merge landed*, and a round whose commits landed is not, whatever
-  the agent step's outcome. The exception is a small regression, accepted:
+  the agent step's outcome. Since 2026-09-22 (Claude Security 4628735; the
+  review loop's 4628734 is the same shape) the rule is narrower again: a
+  round is refunded only when the fix job's `agent_skipped` output is true
+  — both engines' agent steps `skipped`, a step outcome the runner settled
+  before any agent code ran — and nothing was pushed; a step that was
+  entered and then failed keeps its attempt, since
+  the agent decides how its own step ends and a refund keyed on that let a
+  steered agent make a completed round read as an infra crash. A transient
+  bootstrap failure now spends an attempt; the cap bounds spend either
+  way. The exception is a small regression, accepted:
   a provisioning failure on a stale branch skips the agent but the runner's
   clean base merge still lands (HEAD moved, so the bundle carries it and the
   round owes its `@review`), `pushed` is true and the attempt is kept, where
@@ -616,7 +625,12 @@ the model for the review-fix loop and the dev agent:
   fix job's result is `cancelled` — as `claude-review.yml`'s land job is —
   rather than failing its artifact download and reporting "Landing failed"
   on the PR for a round whose agent never started; the refund step still
-  runs. A run cancelled by hand mid-agent lands nothing either. The land
+  runs, on the job's own `agent_skipped` output like every round's — a
+  pending job cancelled before it started delivers no outputs and keeps its
+  attempt (unknown is not evidence; one attempt of slack, since 2026-09-22),
+  a job cancelled during sync or provisioning is refunded, and one cancelled
+  after the agent step started keeps it. A run cancelled by hand mid-agent
+  lands nothing either. The land
   job as a whole is additionally gated on the gate job's *success*, not only
   on its `act` output: a gate that failed after deciding `fix` (a
   `Record attempt` API write that did not go through) skips the fix job,
@@ -694,9 +708,22 @@ agent posts nothing and resolves nothing in-run):
   provisioning steps it used to follow; the land job's refund therefore
   broadened exactly as #82's did (agent step did not succeed, no execution
   output, nothing pushed), with the same one-round regression on a
-  provisioning failure over a stale branch. The refund re-reads the sticky
+  provisioning failure over a stale branch, and narrowed again with it on
+  2026-09-22 (Claude Security 4628734): the round is refunded only when the
+  agent step was never entered (`agent_skipped`, the fix job's own output;
+  a cancelled job is refunded on that evidence alone) and nothing was
+  pushed. The refund re-reads the sticky
   comment's current count *and* head marker rather than writing the gate's
-  values, since the land job is outside the per-PR concurrency group.
+  values, since the land job is outside the per-PR concurrency group. Two
+  companions close the loop the finding described (a steered agent killing
+  its own step with `handback: true` in its manifest, the round refunded to
+  0 and the bare `@review` posted, without bound): a hand-back on a
+  manifest with no bundle is honored only when the agent step succeeded —
+  in the fix job's composer, and again in `land` through its
+  `allow-no-change-handback` input, the trusted copy — and the gate's
+  no-progress check keys on the recorded head marker alone, since a refund
+  keeps the marker while it may take the count to 0, where a `prev >= 1`
+  guard skipped the check.
 - **Verification** (issue #83): `grep -n MARVIN_TOKEN` over the workflow
   names only `gate` and `land`; on a caller, a review with two inline
   suggestions where the agent addresses one and declines the other should

@@ -455,6 +455,161 @@ def test_refund_reads_an_absent_or_unparsable_count_as_zero_with_no_head(tmp_pat
     assert patched == ["100"] and "rounds: 0" in patched_body and "auto-review-head:" not in patched_body
 
 
+# --- the refund's trust and the stall check it must not disarm (4628734) -----
+#
+# The finding's loop: a steered fix agent sets `handback: true`, commits
+# nothing and kills its own action step. The refund read the step's failure
+# and an empty execution file as an infra crash and took round 1 back to 0
+# (marker kept); the bare `@review` posted anyway; the next verdict found
+# prev=0 and skipped the stall check, so round 1 ran again — without bound.
+# Three rules close it, each checked here or in the composer / land tests:
+# the refund fires only on a step the runner never entered, a bundle-less
+# hand-back needs a successful agent step, and the stall check keys on the
+# recorded tip whatever the count reads.
+
+
+def test_no_progress_escalation_fires_at_zero_when_the_recorded_tip_is_unchanged(tmp_path):
+    # rounds: 0 with a head marker is exactly the refunded-round-1 body; the
+    # unchanged tip escalates, a moved tip runs round 1.
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  counter("i-am-marvin", 0, T0, cid=100, head=HEAD)])
+    assert o["act"] == "escalate" and o["stalled"] == "1"
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  counter("i-am-marvin", 0, T0, cid=100, head=OLD)])
+    assert o["act"] == "fix" and o["round"] == "1" and o.get("stalled") is None
+
+
+def test_a_refunded_first_round_still_escalates_on_the_unchanged_tip(tmp_path):
+    # gate (round 1 recorded on HEAD) → refund → gate on the same tip. The
+    # refund writes rounds: 0 and keeps the tip; the next verdict on that tip
+    # escalates for no progress instead of re-running round 1 — and a refund
+    # never takes the count below 0.
+    _, patched, refunded = run_refund(tmp_path, [counter("i-am-marvin", 1, T0, cid=100, head=HEAD)])
+    assert patched == ["100"] and "rounds: 0" in refunded and HEAD in refunded
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  comment(100, "i-am-marvin", refunded, T0)])
+    assert o["act"] == "escalate" and o["stalled"] == "1"
+    _, patched, again = run_refund(tmp_path, [comment(100, "i-am-marvin", refunded, T0)])
+    assert patched == ["100"] and "rounds: 0" in again and HEAD in again
+
+
+def step_if(workflow: Path, anchor: str) -> str:
+    """The `if: >-` expression of the step at `anchor`, whitespace-folded."""
+    text = workflow.read_text()
+    block = text[text.index(anchor):]
+    block = block[:block.index("        run: |")]
+    return " ".join(block[block.index("if: >-") + len("if: >-"):block.index("env:")].split())
+
+
+def ghx(expr: str, ctx: dict) -> bool:
+    """Evaluate a GitHub Actions `if:` expression of the shape the refund
+    steps use — `always()`, `<context path> == 'literal'` / `!= 'literal'`,
+    `&&`, `||`, parentheses — against `ctx`, a map of context paths to their
+    string values. A path missing from `ctx` is an unset output or an
+    undelivered job output and compares as the empty string, as it does on
+    the runner. Written for these tests only; it refuses anything else."""
+    tokens = re.findall(r"\(|\)|&&|\|\||==|!=|'[^']*'|always\(\)|[A-Za-z_][\w.-]*", expr)
+    assert "".join(tokens).replace(" ", "") == expr.replace(" ", ""), f"unsupported syntax in {expr!r}"
+    pos = [0]
+
+    def peek():
+        return tokens[pos[0]] if pos[0] < len(tokens) else None
+
+    def take():
+        pos[0] += 1
+        return tokens[pos[0] - 1]
+
+    def atom():
+        t = take()
+        if t == "(":
+            v = expr_or()
+            assert take() == ")"
+            return v
+        if t == "always()":
+            return True
+        assert re.match(r"[A-Za-z_]", t) and peek() in ("==", "!="), t
+        op, lit = take(), take()
+        assert lit.startswith("'"), lit
+        left = ctx.get(t, "")
+        return (left == lit[1:-1]) if op == "==" else (left != lit[1:-1])
+
+    def expr_and():
+        v = atom()
+        while peek() == "&&":
+            take()
+            v = atom() and v
+        return v
+
+    def expr_or():
+        v = expr_and()
+        while peek() == "||":
+            take()
+            v = expr_and() or v
+        return v
+
+    v = expr_or()
+    assert peek() is None, tokens[pos[0]:]
+    return v
+
+
+# One row per shape the land job can meet; `fix_result` is `needs.fix.result`,
+# `skipped` the fix job's `agent_skipped` output (None: the job delivered no
+# outputs — a PENDING job cancelled before it started, or a runner that
+# died), `pushed` the Land step's output. Shared with test_ci_fix_gate.py:
+# the two refunds must read identically.
+REFUND_CASES = [
+    # (fix_result, skipped, pushed, refunded, why)
+    ("failure", "true", "", True, "sync or provisioning failed; the agent step was skipped"),
+    ("cancelled", "true", "", True, "cancelled during checkout/sync/provisioning; the agent step was skipped"),
+    ("failure", "false", "", False, "the agent step was entered and failed (or was killed by the agent)"),
+    ("cancelled", "false", "", False, "cancelled after the agent step started: the agent ran"),
+    ("cancelled", None, "", False, "a pending job cancelled before it started delivers no outputs: unknown keeps its round"),
+    ("failure", None, "", False, "no outputs delivered (runner died mid-agent): unknown keeps its round"),
+    ("success", "false", "1", False, "a normal round that landed"),
+    ("success", "false", "", False, "a round that ran and landed nothing (no-change, or a lost bundle)"),
+    ("failure", "true", "1", False, "provisioning failed over a stale branch but the base merge landed"),
+]
+
+
+def refund_ctx(fix_result, skipped, pushed, act="fix"):
+    ctx = {"needs.gate.outputs.act": act, "needs.fix.result": fix_result, "steps.land.outputs.pushed": pushed}
+    if skipped is not None:
+        ctx["needs.fix.outputs.agent_skipped"] = skipped
+    return ctx
+
+
+def test_the_refund_and_the_hand_back_key_on_evidence_settled_before_the_agent_ran():
+    """The refund's gating inputs (the `if:`, not only the comment selection
+    the tests above cover): the fix job's `agent_skipped` output — both
+    engines' agent steps `skipped`, a step outcome settled before any agent
+    code ran — plus nothing pushed. Never the agent step's own outcome, and
+    never the job's RESULT (review round 1: a job cancelled after the agent
+    step started ran the agent, and a pending job cancelled before it
+    started delivers no outputs, so neither is evidence — unknown keeps its
+    round). No execution-file signal exists in the workflow at all. The Land
+    step admits a bundle-less hand-back only on the agent step's success,
+    the direction the agent cannot push."""
+    text = WORKFLOW.read_text()
+    assert "id: launched" not in text and "agent_started" not in text and 'echo "value=true"' not in text
+    fix = text[text.index("  fix:\n"):text.index("  land:\n")]
+    outputs = fix[fix.index("    outputs:\n"):fix.index("    steps:\n")]
+    assert "agent_skipped: ${{ steps.claude.outcome == 'skipped' && steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}" in outputs
+    assert ("agent_outcome: ${{ (steps.codexfeedback.outcome == 'failure' || steps.codexprep.outcome == 'failure' || "
+            "steps.codexuser.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || "
+            "(steps.codexfix.outcome == 'success' && 'success') || steps.claude.outcome }}") in outputs
+    assert "outputs.value" not in outputs and "-s " not in outputs
+    condition = step_if(WORKFLOW, "      - name: Refund infra-crashed round")
+    assert condition == ("always() && needs.gate.outputs.act == 'fix' && "
+                         "needs.fix.outputs.agent_skipped == 'true' && "
+                         "steps.land.outputs.pushed != '1'")
+    assert "needs.fix.result" not in condition and "agent_outcome" not in condition
+    for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
+        assert ghx(condition, refund_ctx(fix_result, skipped, pushed)) is refunded, why
+    assert ghx(condition, refund_ctx("failure", "true", "", act="escalate")) is False
+    land = text[text.index("      - name: Land\n"):text.index("      # Infra crashes must not burn review rounds")]
+    assert "allow-no-change-handback: ${{ needs.fix.outputs.agent_outcome == 'success' && 'true' || 'false' }}" in land
+
+
 # --- escalation's reset (the shared composite) -------------------------------
 #
 # The escalation hand-off promises "re-add the label and the loop starts a

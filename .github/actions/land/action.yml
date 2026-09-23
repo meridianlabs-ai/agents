@@ -296,6 +296,27 @@ inputs:
       caller that pushes refuses them.
     required: false
     default: "false"
+  allow-no-change-handback:
+    description: >-
+      Whether a manifest with NO bundle may still carry `handback: true`
+      (the live `@review`). "true" (the default) keeps every caller's
+      behaviour: the review-fix loop's agent may decline everything with
+      rationale replies and still ask for the re-review, and the dev
+      workflows' hand-backs ride their own rules. The two `@auto` loops pass
+      the agent step's success — `needs.fix.outputs.agent_outcome ==
+      'success'`, a step outcome the agent can push only toward `failure` —
+      so a round that landed nothing AND whose agent step failed or never
+      ran posts no hand-back: such a round is either refunded or reported
+      as an error, and a `@review` on it would re-arm the loop from a round
+      that never ran (Claude Security 4628734: a steered agent that killed
+      its own step with `handback: true` in its manifest had the round
+      refunded and the re-review posted, without bound). A bundled
+      hand-back is never affected: the push is what re-runs CI, whatever
+      the step's outcome. Enforced in the `plan` step (the hand-back is
+      dropped, with a warning and a line in the final report), not the
+      validator: the manifest's error and comments still land.
+    required: false
+    default: "true"
 
 outputs:
   pushed:
@@ -407,22 +428,36 @@ runs:
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.
+    # The one field decided here rather than read: a `handback` on a
+    # manifest with no bundle is dropped when the caller's
+    # `allow-no-change-handback` is not "true" (the loops pass the agent
+    # step's success) — see the input.
     - id: plan
       shell: bash
       env:
         DIR: ${{ runner.temp }}/landing
+        ALLOW_NO_CHANGE_HANDBACK: ${{ inputs.allow-no-change-handback }}
       run: |
         set -euo pipefail
         m="$DIR/manifest.json"
+        has_bundle=$(jq -r '.has_bundle' "$m")
+        handback=$(jq -r '.handback // false' "$m")
+        handback_dropped=false
+        if [ "$handback" = "true" ] && [ "$has_bundle" != "true" ] && [ "$ALLOW_NO_CHANGE_HANDBACK" != "true" ]; then
+          handback=false
+          handback_dropped=true
+          echo "::warning::land: the manifest asks for a re-review but carries no bundle and the caller reports the agent step did not succeed (allow-no-change-handback=${ALLOW_NO_CHANGE_HANDBACK:-unset}); no hand-back is owed by a round that landed nothing and did not complete — not posting it."
+        fi
         {
           echo "branch=$(jq -r '.branch' "$m")"
           echo "start_sha=$(jq -r '.start_sha' "$m")"
           echo "head_sha=$(jq -r '.head_sha' "$m")"
-          echo "has_bundle=$(jq -r '.has_bundle' "$m")"
+          echo "has_bundle=$has_bundle"
           echo "pr_number=$(jq -r '.pr_number // ""' "$m")"
           echo "issue_number=$(jq -r '.issue_number // ""' "$m")"
           echo "pr_open=$(jq -r '.pr.open // false' "$m")"
-          echo "handback=$(jq -r '.handback // false' "$m")"
+          echo "handback=$handback"
+          echo "handback_dropped=$handback_dropped"
           echo "handoff=$(jq -r 'if .handoff_body_file then "true" else "false" end' "$m")"
           echo "stage=$(jq -r '.stage // ""' "$m")"
           echo "provenance=$(jq -r 'if .provenance_comment_file then "true" else "false" end' "$m")"
@@ -1266,6 +1301,10 @@ runs:
         # ran. (Any other failure before it means nothing landed.)
         PR_FAILED: ${{ steps.pr.outcome == 'failure' && '1' || '' }}
         HANDBACK_PLANNED: ${{ steps.plan.outputs.handback }}
+        # The plan step dropped a bundle-less hand-back the caller did not
+        # allow (see `allow-no-change-handback`): said on the PR, since the
+        # round then ends with no hand-back and no hand-off.
+        HANDBACK_DROPPED: ${{ steps.plan.outputs.handback_dropped }}
         HANDOFF_PLANNED: ${{ steps.plan.outputs.handoff }}
         STAGE_PLANNED: ${{ steps.plan.outputs.stage }}
         # The verdict is also withheld (skipped, not failed) when the Post
@@ -1330,6 +1369,13 @@ runs:
           cat "$RUNNER_TEMP/err.md" >>"$RUNNER_TEMP/report.md"
           echo "::error::agent run reported: $(head -c 2000 "$RUNNER_TEMP/err.md" | tr '\n' ' ')"
           [ "$FAIL_RUN" = "true" ] && rc=1
+        fi
+        # Our own fixed text (no trigger token: "re-review request", never
+        # the bare word); a note, not a failure — the round's error, when
+        # there is one, is what fails the run.
+        if [ "${HANDBACK_DROPPED:-}" = "true" ]; then
+          [ ! -s "$RUNNER_TEMP/report.md" ] || printf '\n---\n\n' >>"$RUNNER_TEMP/report.md"
+          printf 'ℹ️ The re-review request in this round'"'"'s manifest was not posted: nothing landed and the agent step did not succeed, so no re-review is owed by this round.\n' >>"$RUNNER_TEMP/report.md"
         fi
         target="${PR_NUMBER:-$ISSUE_NUMBER}"
         if [ -z "$target" ]; then
