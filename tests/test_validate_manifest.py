@@ -844,6 +844,33 @@ def test_pr_labels_unrestricted_when_the_caller_sets_no_policy(tmp_path):
     assert run(tmp_path, m) == []
 
 
+# --- a label containing a comma (issue #142) ---------------------------------
+#
+# `land` applies each label through a comma-separated gh flag (`gh pr edit
+# --add-label`, `gh issue create --label`), so "engine:codex,auto" would land
+# as `engine:codex` and `auto`: labels the allow-list never checked. Refused
+# under every policy, the gate's own read of that label included.
+
+
+@pytest.mark.parametrize("allowed", [None, ["engine:codex,auto"]])
+def test_pr_label_containing_a_comma_is_refused(tmp_path, allowed):
+    m = base_manifest(tmp_path)
+    m["pr"]["labels"] = ["engine:codex,auto"]
+    errs = run(tmp_path, m, allowed_pr_labels=allowed)
+    assert any("pr: label 'engine:codex,auto' contains a comma" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("entry", [
+    {"labels": ["triage,auto"]},                     # a create: gh issue create --label splits it
+    {"labels": ["triage,auto"], "comment_on": 444},  # a comment (land applies none; the rule must not depend on that)
+])
+def test_issue_label_containing_a_comma_is_refused(tmp_path, entry):
+    m = base_manifest(tmp_path)
+    m["issues"][0].update(entry)
+    errs = run(tmp_path, m)
+    assert any("issues[0]: label 'triage,auto' contains a comma" in e for e in errs), errs
+
+
 def test_pr_label_policy_does_not_reach_issue_labels_and_vice_versa(tmp_path):
     m = base_manifest(tmp_path)
     m["pr"]["labels"] = ["engine:codex"]
