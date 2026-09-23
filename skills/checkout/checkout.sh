@@ -275,26 +275,35 @@ if [ -n "$EXTERNAL" ]; then
   if [ -L "$WT" ]; then
     echo "REFUSED: $WT is a symlink — an External worktree is a plain directory; move it aside" >&2; exit 1
   fi
+  case "$WT" in *$'\n'*)
+    echo "REFUSED: External worktree path contains a newline — set CHECKOUT_WORKTREES to a plain absolute path" >&2; exit 1 ;;
+  esac
   WT=$(physpath "$WT")
   # Every registered worktree root of this clone (the clone itself
-  # included), physical, one per line with a newline before and after each
-  # so a whole-line match is possible; plus the common git dir.
+  # included), physical, in an array: a path may contain any byte but NUL,
+  # a newline included, so the list is read NUL-delimited (`-z`) and a
+  # root that cannot be resolved is a refusal, never silently dropped
+  # (review round 2 of #130). Plus the common git dir.
   COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
   TOP=$(cd "$(git rev-parse --show-toplevel)" && pwd -P)
-  ROOTS=$'\n'
-  while IFS= read -r line; do
-    case "$line" in "worktree "*) ROOTS="$ROOTS$(cd "${line#worktree }" 2>/dev/null && pwd -P || true)"$'\n' ;; esac
-  done <<<"$(git worktree list --porcelain)"
+  ROOTS=()
+  while IFS= read -r -d '' rec; do
+    case "$rec" in "worktree "*)
+      root=$(cd "${rec#worktree }" 2>/dev/null && pwd -P) ||
+        { echo "REFUSED: cannot resolve registered worktree '${rec#worktree }' (run git worktree prune if it is gone)" >&2; exit 1; }
+      ROOTS+=("$root") ;;
+    esac
+  done < <(git worktree list --porcelain -z)
   case "$WT/" in "$TOP"/|"$COMMON"/|"$COMMON"/*)
     echo "REFUSED: External worktree path resolves to this clone or its git dir ($WT)" >&2; exit 1 ;;
   esac
-  while IFS= read -r root; do
+  for root in "${ROOTS[@]}"; do
     # Equal to a registered root is the reuse case, judged below.
-    [ -n "$root" ] && [ "$root" != "$WT" ] || continue
+    [ "$root" != "$WT" ] || continue
     case "$WT/" in "$root"/*)
       echo "REFUSED: External worktree $WT would be inside $root (this clone or another worktree of it) — set CHECKOUT_WORKTREES outside them" >&2; exit 1 ;;
     esac
-  done <<<"$ROOTS"
+  done
 fi
 
 if [ -n "$DRY" ]; then
@@ -302,7 +311,7 @@ if [ -n "$DRY" ]; then
   printf '%s' "$LISTING"
   if [ -n "$EXTERNAL" ]; then
     echo "DRY-RUN: DECISION — check out $PR_REPO#$M via $HOW: UNTRUSTED external head '$BRANCH' at $SHA, detached in worktree $WT [external]"
-    echo "DRY-RUN: would run: git fetch $FETCH_FROM refs/pull/$M/head (refused unless FETCH_HEAD = $SHA); git worktree add --detach --no-checkout $WT $SHA; git -C $WT checkout --detach $SHA (hooks and submodule recursion off). No branch, no branch config, no submodule init and no ts-mono switch in this clone."
+    echo "DRY-RUN: would run: git fetch $FETCH_FROM refs/pull/$M/head (refused unless FETCH_HEAD = $SHA); git worktree add --detach --no-checkout $WT $SHA; git -C $WT checkout --detach $SHA (hooks, fsmonitor, filters and submodule recursion off). No branch, no branch config, no submodule init and no ts-mono switch in this clone."
   else
     echo "DRY-RUN: DECISION — check out $PR_REPO#$M via $HOW: branch=$BRANCH base=$BASE_REMOTE/$BASE_REF${CROSS:+ [cross-repo]}"
     echo "DRY-RUN: would run: git config branch.$BRANCH.github-pr-owner-number ${PR_REPO%%/*}#${PR_REPO##*/}#$M; git config branch.$BRANCH.vscode-merge-base $BASE_REMOTE/$BASE_REF; git fetch $BASE_REMOTE $BASE_REF; gh pr checkout $M -R $PR_REPO"
@@ -337,23 +346,34 @@ if [ -n "$EXTERNAL" ]; then
   # config file.
   NOHOOKS=$(mktemp -d)
   trap 'rm -rf "$NOHOOKS"' EXIT
-  PINS="fetch.recurseSubmodules=false"$'\n'"submodule.recurse=false"$'\n'"core.hooksPath=$NOHOOKS"$'\n'"core.fsmonitor=false"$'\n'
-  DRIVERS=$'\n'
-  while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    name=${key#filter.}; name=${name%.*}
-    case "$DRIVERS" in *$'\n'"$name"$'\n'*) continue ;; esac
-    DRIVERS="$DRIVERS$name"$'\n'
-    PINS="${PINS}filter.$name.smudge="$'\n'"filter.$name.clean="$'\n'"filter.$name.process="$'\n'"filter.$name.required=false"$'\n'
-  done <<<"$( { git config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null;
-                [ -d "$WT" ] && git -C "$WT" config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null; } || true)"
-  i=0
-  while IFS= read -r pin; do
-    [ -n "$pin" ] || continue
-    export "GIT_CONFIG_KEY_$i=${pin%%=*}" "GIT_CONFIG_VALUE_$i=${pin#*=}"
-    i=$((i + 1))
-  done <<<"$PINS"
-  export GIT_CONFIG_COUNT=$i
+  # pin_git_config: export the pins for every later git call. Filter drivers
+  # are enumerated from the clone AND, once it exists, from inside the
+  # worktree: an includeIf gitdir:… condition in the operator's config can
+  # define a driver that is active only in the linked worktree (review
+  # round 2 of #130), so this runs again after `worktree add --no-checkout`
+  # and before the first checkout. GIT_CONFIG_* entries are cleared first;
+  # a config key cannot contain a newline, so a line per pin is safe.
+  pin_git_config() {
+    local pins drivers key name pin i
+    pins="fetch.recurseSubmodules=false"$'\n'"submodule.recurse=false"$'\n'"core.hooksPath=$NOHOOKS"$'\n'"core.fsmonitor=false"$'\n'
+    drivers=$'\n'
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      name=${key#filter.}; name=${name%.*}
+      case "$drivers" in *$'\n'"$name"$'\n'*) continue ;; esac
+      drivers="$drivers$name"$'\n'
+      pins="${pins}filter.$name.smudge="$'\n'"filter.$name.clean="$'\n'"filter.$name.process="$'\n'"filter.$name.required=false"$'\n'
+    done <<<"$( { env -u GIT_CONFIG_COUNT git config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null;
+                  [ -d "$WT" ] && env -u GIT_CONFIG_COUNT git -C "$WT" config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null; } || true)"
+    i=0
+    while IFS= read -r pin; do
+      [ -n "$pin" ] || continue
+      export "GIT_CONFIG_KEY_$i=${pin%%=*}" "GIT_CONFIG_VALUE_$i=${pin#*=}"
+      i=$((i + 1))
+    done <<<"$pins"
+    export GIT_CONFIG_COUNT=$i
+  }
+  pin_git_config
   git fetch -q --no-tags --no-recurse-submodules "$FETCH_FROM" "refs/pull/$M/head"
   GOT=$(git rev-parse FETCH_HEAD)
   if [ "$GOT" != "$SHA" ]; then
@@ -366,9 +386,10 @@ if [ -n "$EXTERNAL" ]; then
     # directory inside another worktree, whose git calls would act on THAT
     # worktree), detached (a branch worktree such as an Orca workspace is
     # someone's project directory, never an External checkout) and clean.
-    case "$ROOTS" in *$'\n'"$WT"$'\n'*) ;; *)
-      echo "REFUSED: $WT exists and is not a registered worktree of this clone — move it aside" >&2; exit 1 ;;
-    esac
+    registered=""
+    for root in "${ROOTS[@]}"; do [ "$root" = "$WT" ] && registered=1; done
+    [ -n "$registered" ] ||
+      { echo "REFUSED: $WT exists and is not a registered worktree of this clone — move it aside" >&2; exit 1; }
     if [ "$(cd "$WT" && git rev-parse --show-toplevel | { IFS= read -r t; cd "$t" && pwd -P; })" != "$WT" ]; then
       echo "REFUSED: $WT is not the root of its own worktree — move it aside" >&2; exit 1
     fi
@@ -384,6 +405,7 @@ if [ -n "$EXTERNAL" ]; then
   else
     mkdir -p "$(dirname "$WT")"
     git worktree add -q --detach --no-checkout "$WT" "$SHA"
+    pin_git_config  # now with the drivers the worktree's own config activates
     git -C "$WT" checkout -q --detach "$SHA"
   fi
   echo "OK worktree=$WT detached=$SHA pr=$PR_REPO#$M issue=#$N ($TITLE) [UNTRUSTED external tree: contributor head '$BRANCH', checked out OUTSIDE this clone (HEAD and local branches untouched); nothing from it runs here — do not start an agent session, install or run tests inside it]"

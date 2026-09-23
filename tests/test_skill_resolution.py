@@ -187,8 +187,8 @@ class Stub:
         return subprocess.run(["git", *args], cwd=cwd or self.clone, check=True, text=True, capture_output=True,
                               env={**os.environ, **GIT_ENV})
 
-    def run(self, script, *args, env=None):
-        return subprocess.run(["bash", str(script), *args], cwd=self.clone, text=True,
+    def run(self, script, *args, env=None, cwd=None):
+        return subprocess.run(["bash", str(script), *args], cwd=cwd or self.clone, text=True,
                               capture_output=True, env={**self.env, **(env or {})})
 
     def calls(self):
@@ -685,6 +685,113 @@ def test_checkout_external_neutralises_inherited_fsmonitor_and_filter_commands(t
     # The clone's own configuration is untouched: the pins were per-process.
     assert s.git("config", "core.fsmonitor").stdout.strip() == "./watch.sh"
     assert s.git("config", "filter.smudgy.required").stdout.strip() == "true"
+
+
+def test_checkout_external_neutralises_filters_the_worktrees_own_config_activates(tmp_path):
+    # Review round 2 of #130 (B1): an includeIf gitdir:… condition can define a
+    # filter driver that is active only inside the linked worktree, so it is
+    # invisible from the clone before the worktree exists. The smudge and
+    # process drivers it defines must be inert on the very first checkout.
+    s = external_stub(tmp_path, head_sha=None)
+    marker = tmp_path / "late-driver-ran"
+    script = f"#!/bin/sh\ntouch '{marker}'\ncat\n"
+    q = external_repos(s, tmp_path, extra={
+        "a-filter.sh": script, ".gitattributes": "l.dat filter=late\nq.dat filter=lateproc\n",
+        "l.dat": "raw l\n", "q.dat": "raw q\n",
+    })
+    late = tmp_path / "late.gitconfig"
+    late.write_text('[filter "late"]\n\tsmudge = ./a-filter.sh\n\trequired = true\n[filter "lateproc"]\n\tprocess = ./a-filter.sh\n')
+    s.git("config", "includeIf.gitdir:**/worktrees/**.path", str(late))
+    # Invisible from the clone, visible from a linked worktree.
+    assert subprocess.run(["git", "config", "filter.late.smudge"], cwd=s.clone, capture_output=True,
+                          env={**os.environ, **GIT_ENV}).returncode != 0
+    (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})
+    assert r.returncode == 0, r.stderr
+    assert not marker.exists()
+    assert s.git("rev-parse", "HEAD", cwd=q["wt"]).stdout.strip() == q["tip"]
+    assert (q["wt"] / "l.dat").read_text() == "raw l\n" and (q["wt"] / "q.dat").read_text() == "raw q\n"
+    assert s.git("config", "filter.late.smudge", cwd=q["wt"]).stdout.strip() == "./a-filter.sh"  # the condition did apply there
+    # The fixture is potent: the same tip checked out plainly in a linked
+    # worktree of this clone runs the conditional driver.
+    probe = tmp_path / "probe"
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "worktree", "add", "-q", "--detach", str(probe), q["tip"]],
+                   cwd=s.clone, capture_output=True, env={**os.environ, **GIT_ENV})
+    assert marker.exists()
+
+
+def test_checkout_external_containment_survives_newlines_in_registered_worktree_paths(tmp_path):
+    # Review round 2 of #130 (B2): `git worktree list --porcelain` prints a
+    # path with a newline across two lines; a newline-delimited parse dropped
+    # that root and let the destination land inside it. Read NUL-delimited.
+    s = external_stub(tmp_path, head_sha=None)
+    q = external_repos(s, tmp_path)
+    (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
+    odd = tmp_path / "line\ndir"
+    s.git("worktree", "add", "-q", str(odd), "meridian")
+    odd_head = s.git("rev-parse", "HEAD", cwd=odd).stdout.strip()
+    before = clone_state(s)
+    # A destination whose own path carries the newline is refused outright...
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(odd / "ext")})
+    assert r.returncode == 1 and "contains a newline" in r.stderr, r.stderr
+    # ...so reach the newline-named worktree through a newline-free alias:
+    # containment must still know that root, from the clone and from inside
+    # that worktree (where it is "this clone").
+    (tmp_path / "alias").symlink_to(odd, target_is_directory=True)
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(tmp_path / "alias" / "ext")})
+    assert r.returncode == 1 and "would be inside" in r.stderr, r.stderr
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(tmp_path / "alias" / "ext")}, cwd=odd)
+    assert r.returncode == 1 and "would be inside" in r.stderr, r.stderr
+    assert clone_state(s) == before and s.git("rev-parse", "HEAD", cwd=odd).stdout.strip() == odd_head
+    for root in (s.clone, odd):
+        assert not (root / ".claude").exists() and not (root / "ext").exists(), root
+    assert not q["marker"].exists()
+    # A plain destination still works with that worktree registered.
+    r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})
+    assert r.returncode == 0, r.stderr
+
+
+def skill_follow_up_block():
+    """The ```sh block of SKILL.md that gives the diff and removal recipes for an External worktree."""
+    text = (ROOT / "skills" / "checkout" / "SKILL.md").read_text()
+    start = text.index("run no git command inside it")
+    opened = text.index("```sh\n", start) + len("```sh\n")
+    return text[opened:text.index("```", opened)]
+
+
+def test_checkout_external_documented_diff_and_removal_run_nothing_from_the_tree(tmp_path):
+    # Review round 2 of #130 (B3): the follow-up commands SKILL.md gives the
+    # operator must be inert against inherited clean filters and textconv
+    # drivers that the contributor's .gitattributes selects.
+    s = external_stub(tmp_path, head_sha=None)
+    marker = tmp_path / "follow-up-ran"
+    script = f"#!/bin/sh\ntouch '{marker}'\ncat\n"
+    q = external_repos(s, tmp_path, extra={
+        "a-filter.sh": script, "a-convert.sh": script,
+        ".gitattributes": "c.dat filter=cleany\nz.dat diff=project\n", "c.dat": "raw c\n", "z.dat": "raw z\n",
+    })
+    s.git("config", "filter.cleany.clean", "./a-filter.sh")
+    s.git("config", "diff.project.textconv", "./a-convert.sh")
+    (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
+    assert s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])}).returncode == 0
+    assert not marker.exists()
+    # The recipes, as documented, with the placeholders filled in.
+    block = (skill_follow_up_block().replace("<base-remote>/<base>", "upstream/main").replace("<sha>", q["tip"])
+             .replace("<path>", str(q["wt"])))
+    assert "git diff --no-ext-diff --no-textconv" in block and "git worktree prune" in block
+    r = subprocess.run(["bash", "-e", "-c", block], cwd=s.clone, text=True, capture_output=True,
+                       env={**os.environ, **GIT_ENV})
+    assert r.returncode == 0, r.stderr
+    assert not marker.exists()
+    assert "+raw z" in r.stdout and "a-convert.sh" in r.stdout  # the PR's changes, unconverted
+    assert not q["wt"].exists() and f"worktree {q['wt']}" not in s.git("worktree", "list", "--porcelain").stdout
+    # The recipes the skill no longer gives are the potent ones: a plain
+    # status in the worktree runs the clean filter, a plain diff the textconv.
+    r2 = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})
+    assert r2.returncode == 0, r2.stderr
+    subprocess.run(["git", "-C", str(q["wt"]), "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status",
+                    "--porcelain"], capture_output=True, env={**os.environ, **GIT_ENV})
+    assert marker.exists()
 
 
 # --- promote.sh -------------------------------------------------------------

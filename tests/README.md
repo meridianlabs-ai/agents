@@ -200,7 +200,17 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   clean and process drivers (one `required`) selected by the contributor's
   `.gitattributes`, all pointing at scripts the tip supplies (a plain
   worktree add of the same tip runs them), leave no marker and the clone's
-  config untouched. Promotions keep `gh pr checkout`.
+  config untouched — including drivers an `includeIf gitdir:` condition
+  defines only inside the linked worktree, discovered after `worktree add
+  --no-checkout` and before the first checkout. Registered worktree paths
+  are read NUL-delimited, so a worktree whose path holds a newline still
+  bounds the destination (from the clone and from inside that worktree),
+  and a destination path with a newline is refused. The diff and removal
+  recipes SKILL.md gives the operator are lifted from its ```sh block and
+  run against an inherited clean filter and textconv driver: no marker,
+  the worktree gone and pruned; the plain in-worktree status the skill no
+  longer recommends does run the clean filter. Promotions keep
+  `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
