@@ -223,6 +223,24 @@ text are checked by the tests under `tests/`.
   manifest names: the manifest's `start_sha` is the agent job's to write,
   and origin serves any reachable commit — a fork PR's head, an old base
   commit — as a start (Claude Security finding 4628444, 2026-09-22).
+- The same refusal covers every other path a later automated job on the
+  branch executes or loads as configuration, since the machine account's
+  push would otherwise move agent-written files into the same-repo tree
+  the next run provisions from as `runner` or reads as instructions
+  (Claude Security finding 4628446, criterion 2, 2026-09-23): anything
+  under `.github/` (the composite actions a workflow runs with `uses:
+  ./…`, the callers' `claude-setup` among them); agent instructions and
+  settings at any depth (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  `AGENTS.override.md`, `.claude/`, `.mcp.json`, `.claude.json`,
+  `.codex/`, `.agents/`, `.gitmodules`, `.ripgreprc`, `.husky/`); and
+  build and dependency configuration at any depth (`pyproject.toml`,
+  `setup.py`, `setup.cfg`, `uv.lock`, `uv.toml`, `.python-version`,
+  `requirements*.txt`, `package.json`, the npm, pnpm and yarn lockfiles,
+  `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc`,
+  `.yarnrc.yml`, `.yarn/`). The list names entry points, not everything
+  they reach: a module a build backend imports from the tree it builds (a
+  `setup.py`'s own imports, a hatch build hook's file) and files a caller's
+  own `claude-setup` or provisioning recipe reads beyond these still land.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The

@@ -173,8 +173,9 @@ open_or_adopt_pr() {
 # steps that never ran (skipped, not failed, because the PR step failed after
 # the push — or, for the verdict, because the Post step lost a comment) — each owed just
 # like a failed one, and named once even when it appears in both lists.
-# WORKFLOW_FILES is the `workflows` step's list of the files under
-# .github/workflows/ the bundle changes — agent-chosen paths, so they are
+# WORKFLOW_FILES is the `workflows` step's list of the files the bundle
+# changes under .github/ or another path later automated jobs execute or
+# load as configuration (its `protected` list) — agent-chosen paths, so they are
 # de-fanged here; empty with `workflows` failed means the step could not list
 # the paths at all (the listing failed, or the push would create the branch
 # and no base tip was fetched) and refused the bundle unchecked. Everything
@@ -189,9 +190,9 @@ landing_failure_hint() {
       hint="The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted." ;;
     *,workflows,*)
       if [ -n "$files" ]; then
-        hint="The agent's commits change workflow files ($(defang_str "$files")), which the machine account may not push (it has no Workflows permission); changes under \`.github/workflows/\` are made from a maintainer's machine. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
+        hint="The agent's commits change files later automated runs execute or load as configuration ($(defang_str "$files")): workflows, which the machine account may not push (it has no Workflows permission), anything else under \`.github/\`, agent instructions and settings (\`CLAUDE.md\`, \`AGENTS.md\`, \`.claude/\`, \`.mcp.json\`, …), or build and dependency configuration (\`pyproject.toml\`, lockfiles, \`package.json\`, …). Such changes are made from a maintainer's machine, where a human reads them before automation runs them. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
       else
-        hint="The landing could not check whether the agent's commits change workflow files (the listing failed, or a new branch had no base tip to list against; see the run log), so the bundle was refused unchecked. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
+        hint="The landing could not check whether the agent's commits change workflow or other executed files (the listing failed, or a new branch had no base tip to list against; see the run log), so the bundle was refused unchecked. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
       fi ;;
     *,fetch,*|*,push,*) hint="The agent's commits were **not** pushed." ;;
     *) [ -z "$pushed" ] || hint="The agent's commits were pushed; only what follows the push is affected." ;;
@@ -203,6 +204,163 @@ landing_failure_hint() {
   case "$owed" in *,handoff,*) hint="${hint:+$hint }Post the hand-off by hand." ;; esac
   case "$owed" in *,stage,*) hint="${hint:+$hint }Move the Atlas stage by hand." ;; esac
   printf '%s' "$hint"
+}
+
+# PROTECTED_PATHSPECS — the paths a later automated job on an agent's
+# branch executes or loads as configuration, as git pathspecs; the `workflows`
+# step refuses a bundle in which the agent changed any of them (Claude
+# Security 4628446, criterion 2, 2026-09-23): the machine account's push
+# would otherwise move agent-written files into the same-repo tree the next
+# run — the reviewer the `@review` hand-back starts, a loop round, a
+# `@claude` follow-up — provisions from as `runner` or reads as
+# instructions, with no human having read them. Grouped by the consumer
+# that reads them from the checkout:
+#   - .github/ whole (root only: GitHub reads no nested one): the workflows
+#     (the machine account has no Workflows permission), the composite
+#     actions a workflow runs with `uses: ./…` — the callers' claude-setup,
+#     as `runner` before any sandbox — and the scripts and configuration
+#     workflows and GitHub read from there.
+#   - Agent instructions and settings Claude Code and codex load from the
+#     working tree, at every depth (Claude Code reads a nested CLAUDE.md
+#     beside the first file it opens there): CLAUDE.md, CLAUDE.local.md,
+#     AGENTS.md (codex's instructions, and Claude Code's where there is no
+#     CLAUDE.md), AGENTS.override.md, .claude (settings, hooks, skills,
+#     agents, rules; a file or link of that name too), .mcp.json (spawned
+#     MCP servers), .codex/ and .agents/ (codex's project configuration and
+#     skills), and the rest of what claude-code-action's
+#     restoreConfigFromBase treats as executable configuration:
+#     .claude.json, .gitmodules, .ripgreprc, .husky/.
+#   - Build and dependency configuration provisioning executes as `runner`,
+#     at every depth (workspace members are built and installed too):
+#     provision-fallback's `uv pip install -e .[dev]` runs the build backend
+#     pyproject.toml / setup.py / setup.cfg name and installs what they, and
+#     uv.toml's indexes and .python-version, select; callers' recipes run
+#     `uv sync` (uv.lock), pip requirements files, or `pnpm install`, which
+#     runs every package.json lifecycle script, .pnpmfile.cjs hooks and
+#     yarn's .yarn/ plugins, from the registries .npmrc / .yarnrc name.
+# What the list cannot see: a module a build backend imports from the tree
+# it builds (a setup.py's own imports, a hatch build hook's file), and files
+# a caller's own claude-setup or recipe reads beyond these — a change to
+# either still lands. Links and CLAUDE.md imports out of these paths are
+# followed by protected_reach below.
+# shellcheck disable=SC2034  # read by the land composite's `workflows` step
+PROTECTED_PATHSPECS=(
+  .github
+  ':(glob)**/CLAUDE.md' ':(glob)**/CLAUDE.local.md' ':(glob)**/AGENTS.md' ':(glob)**/AGENTS.override.md'
+  ':(glob)**/.claude' ':(glob)**/.claude/**' ':(glob)**/.mcp.json' ':(glob)**/.claude.json'
+  ':(glob)**/.codex' ':(glob)**/.codex/**' ':(glob)**/.agents' ':(glob)**/.agents/**'
+  ':(glob)**/.gitmodules' ':(glob)**/.ripgreprc' ':(glob)**/.husky' ':(glob)**/.husky/**'
+  ':(glob)**/pyproject.toml' ':(glob)**/setup.py' ':(glob)**/setup.cfg'
+  ':(glob)**/uv.lock' ':(glob)**/uv.toml' ':(glob)**/.python-version' ':(glob)**/requirements*.txt'
+  ':(glob)**/package.json' ':(glob)**/package-lock.json' ':(glob)**/npm-shrinkwrap.json'
+  ':(glob)**/pnpm-lock.yaml' ':(glob)**/pnpm-workspace.yaml' ':(glob)**/.pnpmfile.cjs'
+  ':(glob)**/yarn.lock' ':(glob)**/.yarnrc' ':(glob)**/.yarnrc.yml' ':(glob)**/.yarn' ':(glob)**/.yarn/**'
+  ':(glob)**/.npmrc'
+)
+
+# resolve_tree_path REV PATH — follow PATH through REV's tree as the kernel
+# would on a checkout of it: component by component, a symlink's target
+# (relative to the link's directory) substituted in place, `.` dropped, `..`
+# taking the resolved prefix back a level. Prints, NUL-terminated, every
+# symlink location the walk passes through, then the path it ends at (which
+# need not exist). Stops printing when the walk leaves the tree — an absolute
+# target, `..` past the root — or follows more than 40 links (a loop): no
+# bundle can change what lies outside the tree. Returns 1 on a failed read.
+resolve_tree_path() {
+  local rev="$1" rest="$2" at="" comp cand out oid target hops=0
+  while [ -n "$rest" ]; do
+    comp="${rest%%/*}"
+    if [ "$comp" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    case "$comp" in
+      "" | .) continue ;;
+      ..)
+        [ -n "$at" ] || return 0
+        case "$at" in */*) at="${at%/*}" ;; *) at="" ;; esac
+        continue ;;
+    esac
+    cand="${at:+$at/}$comp"
+    out=$(git ls-tree "$rev" -- ":(literal)$cand") || return 1
+    if [ "${out%% *}" = "120000" ]; then
+      printf '%s\0' "$cand"
+      hops=$((hops + 1))
+      [ "$hops" -le 40 ] || return 0
+      out="${out%%$'\t'*}"
+      oid="${out##* }"
+      target=$(git cat-file blob "$oid") || return 1
+      case "$target" in /*) return 0 ;; esac
+      rest="$target${rest:+/$rest}"
+    else
+      at="$cand"
+    fi
+  done
+  [ -z "$at" ] || printf '%s\0' "$at"
+}
+
+# protected_reach REV PATHSPEC... — the in-tree paths REV's entries under
+# PATHSPEC reach beyond the pathspecs themselves, NUL-terminated: every
+# symlink's resolution (resolve_tree_path: the links passed through and the
+# end), and the `@path` imports Claude Code expands in instruction files —
+# CLAUDE.md, CLAUDE.local.md, AGENTS.md, anything under .claude/rules/, and
+# every file reached by an import — resolved relative to the importing
+# file (`~/` and absolute imports are outside the tree). To a fixed point:
+# what a reached path contains is walked too, so a link inside a linked
+# directory or an import of an import is followed; more than 20 rounds
+# fails. Over-matching is the safe direction: an `@` word that is not an
+# import (a mention) names a path that is normally absent, and the imports
+# of code spans are taken too. Returns 1 on a failed read.
+protected_reach() {
+  local rev="$1" empty meta path mode oid dir content round=0 added imp seen f g x y _
+  shift
+  local -a specs=("$@") found=() imported=() cands=()
+  empty=$(git hash-object -t tree /dev/null) || return 1
+  f=$(mktemp) && g=$(mktemp) || return 1
+  while :; do
+    round=$((round + 1))
+    if [ "$round" -gt 20 ]; then
+      echo "::error::land: the protected paths' links and imports did not settle in 20 rounds." >&2
+      rm -f "$f" "$g"; return 1
+    fi
+    git diff --raw -z --no-renames --no-abbrev "$empty" "$rev" -- "${specs[@]}" ${found[@]+"${found[@]/#/:(literal)}"} >"$f" \
+      || { rm -f "$f" "$g"; return 1; }
+    added=""
+    # shellcheck disable=SC2094  # the loop removes its input only on the way out (return 1)
+    while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+      read -r _ mode _ oid _ <<<"$meta"
+      imp=""
+      case "/$path" in
+        */CLAUDE.md | */CLAUDE.local.md | */AGENTS.md | */.claude/rules/*) imp=1 ;;
+        *) for x in ${imported[@]+"${imported[@]}"}; do [ "$x" != "$path" ] || { imp=1; break; }; done ;;
+      esac
+      cands=()
+      if [ "$mode" = "120000" ]; then
+        # A link's resolution; an instruction file's link target is read
+        # for imports like the file it stands in for.
+        resolve_tree_path "$rev" "$path" >"$g" || { rm -f "$f" "$g"; return 1; }
+        while IFS= read -r -d '' x; do
+          cands+=("$x")
+          [ -z "$imp" ] || imported+=("$x")
+        done <"$g"
+      elif [ -n "$imp" ]; then
+        content=$(git cat-file blob "$oid") || { rm -f "$f" "$g"; return 1; }
+        case "$path" in */*) dir="${path%/*}/" ;; *) dir="" ;; esac
+        while IFS= read -r y; do
+          y="${y#"${y%%[![:space:]]*}"}"
+          y="${y#@}"
+          case "$y" in "" | /* | "~"*) continue ;; esac
+          resolve_tree_path "$rev" "$dir$y" >"$g" || { rm -f "$f" "$g"; return 1; }
+          while IFS= read -r -d '' x; do cands+=("$x"); imported+=("$x"); done <"$g"
+        done < <(printf '%s\n' "$content" | grep -oE '(^|[[:space:]])@[^[:space:]]+' || true)
+      fi
+      for x in ${cands[@]+"${cands[@]}"}; do
+        seen=""
+        for y in ${found[@]+"${found[@]}"}; do [ "$y" != "$x" ] || { seen=1; break; }; done
+        [ -n "$seen" ] || { found+=("$x"); added=1; }
+      done
+    done <"$f"
+    [ -n "$added" ] || break
+  done
+  rm -f "$f" "$g"
+  for x in ${found[@]+"${found[@]}"}; do printf '%s\0' "$x"; done
 }
 
 # atlas_todo REPO NUMBER — put an issue the land job created, reopened or
