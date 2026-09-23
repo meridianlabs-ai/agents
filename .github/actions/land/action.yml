@@ -134,10 +134,11 @@ inputs:
       policy); `[]` or an empty value allows none. The default is a staged
       rollout, not the end state: claude.yml passes its list now, and the
       direct-land callers that open PRs (inspect_flow's two scheduled
-      workflows, the actions repo's triage workflow, claude-review.yml's
-      external mode) get their own lists in follow-up changes to those
-      callers, after which the default can tighten (decision: Ransom,
-      2026-09-23, agents PR #132). A PR label this action
+      workflows, the actions repo's triage workflow) get their own lists
+      in follow-up changes to those callers, after which the default can
+      tighten (decision: Ransom, 2026-09-23, agents PR #132); the loops'
+      land jobs pass `[]` and the reviewer's passes `refuse-pr` (issue
+      #138). A PR label this action
       applies is written by the machine account, and the loop gates accept
       that account's `auto` as a trusted decider's opt-in
       (verify-auto-labeler), so which labels reach the PR is an
@@ -849,7 +850,8 @@ runs:
           # Every label here passed the validator's `allowed-pr-labels`
           # check, so under a caller that pins the list (claude.yml: the
           # gate's read) these are the trusted side's labels, not the
-          # manifest's choice.
+          # manifest's choice. `--add-label` splits on commas; the validator
+          # refuses a label containing one, so each $lbl is one label.
           while IFS= read -r lbl; do
             [ -n "$lbl" ] || continue
             gh pr edit "$number" --repo "$REPO" --add-label "$lbl" \
@@ -1165,6 +1167,7 @@ runs:
           fi
           title=$(defang_str "$(jq -r '.title' <<<"$it")")
           args=()
+          # `--label` splits on commas too; the validator refuses a label containing one.
           while IFS= read -r lbl; do [ -n "$lbl" ] && args+=(--label "$lbl"); done <<<"$(jq -r '.labels // [] | .[]' <<<"$it")"
           for a in "${assignees[@]}"; do args+=(--assignee "$a"); done
           if url=$(retry 3 "gh issue create in $irepo" gh issue create --repo "$irepo" --title "$title" \
