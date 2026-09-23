@@ -497,7 +497,12 @@ the same reason the fork PR body's refs must not reach upstream bare: a
 `meridianlabs-ai/inspect_ai#M`, then the body is rendered by GitHub's
 Markdown API in upstream's context and promote refuses (exit 5, before any
 write) if it resolves any upstream issue or PR other than `<up>` — so the
-only upstream reference the PR carries is that `Fixes #<up>`. GitHub's own
+only upstream reference the PR carries is that `Fixes #<up>`, which a trusted
+header always prepends (a copy in the body may be quoted and close nothing).
+It also refuses when the rewrite changed anything else — the fork PR body
+and its qualified text must render identically in the fork's context, so a
+`#M` in code, a link destination or naming no fork issue is never altered
+silently (agents#127 review, 2026-09-23). GitHub's own
 parser decides what is a reference; a hand-written Markdown scanner was
 tried first and did not converge under review (agents#127, 2026-09-23).
 The script prints the body as it will be published, in `--dry-run` and in

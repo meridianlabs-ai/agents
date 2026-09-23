@@ -179,8 +179,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   closing refs / the branch convention when no chip exists. The upstream PR
   body: the `Upstream issue:` header is believed only in /import's shape from
   a trusted author, bare refs are qualified, and a stub `gh api markdown`
-  (standing in for GitHub's renderer) finding any other upstream reference
-  makes promote refuse before any write. Acceptance paths run through
+  (standing in for GitHub's renderer) finding any other upstream reference,
+  or rendering the qualified fork PR body differently from the original in
+  the fork's context (code, link destinations), makes promote refuse before
+  any write; a trusted header's `Fixes #<up>` is prepended even when the
+  body quotes one. Acceptance paths run through
   `--dry-run` only; the test clone's remote is non-routable.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the

@@ -67,19 +67,30 @@ case "$args" in
   "pr checks "*) ;;
   "api repos/UKGovernmentBEIS/inspect_ai/commits/main "*) echo "0123abcd" ;;
   "api markdown --input -")
-    # A stand-in for GitHub's renderer: an href per inline-link destination
-    # (destinations are not text), then one issue link per reference it
-    # recognises in the text (bare `#M` and `GH-M` in the request's context,
-    # qualified `owner/repo#M`, issue/PR URLs) — all promote.sh reads.
-    cat >"$STUB/markdown_in.json"
+    # A stand-in for GitHub's renderer: code (fenced blocks, then spans)
+    # literally, an href per link destination (inline, padded or multiline,
+    # and reference definitions: destinations are not text), then one issue
+    # link per reference it recognises in the rest (bare `#M` and `GH-M` in
+    # the request's context, qualified `owner/repo#M`, issue/PR URLs) — all
+    # promote.sh reads. A qualified ref renders as the bare one in its own
+    # repository's context, as GitHub's does. Every request is logged.
+    cat >"$STUB/markdown_req.json"
+    jq -c . "$STUB/markdown_req.json" >>"$STUB/markdown_in.jsonl"
     if [ -f "$STUB/markdown_fail" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
-    python3 - "$STUB/markdown_in.json" <<'PY'
+    python3 - "$STUB/markdown_req.json" <<'PY'
 import json, re, sys
 req = json.load(open(sys.argv[1]))
 text, ctx = req["text"], req["context"]
-for d in re.findall(r"\]\(([^)\s]*)", text):
+fence, span = re.compile(r"^```[^\n]*\n(.*?)^```", re.S | re.M), re.compile(r"`([^`]*)`")
+for c in fence.findall(text):
+    print(f"<pre><code>{c}</code></pre>")
+text = fence.sub("", text)
+for c in span.findall(text):
+    print(f"<code>{c}</code>")
+text = span.sub("", text)
+for d in re.findall(r"\]\(\s*([^)\s]*)", text) + re.findall(r"^\[[^\]]+\]:\s*(\S+)", text, re.M):
     print(f'<a href="{d}">link</a>')
-text = re.sub(r"\]\([^)]*\)", "]", text)
+text = re.sub(r"^\[[^\]]+\]:.*$", "", re.sub(r"\]\([^)]*\)", "]", text), flags=re.M)
 for m in re.finditer(r"(?<![\w/&])(?:#|GH-)(\d+)\b|\b([\w.-]+/[\w.-]+)#(\d+)\b"
                      r"|https://github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/(\d+)", text):
     repo, num = (ctx, m[1]) if m[1] else (m[2], m[3]) if m[2] else (m[4], m[5])
@@ -806,9 +817,10 @@ def test_promote_issue_without_the_line_needs_no_author_lookup(tmp_path):
     assert not any("/permission" in c for c in s.calls())
 
 
-def rendered_request(s):
-    """The JSON promote.sh sent to `gh api markdown`."""
-    return json.loads((s.dir / "markdown_in.json").read_text())
+def rendered_requests(s):
+    """Every JSON request promote.sh sent to `gh api markdown`, in order."""
+    f = s.dir / "markdown_in.jsonl"
+    return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
 
 
 def test_promote_qualifies_bare_refs_in_the_upstream_body(tmp_path):
@@ -832,9 +844,14 @@ def test_promote_qualifies_bare_refs_in_the_upstream_body(tmp_path):
     # `fixes #N` counts as the closing ref to this issue: no second one is prepended.
     assert body.count(f"meridianlabs-ai/inspect_ai#{N}") == 1
     assert not body.startswith("Fixes")
-    # The check rendered exactly the printed body, in upstream's context.
-    req = rendered_request(s)
-    assert req == {"text": body, "mode": "gfm", "context": UPSTREAM}
+    # The check rendered exactly the printed body, in upstream's context;
+    # then the fork PR body and its qualified text in the fork's context,
+    # which render alike because only real references were qualified.
+    reqs = rendered_requests(s)
+    assert reqs[0] == {"text": body, "mode": "gfm", "context": UPSTREAM}
+    assert [r["context"] for r in reqs[1:]] == [FORK, FORK]
+    assert reqs[1]["text"] == fork_body.rstrip("\n")
+    assert reqs[2]["text"] == body
     assert '-f body=<the body printed above>' in r.stdout
     assert promote_calls_wrote_nothing(s.calls())
 
@@ -885,6 +902,56 @@ def test_promote_refuses_when_the_body_cannot_be_rendered(tmp_path):
     assert r.returncode == 5, r.stdout + r.stderr
     assert "ABORT: could not render the upstream PR body with GitHub's Markdown API" in r.stderr
     assert not any("/merges" in c or c.startswith(f"api repos/{UPSTREAM}/pulls") for c in s.calls())
+
+
+@pytest.mark.parametrize("text", [
+    "Run `echo #1` to reproduce.",                        # inline code
+    "```\nx #19\n```",                                     # fenced code
+    "[Repro]( #1-reproduction )",                          # padded destination
+    "[Repro](\n#1-reproduction\n)",                        # multiline destination
+    "[Repro][r]\n\n[r]: #1-reproduction",                  # reference definition
+], ids=["code-span", "fenced", "padded-destination", "multiline-destination", "reference-definition"])
+def test_promote_refuses_when_qualifying_would_change_a_non_reference(tmp_path, text):
+    # Review round 1 (PR #127): the whitespace rewrite also hits `#M` text
+    # GitHub does not read as a reference, and publishing it would change a
+    # command or break a section link. In the fork's context the qualified
+    # text renders differently from the original there, so promote refuses
+    # before any write. A real run, not --dry-run.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Summary. See #8.\n\n{text}\n")]))
+    r = s.run(PROMOTE, str(N))
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "ABORT: qualifying bare #M refs would change text in fork PR #400's body" in r.stderr
+    assert "meridianlabs-ai/inspect_ai#1" in r.stderr or "meridianlabs-ai/inspect_ai#19" in r.stderr  # the diff names it
+    assert not any("/merges" in c or c.startswith(f"api repos/{UPSTREAM}/pulls") for c in s.calls())
+
+
+def test_promote_renders_once_when_nothing_needs_qualifying(tmp_path):
+    # The fork-context comparison runs only when the rewrite changed the body.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a",
+                                   body=f"Fixes meridianlabs-ai/inspect_ai#{N}\n\n[Repro](#1-reproduction)\n")]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert [q["context"] for q in rendered_requests(s)] == [UPSTREAM]
+
+
+@pytest.mark.parametrize("quoted", [
+    f"Example: `Fixes {UPSTREAM}#{UP_N}`",                           # inline code
+    f"```\nFixes {UPSTREAM}#{UP_N}\n```",                             # fenced code
+    f"<!-- Fixes {UPSTREAM}#{UP_N} -->",                              # HTML comment
+    f'[notes](https://example.org "Fixes {UPSTREAM}#{UP_N}")',       # link title
+    f"Fixes {UPSTREAM}#{UP_N}",                                       # an active one: a second is harmless
+], ids=["code-span", "fenced", "html-comment", "link-title", "active"])
+def test_promote_always_prepends_the_import_headers_fixes_ref(tmp_path, quoted):
+    # Review round 1 (PR #127): a quoted `Fixes …#<up>` in the fork PR body
+    # closes nothing, so it must not suppress the trusted header's closing
+    # line; the header's `Fixes #<up>` is prepended whatever the body says.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Summary.\n\n{quoted}\n")],
+                             author=MARVIN, body=import_body()))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    body = published_body(r.stdout)
+    assert body.splitlines()[:2] == [f"Fixes #{UP_N}", f"Fixes meridianlabs-ai/inspect_ai#{N}"], body
+    assert quoted in body
 
 
 @pytest.mark.parametrize("ref, prepended", [

@@ -20,7 +20,9 @@
 # trust rule. Bare `#M` refs in the fork PR body are qualified to the fork
 # before the body is published upstream, where bare refs resolve against
 # upstream's tracker, and the result is checked with GitHub's own renderer:
-# any other reference to an upstream issue or PR is refused, not published.
+# any other reference to an upstream issue or PR is refused, not published,
+# and so is a qualification that changed text GitHub does not read as a
+# reference (code, a link destination).
 # The body is printed as it will be published, in --dry-run and in the real
 # run.
 #
@@ -36,7 +38,8 @@
 # resolved PR's head is a protected branch; the fork branch has moved past
 # the resolved PR's head; a REVIEWER who is provably not a collaborator on
 # upstream or on the ts-mono companion's repo; the upstream PR body would
-# reference an upstream issue or PR other than the import's, or could not be
+# reference an upstream issue or PR other than the import's, qualifying its
+# bare refs would change text that is not a reference, or it could not be
 # rendered to check; a conflict merging upstream main into the branch);
 # 6 ambiguous — more than one fork PR qualifies;
 # re-run with --pr <number>.
@@ -419,12 +422,13 @@ if [ -n "$M" ]; then
 else
   # The fork PR body was written for the fork's tracker; republished on a PR
   # based on upstream main, every bare `#M` rebinds to upstream issue M and a
-  # closing keyword before it would close that issue on merge. Two steps:
+  # closing keyword before it would close that issue on merge. Three steps:
   #  1. Best effort: qualify the common spelling — a `#M` at the start of a
   #     line or after whitespace — to the fork, as /import does in the other
   #     direction, and make sure a closing ref to THIS issue is present
-  #     (prepend one otherwise), plus the bare `Fixes #<up>` from a validated
-  #     import header.
+  #     (prepend one otherwise). A validated import header's bare
+  #     `Fixes #<up>` is always prepended: a `Fixes …#<up>` already in the
+  #     body may be quoted (code, a comment, a link title) and close nothing.
   #  2. The guarantee: render the result with GitHub's own Markdown renderer
   #     in upstream's context and refuse (exit 5, before any write) if it
   #     resolves any reference to an upstream issue or PR other than <up> —
@@ -433,31 +437,54 @@ else
   #     parser's job; re-implementing it did not converge (PR #127, rounds
   #     1-4), so anything step 1 misses is refused for the operator to fix in
   #     the fork PR body rather than published.
-  BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" FPR_BODY="$FPR_BODY" python3 -c '
+  #  3. Step 1 must not change anything else: a whitespace-preceded `#M` can
+  #     be code (`echo #1`) or a link destination (`[r]( #1-x )`). In the
+  #     fork's context a qualified fork ref renders exactly as the bare one,
+  #     so the fork PR body and its qualified text render identically there
+  #     unless the rewrite touched something that is not a reference to an
+  #     existing fork issue; then promote refuses rather than publish the
+  #     altered body.
+  QUAL=$(FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
-n, up = os.environ["ISSUE_N"], os.environ["UP_ISSUE"]
+print(re.sub(r"(?<!\S)#(\d+)\b", r"meridianlabs-ai/inspect_ai#\1", os.environ["FPR_BODY"]))')
+  BODY=$(ISSUE_N="$N" UP_ISSUE="$UP_ISSUE" QUAL="$QUAL" python3 -c '
+import os, re
+n, up, body = os.environ["ISSUE_N"], os.environ["UP_ISSUE"], os.environ["QUAL"]
 kw = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+"
-body = re.sub(r"(?<!\S)#(\d+)\b", r"meridianlabs-ai/inspect_ai#\1", os.environ["FPR_BODY"])
 if not re.search(kw + r"meridianlabs-ai/inspect_ai#%s\b" % n, body, re.I):
     body = "Fixes meridianlabs-ai/inspect_ai#%s\n\n" % n + body
-if up and not re.search(kw + r"UKGovernmentBEIS/inspect_ai#%s\b" % up, body, re.I):
+if up:
     body = "Fixes #%s\n" % up + body
 print(body)')
   # The operator sees the body as it will be published under their name —
   # every closing reference included — before (dry-run) or as it is created.
   echo "upstream PR body (as published):"
   sed 's/^/  | /' <<<"$BODY"
-  RENDERED=$(jq -n --arg t "$BODY" --arg c "$UPSTREAM" '{text: $t, mode: "gfm", context: $c}' \
-    | gh api markdown --input - 2>/dev/null) || {
+  render() {  # $1 = markdown, $2 = the repository its references resolve in
+    jq -n --arg t "$1" --arg c "$2" '{text: $t, mode: "gfm", context: $c}' \
+      | gh api markdown --input - 2>/dev/null
+  }
+  render_failed() {
     echo "ABORT: could not render the upstream PR body with GitHub's Markdown API (gh api markdown failed) — its references cannot be checked; re-run. Nothing was written." >&2
     exit 5
   }
+  RENDERED=$(render "$BODY" "$UPSTREAM") || render_failed
   STRAY=$(grep -oiE "(data-url|href)=\"https://github\.com/$UPSTREAM/(issues|pull)/[0-9]+" <<<"$RENDERED" \
     | grep -oE '[0-9]+$' | sort -un | grep -vxF "${UP_ISSUE:-none}" | sed 's/^/#/' | tr '\n' ' ' || true)
   if [ -n "$STRAY" ]; then
     echo "ABORT: the upstream PR body references $UPSTREAM issue(s)/PR(s) ${STRAY% } (GitHub resolves them there; a closing keyword before one would close it on merge)." >&2
     echo "Qualify each as meridianlabs-ai/inspect_ai#M in fork PR #$FPR's body, or drop the upstream reference, and re-run — nothing was written." >&2
     exit 5
+  fi
+  if [ "$QUAL" != "$FPR_BODY" ]; then
+    R_ORIG=$(render "$FPR_BODY" "$FORK") || render_failed
+    R_QUAL=$(render "$QUAL" "$FORK") || render_failed
+    if [ "$R_ORIG" != "$R_QUAL" ]; then
+      echo "ABORT: qualifying bare #M refs would change text in fork PR #$FPR's body that GitHub does not read as a reference to an existing $FORK issue (code, a link destination, a number with no issue behind it). The rendered lines that change:" >&2
+      diff <(echo "$R_ORIG") <(echo "$R_QUAL") | grep '^[<>]' | head -20 >&2 || true
+      echo "Reword each so no #M follows whitespace there (e.g. quote it, or qualify a real ref by hand) in fork PR #$FPR's body, and re-run — nothing was written." >&2
+      exit 5
+    fi
   fi
   # Sync the branch with upstream main before opening the PR. Org-fork PR
   # heads take no maintainer edits, and these branches are cut from the fork's
