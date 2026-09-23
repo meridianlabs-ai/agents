@@ -849,7 +849,8 @@ runs:
           # Every label here passed the validator's `allowed-pr-labels`
           # check, so under a caller that pins the list (claude.yml: the
           # gate's read) these are the trusted side's labels, not the
-          # manifest's choice.
+          # manifest's choice. `--add-label` splits on commas; the validator
+          # refuses a label containing one, so each $lbl is one label.
           while IFS= read -r lbl; do
             [ -n "$lbl" ] || continue
             gh pr edit "$number" --repo "$REPO" --add-label "$lbl" \
@@ -1165,6 +1166,7 @@ runs:
           fi
           title=$(defang_str "$(jq -r '.title' <<<"$it")")
           args=()
+          # `--label` splits on commas too; the validator refuses a label containing one.
           while IFS= read -r lbl; do [ -n "$lbl" ] && args+=(--label "$lbl"); done <<<"$(jq -r '.labels // [] | .[]' <<<"$it")"
           for a in "${assignees[@]}"; do args+=(--assignee "$a"); done
           if url=$(retry 3 "gh issue create in $irepo" gh issue create --repo "$irepo" --title "$title" \
