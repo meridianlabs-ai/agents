@@ -1,11 +1,11 @@
 # The agents repo's OWN reviewer stub (based on examples/claude-review-stub.yml;
 # -stub suffix because claude-review.yml is the reusable definition here).
 # PRs here are NOT auto-reviewed on open: the reviewer runs only on an explicit
-# @review comment (on a PR, or on an External-labeled proxy issue). Ransom is
-# moving review into local Orca-driven loops, so the GitHub-hosted review no
-# longer fires on every PR (decision: Ransom, 2026-09-11). This stub therefore
-# deliberately DIVERGES from examples/claude-review-stub.yml, which keeps the
-# pull_request trigger for caller repos; do not "re-sync" it.
+# @review comment (on a PR, or on an External-labeled proxy issue). Ransom
+# moved review into local Orca-driven loops, so the GitHub-hosted review no
+# longer fires on every PR (decision: Ransom, 2026-09-11; the reusable admits
+# issue_comment only since 2026-09-22 — its header names the two caller stubs
+# still to migrate), so this stub is the example minus this header.
 name: Review
 
 on:
@@ -75,6 +75,21 @@ jobs:
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->'))
+    # codex_provision (optional; agents#136): the repository's provisioning
+    # recipe for CODEX runs — bash run as the unprivileged codex user in
+    # the checkout, in place of the generic `uv venv && uv pip install -e
+    # .[dev]`. The codex job never runs this repository's claude-setup
+    # action (a composite runs as the runner; nothing from the checkout may
+    # run as the runner there), so put here what claude-setup does that the
+    # generic recipe does not. uv is on PATH, HOME is /home/codex, no sudo,
+    # network on; create .venv so the agent's tools are found. Examples —
+    # a Python pin:          uv venv --python 3.11 && uv pip install -e ".[dev]"
+    # a lockfile sync:       uv venv --python 3.11 && uv sync --dev
+    # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
+    # with:
+    #   codex_provision: |
+    #     uv venv --python 3.11
+    #     uv sync --dev
     uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
     # The machine account's GitHub App secrets, for the gate's deterministic
     # ack/stage steps (eyes reaction + board stage) and the land job's posts
@@ -88,6 +103,8 @@ jobs:
       # codex engine (design/codex-engine.md in the agents repo):
       # consumed only on items labeled engine:codex; optional.
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    # Agent runs restore caches, never save them (agents repo: design/agent-cache-scope.md).
+    cache-mode: read
     permissions:
       contents: read
       pull-requests: read     # the review is posted by the land job as the machine account (#114)

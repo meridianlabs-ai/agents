@@ -123,6 +123,16 @@ Same rule for chained commands: don't pipe state-changing git commands
 through `| tail`/`| head` inside `&&` chains — the pipe's exit status masks
 the failure (run them bare; inspect output separately).
 
+**Every value that originates in the PR is data, never command syntax.**
+`BRANCH`, `APPROVED`, `FORK_URL`, CHANGELOG entry text, conflicted file
+names, titles: each reaches a command only as a quoted shell variable
+(`"$BRANCH"`), through the environment or on stdin, the way every fenced
+block here does — never pasted into a command template, quoted or not. An
+apostrophe, backtick or `$(` in it is otherwise shell syntax that runs in
+this session with your `gh` login, and for an External PR the author is an
+outsider (finding 4628737: the former inline `awk '/<entry text>/'` check
+executed a backticked phrase in ordinary release-note prose).
+
 ### Conflict resolution invariants
 
 - **CHANGELOG.md** (conflicts almost every time): keep origin/main's released
@@ -131,11 +141,23 @@ the failure (run them bare; inspect output separately).
   gone). Then verify **every** branch entry mechanically — entries relocate
   under released headings *silently*, including via clean auto-merges:
   ```bash
-  git diff "$(git merge-base origin/main HEAD)" HEAD -- CHANGELOG.md | grep '^+- '
+  bad=
+  base=$(git merge-base origin/main HEAD) && added=$(git diff --no-color "$base" HEAD -- CHANGELOG.md) || bad=1
+  while IFS= read -r entry; do   # each `+- ` line the branch adds; awk gets it from the environment and compares it whole — never as a regex or on the command line
+    entry="$entry" awk 'BEGIN { e = substr(ENVIRON["entry"], 2); sec = "(above the first heading)" }
+      /^## / { sec = $0 }
+      $0 == e { print sec "\t" $0; n++; if (sec != "## Unreleased") bad = 1 }
+      END { if (!n) { print "(not in CHANGELOG.md)\t" e; bad = 1 }; exit bad }' CHANGELOG.md || bad=1
+  done < <(grep '^+- ' <<<"$added")
+  test -z "$bad"                 # non-zero: a line above names a released heading (or the entry is gone), or the diff itself failed — fix and rerun
   ```
-  For each added line, confirm its section is `## Unreleased` (awk trick:
-  `awk '/^## /{sec=$0} /<entry text>/{print sec}' CHANGELOG.md`). Check this
-  even when CHANGELOG didn't conflict.
+  One line per added entry, `<section><TAB><entry>`; every section must be
+  `## Unreleased`, and the block exits non-zero otherwise. Check this even
+  when CHANGELOG didn't conflict. The entry text is the PR author's (see the
+  data-not-syntax rule above): run the block as written, never a one-off
+  with the entry typed into a pattern.
+  (tests/test_approval_at_head.py lifts this block and runs it against a
+  CHANGELOG whose entries carry quotes, backticks and `$(…)`.)
 - **Submodule gitlink**: after the merge,
   `git diff --cached origin/main -- src/inspect_ai/_view/ts-mono` must be
   empty (branch carries no net submodule change). If not, restore:
@@ -143,8 +165,17 @@ the failure (run them bare; inspect output separately).
   **Exception**: a PR that changes the viewer type schema needs a deliberate
   pointer bump — see "PRs that need a ts-mono change" below.
 - **Code conflicts** (common once earlier queue PRs land in main): before
-  resolving, inspect what main changed since divergence —
-  `git log/diff "$(git merge-base HEAD origin/main)"..origin/main -- <file>` —
+  resolving, inspect what main changed since divergence in each conflicted
+  file — the paths come from git NUL-delimited and reach the commands only as
+  a quoted variable (a file name is the PR author's too, and may carry
+  spaces, quotes or `$(`):
+  ```bash
+  base=$(git merge-base HEAD origin/main)
+  while IFS= read -r -d '' file; do
+    git log --oneline "$base..origin/main" -- "$file"
+    git diff "$base..origin/main" -- "$file"
+  done < <(git diff --name-only --diff-filter=U -z)
+  ```
   and make sure refactors main applied to code this PR deletes are already
   present in the surviving replacement (e.g. main refactored `run_multiple`
   and its successor identically; deleting `run_multiple` was safe). Then grep
@@ -328,7 +359,9 @@ Same flow as above with these substitutions — the branch lives on the
   else, surface that in the report instead of looping.
 - **Invariants are unchanged** (CHANGELOG entries under `## Unreleased`, no
   net submodule change) — but they were *reviewed*, not authored, by us, so
-  check them even more mechanically. A violation that needs real rework goes
+  check them even more mechanically: the fenced CHANGELOG block of "Conflict
+  resolution invariants" as written, the contributor's entry text reaching
+  awk only as data. A violation that needs real rework goes
   back to the contributor: comment on the upstream PR, move the proxy to
   Contributor, and skip — don't rewrite their PR beyond conflict resolution.
 - **Viewer schema / ts-mono**: an External PR that needs the "PRs that need

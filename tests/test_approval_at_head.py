@@ -627,6 +627,112 @@ def test_skill_external_block_never_materializes_a_moved_head_or_runs_its_hook(e
     assert q["marker"].exists()
 
 
+# --- the CHANGELOG and conflicted-path blocks: PR-authored text reaches commands only as data (finding 4628737) ---
+
+
+HOSTILE_ENTRIES = [
+    "- Don't fail when `touch {m}/backtick` isn't installed",  # ordinary prose: apostrophes balance the quotes, the backticks run
+    "- Fix the log viewer resize'$(touch {m}/subst)'",
+    '- Handle "quotes", $HOME, ${{var}} and C:\\path\\new (regex .* [specials]) literally',
+]
+
+
+@pytest.fixture
+def changelog_repos(tmp_path):
+    """`origin` main with a CHANGELOG, and the queue clone on the PR branch `feature`,
+    whose CHANGELOG entries are an outsider's text. Any command they smuggle would touch
+    a file under `marker`."""
+    marker = tmp_path / "ran"
+    marker.mkdir()
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git("init", "-q", "-b", "main", cwd=seed)
+    commit_file(seed, "CHANGELOG.md", "## Unreleased\n\n## v0.3.100 (01 September 2026)\n\n- Old entry\n", "base")
+    origin = tmp_path / "origin.git"
+    git("init", "-q", "--bare", str(origin), cwd=tmp_path)
+    git("remote", "add", "origin", str(origin), cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+    work = tmp_path / "work"
+    sh("git", "clone", "-q", str(origin), str(work), cwd=tmp_path)
+    git("checkout", "-q", "-b", "feature", "origin/main", cwd=work)
+    entries = [e.format(m=marker) for e in HOSTILE_ENTRIES]
+    return {"work": work, "marker": marker, "entries": entries}
+
+
+def run_changelog_block(work):
+    return sh("bash", "-e", "-c", skill_block("### Conflict resolution invariants"), cwd=work, check=False)
+
+
+def test_skill_changelog_block_reports_every_hostile_entry_under_unreleased_without_running_it(changelog_repos):
+    q = changelog_repos
+    body = "## Unreleased\n\n" + "\n".join(q["entries"]) + "\n\n## v0.3.100 (01 September 2026)\n\n- Old entry\n"
+    commit_file(q["work"], "CHANGELOG.md", body, "feature: changelog")
+    r = run_changelog_block(q["work"])
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert r.stdout.splitlines() == [f"## Unreleased\t{e}" for e in q["entries"]]
+    assert list(q["marker"].iterdir()) == []  # no backtick, no $( ) and no quote of theirs reached the shell
+    assert r.stderr == ""
+
+
+def test_skill_changelog_block_fails_on_an_entry_relocated_under_a_released_heading(changelog_repos):
+    q = changelog_repos
+    ok, relocated, plain = q["entries"]
+    body = f"## Unreleased\n\n{ok}\n{plain}\n\n## v0.3.100 (01 September 2026)\n\n- Old entry\n{relocated}\n"
+    commit_file(q["work"], "CHANGELOG.md", body, "feature: one entry under a release")
+    r = run_changelog_block(q["work"])
+    assert r.returncode != 0
+    assert r.stdout.splitlines() == [  # in diff order, each with the heading it sits under
+        f"## Unreleased\t{ok}",
+        f"## Unreleased\t{plain}",
+        f"## v0.3.100 (01 September 2026)\t{relocated}",
+    ]
+    assert list(q["marker"].iterdir()) == []
+
+
+def test_skill_changelog_block_fails_on_an_entry_that_vanished_and_shows_every_copy(changelog_repos):
+    q = changelog_repos
+    ok, duplicated, gone = q["entries"]
+    commit_file(q["work"], "CHANGELOG.md", "## Unreleased\n\n" + "\n".join(q["entries"]) + "\n", "feature: changelog")
+    # A bad resolution: one entry dropped, one copied under a released heading as well.
+    (q["work"] / "CHANGELOG.md").write_text(
+        f"## Unreleased\n\n{ok}\n{duplicated}\n\n## v0.3.100 (01 September 2026)\n\n{duplicated}\n- Old entry\n"
+    )
+    r = run_changelog_block(q["work"])
+    assert r.returncode != 0
+    assert r.stdout.splitlines() == [
+        f"## Unreleased\t{ok}",
+        f"## Unreleased\t{duplicated}",
+        f"## v0.3.100 (01 September 2026)\t{duplicated}",
+        f"(not in CHANGELOG.md)\t{gone}",
+    ]
+    assert list(q["marker"].iterdir()) == []
+
+
+def test_skill_conflicted_paths_block_quotes_a_hostile_file_name(tmp_path):
+    name = "weird $(touch ran-subst) `touch ran-tick` 'quoted' name.py"  # a smuggled command would create ran-* in the clone
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git("init", "-q", "-b", "main", cwd=seed)
+    commit_file(seed, name, "base\n", "base")
+    origin = tmp_path / "origin.git"
+    git("init", "-q", "--bare", str(origin), cwd=tmp_path)
+    git("remote", "add", "origin", str(origin), cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+    work = tmp_path / "work"
+    sh("git", "clone", "-q", str(origin), str(work), cwd=tmp_path)
+    git("checkout", "-q", "-b", "feature", "origin/main", cwd=work)
+    commit_file(work, name, "theirs\n", "feature: edits the file")
+    commit_file(seed, name, "main refactor\n", "main: refactors the file")
+    git("push", "-q", "origin", "main", cwd=seed)
+    git("fetch", "-q", "origin", cwd=work)
+    assert git("merge", "origin/main", cwd=work, check=False).returncode != 0  # conflicted, as the bullet assumes
+    r = sh("bash", "-e", "-c", skill_block("- **Code conflicts**"), cwd=work, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "main: refactors the file" in r.stdout and "+main refactor" in r.stdout
+    # The name went through `-z` and "$file", never through the shell's parser.
+    assert not (work / "ran-subst").exists() and not (work / "ran-tick").exists()
+
+
 def test_skill_pins_every_upstream_merge_request_and_re_approval_to_the_pushed_commit():
     lines = SKILL.read_text().splitlines()
     merges = [line for line in lines if "gh pr merge" in line and "UKGovernmentBEIS/inspect_ai" in line]

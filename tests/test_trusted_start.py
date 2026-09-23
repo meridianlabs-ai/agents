@@ -58,7 +58,7 @@ CLAUDE = WORKFLOWS / "claude.yml"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_ci_fix_binding import GH_STUB, SHA_A, origin_tip, sync_repo  # noqa: E402
 from test_ci_fix_gate import step_script  # noqa: E402
-from test_land_helpers import git, run_emit_landing, sh, step_block  # noqa: E402
+from test_land_helpers import git, job_block, run_emit_landing, sh, step_block  # noqa: E402
 
 SYNC = step_script(SYNC_ACTION, "    - id: sync", 8)
 RECORD_BASE = step_script(CLAUDE, "        id: base", 10)
@@ -516,6 +516,15 @@ TRUSTED_START = {
     "claude-auto-review.yml": "head",     # the gate's headRefOid / live-tip read
 }
 
+# workflow → its untrusted jobs, one per engine (findings 4628446 and
+# 4629153): each carries its own copy of the sync (and, in claude.yml, the
+# base step), and every copy must carry the pin.
+ENGINE_JOBS = {
+    "claude.yml": ("agent", "agent-codex"),
+    "claude-auto.yml": ("fix", "fix-codex"),
+    "claude-auto-review.yml": ("fix", "fix-codex"),
+}
+
 
 @pytest.mark.parametrize("name,output", sorted(TRUSTED_START.items()))
 def test_every_pushing_land_job_and_its_sync_are_pinned_to_the_gates_start(name, output):
@@ -524,9 +533,10 @@ def test_every_pushing_land_job_and_its_sync_are_pinned_to_the_gates_start(name,
     assert "uses: meridianlabs-ai/agents/.github/actions/land@main" in land
     assert f"          start-sha: ${{{{ needs.gate.outputs.{output} }}}}\n" in land
     assert "refuse-bundle" not in land
-    sync = step_block(text, "sync")
-    assert "uses: meridianlabs-ai/agents/.github/actions/sync-branch@main" in sync
-    assert f"          head-sha: ${{{{ needs.gate.outputs.{output} }}}}\n" in sync
+    for job in ENGINE_JOBS[name]:
+        sync = step_block(job_block(text, job), "sync")
+        assert "uses: meridianlabs-ai/agents/.github/actions/sync-branch@main" in sync, job
+        assert f"          head-sha: ${{{{ needs.gate.outputs.{output} }}}}\n" in sync, job
 
 
 def test_claude_yml_gate_records_the_start_and_the_issue_run_pins_to_it():
@@ -536,14 +546,20 @@ def test_claude_yml_gate_records_the_start_and_the_issue_run_pins_to_it():
     assert "if: steps.trig.outputs.ok == 'true'" in start
     assert "HEAD_BRANCH: ${{ steps.engine.outputs.head_branch }}" in start
     assert "BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}" in start
-    base = step_block(text, "base")
-    assert "GATE_SHA: ${{ needs.gate.outputs.start_sha }}" in base
-    assert "BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}" in base
-    # Its fetch of the live base tip runs under the one step-scoped
-    # credential-helper block every runner-side git network call uses.
-    assert "GIT_TOKEN: ${{ github.token }}" in base
-    assert "GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo \"password=$GIT_TOKEN\"; }; f'" in base
-    assert 'git fetch --quiet origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"' in base
+    # Both engine jobs pin their base step to the gate's read, and the two
+    # copies run the same script (the lifted tests exercise the first).
+    scripts = []
+    for job in ENGINE_JOBS["claude.yml"]:
+        base = step_block(job_block(text, job), "base")
+        assert "GATE_SHA: ${{ needs.gate.outputs.start_sha }}" in base, job
+        assert "BASE: ${{ inputs.base_branch || github.event.repository.default_branch }}" in base, job
+        # Its fetch of the live base tip runs under the one step-scoped
+        # credential-helper block every runner-side git network call uses.
+        assert "GIT_TOKEN: ${{ github.token }}" in base, job
+        assert "GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo \"password=$GIT_TOKEN\"; }; f'" in base, job
+        assert 'git fetch --quiet origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"' in base, job
+        scripts.append(base[base.index("run: |"):])
+    assert scripts[0] == scripts[1]
     # The gate step runs after the engine step whose head_branch it reads,
     # and before the ack (nothing it does needs to wait for the ack).
     assert text.index("        id: engine\n") < text.index("        id: start\n")
@@ -551,8 +567,9 @@ def test_claude_yml_gate_records_the_start_and_the_issue_run_pins_to_it():
     # bundles are cut above); the pin makes it the gate's when the run is
     # honest, and the land job compares against the gate's directly.
     emit = [s for s in text.split("\n      - ") if "emit-landing@main" in s]
-    assert len(emit) == 1
-    assert "start-sha: ${{ steps.base.outputs.sha || steps.sync.outputs.start_sha || steps.sync.outputs.head_sha || github.sha }}" in emit[0]
+    assert len(emit) == len(ENGINE_JOBS["claude.yml"])
+    for e in emit:
+        assert "start-sha: ${{ steps.base.outputs.sha || steps.sync.outputs.start_sha || steps.sync.outputs.head_sha || github.sha }}" in e
 
 
 def test_the_landing_smoke_example_is_pinned_like_a_real_caller():

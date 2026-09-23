@@ -70,7 +70,11 @@ differ; the exceptions are listed there, not assumed away here.
 - **I4. Untrusted code never runs before authorization or outside a sandbox.**
   Who may trigger a run is decided by a deterministic step, by login or by a
   permission lookup that fails closed, before any PR head is checked out and
-  before any local action runs. Code from a fork head or an external checkout
+  before any local action runs. In a codex job no code from the checkout
+  runs as the runner at all: the caller's `claude-setup` action is never
+  run there and the provisioning recipe runs as the `codex` user, after
+  that user exists (findings 4628446 and 4629153, 2026-09-22; section 3.1).
+  Code from a fork head or an external checkout
   runs only inside the reviewer's OS-level sandbox, and project configuration
   from that tree (`.claude/`, `.mcp.json`, `CLAUDE.md`) is removed before the
   agent starts.
@@ -100,26 +104,55 @@ differ; the exceptions are listed there, not assumed away here.
 
 ### 3.1 Gate, agent, land
 
-The four reusable workflows are three jobs each (the `actions`
-repository's two agent workflows fold the gate's role into the agent job's
-`if:` and run two; section 4.2):
+The four reusable workflows are four jobs each — a gate, one untrusted job
+per engine of which the gate's `engine` output selects exactly one, and
+the land job (the `actions` repository's two agent workflows fold the
+gate's role into the agent job's `if:` and run two; section 4.2):
 
 ```
 gate   (trusted)    trigger check by login or permission lookup; the pre-agent
                     writes as the machine account (👀, stage → Agent, opt-in
                     label, loop counters); mints its own token; checks out
-                    no PR code.
-  -> agent/fix/review (untrusted)
-                    checkout with persist-credentials: false; provisioning;
-                    the agent; commits locally and never pushes; the read-only
-                    job token, plus the Claude action's own token while its
-                    step runs; emit-landing runs last, if: always(), with no
-                    token.
-  -> land  (trusted, fresh runner)
+                    no PR code; resolves the engine.
+  -> agent/fix/review (untrusted, Claude engine; if: engine != 'codex')
+                    checkout with persist-credentials: false; provisioning
+                    as the runner (the caller's claude-setup or the fallback
+                    recipe); the agent; commits locally and never pushes;
+                    the read-only job token, plus the Claude action's own
+                    token while its step runs; names no other secret;
+                    emit-landing runs last, if: always(), with no token.
+  -> agent-codex/fix-codex/review-codex (untrusted, codex; if: engine == 'codex')
+                    the same checkout and sync; the codex user boundary;
+                    provisioning AS the codex user (the fallback recipe or
+                    the caller's `codex_provision`, never the caller's
+                    action); the codex-home reset (every codex process
+                    killed, ~codex/.codex re-created); codex, the reclaim
+                    and the deterministic commit; the read-only job token
+                    and OPENAI_API_KEY at the codex-action step — the one
+                    job of the workflow that references it.
+  -> land  (trusted, fresh runner; needs both agent jobs)
                     mints its own token; downloads the artifact; validates
                     the manifest; pushes the bundle; opens or adopts the PR;
                     posts; resolves; files issues; moves the stage; reports.
 ```
+
+The engine split (2026-09-22, findings 4628446 and 4629153) exists because
+a secret a step references is delivered to the job's runner whether or not
+the step runs: the runner builds its `secrets` expression context from the
+job message before the first step (`actions/runner`,
+`Runner.Worker/ExecutionContext.cs`: `ExpressionValues["secrets"] =
+Global.Variables.ToSecretsContext()` in `InitializeJob`), and a step's `if:`
+is evaluated on the runner when the step is reached (`StepsRunner`), so the
+codex step's `${{ secrets.OPENAI_API_KEY }}` used to put the OpenAI key into
+every Claude-engine agent job's message, where the unsandboxed, sudo-capable
+Claude agent could read it out of the runner's memory. A job-level `if:` is
+decided by the service before the job is dispatched, and a skipped job has
+no job message. Whether the service scopes referenced secrets per job or per
+called workflow is not documented; the split makes the Claude job's YAML
+reference no key, which is the documented condition for a secret not to be
+delivered, the hosted canary in section 6 measures per-job scoping in this
+gate/agent/land shape (App secrets included), and section 7 records the
+remaining uncertainty.
 
 The gate exists because some writes must happen before the agent runs (the
 acknowledgement, the stage move, the loop's attempt counter), and those are
@@ -215,13 +248,26 @@ workflow) the validator additionally refuses any manifest that carries
 commits, claims HEAD moved or ships a bundle, whatever the agent job
 uploaded, and the push-side branch rules are off because nothing is pushed.
 `emit-landing`'s `read-only` input is the producing side of the same pair:
-no git runs, `head_sha` equals `start_sha`, no bundle. Refusing bundles does
-not refuse pull requests: `pr.open` adopts or opens a PR for a branch that
-already exists on origin and labels it, with no push. Under `refuse-pr` (the
-triage workflow, since 2026-09-22) the validator also refuses a manifest
-carrying `pr` or `handback: true`, so a caller whose token reaches the
-repository's pull requests (the `MARVIN_TOKEN` fallback) cannot be made to
-label an existing PR `auto` or post `@review` by a forged artifact.
+no git runs, `head_sha` equals `start_sha`, no bundle. Since 2026-09-22
+`refuse-bundle` also refuses every field only a landed commit or a loop's fix
+agent owes — `pr`, `replies`, `resolve_threads`, `handoff_body_file` and
+`handback: true` — because nothing lands there to owe them: a forged review
+manifest could otherwise make the land job post the live `@review` as the
+machine account and start another review of the same PR without bound, post
+the `auto-handoff` stop marker, or resolve a human's review threads (Claude
+Security finding 4628439). Under `refuse-pr` (the triage workflow, since
+2026-09-22) the validator refuses a manifest carrying `pr` or `handback:
+true` on its own, so a caller whose token reaches the repository's pull
+requests (the `MARVIN_TOKEN` fallback) cannot be made to label an existing
+PR `auto` or post `@review` by a forged artifact.
+
+The review fields — `review_verdict`, `comments[].review` and
+`review_comments` — are accepted only on a land job whose caller passes
+`allow-review`, which claude-review.yml alone does (Claude Security finding
+4628442, 2026-09-22). On every other caller the validator refuses a manifest
+carrying any of them: they make `land` post a review as the machine account,
+byte-identical to the reviewer's, and the compose steps that keep the other
+callers' manifests free of them run in the agent job.
 
 Every agent-authored body the land job posts passes through a de-fang step
 first (trigger tokens lose their `@`, loop markers are split,
@@ -345,14 +391,37 @@ push with GitHub's "refusing to allow a GitHub App to create or update
 workflow" error. That is the intended boundary: the workflows that hold the
 credentials are changed from a maintainer's machine, under a maintainer's
 review, never by an agent running in CI. Since 2026-09-18 the land job
-enforces it before the push: its `workflows` step lists the paths the
-bundle changes under `.github/workflows/` and refuses the bundle with a
+enforces it before the push: its `workflows` step lists the paths under
+`.github/workflows/` the push would change on origin — the bundle's tip
+against the branch's live tip, or against origin's base tip when the push
+creates the branch; trusted references the land job reads itself, never
+the manifest's `start_sha`, which the agent job writes and which origin
+would serve for any reachable commit, a fork PR's head or an old base
+commit included (Claude Security finding 4628444, 2026-09-22) — and
+refuses the bundle with a
 one-line report naming the files the agent itself changed — a change the
 runner's base merge brought in (the file's content at the bundle's tip
-equals the base branch's on origin, or that of the base as last merged into
+equals the base branch's on origin, or, on a branch that is on origin, that
+of the base as last merged into
 the branch: the merge base of the tip and origin's base) is not the agent's
-and passes (decision: Ransom, 2026-09-18) — and the agent prompts say up
-front not to edit them.
+and passes (decision: Ransom, 2026-09-18); on a branch the push creates,
+only content equal to the base tip passes, since an issue run cuts its
+branch from that tip and a lower fork point cannot be told from one the
+agent chose — and the agent prompts say up
+front not to edit them. Since 2026-09-23 the same step refuses the entry
+points and configuration files a later automated job on the branch
+executes or loads (Claude Security finding 4628446, criterion 2): anything
+under `.github/`, agent instructions and settings, and build and
+dependency configuration, at any depth, plus the symlink targets and
+`CLAUDE.md` imports they reach — the list and its rationale are in lib.sh
+and in SECURITY.md → Guarantees. GitHub's check covers only workflows, so
+for these the land job's refusal is the whole boundary: without it the
+machine account's push would launder an agent-written `claude-setup`
+composite or build hook into a same-repo branch the next run provisions
+from as `runner`. It does not close the class: an ordinary file that
+unchanged configuration executes still lands, an accepted gap (decision:
+Ransom, 2026-09-23) stated in SECURITY.md → Guarantees and left to the
+design follow-up named there.
 
 The app is not a member of `UKGovernmentBEIS`, so, like the PAT before it, it
 cannot open or push to upstream pull requests; promotion to upstream is a
@@ -417,9 +486,26 @@ human step.
   Federation: the job's OIDC token is exchanged for a short-lived Anthropic
   credential under a rule that matches `repository_owner ==
   "meridianlabs-ai"`; there is no API key. The codex engine has no such
-  exchange, so `OPENAI_API_KEY` is the one secret an agent job names,
-  consumed only on items labelled `engine:codex`, and codex itself runs as
-  an unprivileged `codex` user with no GitHub credential at all.
+  exchange, so `OPENAI_API_KEY` is the one secret an agent job names — the
+  codex job, at its codex-action step, and no other job (section 3.1): the
+  Claude job's YAML references it nowhere, so a Claude-engine run's job
+  message never carries it. Codex itself runs as an unprivileged `codex`
+  user with no GitHub credential at all, and since 2026-09-22 so does the
+  provisioning of its checkout: the codex jobs run the shared fallback
+  recipe under `sudo -u codex -H` after `create-codex-user`, never the
+  caller's `claude-setup` composite as the runner, so a hostile build hook
+  or action in a head the pipeline itself authored runs with codex's
+  boundary, not ahead of the key (finding 4628446).
+- **The Actions runtime token, cache-read-only.** The runner gives every
+  node action of the job the runtime token (the same value as the OIDC
+  request token), and code running as `runner` can recover it from the job's
+  later steps or the worker whatever reaches the agent's own environment; on
+  the Claude engine the agent is that user. Every reusable workflow declares
+  top-level `cache-mode: read`, which GitHub enforces on that token, so it
+  restores the caller's caches and saves none, in any scope (Claude Security
+  4629157, 2026-09-23; [agent-cache-scope.md](agent-cache-scope.md)). It
+  can also upload the run's artifacts, which the land job already treats as
+  untrusted and validates (section 3.2).
 
 The agent commits and stops (decision: Ransom, 2026-09-09: every comment the
 loop produces is posted by the land job as the machine account after the
@@ -479,8 +565,9 @@ files (it runs tests and Python, unsandboxed on same-repo heads, and its
 `gh` runs outside the sandbox on the sandboxed paths), and under
 `refuse-bundle` the validator still accepts `comments[]` on any thread of
 the caller repository, `issues[]` in the caller repository (create,
-comment, reopen, assign), a `stage` move and a `pr.open` for a branch that
-already exists on origin. A compromised review job can therefore have the
+comment, reopen, assign) and a `stage` move (since 2026-09-22 it refuses
+`pr`, `replies`, `resolve_threads`, `handoff_body_file` and `handback`
+there). A compromised review job can therefore have the
 machine account post those, de-fanged, on the caller repository; it cannot
 push through its landing job, and its manifest cannot reach another
 repository. The Claude action's own installation token in the review job is
@@ -675,8 +762,13 @@ results against the invariant each one tests.
   run the lifted `run:` scripts against a stub `gh` and check that every
   trust decision is by login or permission, fail-closed (I4).
 - `grep -n 'secrets\.' .github/workflows/<file>` must hit only the
-  `workflow_call` declarations, the `gate` job, the `land` job and the codex
-  step's `OPENAI_API_KEY` (I1, I2). `grep -rn 'secrets\.'
+  `workflow_call` declarations, the `gate` job, the `land` job and the
+  codex job's codex-action step (`openai-api-key: ${{
+  secrets.OPENAI_API_KEY }}`); the Claude job hits nothing (I1, I2;
+  `test_engine_job_isolation.py` checks this, the job-level engine
+  selection, the land job's `needs`, and that the codex job runs no
+  `./`-local action and provisions with `user: codex` between
+  `create-codex-user` and the codex-action step). `grep -rn 'secrets\.'
   .github/actions/emit-landing` stays empty.
 - `grep -n 'persist-credentials' .github/workflows/<file>` shows `false` on
   every checkout (I5); `grep -n '${{ inputs\.' <file>` inside `run:` blocks
@@ -693,6 +785,78 @@ results against the invariant each one tests.
   `@review`, and a no-role account's `@review`, `@auto` or forged marker
   comment produces no run past the gate (I4); the run's only artifact is the
   landing directory (I6).
+- The engine split's hosted canary, `.github/workflows/engine-isolation-canary.yml`
+  (`gh workflow run engine-isolation-canary.yml --repo meridianlabs-ai/agents
+  --ref <branch>`, a push touching the composites or the harness, or its
+  weekly schedule on `main`, Mondays 06:17 UTC): the
+  `probe` job passes two synthetic repository secrets to a called workflow
+  shaped like the agent workflows and scans the runner processes' memory
+  as root in three jobs — a secret referenced in a never-run step is
+  delivered to that job's runner (the positive control, and the finding's
+  platform claim), a job referencing nothing receives neither sentinel
+  although the caller passed both and sibling jobs reference each (the
+  fixed Claude job; per-job scoping), a used secret is found (the codex
+  job); the `provisioning-boundary` job runs this revision's composites
+  over a hostile checkout whose build backend plants the config.toml
+  symlink and a survivor process, and checks that it ran as codex, could
+  not touch the runner's home or read the runner process's environment,
+  and that the `reset-home` step left no codex process and a pristine home
+  (I4). Run on 2026-09-22 against `06ce67a` (the round-2 head), run
+  35796259846, all four jobs green: the referenced-but-skipped job found
+  sentinel A 9 times in Runner.Listener and 16 times in Runner.Worker and
+  sentinel B not at all; the unreferencing job found neither (Listener 709
+  and Worker 851 readable regions scanned); the used-secret job found B (8
+  and 14) and not A. So a secret a never-run step references IS delivered
+  to that job's runner (finding 4629153's claim, confirmed), and the
+  service scopes referenced secrets per job — a sibling job's reference
+  delivers nothing to a job that references none. The provisioning
+  boundary: the hostile backend ran as `codex` (uid 113), planted the
+  `config.toml` symlink and a survivor (pid 2343), and was refused the
+  runner's home (`PermissionError`) and the runner processes' environment
+  (`PermissionError`); after `reset-home` no process ran as codex and the
+  home held exactly the profile and the server-info file; the caller
+  recipe ran as codex with `uv` at `/home/codex/.local/bin/uv`, HOME
+  `/home/codex`, the checkout as cwd. The first run on the round-2 code
+  (35796037163) failed its boundary job before the backend ran — the uv
+  installer under `sudo -u codex -H` tried to write the runner's
+  `$XDG_CONFIG_HOME/uv` (the hosted sudoers keeps XDG_*) — which is why the
+  composite now runs the recipe under `env -i`. Run 35798100140 on
+  `743b495` (round 3) added the `caller-recipes` matrix over the four
+  stand-in projects in `tests/fixtures/callers/` and passed all eight jobs:
+  the inspect_ai-like recipe gave a Python 3.11 venv with the `dev` extra
+  (`pytest`, `ruff`), the inspect_flow-like one Python 3.11 with the `dev`
+  group from an unchanged `uv.lock` (`pytest`, `pyright`), the
+  inspect_harbor-like one Python 3.12 with the `dev` and `doc` default
+  groups from an unchanged lock, and the ts-mono-like one — no
+  `pyproject.toml`, the recipe-only route — Node v22.23.2 (the image's),
+  pnpm 11.22.0 via corepack in `~codex/.local/bin`, a frozen install and
+  `prettier` in `node_modules/.bin`; every tool the compose steps' discovery
+  found ran as codex under `sudo -u codex`.
+- I1 against the job message, in the agent workflows' own shape: the same
+  canary's `pipeline-probe` job (finding 4629153, fix criterion 3) calls
+  `engine-isolation-canary-pipeline.yml` once per engine. That workflow
+  declares the three `workflow_call` secrets under their real names
+  (`MARVIN_APP_CLIENT_ID`, `MARVIN_APP_PRIVATE_KEY`, `OPENAI_API_KEY`), and
+  the canary fills them with the synthetic sentinels only — A for both App
+  secrets, B for the OpenAI key; its `gate` and `land` jobs reference the
+  App secrets in job `env:` and as action inputs of a step that runs (the
+  mint step's shape, through the stand-in action in
+  `tests/fixtures/secret-input`), its `agent` and `agent-codex` jobs `need`
+  the gate and are selected by its `engine` output at the job level, the
+  Claude job referencing nothing and the codex job the OpenAI key at a step
+  that runs, and every job ends with the root memory scan.
+  `tests/test_secret_delivery_canary.py` keeps each job's secret references,
+  the workflow's secret declarations and the job selection equal to the
+  four reusable workflows', so the measurement stands for them. Run on
+  2026-09-23 against `8bf9170`, run 35891370879, all sixteen jobs green
+  (the two unselected agent jobs skipped): in both engine runs the gate and
+  land jobs held sentinel A (Listener 16–18, Worker 44–56 matches) and not
+  B; the Claude agent job held neither (Listener 709 and Worker 818
+  readable regions scanned) although the gate before it and the land job
+  after it referenced the App secrets and the caller passed the OpenAI key;
+  the codex job held B (9 and 21) and not A. So the App secrets are
+  delivered to the jobs that reference them and not to the agent jobs of
+  the same called workflow, and the OpenAI key reaches the codex job alone.
 
 ## 7. Costs and residual risks
 
@@ -725,14 +889,17 @@ results against the invariant each one tests.
   the land job refuses bundles. Its normal output is the three review files, landed as the
   review summary, the inline findings and a verdict that is one of two
   fixed bodies, after the de-fang. The enforced limits stop there: the
-  review job runs tests and Python (unsandboxed on same-repo heads), its
-  workspace stays writable on the sandboxed paths and `gh` runs outside
-  the sandbox there, and the landing manifest it uploads is data the
+  review job runs tests and Python (unsandboxed on same-repo heads), on the
+  sandboxed paths its scratch copy of the checkout stays writable while the
+  checkout itself is read-only to sandboxed commands (Claude Security
+  4628445) and `gh` runs outside the sandbox there, and the landing
+  manifest it uploads is data the
   validator checks for shape, not intent. Under `refuse-bundle` the
   validator accepts `comments[]` on any thread of the caller repository,
-  `issues[]` in the caller repository (create, comment, reopen, assign), a
-  `stage` move and a `pr.open` for a branch that already exists on origin,
-  all of which the land job would post as the machine account. So what a
+  `issues[]` in the caller repository (create, comment, reopen, assign) and
+  a `stage` move (since 2026-09-22 no `pr`, `replies`, `resolve_threads`,
+  `handoff_body_file` or `handback`), all of which the land job would post
+  as the machine account. So what a
   steered reviewer can cause through the landing is a wrong review and
   manifest-authorized writes on the caller repository, never a
   machine-account push and never a machine-account write outside it; a
@@ -769,3 +936,75 @@ results against the invariant each one tests.
   before the push with a plain report line, and the agent prompts say not
   to edit them (section 3.4). A run that needs a workflow change still
   spends itself before the refusal is posted.
+- **CI agents cannot change the entry points later automation executes**
+  (finding 4628446, criterion 2, 2026-09-23). The same step refuses
+  `.github/`, agent instructions and settings, and build and dependency
+  configuration at any depth. Accepted gap (decision: Ransom, 2026-09-23):
+  an ordinary file that unchanged configuration executes still lands, and
+  the next Claude-engine run executes it as `runner` during provisioning
+  or at agent start; closing that is the design follow-up SECURITY.md →
+  Guarantees names (approval gating, dependency following, or an
+  unprivileged Claude user). Price: a task that needs a dependency bump, a
+  `CLAUDE.md`/`AGENTS.md` edit or a composite-action change — most of this
+  repo's own code is under `.github/` — is done from a maintainer's
+  machine; so is a base-merge conflict the agent resolves in one of these
+  files, and a base merge combining a human's branch change with a base
+  change to the same file (the merged content matches neither trusted
+  reference), as for workflow files before.
+- **Secret delivery is per job — measured, not documented.** GitHub says a
+  referenced secret can be harvested by code running in the job and that
+  unreferenced ones are scrubbed; it does not say whether "referenced" is
+  decided per job or per called workflow. The canary in section 6 measured
+  it on 2026-09-22: a job that references nothing received neither
+  sentinel although the caller passed both to the called workflow and
+  sibling jobs referenced each, and a job whose only reference sat in a
+  never-run step received its sentinel; on 2026-09-23 its pipeline probe
+  repeated that in the agent workflows' own shape — gate, engine-selected
+  agent jobs, land — and the Claude agent job held no App secret and no
+  OpenAI key. So the engine split — a Claude job whose YAML references no
+  `OPENAI_API_KEY` — keeps the key out of that job's message today, and the
+  App secrets the gate and land jobs reference stay out of the agent jobs'
+  messages the same way, which is why the App-secret-referencing jobs can
+  share a workflow file with the agent jobs. What the canary does not do is
+  scan a real agent run: its jobs are stand-ins with the same references,
+  held to the real files by `tests/test_secret_delivery_canary.py`, and a
+  real run's memory is never dumped for real secret values. The stubs keep passing
+  the key to every reusable workflow (the declaration is kept for backward
+  compatibility: a stub naming an undeclared secret fails to load). What
+  remains is that this is the platform's current behaviour, not a contract:
+  the canary runs weekly on `main` (decision: Ransom, 2026-09-23 — no push
+  here would reveal a platform change), on every push that touches the
+  composites or the harness, and by hand, and a change in delivery scoping
+  would turn its `unreferencing` and pipeline-probe agent jobs red. GitHub
+  emails a failed scheduled run to the user who last modified the cron
+  line, and disables a scheduled workflow after 60 days without repository
+  activity; a quiet stretch in this repository can therefore stop the
+  weekly run, and re-enabling it (`gh workflow enable
+  engine-isolation-canary.yml`) is manual.
+- **The Claude job still executes the checkout as the runner.** Its
+  provisioning (the caller's `claude-setup`, the fallback dev-install) and
+  the agent's own test runs execute the tree's code unsandboxed, as the
+  runner, with sudo, the OIDC request token and the Claude action's
+  installation token in reach — the concession SECURITY.md makes for
+  same-repo heads, now stated for heads the pipeline itself authored as
+  well: an outsider's issue text steers the first run's agent, and a second
+  automated run on the branch it produced executes that branch's build
+  hooks before the agent. What the split removes from that job is the
+  OpenAI key; what remains is exactly what a prompt-injected Claude agent
+  already holds there. Since 2026-09-23 the land job refuses agent bundles
+  that touch paths a later job executes or loads as configuration
+  (`.github/`, build and dependency configuration, agent instructions and
+  settings; finding 4628446, criterion 2 — section 3.4), so an agent can no
+  longer add or change those entry points for the next run. It can still
+  change an ordinary file that unchanged configuration executes (a script
+  the `claude-setup` composite or a settings hook runs, a module the build
+  backend imports), which the next Claude-engine run executes as `runner`
+  before the agent — an accepted gap (decision: Ransom, 2026-09-23; see
+  SECURITY.md → Guarantees for the design follow-up that would close it);
+  a maintainer's own push to the branch still can do either, as before.
+- **A caller's own cache writers.** A caller that sets `cache-mode: write`
+  on the job calling an agent workflow cannot widen what the reusable
+  workflow declares (the called workflow's `read` holds), but its own
+  non-agent jobs, and agent jobs it defines in workflows of its own, save
+  under its own triggers and are its own concern
+  ([agent-cache-scope.md](agent-cache-scope.md) → Caller-owned agent jobs).

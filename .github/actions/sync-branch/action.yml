@@ -137,7 +137,7 @@ outputs:
     description: >-
       The merge commit, ONLY when a merge actually happened cleanly ("Already
       up to date" leaves it empty). Gates the "review the runner's merge"
-      prompt note and the push-base-merge backstop.
+      prompt note.
     value: ${{ steps.sync.outputs.merge_sha }}
   started:
     description: >-

@@ -363,8 +363,17 @@ be a writer" rule would refuse that while telling two writers' PRs apart no
 better. The actor check judges who *ran* CI, not who *authored* the PR. And a
 Claude step that **fails**, for any reason — the action's actor refusal, a
 bootstrap failure, a failure during the run — now lands nothing: not the
-runner's base merge, not a commit Claude made before failing; its attempt
-is refunded, as the codex failure path always did. The three causes cannot
+runner's base merge, not a commit Claude made before failing, as the codex
+failure path always did; since Claude Security 4628735 (2026-09-22) its
+attempt is *kept*, not refunded — the refund fires only when the agent
+step was never entered (`agent_skipped`: the engine's agent step
+`skipped` — each engine has its own fix job and output, the land job
+reading the gate's engine's — a step outcome the runner settled before any agent code ran) and nothing was
+pushed, because the agent decides how its own step ends and a refund keyed
+on that let a steered agent make a completed round read as an infra crash,
+so the cap bounded only rounds that landed; a cancellation alone, or a job
+that delivered no outputs (a pending fix job cancelled before it started),
+keeps the recorded count. The three causes cannot
 be told apart from outside the action, and nothing the fix job can observe
 proves Claude launched: a file at the action's default path is one the
 PR's provisioning step can pre-create (review round 1), and the action's
@@ -891,8 +900,10 @@ are single-valued). Now `@auto`/`auto` is a **distinct kickoff that coexists
 with `@claude`**: a second dev-agent job (in the caller stub) invokes the same
 reusable `claude.yml` with `trigger_phrase: '@auto'`, `label_trigger: 'auto'`,
 and the dev agent's land job **propagates the `auto` label from the issue
-onto the new PR** (the manifest's `pr.labels`, read by the gate) so the loop
-engages. `claude`/`@claude` remains the
+onto the new PR** (the manifest's `pr.labels`, read by the gate — which
+counts the issue's label only when a write-access human applied it, and
+pinned by the land job's `allowed-pr-labels` to that read; Claude Security
+findings 4628438 and 4628441, 2026-09-22) so the loop engages. `claude`/`@claude` remains the
 one-shot assisted mode (PR opened, human drives); `auto`/`@auto` is the
 autonomous mode (PR opened, labeled `auto`, loop runs to handoff).
 

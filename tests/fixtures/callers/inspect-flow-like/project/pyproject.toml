@@ -1,0 +1,14 @@
+# Representative of inspect_flow's setup (Python 3.11, `uv sync --dev`
+# against a committed uv.lock, a `dev` dependency group that is also a
+# default group). Used by the hosted canary's caller-recipes job.
+[project]
+name = "inspect-flow-like"
+version = "0"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "pyright>=1.1"]
+
+[tool.uv]
+default-groups = ["dev"]

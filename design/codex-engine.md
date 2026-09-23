@@ -71,9 +71,15 @@ ref; a diverted HEAD that isn't genuinely new work fails the push
 non-fast-forward — loud, not lossy. Failure parity mirrors the Claude
 path throughout: a failed codex step *or* any of its prep steps
 (workspace/context prep, and the dev verb's separate prompt-compose)
-surfaces a visible error comment and, in the loops, refunds the review
-round / CI-fix attempt (infra failures — e.g. a missing
-`OPENAI_API_KEY` — must not march a PR toward spurious escalation);
+surfaces a visible error comment and, in the loops, a failed prep step
+refunds the review round / CI-fix attempt (the codex step was never
+entered), while a codex step that ran and failed keeps its round, like a
+failed Claude step (Claude Security 4628734 / 4628735, 2026-09-22: a
+refund keyed on the agent step's own outcome is the agent's to trigger).
+A missing `OPENAI_API_KEY` fails the entered codex action step — the key
+is passed straight to it — and therefore consumes a round or attempt,
+where it used to be refunded; a persistently missing key now reaches the
+cap and a human instead of a refund on every trigger;
 in both loops (`claude-auto.yml` since #82, `claude-auto-review.yml`
 since #83) the codex step only *commits*:
 the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)
@@ -147,12 +153,21 @@ engine uses an **`OPENAI_API_KEY` org secret** (created by Ransom,
 2026-08-31) — the one exception to this repo's no-API-key-secrets
 invariant. Containment: the reusable workflows declare it as an
 optional secret, stubs pass it explicitly (never `secrets: inherit`),
-and it is exposed ONLY to the `openai/codex-action` step, which uses it
-server-side to mint a scoped proxy credential; it never appears in
-prompts, sandboxed command environments, or other steps. Repos without
-the secret: codex-labeled runs fail at the codex step with a clear
-error rather than silently falling back (a silent Claude fallback would
-misattribute output).
+and it is referenced ONLY by the `openai/codex-action` step of the codex
+job — the `agent-codex`, `review-codex` and `fix-codex` jobs, one per
+workflow, which the gate's `engine` output selects at the job level (One
+job per engine, below). The action uses it server-side to mint a scoped
+proxy credential; it never appears in prompts, sandboxed command
+environments, or other steps, and since 2026-09-22 never in another job's
+message either: until then the codex step sat in the same job as the
+Claude agent with a step-level `if:`, and a referenced secret reaches the
+job's runner whatever the step's `if:` says (the runner builds its
+`secrets` context from the job message before any step runs), so every
+Claude-engine run's job carried the key where the unsandboxed,
+sudo-capable Claude agent could read it out of Runner.Worker's memory
+(Claude Security finding 4629153). Repos without the secret: codex-labeled
+runs fail at the codex step with a clear error rather than silently
+falling back (a silent Claude fallback would misattribute output).
 
 ## Safety strategy: unprivileged-user, not drop-sudo
 
@@ -387,14 +402,190 @@ Verification for a change here, all cases prompted to codex (any verb):
    `$RUNNER_TEMP/no-hooks`, and no later step's log (landing, hand-back,
    Surface) may contain `HOOK-RAN`.
 
+### Runner-side search path
+
+The hook-safe landing reasons about what git *executes*; the job PATH is
+the same kind of boundary for every command (Claude Security finding
+4628448, 2026-09-22). Two runner facts, verified against actions/runner
+`src/Runner.Worker` (`FileCommandManager.cs`, `Handlers/Handler.cs`,
+`Handlers/ScriptHandler.cs`): every line a step writes to `$GITHUB_PATH`
+is added to the job's prepend list and never removed (`PrependPath` is
+only ever appended to and deduplicated), and every later step — composite
+steps included — gets `PATH = <prepend list> : <original PATH>`, with a
+step's own `env: PATH` used only as the tail; and the runner picks each
+`run:` step's shell interpreter with `WhichUtil.Which(shell, …,
+prependPath)`, i.e. through the same list, before the script runs. So a
+directory on the job PATH that the codex user can write or replace is code
+execution as `runner` in the first step after codex — and the reclaim's
+own script cannot pin its way out, since its `bash` was already chosen.
+The `mechanism` job of `.github/workflows/codex-path-smoke.yml` reproduces
+this on the hosted image: with the workspace venv on `GITHUB_PATH` and a
+`bash` planted there, the next `shell: bash` step runs under it.
+
+Until 2026-09-22 `provision-fallback` put `$PWD/.venv/bin` on
+`GITHUB_PATH` on every engine, and `create-codex-user`'s `chown -R
+runner:codex` + `chmod -R g+rwX` then made that directory `drwxrwsr-x
+runner codex`: a prompt-injected codex could write `.venv/bin/sudo`
+(wrapping `/usr/bin/sudo`), `bash`, `git`, `find`, `jq`, and the reclaim's
+first command — a bare `sudo pkill -KILL -u codex` — would have run it as
+`runner`, root on a hosted runner, before the kill, the chown, the config
+restore or any refusal; `codex-usage`'s `sudo test`/`sudo find`/`sudo cat`
+on the reviewer's path (which has no reclaim), the guard's `git`, the
+commit step's `git add -A`, emit-landing's `git bundle` likewise. The
+reclaim's guarantees would have been executed by attacker-chosen binaries,
+and the containment argument under "Safety strategy" would have been void.
+The venv was only the convenient case: the hosted Ubuntu image itself
+ships `/opt` (and so `/opt/pipx_bin` and `/opt/hostedtoolcache`, both on
+the job PATH ahead of `/usr/bin`), `/usr/local/bin` and
+`/usr/local/.ghcup` recursively mode 777 (actions/runner-images
+`images/ubuntu/scripts/build/configure-system.sh`,
+`configure-environment.sh`, `install-nodejs.sh`, `install-haskell.sh` at
+`e75633902841`), so on a stock runner any unprivileged user — the codex
+user included — could plant `/opt/pipx_bin/sudo` with no help from
+provisioning at all (review round 1 of #131). The fix is structural, in
+three layers:
+
+- **Nothing under the workspace goes on the job PATH when codex may run.**
+  Since the engine split (One job per engine, below) a job runs one engine
+  only. The codex jobs provision with `provision-fallback` `user: codex`,
+  whose recipe runs as the codex user under `env -i` and cannot reach
+  `GITHUB_PATH` at all (the venv is still created at `.venv` — the compose
+  steps take the tools from the composite's `bin` directories by absolute
+  path, which is how codex was always told to run them), and they never
+  run a caller's `claude-setup`. `provision-fallback` also takes
+  `add-to-path` (default `true`, ignored under `user`): the Claude jobs
+  keep the default, and a caller's `claude-setup` may keep putting its venv
+  on the job PATH there — Claude runs as `runner` with the job PATH, so a
+  shadow there gives it nothing it does not already have, and no codex user
+  exists in that job. (Before the split, #131 had the workflows pass
+  `add-to-path: false` when the gate's engine was codex, and a caller's
+  `claude-setup` that put `$GITHUB_WORKSPACE/.venv/bin` on `GITHUB_PATH` —
+  inspect_flow's and inspect_harbor's did on 2026-09-22 — failed the next
+  layer on codex runs; with the split those callers' codex runs never run
+  it.)
+- **`Create codex user` makes the job PATH runner-only before the grant, or
+  refuses to start codex** (`assert-runner-only-path`, a nested step
+  between the user's creation and the workspace grant, `protect: "true"`).
+  For every job PATH entry it walks every HOP of the entry as written —
+  the entry and each ancestor up to `/` — and, wherever a hop is a
+  symlink, every hop of the link's target as written, recursively (eight
+  levels; a loop refuses). A hop is a place codex could substitute: write
+  on a directory renames its child away, and a symlink is replaced by
+  writing its parent — so resolving the entry first and checking only the
+  target would have waved through `ws/tools -> /usr/bin`, which codex
+  replaces with a directory holding `bash` once the grant lands (round 1
+  of #131 reproduced exactly that). Refused, whatever the mode: a relative
+  or empty entry (each step's working directory is the workspace), and a
+  hop whose physical path lies inside `$GITHUB_WORKSPACE` (codex-writable
+  once the grant runs — checked by path, since the grant has not happened
+  yet). A hop outside the workspace that codex **owns** (`find -user`, an
+  lstat — ownership is authority: an owner can chmod a read-only directory
+  writable again, and the owner of a sticky directory may rename or unlink
+  anyone's entries in it, unlink(2); round 2 of #131) or that `sudo -u
+  codex test -w` finds writable (group memberships count) is **protected**
+  — `chown runner`, `chmod go-w`, sticky and other bits kept — and refused
+  only if still owned or writable afterwards. Then the FILES directly
+  inside each entry — a tool a later step may call, or the runner may pick
+  as an interpreter — are found in one `find` pass (every symlink,
+  everything codex owns, everything codex could write through its groups or
+  the world; nothing else is codex's to change, the image has no ACLs) and
+  settled the same way, a symlink followed as written: its target's
+  directory chain is walked like an entry and the target checked in turn,
+  so `bash -> $GITHUB_WORKSPACE/.venv/bin/bash` in a runner-only directory
+  is refused as a workspace hop, and a link to a file codex owns or can
+  write or replace is protected or refused (round 2 of #131: the first cut
+  scanned regular files by mode bits and skipped symlinks — a link from a
+  runner-only directory to a codex-writable target was the planted
+  interpreter by another name). Hops and files found unconditionally safe
+  are remembered, so a chain many links share (`/etc/alternatives`, a
+  toolcache) is probed once — but a sticky directory accepted for one child
+  is not: that acceptance is the child's, and round 3 of #131 showed a safe
+  `T/runner-bin` vouching for a later `T/not-yet/bin`, for `T` itself and
+  for a dangling `bash -> T/not-yet/bash`. The check runs as one privileged process (it re-executes itself
+  under `sudo` once; probes are then plain `find`/`test` and `runuser -u
+  codex -- test -w`), because a separate `sudo` per probe cost ~40 ms on
+  the hosted runner and ~55 s per check in round 3. On the stock image that
+  protects `/opt`, `/opt/pipx_bin`, the
+  toolcache chain, `/usr/local/bin` and `/usr/local/.ghcup`, the
+  world-writable files in them and the targets their links reach, and
+  keeps the runner user's own writes — npm's global bin, which
+  openai/codex-action's `npm install -g @openai/codex` needs; the toolcache
+  setup-* actions fill — while taking the codex user's away. The one
+  exception to "writable refuses" is a sticky directory codex does NOT own,
+  such as `/tmp`, where a user may create entries but not rename or unlink
+  another user's: accepted when the child on the way down exists and is
+  not codex-owned. A not-yet-existing entry whose nearest existing ancestor
+  is writable is refused the same way (codex could create it). This is the
+  primary defence: it runs before
+  codex, on a PATH only the runner has written, and when it refuses codex
+  never runs. The check's own probes resolve through its `system-path`
+  input — `/usr/sbin:/usr/bin:/sbin:/bin`, the root-owned system
+  directories; NOT `/usr/local/bin`, world-writable on the image — never
+  through the PATH under test. codex cannot add to `GITHUB_PATH` later —
+  the per-step file lives under the runner-only `$RUNNER_TEMP` — and
+  openai/codex-action installs the CLI with `npm install -g` and adds no
+  path, so the PATH the pre-grant check accepted is the PATH every
+  post-codex step gets.
+- **Belt and braces after codex.** `reclaim-codex-workspace` runs the same
+  check as its first step — without `protect`: a hop that became writable
+  after the grant is refused, not fixed — so a `GITHUB_PATH` addition made
+  between the grant and the reclaim by some later action would fail the
+  reclaim closed (and, through its outcome, skip every git-running step),
+  and its script then pins `PATH` to `system-path` before its first
+  command; `codex-usage` (the reviewer's first post-codex step),
+  `unresolved-merge-guard` and `emit-landing`'s `write` step pin the same
+  way, and so do the three `Commit codex` steps. The pins cover command
+  resolution only — the interpreter is the runner's choice — which is why
+  the pre-grant check, not the pins, carries the guarantee. Every one of
+  these steps takes a `system-path` input (default
+  `/usr/sbin:/usr/bin:/sbin:/bin`) so a self-hosted layout can name its
+  own, and so the tests can plant a stub `sudo` there.
+
+Verification: `tests/test_codex_path.py` runs the composites' scripts
+against a planted `.venv/bin` of `sudo`, `bash`, `git`, `find`, `jq` and
+friends with a stub `sudo` (macOS or Linux, no codex user);
+`tests/codex_path_smoke.sh`, run by `.github/workflows/codex-path-smoke.yml`
+on every push touching the composites (and by hand), runs the SAME lifted
+bodies of the checked-out revision on the hosted image with the real codex
+user, the real image PATH and real sudo: the pre-grant check passes on the
+stock PATH (naming what it protected), refuses a workspace venv and an
+outward workspace symlink, refuses or protects (with real codex ownership)
+a codex-owned 555 directory, a codex-owned sticky parent, a runner-only
+directory linking `bash` into the workspace and one linking to a
+codex-owned file — codex can chmod or write none of them afterwards — the
+grant runs, a codex-user "codex" plants into
+the venv and cannot plant into the protected directories, npm's global
+install still works for the runner, and the reclaim, `codex-usage` and the
+guard complete without running a planted file; the `mechanism` job shows
+the planted interpreter being chosen when the venv IS on `GITHUB_PATH`,
+and the check refusing that PATH. Because the composites reference each
+other `@main`, a branch's nested `uses:` would resolve to `main`'s bodies;
+the smoke lifts the blocks from the checkout so a branch is tested as
+itself, and logs the revision. For a live codex run: prompt codex on a
+caller whose provisioning leaves a venv at `.venv` to write
+`.venv/bin/sudo` as a script that appends `HIJACKED` to a file under
+`/tmp` and then `exec`s `/usr/bin/sudo "$@"`, plus the same for `bash`,
+`git`, `find` and `jq`; the run's `Reclaim workspace from codex`, `Codex
+usage`, guard and commit steps must complete normally, no step's log may
+show `HIJACKED`, and a scratch step after the reclaim that prints `$PATH`
+must show no entry under the workspace. Control: nothing in a codex job
+adds to the job PATH before `Create codex user` since the engine split (the
+caller's `claude-setup` runs only in the Claude job), so a live control
+needs a scratch workflow step that appends `$GITHUB_WORKSPACE/.venv/bin` to
+`GITHUB_PATH` before it: the run must go red on `Create codex user` with
+the entry named in its log, the codex step skipped, and the Surface comment
+naming the user setup. The smoke harness's `mechanism` job is the hosted
+counterpart.
+
 ## v1 limitations (deliberate)
 
 - **External proxy reviews stay on Claude** — their contributor-code
   sandbox overlay is Claude-settings-specific.
 - **Codex reviews run tests since 2026-09-01** (they were static in the
-  first cut): the review step uses the `:workspace` profile with
-  claude-setup provisioning, so codex can verify findings with
-  pytest/ruff/mypy like the Claude reviewer. Read-only-ness of the
+  first cut): the review step uses the `:workspace` profile with a
+  provisioned venv (claude-setup until 2026-09-22, the fallback recipe run
+  as the codex user since — One job per engine, below), so codex can
+  verify findings with pytest/ruff/mypy like the Claude reviewer. Read-only-ness of the
   review is enforced by instruction plus structure — the review path
   has no landing step and no push credentials, so stray
   writes die with the runner (decided after inspect_ai#392's review
@@ -430,9 +621,9 @@ Verification for a change here, all cases prompted to codex (any verb):
   agent there would strand the branch — the round runs static-only, the
   prompt says so and tells codex to report static-only verification, and
   the next round provisions on the resolved branch. The codex prompt's
-  verification line is composed from the provisioning outcomes (venv on
-  PATH / provisioning failed / nothing to provision) rather than asserting
-  a venv unconditionally.
+  verification line is composed from the provisioning outcomes (venv
+  provisioned / provisioning failed / nothing to provision) rather than
+  asserting a venv unconditionally.
 - **Fix-round context is filtered and stateful since 2026-09-09**: the
   codex fix prompts (review-fix loop, dev verb on a PR) embedded the last
   12 top-level comments and the last 40 inline comments as a flat REST
@@ -502,9 +693,15 @@ Verification for a change here, all cases prompted to codex (any verb):
   before codex starts, so a venv on `GITHUB_PATH` does not resolve as bare
   names (inspect_flow#818: `command -v pytest ruff mypy` printed nothing;
   only the `drop-sudo` strategy forwards the runner PATH). The compose
-  steps run as the runner with the provisioned PATH, discover the paths
-  there (`pytest ruff mypy pyright python3`, the same list in all four
-  workflows), and splice them into the verification instruction.
+  steps used to run as the runner with the provisioned PATH and discover
+  the paths there; since the provisioning runs as codex (2026-09-22) they
+  look the list (`pytest ruff mypy pyright python3 node pnpm npm`, in all
+  four workflows) up in the directories the `provision-fallback` composite
+  reports (`bin`: the venv's, `node_modules/.bin`, `~codex/.local/bin`),
+  never on a PATH, and splice the paths into the verification instruction.
+  The venv is never on the job PATH on a codex job (Runner-side search
+  path, above): the recipe runs as codex under `env -i` and cannot reach
+  `GITHUB_PATH`.
 - **CI-trigger parity depends on the machine account's secrets**: codex-path
   pushes fall back to `github.token` where the app secrets are absent, and
   those pushes do not trigger CI (the Claude path pushes via the app token,
@@ -628,6 +825,182 @@ Verification for a change here, all cases prompted to codex (any verb):
   execution log (#65).
 - The claude-* file/marker names stay — historical, and renaming them
   is churn across every consumer.
+
+## One job per engine (2026-09-22)
+
+Each reusable workflow runs the codex engine in a job of its own —
+`agent-codex` (claude.yml), `review-codex` (claude-review.yml),
+`fix-codex` (both loops) — next to the Claude job it used to share, and the
+gate's `engine` output selects exactly one of the two at the job level
+(`if: needs.gate.outputs.engine == 'codex'` / `!= 'codex'`). The land job
+`needs` both and gates its steps on the one that ran (`AGENT_RESULT` /
+`AGENT_OUTCOME` job env in claude.yml and the loops; the reviewer's land
+job skips on either being cancelled and reads the Claude job's outputs,
+which are empty when the codex job ran). Two Claude Security findings
+(2026-09-22) drove it:
+
+- **4629153 — the Claude job carried OPENAI_API_KEY.** A secret a step
+  references is delivered to the job's runner whether or not the step
+  runs: the runner builds its `secrets` expression context from the job
+  message before the first step (`actions/runner`,
+  `Runner.Worker/ExecutionContext.cs`, `InitializeJob`:
+  `ExpressionValues["secrets"] = Global.Variables.ToSecretsContext()`) and
+  evaluates a step's `if:` itself when the step is reached
+  (`StepsRunner`). The codex step's `if: engine == 'codex'` therefore kept
+  the key out of the codex *process* on Claude runs but not out of
+  Runner.Worker's memory, where an unsandboxed agent with passwordless
+  sudo (every same-repo Claude run) could read it. A job-level `if:` is
+  decided by the service before dispatch and a skipped job gets no job
+  message, so the Claude job now references no key at all; the codex job
+  references it at its codex-action step and nowhere else
+  (`tests/test_engine_job_isolation.py`). Whether the service scopes
+  referenced secrets per job or per called workflow is not documented; the
+  hosted canary below measures it — per job, in the agent workflows' own
+  gate/agent/land shape too — and design/credential-separation.md →
+  section 7 carries the residual that this is measured platform behaviour,
+  not a contract.
+- **4628446 — provisioning ran head code as the runner ahead of the codex
+  boundary.** The caller's `./.github/actions/claude-setup` and the
+  fallback's `uv pip install -e` (the checkout's build backend) executed
+  as `runner` — passwordless sudo, the OIDC request token, unrestricted
+  egress — before `create-codex-user` and before the codex-action step
+  that holds the key, on heads the pipeline itself produces: a
+  `claude/issue-N-*` branch an earlier run wrote from an outsider's issue
+  text, pushed and labelled by the machine account, so "same-repo" says
+  nothing about who wrote its build hooks. In the codex job the order is
+  now checkout → sync → (prep) → `create-codex-user` → **provisioning as
+  the codex user** → compose → codex: the shared `provision-fallback`
+  composite takes `user: codex` and runs its `provision.sh` under `sudo -u
+  codex -H` from a copy in `$RUNNER_TEMP`, so the uv bootstrap, the venv,
+  the build backend and the tiktoken warm all run with codex's own
+  boundary (no sudo, no token, no view of the runner's processes), and
+  the workspace group grant is what lets them write. A composite action
+  can only run as the runner, so the codex jobs never run the caller's
+  `claude-setup`, even on callers that define one; the venv lands in the
+  checkout as before, codex-owned, and the compose steps take the tool
+  paths from the composite's `bin` output (the venv's bin,
+  `node_modules/.bin`, `~codex/.local/bin`). The reclaim step's
+  embedded-repository refusal covers a `.git` provisioning planted.
+- **The boundary between provisioning and codex-action (review round 1 of
+  the fix).** Provisioning as codex runs BEFORE codex-action's runner-side
+  bootstrap, and that bootstrap reads `~codex/.codex/config.toml`
+  (`writeProxyConfig`, following a symlink) and writes the merged file back
+  readable by codex — so a build backend running as codex could replace
+  the file with a link to `/proc/self/environ` and have the action copy its
+  own process environment (the OIDC request token, the `INPUT_*` key) into
+  a file codex reads, or leave a background process to do it later. The
+  `Reset codex home` step (the `create-codex-user` composite in `mode:
+  reset-home`) therefore runs between provisioning and codex-action: it
+  kills every process running as codex (the reclaim step's loop; a
+  survivor fails the step and skips codex) and deletes and re-creates
+  `~codex/.codex` from the composite's `codex-home.sh` — the same script
+  the create mode runs — so the only files codex-action reads before
+  launching codex are the ones the composite just wrote. For the same
+  reason the runner writes nothing into the workspace once the codex user
+  exists: the codex prompt files live in `$RUNNER_TEMP` (755 runner:runner,
+  readable by codex), and the `.git/info/exclude` lines are appended by the
+  prep steps before `Create codex user` — a runner-side write into the
+  group-writable tree could otherwise follow a symlink a codex-uid process
+  planted (a prompt written through `.codex-prompt.md` → `$GITHUB_ENV`
+  would have handed later steps an environment composed from the issue
+  text). The hosted canary (below) exercises the whole sequence against a
+  hostile checkout.
+- **The caller's recipe (`codex_provision`).** The four reusable workflows
+  take a `codex_provision` input — bash the caller's stub supplies, run as
+  the codex user after the uv bootstrap in place of the generic venv +
+  dev-install (the `provision-fallback` composite's `recipe` input, written
+  to `$RUNNER_TEMP` and passed to `provision.sh` as its one argument). It
+  is the codex-run counterpart of the caller's `claude-setup`: a Python
+  pin (`uv venv --python 3.11`), a lockfile sync (`uv sync --dev`), Node
+  tooling (`corepack enable --install-directory ~/.local/bin && pnpm
+  install --frozen-lockfile`). It comes from the stub — a workflow file
+  resolved from the caller's default branch — so it is trusted like every
+  other input, and it runs with codex's boundary, never the runner's. The
+  known callers' recipes, for their stubs to adopt after this lands (the
+  task keeps caller stubs out of this change): the inspect_ai fork's
+  `meridian` claude-setup is `uv venv --python 3.11 && uv pip install -e
+  ".[dev]"`; inspect_flow's `setup` action is Python 3.11 plus `uv sync
+  --dev` (its `[tool.uv] default-groups = ["dev"]`); inspect_harbor's is
+  Python 3.12 plus `uv sync` (default groups `dev` and `doc`); ts-mono's is
+  Node 22 with `pnpm install --frozen-lockfile` (`packageManager:
+  pnpm@11.22.0` — `corepack enable --install-directory ~/.local/bin` then
+  `pnpm install --frozen-lockfile`; the hosted image's `node` is on codex's
+  PATH, and `~codex/.local/bin` is one of the tool directories the prompts
+  search). Until a stub sets the input, that caller's codex runs get the
+  generic recipe (or none, for a repository without a `pyproject.toml`).
+  The provisioning step runs when the checkout has a `pyproject.toml` OR
+  the stub set a recipe (review round 2: gating on the pyproject alone
+  would have skipped ts-mono's recipe), and a recipe runs under `bash
+  --noprofile --norc -eo pipefail`, a `shell: bash` step's options, so a
+  failing command fails provisioning instead of a later successful one
+  hiding it (review round 2). Each of the four recipes is exercised by the
+  hosted canary's `caller-recipes` job against an agents-owned stand-in
+  project (`tests/fixtures/callers/`, its README has the table): the
+  interpreter or Node version the recipe selects, the dependency groups or
+  extras it installs, the lockfile left unchanged by a locked sync, and
+  every discovered tool run as codex under codex-action's launch shape
+  (run 35798100140 on `743b495`, all four green — the results are in
+  design/credential-separation.md → section 6).
+
+Caller-visible effects of the codex-side change (the Claude jobs are
+unchanged, minus the key): a codex run on a caller with a `claude-setup`
+action (the inspect_ai fork's `meridian` branch for dev-agent issue runs,
+inspect_flow, inspect_harbor, ts-mono) gets the generic recipe until its
+stub sets `codex_provision` — the runner's default Python rather than the
+action's pin, no Actions cache, `.[dev]` plus a `dev` dependency group when
+one exists — and a caller whose project is not a Python project (ts-mono:
+pnpm) gets no provisioning on codex runs at all until then; codex's prompt
+says so and tells it that it may install what verification needs inside
+its sandbox, which has network. No caller is in a hurry: `engine:codex`
+exists as a label on the inspect_ai fork and inspect_flow only (one item
+each on 2026-09-22). The Claude jobs still run the caller's `claude-setup`
+as the runner, which
+is exactly how the Claude agent itself runs there (SECURITY.md → By
+design). The loops' prep steps split in two around the new order — the
+identity and landing-directory part before the codex user exists (the
+`.git/config` it writes is what `create-codex-user` snapshots), the
+prompt composition after provisioning — so their Surface steps name a
+`codexcompose` failure separately, and `agent_outcome` counts it.
+
+The stubs are unchanged: every reusable workflow still declares
+`OPENAI_API_KEY` (a stub passing an undeclared secret fails to load) and
+the stubs keep passing it; only the codex job reads it. The example stubs
+carry the `codex_provision` guidance as comments.
+
+**The hosted canary** (`.github/workflows/engine-isolation-canary.yml`,
+`workflow_dispatch`, pushes touching the composites or the harness, and a
+weekly schedule on `main` that would catch a change in the platform's
+secret delivery; a failed scheduled run is emailed to whoever last edited
+the cron line, and GitHub disables the schedule after 60 days without
+repository activity) is
+the evidence for both findings on a real `ubuntu-latest` runner, with no
+real secret and no model. Its `probe` job calls a reusable workflow shaped
+like the agent workflows with two synthetic repository secrets
+(`CANARY_SENTINEL_A` / `CANARY_SENTINEL_B`, values `CANARYA-<16 hex>` and
+`CANARYB-<16 hex>`, set by hand) and runs `tests/secret_delivery_scan.py`
+as root over the memory of the runner processes in each of three jobs: one
+references sentinel A in a step whose `if:` is never true (the pre-fix
+Claude job's shape; expected present — the positive control), one
+references nothing (the fixed Claude job; expected neither sentinel,
+although the caller passed both and sibling jobs reference each — which
+also settles per-job scoping), one uses sentinel B in a step that runs
+(the codex job's shape; expected present). Its `provisioning-boundary` job
+runs this revision's `create-codex-user`, `provision-fallback` with `user:
+codex` over `tests/fixtures/hostile-checkout` (a `setup.py` build backend
+that plants the config.toml symlink, leaves a survivor process and tries
+runner-only reads and writes), then `create-codex-user` in `reset-home`
+mode, asserting the positive controls before the reset and the pristine
+boundary after it, then a caller `recipe` as codex. Its `pipeline-probe`
+job repeats the secret-delivery measurement in the agent workflows' own
+shape (`engine-isolation-canary-pipeline.yml`, once per engine): the three
+secrets under their real names carrying the sentinels, a gate and a land
+job referencing the App secrets in job env and as action inputs, and the
+two agent jobs selected by the gate's `engine` output; the Claude agent job
+is expected to hold neither sentinel, the codex job the OpenAI stand-in
+alone, and `tests/test_secret_delivery_canary.py` keeps the probe's
+per-job references equal to the reusable workflows'. Results per run are in
+the run's logs; the recorded runs are in design/credential-separation.md →
+section 6.
 
 ## Network inside the codex sandbox
 
