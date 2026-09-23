@@ -107,24 +107,28 @@ jobs:
           [ "$NEW_HIT" != true ] || fail "the mode-aware client's save restored"
 
           # Each job's "Set up job" line and the probe's two save outcomes.
-          # Job logs are readable once the job has completed.
+          # Job logs are readable once the job has completed. They are
+          # fetched with curl: recent gh refuses to print a response that
+          # carries terminal escape sequences, as these logs do, and curl
+          # drops the Authorization header on the redirect to the log blob.
           jobs=$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
             --jq '.jobs[] | "\(.id) \(.name)"')
           job_log() {
             local id
             id=$(awk -v n="$1" '{ i = $1; sub(/^[^ ]+ /, ""); if ($0 == n) print i }' <<<"$jobs")
             [ -n "$id" ] || { echo "no job named '$1' in: $jobs" >&2; return 1; }
-            gh api "repos/$GH_REPO/actions/jobs/$id/logs"
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GH_REPO/actions/jobs/$id/logs"
           }
           probe_log=$(job_log "probe / probe") || { fail "cannot read the probe job's log"; probe_log=""; }
           control_log=$(job_log "control") || { fail "cannot read the control job's log"; control_log=""; }
-          grep -q 'Cache mode: read' <<<"$probe_log" \
+          grep -aq 'Cache mode: read' <<<"$probe_log" \
             || fail "the probe job's 'Set up job' did not log 'Cache mode: read'"
-          grep -q 'Cache mode: write' <<<"$control_log" \
+          grep -aq 'Cache mode: write' <<<"$control_log" \
             || fail "the control job's 'Set up job' did not log 'Cache mode: write'"
-          grep -q "Cache save skipped: the effective cache-mode 'read' does not permit writes" <<<"$probe_log" \
+          grep -aq "Cache save skipped: the effective cache-mode 'read' does not permit writes" <<<"$probe_log" \
             || fail "the mode-aware client did not log its skip"
-          grep -q 'cache write denied:' <<<"$probe_log" \
+          grep -aq 'cache write denied:' <<<"$probe_log" \
             || fail "the service's refusal ('cache write denied:') is not in the probe job's log"
 
           [ "$bad" = 0 ] && echo "canary green: saves skipped and refused under cache-mode read; control saved"

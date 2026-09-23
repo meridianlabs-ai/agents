@@ -557,6 +557,10 @@ design changes none of them.
       relying on the dispatch default, so the positive control does not
       depend on trigger classification; it is the test's one listed
       exception.
+    - The `verify` job's `Check` step is lifted into
+      `tests/test_cache_mode.py` and run against a stub `gh` and `curl`,
+      green and one red case per condition, so its logic is tested before
+      the canary can be dispatched.
   - The canary runs once by dispatch before the change is called done, and
     again whenever GitHub changes cache-mode semantics. GitHub dispatches a
     workflow only once it exists on the default branch or has run once, so

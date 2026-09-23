@@ -18,13 +18,23 @@ dependency), one per rule the design relies on:
   call at `cache-mode: read`, so a future write-capable declaration here
   would fail a copied caller's validation instead of being granted;
 - the canary's called workflow declares the same line as the agent
-  workflows, and its calling job, like a caller stub's, sets none.
+  workflows, and its calling job, like a caller stub's, sets none;
+- the canary's `Check` step, lifted and run against a stub `gh` and `curl`,
+  is green only when exactly the control entry exists and restores, each
+  job's "Set up job" line shows its mode, and the probe's log shows the
+  mode-aware client's skip and the service's refusal.
 """
 
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_review_fix_gate import STEP_BASH, lift_step  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -147,3 +157,87 @@ def test_canary_calls_like_a_stub():
     text = (WORKFLOWS / CANARY).read_text()
     assert f"    uses: ./.github/workflows/{CANARY_REUSABLE}\n" in text
     assert "\non:\n  workflow_dispatch:\n\n" in text, "the canary is dispatch-only"
+
+
+# The canary's `verify` job decides green or red in its `Check` step, and the
+# canary can only be dispatched from the default branch, so the step is lifted
+# and run here against a stub `gh` (the cache listing, the attempt's jobs) and
+# a stub `curl` (each job's log), the way the other workflow tests lift theirs.
+
+PREFIX = "canary-7-1-"
+PROBE_LOG = (
+    "\ufeff2026-09-23T10:00:00Z ##[group]Runner Image\n"
+    "2026-09-23T10:00:00Z Cache mode: read\n"
+    "2026-09-23T10:00:05Z Cache save skipped: the effective cache-mode 'read' does not permit writes.\n"
+    "2026-09-23T10:00:06Z ##[warning]Failed to save: Unable to reserve cache with key canary-7-1-old."
+    " More details: cache write denied: token is read-only\n"
+)
+CONTROL_LOG = "2026-09-23T10:00:00Z Cache mode: write\n2026-09-23T10:00:05Z Cache saved with key: canary-7-1-ctl\n"
+
+STUB_GH = """#!/bin/sh
+case "$1 $2" in
+  "cache list") cat "$STUB/keys" ;;
+  "api --paginate") cat "$STUB/jobs" ;;
+  *) echo "unexpected gh $*" >&2; exit 2 ;;
+esac
+"""
+STUB_CURL = """#!/bin/sh
+for a; do url=$a; done
+id=${url%/logs}; id=${id##*/}
+[ -f "$STUB/log-$id" ] || exit 22
+cat "$STUB/log-$id"
+"""
+
+
+def run_check(tmp_path, *, keys=(PREFIX + "ctl",), probe_log=PROBE_LOG, control_log=CONTROL_LOG,
+              probe="success", control="success", ctl_hit="true", old_hit="", new_hit=""):
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    for name, body in (("gh", STUB_GH), ("curl", STUB_CURL)):
+        (stub / name).write_text(body)
+        (stub / name).chmod(0o755)
+    (stub / "keys").write_text("".join(k + "\n" for k in keys))
+    (stub / "jobs").write_text("11 probe / probe\n22 control\n33 verify\n")
+    if probe_log is not None:
+        (stub / "log-11").write_text(probe_log)
+    if control_log is not None:
+        (stub / "log-22").write_text(control_log)
+    env = {**os.environ, "PATH": f"{stub}:{os.environ['PATH']}", "STUB": str(stub),
+           "GH_TOKEN": "t", "GH_REPO": "o/r", "RUN_ID": "7", "RUN_ATTEMPT": "1", "KEY_PREFIX": PREFIX,
+           "GITHUB_API_URL": "https://api.github.com",
+           "PROBE_RESULT": probe, "CONTROL_RESULT": control,
+           "CTL_HIT": ctl_hit, "OLD_HIT": old_hit, "NEW_HIT": new_hit}
+    script = lift_step(WORKFLOWS / CANARY, "      - name: Check")
+    return subprocess.run([*STEP_BASH, script], env=env, text=True, capture_output=True, check=False)
+
+
+def test_canary_check_is_green_when_saves_are_skipped_and_refused(tmp_path):
+    r = run_check(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "canary green" in r.stdout
+
+
+@pytest.mark.parametrize("case, kwargs, error", [
+    ("a refused save left an entry", {"keys": (PREFIX + "ctl", PREFIX + "old")}, "entries under"),
+    ("a skipped save left an entry", {"keys": (PREFIX + "ctl", PREFIX + "new")}, "entries under"),
+    ("the control saved nothing", {"keys": ()}, "entries under"),
+    ("the control did not restore", {"ctl_hit": "false"}, "control entry did not restore"),
+    ("the refused save restored", {"old_hit": "true"}, "mode-ignoring client's save restored"),
+    ("the skipped save restored", {"new_hit": "true"}, "mode-aware client's save restored"),
+    ("the probe failed", {"probe": "failure"}, "probe job concluded 'failure'"),
+    ("the control was skipped", {"control": "skipped"}, "control job concluded 'skipped'"),
+    ("the probe ran with write", {"probe_log": PROBE_LOG.replace("Cache mode: read", "Cache mode: write")},
+     "did not log 'Cache mode: read'"),
+    ("the control ran read-only", {"control_log": CONTROL_LOG.replace("write", "read")},
+     "did not log 'Cache mode: write'"),
+    ("no client skip", {"probe_log": PROBE_LOG.replace("Cache save skipped", "Cache saved")},
+     "did not log its skip"),
+    ("no service refusal", {"probe_log": PROBE_LOG.replace("cache write denied:", "saved")},
+     "service's refusal"),
+    ("the probe log is unreadable", {"probe_log": None}, "cannot read the probe job's log"),
+])
+def test_canary_check_is_red(tmp_path, case, kwargs, error):
+    r = run_check(tmp_path, **kwargs)
+    assert r.returncode == 1, f"{case}: {r.stdout}{r.stderr}"
+    assert "::error::" in r.stdout and error in r.stdout, f"{case}: {r.stdout}{r.stderr}"
+    assert "canary green" not in r.stdout

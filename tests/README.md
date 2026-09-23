@@ -266,7 +266,11 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `cache-mode: read`, on a trusted trigger its caller sets no mode for,
   sees the mode, and neither a mode-aware client's save (skipped) nor a
   mode-ignoring client's save (refused by the service) leaves an entry,
-  while a write-mode control job's save does.
+  while a write-mode control job's save does. That workflow's `Check` step
+  is lifted and run here against a stub `gh` and `curl`: green only when
+  exactly the control entry exists and restores, each job's "Set up job"
+  line shows its mode, and the probe's log shows the client's skip and the
+  service's `cache write denied:` refusal; red, with the reason, otherwise.
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc
