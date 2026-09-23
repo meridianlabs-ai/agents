@@ -397,12 +397,15 @@ Testing a change).
   `auto` event (a label re-applied or removed during the permission
   lookup or its retry is left alone); a failed read or a run started by
   applying `auto` writes nothing, and a failed removal is said (issue
-  #141); an `@auto` comment opts in without a label read; a PR's
-  label is left to the loop gates. Each of an issue's
-  `engine:*` labels gets the same check (#139), one label at a time and
-  sharing the `auto` check's timeline read: one that fails stays out of
+  #141); an `@auto` comment opts in without a label read. Each of an
+  issue's `engine:*` labels gets the same check (#139), one label at a time
+  and sharing the `auto` check's timeline read: one that fails stays out of
   `pr_labels`, and a failed `engine:codex` leaves the Claude engine; a PR's
-  engine label is not checked there. Also that the land job pins the PR
+  engine label is not checked there. A PR's `auto` label makes a landed
+  commit owe the `@review` hand-back only when verify-auto-labeler would
+  pass it — a writer, or either machine-account login with no lookup — so a
+  non-writer's or an unverifiable label costs no reviewer run, and nothing
+  is written to the PR (agents#140). Also that the land job pins the PR
   labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,
