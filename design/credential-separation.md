@@ -971,14 +971,20 @@ results against the invariant each one tests.
 - **The Claude job still executes the checkout as the runner.** Its
   provisioning (the caller's `claude-setup`, the fallback dev-install) and
   the agent's own test runs execute the tree's code unsandboxed, as the
-  runner, with sudo, the OIDC request token and the Claude action's
-  installation token in reach — the concession SECURITY.md makes for
+  runner, with the OIDC request token and the Claude action's installation
+  token in reach, and the provisioning with sudo as well: since 2026-09-23
+  the `drop-runner-root` step takes the runner's sudo, docker socket and
+  same-uid process inspection away between provisioning and the agent
+  (finding 4629153, criterion 2; architecture.md → No root for the agent
+  uid), so the agent and its test runs no longer have root, but a build
+  hook that ran during provisioning did — the concession SECURITY.md makes for
   same-repo heads, now stated for heads the pipeline itself authored as
   well: an outsider's issue text steers the first run's agent, and a second
   automated run on the branch it produced executes that branch's build
   hooks before the agent. What the split removes from that job is the
-  OpenAI key; what remains is exactly what a prompt-injected Claude agent
-  already holds there. Since 2026-09-23 the land job refuses agent bundles
+  OpenAI key; what remains is what a prompt-injected Claude agent already
+  holds there, plus root while provisioning runs. Since 2026-09-23 the land
+  job refuses agent bundles
   that touch paths a later job executes or loads as configuration
   (`.github/`, build and dependency configuration, agent instructions and
   settings; finding 4628446, criterion 2 — section 3.4), so an agent can no
@@ -986,7 +992,8 @@ results against the invariant each one tests.
   change an ordinary file that unchanged configuration executes (a script
   the `claude-setup` composite or a settings hook runs, a module the build
   backend imports), which the next Claude-engine run executes as `runner`
-  before the agent — an accepted gap (decision: Ransom, 2026-09-23; see
+  before the agent, with root while provisioning runs — an accepted gap
+  (decision: Ransom, 2026-09-23; see
   SECURITY.md → Guarantees for the design follow-up that would close it);
   a maintainer's own push to the branch still can do either, as before.
 - **A caller's own cache writers.** A caller that sets `cache-mode: write`

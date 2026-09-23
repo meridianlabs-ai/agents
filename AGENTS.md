@@ -25,6 +25,7 @@ take effect on every repo's next run.
   `reclaim-codex-workspace`, `import-codex-final`,
   `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
+  `drop-runner-root`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
   Referenced fully-qualified

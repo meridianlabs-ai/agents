@@ -90,7 +90,11 @@ workflow, such as CI on push to the default branch, saving the entries you
 want agents to hit. If you set `cache-mode` on the job that calls an agent
 workflow, use `read` or `write`: `none` or `write-only` there makes the run
 fail validation. Both agents run it automatically when present (a failed setup
-fails the run, so keep it green). See
+fails the run, so keep it green). It is also the last step with root: from the
+agent step on, a Claude-engine agent has no sudo and no docker, so system
+packages, docker images, global installs into `/usr/local/bin` or anything
+else that needs root belong in `claude-setup`, and tests that need a docker
+daemon cannot run in the agent. See
 [design/architecture.md](design/architecture.md) for the mechanics and the
 inspect_ai-fork caveat.
 

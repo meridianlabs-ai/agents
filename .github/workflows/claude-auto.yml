@@ -1058,8 +1058,11 @@ jobs:
       # engine only: this job runs the caller's composite (and the fallback
       # below) as the runner, which is exactly how the Claude agent itself
       # runs — unsandboxed, as the runner, over a same-repo tree whose tests
-      # it then executes — so code from the tree gains nothing here it does
-      # not already have once the agent starts; and this job names no
+      # it then executes — except root: this step still has the runner's
+      # sudo, which the "Drop the runner's root access" step below removes
+      # before the agent (finding 4629153, criterion 2; the residual is
+      # recorded in design/architecture.md → No root for the agent uid);
+      # and this job names no
       # OPENAI_API_KEY (Claude Security finding 4629153: the key is the
       # codex job's alone). The codex job provisions differently: the shared
       # fallback recipe, run as the unprivileged codex user AFTER the codex
@@ -1086,6 +1089,18 @@ jobs:
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+
+      # Root ends here (Claude Security finding 4629153, criterion 2): the
+      # agent runs as the runner, so the runner's passwordless sudo, its
+      # docker socket and same-uid inspection of the runner's processes are
+      # removed after the last step that needs root and before the agent
+      # step, with the agent step's own `if:`, and the composite checks from
+      # the runner that `sudo -n true` fails. A failure skips the agent and
+      # the Surface step says why. Nothing after the agent step uses sudo or
+      # docker. design/architecture.md → No root for the agent uid.
+      - name: Drop the runner's root access before the agent
+        id: noroot
+        uses: meridianlabs-ai/agents/.github/actions/drop-runner-root@main
 
       # The agent commits and stops: it holds no credential that may push or
       # post as the loop's identity, so the prompt says so plainly and hands
@@ -1276,6 +1291,7 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
+          NOROOT_OUTCOME: ${{ steps.noroot.outcome }}
           FIXSETTINGS_OUTCOME: ${{ steps.fixsettings.outcome }}
           # The gate job's lookup (trusted: computed as marvin before any PR
           # code ran); the land job de-fangs the body it lands in anyway.
@@ -1339,6 +1355,13 @@ jobs:
             err="environment provisioning (claude-setup) failed before the fix agent started — a transient dependency-download/network error, a dependency file the base merge touched, or this PR's own dependency change no longer installing (that one fails identically on every trigger: fix it by hand); no fix was attempted, though the runner's clean base merge, if there was one, was still landed on the branch. Re-trigger if it looks transient."
           elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
             err="fallback environment provisioning (uv dev-install) failed before the fix agent started — a transient dependency-download/network error, the project not dev-installing on a bare runner, or this PR's own dependency change no longer installing (either of those fails identically on every trigger: fix it by hand — check the job logs); no fix was attempted, though the runner's clean base merge, if there was one, was still landed on the branch. Re-trigger if it looks transient."
+          fi
+          # Taking root away from the runner failed (drop-runner-root): the
+          # agent step is SKIPPED, not failed — the boundary fails closed —
+          # so without this clause nothing would say why. Probably not
+          # transient (a runner image change), so no plain re-trigger advice.
+          if [ -z "$err" ] && [ "${NOROOT_OUTCOME:-}" = "failure" ]; then
+            err="removing the runner's root access (sudo, the docker socket, process inspection) failed before the fix agent started, so no fix was attempted, though the runner's clean base merge, if there was one, was still landed on the branch — the job log names the check that failed. This is probably not transient: re-triggering fails the same way until the runner image or the drop-runner-root step changes."
           fi
           # The settings composer failed (a caller's `settings` that is
           # neither a JSON object nor a path to a file holding one): the
