@@ -1131,8 +1131,10 @@ What stays open:
   systemd's default PATH ahead of `/usr/bin`. The drop does not touch it:
   the runner's own writes there (npm's global bin) are legitimate. It
   becomes a route to root only if a root process resolves a bare command
-  name during the job — a timer or service firing while the agent runs.
-  The smoke run lists them; the result is in the PR that added the drop.
+  name during the job. The smoke run of 2026-09-23 confirmed
+  `/usr/local/bin` and the `/opt` tree root-owned and mode 777 on the stock
+  image; it did not establish whether a root process executes from them
+  while an agent runs.
 - **Read-mode inspection.** Yama restricts attach-mode access only: the
   runner can still read `Runner.Worker`'s `/proc/<pid>/environ`, `cmdline`
   and `status` (the service environment, not the job's secrets).
