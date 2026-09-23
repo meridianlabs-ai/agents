@@ -24,15 +24,26 @@ description: >-
 
   The recipe (decision: Ransom, 2026-09-01), mirroring the fork's
   claude-setup: the uv installer curl is retried — its tarball download
-  flaked repeatedly on 2026-08-12; uv's own HTTP retries internally. Both
-  bin dirs go on GITHUB_PATH so pytest/ruff/mypy resolve for the Claude
-  engine and for the runner-side steps. NOT for codex's own tool calls:
-  under the unprivileged-user strategy codex-action launches codex via
-  `sudo -u codex` (no -E), and sudo's env_reset/secure_path replaces PATH
-  before codex starts (the drop-sudo strategy would forward the runner
-  PATH; this repo does not use it), so the codex prompts name these tools
-  by absolute path, discovered by the compose steps (which run as the
-  runner with this PATH in effect). Fatal on
+  flaked repeatedly on 2026-08-12; uv's own HTTP retries internally. With
+  `add-to-path: true` (the default) both bin dirs go on GITHUB_PATH so
+  pytest/ruff/mypy resolve for the Claude engine, which runs as the runner
+  with the job PATH. NOT for codex's own tool calls: under the
+  unprivileged-user strategy codex-action launches codex via `sudo -u
+  codex` (no -E), and sudo's env_reset/secure_path replaces PATH before
+  codex starts (the drop-sudo strategy would forward the runner PATH; this
+  repo does not use it), so the codex prompts name these tools by absolute
+  path, discovered by the compose steps from `.venv/bin` in the checkout.
+  On the codex path the workflows pass `add-to-path: false` and NOTHING
+  goes on GITHUB_PATH (Claude Security finding 4628448;
+  design/codex-engine.md → Runner-side search path): the runner prepends
+  every GITHUB_PATH entry to every later step's PATH and resolves each
+  step's shell interpreter through it, and `create-codex-user` makes the
+  whole checkout — `.venv/bin` included — writable by the codex user, so a
+  venv on the job PATH would let codex plant the `sudo`, `bash` or `git`
+  the first runner-side step after it executes; `create-codex-user`
+  refuses to start codex when any job PATH entry is inside the workspace
+  or codex-writable, so a caller's own `claude-setup` must not put its
+  venv on GITHUB_PATH on that path either. Fatal on
   failure, exactly like claude-setup: a repo whose pyproject exists but
   cannot dev-install is a loud signal, not a silent static-only run — the
   callers' Surface steps report a failed outcome. No plain `-e .` fallback:
@@ -69,10 +80,26 @@ description: >-
   reports a blocked download; a failed or stalled warm (bounded by
   `timeout`) only costs a slower first test.
 
+inputs:
+  add-to-path:
+    description: >-
+      "true" (default) puts `$HOME/.local/bin` (uv) and the checkout's
+      `.venv/bin` on GITHUB_PATH for the rest of the job — the Claude
+      engine's bare `pytest`/`ruff`/`mypy`. "false" adds nothing to the job
+      PATH: for jobs that may run codex, whose `create-codex-user` grant
+      makes the checkout codex-writable and which refuses to run codex
+      behind a job PATH entry inside the workspace (see description). The
+      venv is created and installed either way, at `.venv` in the checkout,
+      where the codex compose steps discover the tools by absolute path.
+    required: false
+    default: "true"
+
 runs:
   using: composite
   steps:
     - shell: bash
+      env:
+        ADD_TO_PATH: ${{ inputs.add-to-path }}
       run: |
         set -euo pipefail
         for attempt in 1 2 3; do
@@ -91,8 +118,15 @@ runs:
         else
           uv pip install -e ".[dev]"
         fi
-        echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-        echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
+        # The job PATH only when asked (see the input): a workspace directory
+        # on it would be codex-writable after the codex user's grant, and
+        # `create-codex-user` refuses to run codex behind one.
+        if [ "$ADD_TO_PATH" = "true" ]; then
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+          echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
+        else
+          echo "provision-fallback: add-to-path is '$ADD_TO_PATH'; nothing added to the job PATH (tools at $PWD/.venv/bin)."
+        fi
         # Warm network-fetched caches the agents' tests need, from the runner
         # (which has network) into a place the agent reads from. Evidence-
         # driven list — extend it when a run reports another blocked

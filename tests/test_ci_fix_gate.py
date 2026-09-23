@@ -33,7 +33,7 @@ RESET_ACTION = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.ym
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
-from test_review_fix_gate import MARVIN, MARVIN_BOT, workflow_env  # noqa: E402
+from test_review_fix_gate import MARVIN, MARVIN_BOT, workflow_env, step_if, ghx, REFUND_CASES, refund_ctx  # noqa: E402
 
 TRUSTED_LOGINS = workflow_env(WORKFLOW, "TRUSTED_LOGINS")
 
@@ -420,6 +420,58 @@ def test_refund_reads_an_unparsable_or_reset_body_as_zero(tmp_path):
     octal = comment(10, "i-am-marvin", f"{MARKER}\nattempts: 08 (cap 3).")
     res, _, _, stub = refund(tmp_path, [octal], attempt="3")
     assert res.returncode == 0 and "attempts: 7 (cap 3)" in (stub / "patched.10").read_text()
+
+
+def test_a_refunded_attempt_is_counted_from_where_the_refund_left_it_and_the_cap_holds(tmp_path):
+    # gate (attempt 1 recorded) → refund → gate: the next round is attempt 1
+    # again — the CI-fix loop has no head marker, so its only bound is the
+    # cap, and a refund never takes the count below 0. From the cap the
+    # refund gives one attempt back and the gate escalates on the one after.
+    res, _, _, stub = refund(tmp_path, [counter(10, "i-am-marvin", 1)], attempt="1")
+    assert res.returncode == 0 and "attempts: 0 (cap 3)" in (stub / "patched.10").read_text()
+    res, out, _, _ = gate(tmp_path, [comment(10, "i-am-marvin", (stub / "patched.10").read_text())])
+    assert res.returncode == 0 and out["act"] == "fix" and out["attempt"] == "1"
+    res, _, _, stub = refund(tmp_path, [counter(10, "i-am-marvin", 3)], attempt="3")
+    assert "attempts: 2 (cap 3)" in (stub / "patched.10").read_text()
+    res, out, _, _ = gate(tmp_path, [comment(10, "i-am-marvin", (stub / "patched.10").read_text())])
+    assert out["act"] == "fix" and out["attempt"] == "3"
+    res, out, _, _ = gate(tmp_path, [counter(10, "i-am-marvin", 3)])
+    assert out["act"] == "escalate" and out["attempt"] == "4"
+
+
+def test_the_refund_fires_only_on_a_step_the_runner_never_entered():
+    """The refund's gating inputs, not only its comment selection (Claude
+    Security 4628735): the fix job's `agent_skipped` output — both engines'
+    agent steps `skipped`, a step outcome the runner settled before any
+    agent code ran — plus nothing pushed. Never `agent_outcome`, which the
+    agent decides by how it ends its own step; never the job's RESULT (a job
+    cancelled after the agent step started ran the agent, and a pending job
+    cancelled before it started delivers no outputs — unknown keeps its
+    attempt); never an execution file. The condition is evaluated over the
+    same case table as the review loop's (REFUND_CASES): the two refunds
+    read identically. The Land step admits a bundle-less hand-back only on
+    the agent step's success, the direction the agent cannot push, so a
+    refunded round never posts the `@review` that would re-arm the loop."""
+    text = WORKFLOW.read_text()
+    assert "id: launched" not in text and "agent_started" not in text
+    fix = text[text.index("  fix:\n"):text.index("  land:\n")]
+    outputs = fix[fix.index("    outputs:\n"):fix.index("    steps:\n")]
+    assert "agent_skipped: ${{ steps.claude.outcome == 'skipped' && steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}" in outputs
+    assert ("agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || "
+            "steps.codexfix.outcome == 'failure') && 'failure' || (steps.codexfix.outcome == 'success' && 'success') || "
+            "steps.claude.outcome }}") in outputs
+    refund_step = text[text.index("      - name: Refund infra-crashed attempt"):]
+    refund_step = refund_step[:refund_step.index("        run: |")]
+    condition = step_if(WORKFLOW, "      - name: Refund infra-crashed attempt")
+    assert condition == ("always() && needs.gate.outputs.act == 'fix' && "
+                         "needs.fix.outputs.agent_skipped == 'true' && "
+                         "steps.land.outputs.pushed != '1'")
+    assert "agent_outcome" not in condition and "needs.fix.result" not in condition and "execution" not in refund_step
+    for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
+        assert ghx(condition, refund_ctx(fix_result, skipped, pushed)) is refunded, why
+    assert ghx(condition, refund_ctx("failure", "true", "", act="escalate")) is False
+    land = text[text.index("      - name: Land\n"):text.index("      # The revalidation refused")]
+    assert "allow-no-change-handback: ${{ needs.fix.outputs.agent_outcome == 'success' && 'true' || 'false' }}" in land
 
 
 # --- Reset the attempt counter (escalation) -----------------------------------

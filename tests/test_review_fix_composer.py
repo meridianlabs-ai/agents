@@ -65,7 +65,7 @@ def commit(r):
 
 
 def compose(r, *, engine, agent_extra=None, claude_outcome="success", codex_commit="skipped",
-            codex_ids="", codex_summary=None, final_message="nothing to change"):
+            codex_ids="", codex_summary=None, final_message="nothing to change", merge_sha=""):
     landing = r["tmp"] / "landing"
     landing.mkdir(exist_ok=True)
     if agent_extra is not None:
@@ -77,7 +77,7 @@ def compose(r, *, engine, agent_extra=None, claude_outcome="success", codex_comm
     extra = r["tmp"] / "landing-extra.json"
     env = {
         "DIR": str(landing), "EXTRA": str(extra), "PR": "42", "ROUND": "3", "ENGINE": engine,
-        "MENTION": "someone", "START_SHA": r["start"], "MERGE_SHA": "", "EXEC": str(exec_file),
+        "MENTION": "someone", "START_SHA": r["start"], "MERGE_SHA": merge_sha, "EXEC": str(exec_file),
         "CLAUDE_OUTCOME": claude_outcome if engine == "claude" else "skipped",
         "CODEXGUARD_OUTCOME": "success" if engine == "codex" else "skipped",
         "CODEXCOMMIT_OUTCOME": codex_commit, "CODEX_IDS": codex_ids, "PROV_NOTE": "",
@@ -195,6 +195,52 @@ def test_claude_no_commit_handoff_with_replies_is_honored(repo):
 def test_claude_failed_run_without_commit_lands_nothing_and_decides_nothing(repo):
     m, _, _, _ = compose(repo, engine="claude", claude_outcome="failure")
     assert m == {}
+
+
+@pytest.mark.parametrize("outcome", ["failure", "skipped", "cancelled", ""])
+def test_a_no_change_handback_needs_a_successful_agent_step(repo, outcome):
+    # Claude Security 4628734: the steered agent writes `handback: true`,
+    # commits nothing and kills its own step (or the PR's provisioning step
+    # writes the file and fails, so the agent step is skipped). HEAD never
+    # moved and the step did not complete, so no re-review is owed — the
+    # manifest carries neither hand-back, and the land job drops such a
+    # hand-back again from the trusted side. Replies still post.
+    m, res, _, _ = compose(repo, engine="claude", claude_outcome=outcome, agent_extra=json.dumps({
+        "handback": True, "replies": [{"review_comment_id": 7, "body_file": "r.md"}]}))
+    assert "handback" not in m and "handoff_body_file" not in m and "stage" not in m, outcome
+    assert m["replies"] == [{"review_comment_id": 7, "body_file": "r.md"}]
+    assert "the agent step did not succeed" in res.stdout and "none is requested" in res.stdout
+
+
+def test_a_no_change_handback_is_honored_after_a_successful_step_and_a_committed_one_whatever_the_outcome(repo):
+    # The two legitimate shapes: a run that finished and asked for the
+    # re-review without committing (the gate's no-progress check bounds it),
+    # and a run that committed and then failed (the commits land, the push
+    # re-runs CI, the ⚠️ posts alongside).
+    m, res, _, _ = compose(repo, engine="claude", agent_extra=json.dumps({"handback": True}))
+    assert m["handback"] is True and "handoff_body_file" not in m
+    assert "without committing anything; the re-review re-reads unchanged code" in res.stdout
+    commit(repo)
+    m, _, _, _ = compose(repo, engine="claude", claude_outcome="failure", agent_extra=json.dumps({"handback": True}))
+    assert m["handback"] is True
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "skipped"])
+def test_a_merge_only_handback_is_honored_whatever_the_agent_step_did(repo, outcome):
+    # Review round 1 (B2): HEAD moved to exactly the runner's clean base
+    # merge and the agent set `handback: true` (or the file predates a step
+    # that failed or was skipped). emit-landing bundles that merge from the
+    # same "HEAD moved" test, the land job pushes it and CI re-runs — a CI
+    # run requests no review, so the hand-back must ride the bundle or the
+    # loop stops on a pushed merge. Keyed on `moved`, never on an agent
+    # commit; the land job exempts every bundled hand-back the same way.
+    commit(repo)                                      # the runner's base merge, above the start SHA
+    head = git("rev-parse", "HEAD", cwd=repo["work"]).stdout.strip()
+    m, res, _, _ = compose(repo, engine="claude", claude_outcome=outcome, merge_sha=head,
+                           agent_extra=json.dumps({"handback": True}))
+    assert m["handback"] is True and "handoff_body_file" not in m and "stage" not in m, outcome
+    assert "without committing anything (the base merge from the runner lands)" in res.stdout
+    assert "none is requested" not in res.stdout
 
 
 def test_claude_mistyped_fields_are_dropped_not_fatal(repo):

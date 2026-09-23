@@ -18,7 +18,7 @@ the auto-review and permission tradeoffs — see [design/architecture.md](design
 | Tools | file edits + verify loop (tests/lint) + `gh` | verify loop + `gh` + inline comments; **denies** edits/git writes |
 
 Both authenticate the same way (Workload Identity Federation) and default to
-the same model (Fable, falling back to the account default). The hard
+the same model (Opus, falling back to the account default). The hard
 privilege boundary between them is the GitHub token scope, not the prompt —
 neither job that runs an agent holds a write token: the reviewer physically
 cannot push regardless of what it's asked to do, and the dev agent's commits
@@ -151,10 +151,13 @@ speculative ones).
 A collaborator's `@review` comment
 reviews one — treated as untrusted code: nothing from the fork's tree is
 executed on the runner itself, the reviewer installs and tests inside an
-OS-level sandbox, and the fork's `.claude/` / `.mcp.json` are deleted from the
-checkout first while its `CLAUDE.md` is renamed so it loads as untrusted text,
-not instructions (review those files from the diff). Findings still
-land on the PR. Codex-engine reviews are not sandboxed, so a fork PR labeled
+OS-level sandbox in a scratch copy of the checkout (the checkout itself is
+read-only to its commands, and Claude Code reads no settings or instruction
+files from it), and the fork's `.claude/` / `.mcp.json` are deleted from the
+checkout first while its `CLAUDE.md` / `AGENTS.md` are renamed so they load as
+untrusted text, not instructions (review those files from the diff). Findings
+still land on the PR — unless such a file has reappeared in the checkout
+after the run, in which case the review is withheld and a note says so. Codex-engine reviews are not sandboxed, so a fork PR labeled
 `engine:codex` is reviewed by Claude instead.
 
 ### The review → fix loop

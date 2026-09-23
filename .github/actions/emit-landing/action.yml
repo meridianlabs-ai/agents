@@ -93,6 +93,18 @@ inputs:
       which refuses any manifest carrying commits whatever this job uploaded.
     required: false
     default: "false"
+  system-path:
+    description: >-
+      The PATH the `write` step's commands run with, pinned before the first
+      of them: on the codex path this runs after codex had write access to
+      the tree, and `git` and `jq` must never resolve through a directory
+      codex could write (Claude Security finding 4628448;
+      design/codex-engine.md → Runner-side search path). The hosted runner
+      image's root-owned system directories — NOT `/usr/local/bin`, which
+      the image ships world-writable; harmless on the Claude path, which
+      needs nothing else here.
+    required: false
+    default: /usr/sbin:/usr/bin:/sbin:/bin
 
 outputs:
   emitted:
@@ -123,6 +135,7 @@ runs:
         READ_ONLY: ${{ inputs.read-only }}
         REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
+        SYSTEM_PATH: ${{ inputs.system-path }}
         # No hooks, no fsmonitor: on the codex path the reclaim step already
         # pinned these in .git/config, but `git bundle create` / `rev-parse`
         # must not depend on that ordering to be hook-free. Pinned by env
@@ -138,6 +151,8 @@ runs:
         # the manifest (or the log) and the step still exits 0 — the agent
         # job's outcome must reflect the agent, not this packaging step.
         set -uo pipefail
+        # System tools only, whatever GITHUB_PATH prepended (see the input).
+        export PATH="$SYSTEM_PATH"
         wrote=false
         echo "wrote=false" >>"$GITHUB_OUTPUT"
         mkdir -p "$DIR" || { echo "::warning::emit-landing: cannot create $DIR; nothing emitted."; exit 0; }

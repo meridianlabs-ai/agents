@@ -459,7 +459,11 @@ Three rules define the shape:
   One marker is `land`'s own: the `<!-- claude-review-comment -->` it
   appends, after the de-fang, to a `comments[]` body flagged `review` (the
   reviewer's top-level review — the flag is admitted only next to a
-  `review_verdict`, so no other agent's comment can pose as a review).
+  `review_verdict` and only on a land job whose caller passes
+  `allow-review`, which claude-review.yml alone does, so no other agent's
+  comment can pose as a review; since 2026-09-22 `review_verdict` and
+  `review_comments[]` are refused on every other caller the same way,
+  Claude Security finding 4628442).
   The codex reviewer's `engine: codex` anchor footer is deliberately NOT
   on `land`'s list: the reviewer posts its real footer through this same
   composite, so workflows whose bodies must not pose as a review (the
@@ -583,7 +587,16 @@ the model for the review-fix loop and the dev agent:
   agent step did not succeed, produced no execution output, and the landing
   pushed nothing" — a skipped agent is refunded whatever skipped it *unless
   a base merge landed*, and a round whose commits landed is not, whatever
-  the agent step's outcome. The exception is a small regression, accepted:
+  the agent step's outcome. Since 2026-09-22 (Claude Security 4628735; the
+  review loop's 4628734 is the same shape) the rule is narrower again: a
+  round is refunded only when the fix job's `agent_skipped` output is true
+  — both engines' agent steps `skipped`, a step outcome the runner settled
+  before any agent code ran — and nothing was pushed; a step that was
+  entered and then failed keeps its attempt, since
+  the agent decides how its own step ends and a refund keyed on that let a
+  steered agent make a completed round read as an infra crash. A transient
+  bootstrap failure now spends an attempt; the cap bounds spend either
+  way. The exception is a small regression, accepted:
   a provisioning failure on a stale branch skips the agent but the runner's
   clean base merge still lands (HEAD moved, so the bundle carries it and the
   round owes its `@review`), `pushed` is true and the attempt is kept, where
@@ -611,7 +624,12 @@ the model for the review-fix loop and the dev agent:
   fix job's result is `cancelled` — as `claude-review.yml`'s land job is —
   rather than failing its artifact download and reporting "Landing failed"
   on the PR for a round whose agent never started; the refund step still
-  runs. A run cancelled by hand mid-agent lands nothing either. The land
+  runs, on the job's own `agent_skipped` output like every round's — a
+  pending job cancelled before it started delivers no outputs and keeps its
+  attempt (unknown is not evidence; one attempt of slack, since 2026-09-22),
+  a job cancelled during sync or provisioning is refunded, and one cancelled
+  after the agent step started keeps it. A run cancelled by hand mid-agent
+  lands nothing either. The land
   job as a whole is additionally gated on the gate job's *success*, not only
   on its `act` output: a gate that failed after deciding `fix` (a
   `Record attempt` API write that did not go through) skips the fix job,
@@ -689,9 +707,22 @@ agent posts nothing and resolves nothing in-run):
   provisioning steps it used to follow; the land job's refund therefore
   broadened exactly as #82's did (agent step did not succeed, no execution
   output, nothing pushed), with the same one-round regression on a
-  provisioning failure over a stale branch. The refund re-reads the sticky
+  provisioning failure over a stale branch, and narrowed again with it on
+  2026-09-22 (Claude Security 4628734): the round is refunded only when the
+  agent step was never entered (`agent_skipped`, the fix job's own output;
+  a cancelled job is refunded on that evidence alone) and nothing was
+  pushed. The refund re-reads the sticky
   comment's current count *and* head marker rather than writing the gate's
-  values, since the land job is outside the per-PR concurrency group.
+  values, since the land job is outside the per-PR concurrency group. Two
+  companions close the loop the finding described (a steered agent killing
+  its own step with `handback: true` in its manifest, the round refunded to
+  0 and the bare `@review` posted, without bound): a hand-back on a
+  manifest with no bundle is honored only when the agent step succeeded —
+  in the fix job's composer, and again in `land` through its
+  `allow-no-change-handback` input, the trusted copy — and the gate's
+  no-progress check keys on the recorded head marker alone, since a refund
+  keeps the marker while it may take the count to 0, where a `prev >= 1`
+  guard skipped the check.
 - **Verification** (issue #83): `grep -n MARVIN_TOKEN` over the workflow
   names only `gate` and `land`; on a caller, a review with two inline
   suggestions where the agent addresses one and declines the other should
@@ -743,9 +774,12 @@ the agent push mid-run:
   description; codex's subject is its final message's first line as
   before), a body of `Fixes #N`, the commit body and the run link,
   `pr.base` from `base_branch`, `pr.labels` from the gate's label read
-  (`auto` on an `@auto` run or an `auto`-labelled issue, plus the issue's
-  `engine:*` labels — read in the trusted job, not after the agent ran)
-  and `pr.issue` for the link comment. `land` adopts an open PR for the
+  (`auto` on an `@auto` run or an `auto`-labelled issue — the issue's label
+  counting only when a write-access human applied it, finding 4628438 —
+  plus the issue's `engine:*` labels — read in the trusted job, not after
+  the agent ran; the land job passes that same read to the validator as
+  `allowed-pr-labels`, so the manifest may not name a label the gate did
+  not, finding 4628441) and `pr.issue` for the link comment. `land` adopts an open PR for the
   branch instead of duplicating it, labels on both paths, and `handback:
   true` rides on that manifest whenever those labels carry `auto` — the
   dev agent is the third hand-back writer, next to the two fix loops, and
@@ -876,7 +910,12 @@ the dev-agent shape did not:
   git in the workspace codex had write access to, which is why the reviewer
   needs no reclaim step); `land`'s `refuse-bundle` input is the enforcing
   side: the validator refuses any manifest that carries commits, claims
-  HEAD moved or ships a `commits.bundle`, whatever the review job uploaded.
+  HEAD moved or ships a `commits.bundle`, whatever the review job uploaded —
+  and, since 2026-09-22, any that carries `pr`, `replies`,
+  `resolve_threads`, `handoff_body_file` or `handback: true`, the fields
+  only a landed commit or a loop's fix agent owes (a forged `handback`
+  would otherwise post the live `@review` and re-run the reviewer on its
+  own PR without bound; Claude Security finding 4628439).
   The same flag turns the push-side branch rules off (charset, default
   branch, refused list): with nothing pushed, `branch` is only the pin to
   the run's PR head ref, and a fork-head PR whose branch is `main` — the
@@ -961,17 +1000,19 @@ job; a marvin-less caller's land job used to fall back to the job token
 posting step's fallback already did) until #114 retired that fallback with
 the stubs' write grant.
 
-## Model selection: prefer Fable, fall back gracefully
+## Model selection: prefer Opus, fall back gracefully
 
-Default is the `fable` alias with `--fallback-model default`. Claude Code's
-`--fallback-model` fires not just on overload but on an **unavailable/retired**
-primary, and `default` expands to the account default. So `--model fable
---fallback-model default` means "prefer Fable, degrade to the default if it's
-gone" in one invocation, with no pre-flight availability probe.
+Default is the `opus` alias with `--fallback-model default` (decision:
+Ransom, 2026-09-23, "I'd like everything to switch to Opus"; the default was
+the `fable` alias until then). Claude Code's `--fallback-model` fires not
+just on overload but on an **unavailable/retired** primary, and `default`
+expands to the account default. So `--model opus --fallback-model default`
+means "prefer Opus, degrade to the default if it's gone" in one invocation,
+with no pre-flight availability probe.
 
-This was verified the hard way: when Fable became unavailable, a run's init
-line still reported `claude-fable-5`, but `modelUsage` in the execution log
-showed every token served by `claude-opus-4-8` — the fallback fired
+This was verified the hard way, while the default was still `fable`: when
+Fable became unavailable, a run's init line still reported `claude-fable-5`,
+but `modelUsage` in the execution log showed every token served by `claude-opus-4-8` — the fallback fired
 correctly, and **the init line echoes the *requested* model, not the one that
 ran.** Always read `modelUsage` to know what actually executed. The
 `model-provenance` composite action does that on every Claude-path run: it
@@ -998,8 +1039,8 @@ per-request fallback. It only judges the fallback when the log has an init
 line to compare against; without one it reports the table and says so.
 Best-effort: every path exits 0.
 
-The `fable` alias (not a pinned `claude-fable-5[1m]`) is used so the model
-auto-updates if Fable returns under a new version.
+The `opus` alias (not a pinned id such as `claude-opus-5-5`) is used so the
+model floats with Opus releases.
 
 ## Permissions: settings.json, allow-list, layered separation
 
@@ -1264,20 +1305,124 @@ its working directory — the checkout — and hooks and `apiKeyHelper` run
 *outside* the Bash sandbox, so the overlay below cannot contain them: a
 contributor's `settings.json` could turn the sandbox off or run a command with
 the job's credentials before the first prompt. `CLAUDE.md` / `CLAUDE.local.md`
-are only instruction text, and the hazard is Claude Code *auto-loading* them
-with instruction authority, so they are *moved aside* to `<name>.untrusted` — a
-name Claude Code does not load — and the prompt tells the reviewer it may read
-them as untrusted data (the project's documented test and lint commands) but
-must take no instruction from them; that keeps the convention knowledge
-external reviews of the inspect_ai upstream relied on. After the strip, the
-caller's `settings` input plus the sandbox overlay are the only configuration
-Claude Code sees; changes to any of these files are reviewed from the diff.
-The overlay also carries `disableAllHooks: true` as a second, independent
-barrier: if the strip's predicates ever miss a hooks-bearing file (a name a
-later Claude Code release starts loading), the switch still stops the hooks.
-It is defense in depth, not a replacement — the action writes the merged
-settings to the *user* scope, which any surviving project-scope settings file
-could override, so the strip is what keeps that scope empty.
+/ `AGENTS.md` are only instruction text, and the hazard is Claude Code
+*auto-loading* them with instruction authority (Claude Code ≥ 2.1.277 reads
+`AGENTS.md` as the project instructions when no `CLAUDE.md` counts — exactly
+the state the rename leaves), so they are *moved aside* to `<name>.untrusted`
+— a name Claude Code does not load — and the prompt tells the reviewer it may
+read them as untrusted data (the project's documented test and lint commands)
+but must take no instruction from them; that keeps the convention knowledge
+external reviews of the inspect_ai upstream relied on. Changes to any of
+these files are reviewed from the diff. The overlay also carries
+`disableAllHooks: true` as a second, independent barrier: if the strip's
+predicates ever miss a hooks-bearing file (a name a later Claude Code release
+starts loading), the switch still stops the hooks.
+
+**The strip alone was a check-then-run** (Claude Security 4628445, fixed
+2026-09-22): it runs once, before any contributor code, and the sandbox note
+then has the reviewer run that code — the build backend, `setup.py`,
+`conftest.py`, the collected tests — which until then had write access to
+the very paths the strip had cleaned. Two routes were established on the CLI
+the action pins (2.1.278, checked locally): Claude Code loads a *nested*
+`CLAUDE.md` the first time a file beside it is read, so `<pkg>/CLAUDE.md`
+written during `pip install -e` was loaded with instruction authority on the
+reviewer's next read there; and Claude Code hot-reloads a project
+`.claude/settings.json` created or changed mid-session, `sandbox.enabled`
+included — a file the action's user-scope overlay could not outrank. (The
+sandbox's own protected paths already refused writes to the root `.claude`
+settings files and `.mcp.json`, so contributor *code* reaching the second
+route through the sandbox is not established; a `.git/config`-style
+unsandboxed `gh` redirect could. A third gap fell out of the investigation:
+on fork-head PRs the action's prepare phase restores the *base branch's* root
+`CLAUDE.md` after the strip, and inspect_ai's is `@AGENTS.md` — importing the
+*fork head's* `AGENTS.md`, which the strip did not rename.) Three barriers
+now compose, each holding on its own:
+
+- **The checkout's setting sources are excluded.** The agent step passes
+  `--setting-sources user` on the sandboxed paths, so Claude Code reads
+  settings, hooks, `.mcp.json`, `CLAUDE.md`, rules and skills from the user
+  scope alone — the action's merge of the caller's `settings` and the overlay
+  — and never from the checkout, at startup or on its settings watcher. The
+  overlay additionally pins the load side by path: `claudeMdExcludes` names
+  every instruction file under the checkout and the runner temp directory
+  (arrays merge across scopes, so no other scope can remove an entry), and
+  the agents-md plugin's `instructionFiles: claude-md` option keeps
+  `AGENTS.md` from being read as project instructions at all (honoured in
+  user settings, ignored in project and local ones). Claude Code ≥ 2.1.246
+  also drops an excluded source's `sandbox.filesystem` entries from the
+  sandbox configuration; the post-agent version check enforces that floor.
+- **The checkout is read-only to sandboxed commands.** `$GITHUB_WORKSPACE`
+  is on the overlay's `denyWrite`, so no command the reviewer runs can write
+  a configuration name into the tree at any depth — a per-path deny would
+  need the path to exist to bind. Writes go to a **scratch copy** the
+  workflow takes right after the strip (`$RUNNER_TEMP/scratch/src`, `.git`
+  included for `setuptools_scm` and the reviewer's `git diff`; taken before
+  the action rewrites `.git/config`, so the copy holds no token), the one
+  `allowWrite` entry; the sandbox note sends `venv`, `pip install -e` and
+  `pytest` there and keeps the checkout as the source of truth. A read-only
+  checkout cannot be dev-installed directly — setuptools writes
+  `<pkg>.egg-info` beside the sources while gathering build requirements
+  (inspect_ai: `could not create 'src/inspect_ai.egg-info'`) — hence the
+  copy rather than a scratch directory for the venv alone. The copy is
+  outside Claude Code's working directory, so nothing is loaded from it.
+  A caller's `sandbox.filesystem.allowWrite` is not carried over on these
+  paths (it would only widen).
+- **A post-agent check withholds the review.** The strip step writes a
+  **raw snapshot tree of the stripped checkout** into the object store
+  (`git add -A -f` into a temporary index under a temporary
+  `.git/info/attributes` override, so the blobs are the files' bytes and
+  link blobs the targets' bytes, not clean-filtered or normalised ones).
+  After the agent the checkout is hashed again with the same recipe and
+  compared with the snapshot **tree against tree** (`git diff-tree`, object
+  ids only): every file, link, mode and extra entry, wherever it is and
+  whatever links point at it. The checkout is read-only to sandboxed
+  commands, so it must be unchanged apart from what claude-code-action's
+  prepare phase does on PR events after the strip — it copies the PR's
+  remaining sensitive paths to `.claude-pr/` and restores `.claude`,
+  `.mcp.json`, `.claude.json`, `.gitmodules`, `.ripgreprc`, `CLAUDE.md`,
+  `CLAUDE.local.md` and `.husky` from `origin/<base>`. A changed restore
+  root must equal the base's tree entry — mode, type and object id, since a
+  file and a symlink can share a blob — and never passes when that
+  ref is absent (external mode restores nothing and changes nothing). The
+  strip's own predicates then run: every `CLAUDE.md`, `CLAUDE.local.md`,
+  `AGENTS.md`, `.claude` or `.mcp.json` must be a verified restore root or
+  lie inside one. Last, what a verified configuration root *reaches* must
+  stay inside the tree the comparison covered: the roots are walked
+  following symlinks and every entry resolved component by component with
+  the filesystem's own semantics, every location the resolution passes
+  through checked (intermediate links included — a relay link in
+  unverified storage could otherwise redirect an in-tree target), and a
+  location outside the checkout, in `.git`, in the action's `.claude-pr/`
+  copy (exempt from the comparison) or in an embedded repository (hashed
+  as a gitlink, its files unseen), a link with an absolute target, or a
+  chain of more than 40 links (a loop) fails; dangling links reach nothing (the callers' `CLAUDE.md ->
+  AGENTS.md` dangles after the strip's rename). Any failure — or a missing
+  snapshot — fails the step, the landing prep is gated on it (nothing the
+  reviewer wrote is posted), and the Surface step posts a withheld-review
+  note. This whole-tree shape replaced a per-entry comparison in which each
+  review round found a hole: the PR's index (a restored path the PR deleted
+  is untracked there), the head's `.gitattributes` (`git diff` let an
+  `ident`-contracted settings change compare equal), newline-stripping
+  command substitutions in link targets, the content behind a trusted
+  symlink (ts-mono's `.claude -> .agents`, the `.claude/skills ->
+  ../skills` of agents, inspect_harbor, inspect_scout and the inspect_ai
+  fork), and lexical `..` and shell globs in link paths. Fail-closed
+  corollary: a head `.gitattributes` that makes `git checkout` transform a
+  restore root (ident, eol, a smudge filter) leaves the action's own
+  restore differing from the base blob and the review is withheld — no
+  caller carries such an attribute. The step's git runs pinned (`GIT_DIR`,
+  `GIT_WORK_TREE`, no global or system config, hooks path and fsmonitor
+  off): the checkout's config is the contributor's.
+
+The alternative for the settings tier — managed policy settings at
+`/etc/claude-code/managed-settings.json`, which the sudo-capable runner could
+write — was not taken: it outranks a project file for boolean keys but Claude
+Code *merges* array keys such as `excludedCommands`, `allowedDomains` and
+`allowWrite` across every scope it loads, so a project settings file could
+still widen the sandbox unless the project scope is not loaded at all, which
+is what `--setting-sources user` does. What changed for callers: fork-head
+and external reviews now provision and test in the scratch copy instead of
+the checkout; same-repo reviews are untouched, and no caller stub changes.
 
 That gave up real verification, so the reviewer now gets **interactive test
 execution inside Claude Code's OS-level Bash sandbox** (bubblewrap + network
@@ -1363,9 +1508,11 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   the merged settings to `~/.claude/settings.json`, and a relative sandbox
   path in user-scope settings resolves against `~/.claude`, not the
   checkout), and the CLI version can only be checked *after* the agent step
-  (the action installs the pinned CLI — 2.1.266 at the time of writing —
+  (the action installs the pinned CLI — 2.1.278 at the time of writing —
   from inside its own steps), so a post-agent step fails the run loudly if
-  the version ever drops below 2.1.221 (the external stage hand-back runs
+  the version ever drops below 2.1.246 — the mask needs 2.1.221, and
+  dropping an excluded setting source's `sandbox.filesystem` entries from
+  the sandbox configuration needs 2.1.246 (the external stage hand-back runs
   under `always()` so that failure cannot park the proxy issue at Agent
   Working, and "Surface agent errors" reads the step's outcome to post a ⚠️
   on the thread — the review is already there, so a red job alone would go

@@ -114,7 +114,7 @@ on:
       model:
         required: false
         type: string
-        default: "fable"
+        default: "opus"
       fallback_model:
         required: false
         type: string
@@ -766,10 +766,15 @@ jobs:
           # (branch tip unchanged since it was recorded) yet the reviewer still
           # has suggestions. Re-running the agent against an unchanged tree would
           # just repeat itself, so hand off early rather than burning rounds up
-          # to the cap. Only meaningful once a prior round recorded a tip; a
-          # marker without one (pre-upgrade) skips the check and falls through.
-          if [ "$prev" -ge 1 ] && [ -n "$prevsha" ] && [ "$head" = "$prevsha" ]; then
-            echo "No new commit since round $prev (tip $head unchanged); escalating for no progress."
+          # to the cap. Keyed on the recorded tip ALONE, not on the count: a
+          # refund keeps the head marker while it may take the count to 0
+          # (round 1 refunded), and a `prev >= 1` guard would skip the check
+          # exactly there, so a verdict on an unchanged tip after such a
+          # refund would start round 1 again (Claude Security 4628734). A
+          # body without a tip — a reset, or a pre-upgrade marker — skips the
+          # check and falls through.
+          if [ -n "$prevsha" ] && [ "$head" = "$prevsha" ]; then
+            echo "No new commit since the tip $head was recorded (counter at $prev); escalating for no progress."
             echo "stalled=1" >>"$GITHUB_OUTPUT"
             act escalate; exit 0
           fi
@@ -1047,15 +1052,30 @@ jobs:
       id-token: write         # WIF auth (and the action's own App token)
       actions: read
     outputs:
-      # What the land job's refund step needs from this job: whether the
-      # agent step ran to a result, and whether it launched at all (the
-      # execution file exists only on this runner). `agent_outcome` is
-      # `failure` when any codex step that precedes or is the codex run
-      # failed, `success` when the codex run succeeded, and the Claude step's
-      # outcome otherwise (`skipped` on a run whose sync or provisioning
-      # failed before either engine started).
+      # What the land job needs from this job, both read from STEP OUTCOMES
+      # — the runner's record of whether a step was entered and how it
+      # exited, settled for the agent step before any agent code ran and
+      # for the steps ahead of it before that — never from a file in the
+      # workspace or under RUNNER_TEMP, which a process the agent leaves
+      # behind, or the PR's own provisioning step, can write (Claude
+      # Security 4628734; claude-auto.yml's finding 4628657 retired the
+      # execution-file "launched" signal for the same reason).
+      # `agent_skipped` is `true` when the engine's agent step was never
+      # entered — the Claude step AND the codex run are both `skipped`,
+      # which is the case exactly when the checkout, the sync, the
+      # provisioning or a codex prep step failed ahead of it (each engine's
+      # step is `skipped` on the other engine regardless). It drives the
+      # land job's round refund and nothing else: a step that was entered
+      # and then FAILED, whatever failed it, is not skipped, so that round
+      # keeps its count — the agent cannot make its own step read as never
+      # entered, only as failed. `agent_outcome` is `failure` when any codex
+      # step that precedes or is the codex run failed, `success` when the
+      # codex run succeeded, and the Claude step's outcome otherwise; only
+      # `success` admits a re-review request on a round that landed nothing
+      # (the Land step's `allow-no-change-handback`) — a value the agent can
+      # only push toward `failure`, which withholds.
       agent_outcome: ${{ (steps.codexfeedback.outcome == 'failure' || steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || (steps.codexfix.outcome == 'success' && 'success') || steps.claude.outcome }}
-      agent_started: ${{ steps.launched.outputs.value }}
+      agent_skipped: ${{ steps.claude.outcome == 'skipped' && steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}
     steps:
       # Check out the PR head (the gate's lookup). persist-credentials:false
       # (issue #61): checkout otherwise writes its token into .git/config for
@@ -1197,6 +1217,13 @@ jobs:
           hashFiles('pyproject.toml') != ''
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+        with:
+          # A codex run puts NOTHING on the job PATH: the venv would be
+          # codex-writable after the user's grant, and `Create codex user`
+          # refuses to run codex behind a workspace directory on PATH
+          # (design/codex-engine.md → Runner-side search path). The compose
+          # step finds the tools at .venv/bin instead.
+          add-to-path: ${{ needs.gate.outputs.engine == 'codex' && 'false' || 'true' }}
 
       # The agent commits and stops, and says what the land job should reply,
       # resolve and post through a JSON file under the landing directory —
@@ -1437,12 +1464,19 @@ jobs:
           # sudo's env_reset/secure_path replaces PATH before codex starts,
           # so the venv does NOT resolve as bare names there (inspect_flow#818
           # dev run, 2026-09-09; the reviewer's Create codex user step has
-          # said as much since 2026-09-01). This step runs as the runner with
-          # the provisioned PATH in effect, so discover here.
+          # said as much since 2026-09-01). Discovered from the checkout's
+          # .venv/bin first — where provision-fallback and the fork's
+          # claude-setup create the venv, and NOT on the job PATH on a codex
+          # run (the provisioning step passes add-to-path: false; a workspace
+          # directory on PATH would be codex-writable, and Create codex user
+          # refuses one — design/codex-engine.md → Runner-side search path)
+          # — then from this step's PATH for a caller that provisions
+          # elsewhere.
           if [ "${SETUP_OUTCOME:-}" = "success" ] || [ "${SETUPFB_OUTCOME:-}" = "success" ]; then
             tools=""
             for t in pytest ruff mypy pyright python3; do
-              path=$(command -v "$t" 2>/dev/null || true)
+              path="$GITHUB_WORKSPACE/.venv/bin/$t"
+              [ -x "$path" ] || path=$(command -v "$t" 2>/dev/null || true)
               [ -n "$path" ] && tools="$tools$t=$path "
             done
             verify="Verify your changes with the locally provisioned tools where relevant. Your process runs under sudo with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
@@ -1586,6 +1620,27 @@ jobs:
         if: always() && steps.codexuser.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
 
+      # Bring codex's final message across the user boundary ONCE, right
+      # after the reclaim's kill loop has ended every codex process: the
+      # output file sits in the codex-owned $RUNNER_TEMP/codex, whose entry
+      # codex could swap for a symlink, and every reader below runs as the
+      # runner. The composite opens it with O_NOFOLLOW, refuses anything
+      # but a regular codex-owned file, and copies it to
+      # $RUNNER_TEMP/codex-final.md (runner-only); the commit subject, the
+      # RESOLVED-THREADS parse and the summary read that copy and nothing
+      # else under the codex-owned dir (finding 4628447). A refused or
+      # missing message leaves no copy and the readers fall back to their
+      # defaults (default subject, the no-final-message placeholder).
+      # Gated like the guard; runs no git. continue-on-error: the copy is
+      # best-effort like the parse — a failure here (a misconfigured owner,
+      # an unwritable destination) must leave no copy, not strand the
+      # commit behind the readers' implicit success() gate.
+      - name: Import codex final message
+        id: codexfinal
+        continue-on-error: true
+        if: steps.codexfix.outcome == 'success' && steps.codexreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
+
       # Token split for the codex run: the CLI's step-log "tokens used" is one
       # blended number (non-cached input + output), so this reads the session
       # rollout codex wrote under its CODEX_HOME and puts input / cached /
@@ -1644,7 +1699,7 @@ jobs:
           token: ${{ github.token }}
           repo: ${{ github.repository }}
           pr: ${{ inputs.pr_number }}
-          final-message: ${{ runner.temp }}/codex/codex-final.md
+          final-message: ${{ runner.temp }}/codex-final.md
           stripped: ${{ runner.temp }}/codex-final.stripped.md
           resolve: "false"
 
@@ -1685,7 +1740,9 @@ jobs:
           ROUND: ${{ needs.gate.outputs.round }}
           MENTION: ${{ needs.gate.outputs.mention }}
           OUT: ${{ runner.temp }}/codex-final.stripped.md
-          FINAL: ${{ runner.temp }}/codex/codex-final.md
+          # The copy `Import codex final message` verified, never the
+          # codex-owned output file (finding 4628447).
+          FINAL: ${{ runner.temp }}/codex-final.md
           IDS: ${{ steps.codexthreads.outputs.ids }}
           DIR: ${{ runner.temp }}/landing
           START_SHA: ${{ steps.base.outputs.sha }}
@@ -1701,6 +1758,12 @@ jobs:
           GIT_CONFIG_VALUE_1: "false"
         run: |
           set -euo pipefail
+          # System tools only, whatever GITHUB_PATH prepended: `Create codex
+          # user` refused any codex-writable job PATH entry before codex ran,
+          # and the reclaim re-checked; this pin is belt and braces on the
+          # step that commits (design/codex-engine.md → Runner-side search
+          # path).
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
           mkdir -p "$DIR"
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge
@@ -1762,8 +1825,9 @@ jobs:
           # happened (emit-landing may still lose the bundle and drop the
           # hand-back, and the land job posts the body either way), so the
           # wording claims only what is true here. OUT is the stripped copy
-          # the parse step wrote — falling back to FINAL, codex's message
-          # unstripped, when that copy is missing (the composite warned; a
+          # the parse step wrote — falling back to FINAL, the imported copy of
+          # codex's message unstripped (never the codex-owned output file;
+          # finding 4628447), when that copy is missing (the composite warned; a
           # read needs no write permission, and a stray RESOLVED-THREADS
           # line in a comment beats the summary going unread —
           # inspect_ai#428's ten blind rounds). The list here includes the
@@ -1809,22 +1873,6 @@ jobs:
           fi
           echo "codex summary: $(wc -c <"$DIR/codex-comment.md") bytes — posted by the land job."
       # ---- end Codex engine ---------------------------------------------------
-
-      # Whether the Claude agent launched at all, for the land job's refund
-      # step: the execution file exists only on this runner, and the action
-      # writes it only after the Claude session (or on an SDK error mid-run)
-      # — never when it dies before starting Claude. Bash builtins only (the
-      # value flows into a marvin write's condition; nothing on PATH is
-      # consulted). Codex runs never have one: their success is read from the
-      # codex step's outcome (see the job outputs).
-      - name: Record whether the agent launched
-        id: launched
-        if: always()
-        env:
-          EXEC: ${{ steps.claude.outputs.execution_file }}
-        run: |
-          file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
-          if [ -s "$file" ]; then echo "value=true"; else echo "value=false"; fi >>"$GITHUB_OUTPUT"
 
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
@@ -1968,7 +2016,7 @@ jobs:
           # A failed codex-user setup SKIPS the codex step, so it needs its
           # own check or the failure is a silent red job.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
-            err="the codex user setup failed before the agent started — no fix was attempted this round (a runner-image change breaking adduser/usermod? — see the job logs)."
+            err="the codex user setup failed before the agent started — no fix was attempted this round (a job PATH entry inside the workspace or writable by the codex user — a caller's claude-setup putting its venv on GITHUB_PATH — or a runner-image change breaking adduser/usermod; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
@@ -2101,9 +2149,16 @@ jobs:
       #     clean base merge — merge-only), handoff → handoff_body_file,
       #     stage: Review (everything remaining declined with rationale —
       #     the replies carry it; a merge-only round lands the merge too)
-      #   no agent commit, handback → honored (the re-review re-reads the
-      #     same code; the gate's no-progress check then escalates, as it
-      #     did when the agent posted the request itself)
+      #   no agent commit, handback → honored when HEAD moved (merge-only:
+      #     the runner's base merge lands and re-runs CI, so the re-review
+      #     is owed like any bundled hand-back) or the agent step SUCCEEDED
+      #     (the re-review re-reads the same code; the gate's no-progress
+      #     check then escalates, as it did when the agent posted the
+      #     request itself), and dropped when neither holds: a failed or
+      #     skipped step with nothing to land owes no re-review, and
+      #     honoring one would let a round that never ran re-arm the loop
+      #     (Claude Security 4628734; the land job drops it again from the
+      #     trusted side — see the Land step's `allow-no-change-handback`)
       #   no agent commit, neither → the round is CONCLUDED with a hand-off
       #     whose body is the agent's final message (when the run succeeded
       #     and the Surface step found no error): the codex path's rule,
@@ -2250,8 +2305,26 @@ jobs:
             if [ -n "$violation" ]; then
               echo "::error::landing: ending-contract violation — $violation; posting neither hand-back."
             elif [ "$handback" = "true" ]; then
-              extra=$(jq -c '.handback = true' <<<"$extra")
-              [ -n "$committed" ] || echo "::warning::landing: the agent set handback without committing anything; the re-review re-reads unchanged code (the gate's no-progress check escalates a stall)."
+              if [ "$moved" = "true" ] || [ "${CLAUDE_OUTCOME:-}" = "success" ]; then
+                extra=$(jq -c '.handback = true' <<<"$extra")
+                [ -n "$committed" ] || echo "::warning::landing: the agent set handback without committing anything${merge_only:+ (the base merge from the runner lands)}; the re-review re-reads unchanged code (the gate's no-progress check escalates a stall)."
+              else
+                # Nothing to land and no completed run behind the request:
+                # a re-review is owed by a landed commit — the agent's or
+                # the runner's clean base merge, whose bundle lands and
+                # re-runs CI whatever the step's outcome — or by a run that
+                # finished and chose it, never by a round that failed or
+                # never ran with nothing to push (the file may predate the
+                # agent — the PR's own provisioning step can write it). Keyed
+                # on `moved`, the same test emit-landing bundles by, so the
+                # hand-back and the bundle cannot come apart (emit-landing
+                # drops both when the bundle is lost). The land job enforces
+                # the same rule from the trusted side (`allow-no-change-
+                # handback` off unless the agent step succeeded, bundled
+                # hand-backs exempt); this keeps the manifest honest and the
+                # log explicit.
+                echo "::warning::landing: the agent set handback, HEAD did not move and the agent step did not succeed (outcome: ${CLAUDE_OUTCOME:-unknown}); no re-review is owed by a round that landed nothing and did not complete, so none is requested."
+              fi
             elif [ -n "$handoff" ]; then
               extra=$(jq -c --arg f "$handoff" '.handoff_body_file = $f | .stage = "Review"' <<<"$extra")
             elif [ -z "$committed" ] && [ "${CLAUDE_OUTCOME:-}" = "success" ] && [ ! -s "$ERROR_FILE" ] && [[ "$PR" =~ ^[0-9]+$ ]]; then
@@ -2356,7 +2429,8 @@ jobs:
   # a fix job that failed still gets its error posted and its round refunded;
   # with no artifact at all (runner killed mid-agent) the composite fails
   # its download, lands nothing, and says so on the PR. A CANCELLED fix job
-  # skips the Land step but still gets its refund (see the step gates).
+  # skips the Land step; its refund follows the same evidence as every
+  # other round's (see the refund step).
   #
   # Gated on the gate job having SUCCEEDED, not only on its `act` output: a
   # gate that failed after writing act=fix — `Record round` is the realistic
@@ -2408,7 +2482,15 @@ jobs:
       # PR for nothing; a run cancelled by hand mid-agent is skipped too, so
       # its partial commits are not pushed and re-reviewed on the strength of
       # an always(). The step is gated, not the job, so the refund below
-      # still runs and gives back the round the gate recorded. `skipped` is
+      # still runs — and refunds only on the evidence every round needs: the
+      # job's own `agent_skipped` output. A job cancelled during checkout,
+      # sync or provisioning delivers it (the agent step is `skipped`) and
+      # is refunded; one cancelled after the agent step started delivers
+      # `false` and keeps its round; a PENDING job cancelled before it
+      # started delivers no outputs at all, and unknown keeps its round —
+      # one round of slack on a rare concurrency cancellation, not a refund
+      # decided by a job that may have run the agent (Claude Security
+      # 4628734, review round 1). `skipped` is
       # excluded too — the job-level gate on the gate job's success already
       # rules it out, so the test is belt and braces for the same "no
       # artifact, no agent" shape should the job gate ever loosen.
@@ -2434,25 +2516,58 @@ jobs:
           # The review-fix manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""
+          # A re-review request on a manifest with NO bundle is honored only
+          # when the agent step succeeded (`agent_outcome`, a step outcome
+          # the agent can push only toward `failure`): a round that landed
+          # nothing and did not complete owes no `@review`, and one that
+          # posted would re-arm the loop from a round that never ran — the
+          # self-retrigger of Claude Security 4628734, where a bundle-less
+          # hand-back rode a refunded round. A bundled hand-back is
+          # unaffected: the push is what re-runs CI, whatever the step's
+          # outcome. The composer applies the same rule in the fix job; this
+          # is the trusted copy.
+          allow-no-change-handback: ${{ needs.fix.outputs.agent_outcome == 'success' && 'true' || 'false' }}
 
       # Infra crashes must not burn review rounds (mirror of claude-auto.yml's
       # attempt refund): the counter increments in the gate job, BEFORE the
-      # agent runs (so real crashes still consume rounds), but a round whose
-      # agent never launched — a bootstrap failure with NO execution output,
-      # a failed codex feedback-fetch / prep / user-setup / run step (no fix
-      # reached the branch; a persistently missing OPENAI_API_KEY must not
-      # march a PR to spurious escalation), or a sync / provisioning failure
-      # that skipped the agent outright (before the split the round was
-      # recorded after those steps; it cannot be any more, so the refund
-      # covers it) — attempted no fix. Roll the sticky counter back one.
-      # Three conditions: the agent step did not succeed (a successful codex
-      # run has no execution file), it never produced execution output (a
-      # Claude run that reached a result counts, failed or not), and the
-      # landing pushed nothing (a round whose commits landed keeps its round
-      # whatever the agent step's outcome). Never on a FAILED gate (the job
-      # gate above): whether `Record round` ever incremented is then
-      # unknown, and an unrecorded round refunded would put the count one
-      # below the truth — not refunding is the conservative side.
+      # agent runs, but a round whose agent step was NEVER ENTERED — a sync
+      # or provisioning failure that skipped it outright (before the split
+      # the round was recorded after those steps; it cannot be any more, so
+      # the refund covers it), a failed codex feedback-fetch / prep /
+      # user-setup step, or a job cancelled while one of those steps ran
+      # (the agent step is `skipped` then too) — attempted no fix. Roll the
+      # sticky counter back one. Two conditions: the fix job's
+      # `agent_skipped` output is true (both engines' agent steps `skipped`,
+      # a step outcome the runner settled before any agent code ran), and
+      # the landing pushed nothing (a round whose commits landed keeps its
+      # round whatever the agent step's outcome). The job's RESULT is not
+      # evidence: a job cancelled after the agent step started ran the
+      # agent (its output reads `false` and the round is kept), and a
+      # pending job cancelled before it started delivers no outputs at all
+      # — unknown, so it keeps its round (one round of slack on a rare
+      # concurrency cancellation; the escalation still drops the label and
+      # posts, and the reset restores the budget). A step that was entered
+      # and then FAILED — the
+      # action's bootstrap failure, its actor refusal, a Claude or codex
+      # failure during the run, the codex step failing on a missing
+      # OPENAI_API_KEY (which used to be refunded; the sandboxed agent can
+      # fail its own step too, so the step's outcome cannot decide) — is a
+      # round: nothing lands, the Surface error posts, and the count stays,
+      # so a persistent cause reaches the cap and a human, not a silent
+      # refund loop. Until Claude Security 4628734
+      # (2026-09-22) the refund fired on `agent_outcome != success` plus an
+      # empty execution file (the retired "launched" step's output), both
+      # decided inside the untrusted job after the agent had run: a steered
+      # agent that killed
+      # the action's process, or truncated the file from a process it left
+      # behind, made a completed round read as an infra crash, and a
+      # bundle-less hand-back in the same manifest then re-armed the loop
+      # on the refunded count without bound. The cost of the narrower rule
+      # is that a transient bootstrap failure now spends a round; the cap
+      # and the stall check bound spend either way. Never on a FAILED gate
+      # (the job gate above): whether `Record round` ever incremented is
+      # then unknown, and an unrecorded round refunded would put the count
+      # one below the truth — not refunding is the conservative side.
       #
       # NOT serialized: this job is outside the per-PR concurrency group (the
       # gate's comment says why), so this write can interleave with the next
@@ -2467,8 +2582,7 @@ jobs:
       - name: Refund infra-crashed round
         if: >-
           always() && needs.gate.outputs.act == 'fix' &&
-          needs.fix.outputs.agent_outcome != 'success' &&
-          needs.fix.outputs.agent_started != 'true' &&
+          needs.fix.outputs.agent_skipped == 'true' &&
           steps.land.outputs.pushed != '1'
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
@@ -2530,7 +2644,7 @@ jobs:
           head=$(field auto-review-head '[0-9a-f]{40}' "$mbody")
           prev=$(( cur > 0 ? cur - 1 : 0 ))
           body="$MARKER
-          🤖 auto review rounds: $prev (cap $CAP). (one round refunded — the fix agent never ran to a result and nothing landed: infrastructure, not the fix)"
+          🤖 auto review rounds: $prev (cap $CAP). (one round refunded — the fix agent never ran and nothing landed: infrastructure, not the fix)"
           [ -n "$head" ] && body="$body
           <!-- auto-review-head:$head -->"
           gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
