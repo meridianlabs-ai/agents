@@ -52,7 +52,15 @@ inputs:
     description: Pull-request number whose threads may be resolved.
     required: true
   final-message:
-    description: Path of codex's final message (the codex-action output file).
+    description: >-
+      Path of codex's final message: the runner-owned copy `import-codex-final`
+      wrote directly under $RUNNER_TEMP, NEVER codex-action's output file
+      itself. That file sits in a codex-owned directory whose entry codex can
+      replace with a symlink, and this action reads as the runner (finding
+      4628447): it refuses a symlink or non-regular file at this path as
+      belt and braces (a `::warning::`, no ids, no stripped copy), but the
+      ownership check and the no-follow read live in the import composite —
+      callers run it first and pass its copy here.
     required: true
   stripped:
     description: >-
@@ -140,7 +148,17 @@ runs:
         # exactly as the awk did. Instead the callers' post step reads FINAL
         # when STRIPPED is missing (a read needs no write permission), so
         # this action's part is to warn, not to promise the post.
-        if [ -f "$FINAL" ]; then
+        # FINAL is the runner-owned copy import-codex-final verified (a
+        # regular, codex-owned, non-symlinked file, read with O_NOFOLLOW):
+        # the read side of the same hazard — awk follows a symlink as
+        # readily as `[ -f ]` does, and a link planted in the codex-owned
+        # output dir would have made the runner read its target into
+        # STRIPPED for the caller to publish (finding 4628447). Refuse a
+        # symlink or non-regular file here too, so this action is safe
+        # against a caller that passes the raw output file by mistake.
+        if [ -L "$FINAL" ] || { [ -e "$FINAL" ] && [ ! -f "$FINAL" ]; }; then
+          echo "::warning::final message at $FINAL is a symlink or not a regular file — refusing to read it; no RESOLVED-THREADS ids parsed and no stripped copy written (pass import-codex-final's verified copy, never the codex-owned output file)"
+        elif [ -f "$FINAL" ]; then
           mkdir -p "$(dirname "$STRIPPED")" 2>/dev/null || true
           ids=$(awk -v out="$STRIPPED" '
             function flush() { for (; held > 0; held--) print "" > out }

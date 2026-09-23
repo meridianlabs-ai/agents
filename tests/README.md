@@ -7,14 +7,37 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   (`.github/scripts/validate_manifest.py`): one valid manifest, one failing
   case per rule — including the per-caller issue policy (`allowed-issue-labels`
   / `allowed-issue-assignees` / `max-issues`) and `refuse-pr` under the triage
-  workflow's actual land inputs, against forged manifests.
+  workflow's actual land inputs, against forged manifests; the PR-label
+  policy (`allowed-pr-labels`: the dev gate's read, which a manifest's
+  `pr.labels` may not exceed — Claude Security 4628441); the review fields
+  refused on every caller but the reviewer's (`allow-review`), and the
+  fix-agent fields (`pr`, `replies`, `resolve_threads`, `handoff_body_file`,
+  `handback`) refused under `refuse-bundle`, each against the forged manifest
+  its finding describes.
+- `test_import_codex_final.py` — the `import-codex-final` composite's
+  script (`.github/scripts/import_codex_final.py`): a regular file owned by
+  the expected user is copied byte for byte; a symlink (to a runner file, or
+  dangling), a directory, a FIFO (without blocking), a file owned by someone
+  else and an unknown owner are refused with no copy and a stale copy
+  removed; oversize input is truncated. Plus the `resolve-reported-threads`
+  composite's step, lifted the same way, refusing a symlinked final message
+  (no ids, no stripped copy), and the structural rule over the three
+  write-path workflows: the codex-owned output file is named only by
+  codex-action's `output-file`, every reader takes the imported copy, and
+  the import step sits right after the reclaim (finding 4628447).
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
   retry, open-or-adopt PR and the branch-existence probe against a stub
   `gh`, the landing-failure hint) and
   the git sequence its fetch/push steps rely on (bundle above the start SHA;
   unbundle into an empty bare repo; refuse a moved branch; push without
   `--force`), run against local repos — including `emit-landing`'s `write`
-  step, lifted from the action and run against those repos.
+  step, lifted from the action and run against those repos, and the
+  `workflows` guard, lifted the same way: what the push would change on
+  origin, listed from the branch's live tip or the base tip, never from
+  the manifest's `start_sha` (a start shifted onto a fork PR's head or an
+  old base commit still names the file; Claude Security 4628444) — with a
+  new branch cut from a configured non-default base (the fork's `main`
+  under a `meridian` default) run through the lifted `fetch` step too.
 - `test_ci_fix_composer.py` — `claude-auto.yml`'s `Compose landing manifest`
   step, lifted the same way: a landed fix or merge-only attempt owes the
   re-review request and sets no stage (a hand-back is mid-flight; Review is
@@ -35,7 +58,34 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `review_comments` — the lenient verdict read, the malformed-inline
   fallbacks, external mode's single comment, the codex branch untouched —
   with the pr-mode and external results run on through `emit-landing` and
-  the validator under the land job's `refuse-bundle`.
+  the validator under the land job's `refuse-bundle`. Also the `Compose
+  settings` step: the review-dir allow and posting denies, and on the
+  sandboxed paths the overlay — the checkout and the review dir on
+  `denyWrite`, the scratch copy the one `allowWrite`, `claudeMdExcludes`
+  and the agents-md `instructionFiles` option composed with the caller's
+  entries, a caller's `allowWrite` and `tlsTerminate` dropped.
+- `test_review_strip.py` — `claude-review.yml`'s untrusted-checkout
+  preparation and post-agent check (Claude Security 4628445), lifted the
+  same way and run against local repos: the strip renames `CLAUDE.md` /
+  `CLAUDE.local.md` / `AGENTS.md` to `*.untrusted` and deletes `.claude` /
+  `.mcp.json` at every depth and writes a raw snapshot tree of the stripped
+  checkout; the scratch step copies the stripped tree with its
+  credential-free `.git`; the post-agent check compares the whole checkout
+  with that snapshot tree against tree and passes on a clean tree and on
+  exactly what claude-code-action does on PR events (the base-branch restore
+  of its sensitive roots when object-identical to `origin/<base>` — PR-deleted
+  roots, a restored `.claude/` subtree, symlinked roots and PR content behind
+  them included — and its `.claude-pr/` copy), and fails on a nested or root
+  configuration entry, a changed or added file anywhere (behind a link at
+  any depth, through an intermediate link followed by `..`, behind a
+  glob-character target), an attribute-normalised or mode change, a
+  retargeted or newline-retargeted link, a configuration root reaching
+  outside the checkout or into `.git`, a root `AGENTS.md`, and a missing
+  base ref or snapshot (fail-closed, a hostile `BASE_REF` included) — with
+  the checkout's hooks, fsmonitor and external diff never run. Also the
+  wiring: `--setting-sources user` on the agent step after the caller's args, the three steps gated on the sandboxed
+  paths, the landing prep gated on the check, the 2.1.246 version floor, the
+  Surface step's outcomes and note, and the prompt's scratch-copy guidance.
 - `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
   step, lifted the same way: the PR open for an issue run (title, body,
   labels, base, the hand-back an `auto`-labelled PR owes and the
@@ -62,8 +112,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
 - `test_atlas_sync.py` — the hourly Atlas sync's author checks
   (`.github/scripts/atlas_sync.py`, against a fake `gh`): `trusted_author`
   (trusted logins — the machine account under both its User and GitHub App
-  logins — `author_association`, the cached write-permission lookup,
-  fail-closed), the stale hand-back revival honouring only trusted authors
+  logins — or the cached write-permission lookup, fail-closed; the payload's
+  `author_association` decides nothing, so a MEMBER or COLLABORATOR at read
+  or triage is refused), the stale hand-back revival honouring only trusted authors
   (an outsider's `@review` or forged verdict is never re-issued as the
   machine account and ends the search), the `Companion PR:` issue-body
   line counting only from a trusted author and only for a ts-mono URL, and
@@ -229,14 +280,35 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   same lifted bodies with the real codex user, image PATH and sudo, plus a
   control job showing the runner pick a planted interpreter when the venv IS
   on GITHUB_PATH.
+- `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
+  the same way against a stub `gh`: an issue's `auto` label is the run's
+  opt-in only when the account that applied it most recently is a human
+  with write access (Claude Security 4628438) — a triage account's, a
+  bot's or the machine account's own label, a timeline that names no
+  labeler and a failed permission lookup all leave the run one-shot with
+  no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; an
+  `@auto` comment opts in without a label read; a PR's label is left to the
+  loop gates. Also that the land job pins the PR labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,
   from text or from an `auto`/`claude` label (Claude Security finding
   4628345 — its label was the triage agent's decision, only written by
   marvin), other Apps' labels and every bot's text trigger are refused, a
   human is authorized by the permission lookup and refused when it fails;
+  an opened issue whose first line is `/import`'s `Upstream issue:` line
+  is no text trigger, body or title (Claude Security 4629154), while the
+  same text in a human's own issue and a label on an import still are;
   the workflow's agent steps carry no bot allow-list; and the dev stubs
   exclude both machine logins on the label path like everywhere else.
+- `test_import.py` — `skills/import/import.sh` against a stub `gh` that
+  answers the upstream issue from a fixture and records the created title
+  and body: every trigger phrase and loop marker in the copied title and
+  snapshot is de-fanged before `gh issue create` (Claude Security 4629154 —
+  the fork issue is posted under the importing maintainer's login, whom the
+  gate authorizes), the import's own shape (`Upstream issue:` first line,
+  `---` rule, qualified `#N` refs) survives, `--dry-run` previews the
+  de-fanged title and creates nothing, and ordinary text is copied
+  unchanged.
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc
