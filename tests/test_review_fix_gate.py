@@ -578,6 +578,24 @@ def refund_ctx(fix_result, skipped, pushed, act="fix"):
     return ctx
 
 
+def engine_selected_skipped(engine, skipped):
+    """The land job's `AGENT_SKIPPED` env — `engine == 'codex' &&
+    needs.fix-codex.outputs.agent_skipped || needs.fix.outputs.agent_skipped`
+    — as GitHub evaluates `a && b || c` (b when a holds and b is non-empty,
+    else c): only the engine's job ran and delivered `skipped`; the other
+    job was skipped at the job level and delivers no outputs (one job per
+    engine, findings 4628446 and 4629153)."""
+    codex_out = (skipped or "") if engine == "codex" else ""
+    claude_out = (skipped or "") if engine != "codex" else ""
+    return codex_out if engine == "codex" and codex_out else claude_out
+
+
+def refund_ctx_split(fix_result, skipped, pushed, engine, act="fix"):
+    ctx = {"needs.gate.outputs.act": act, "steps.land.outputs.pushed": pushed,
+           "env.AGENT_RESULT": fix_result, "env.AGENT_SKIPPED": engine_selected_skipped(engine, skipped)}
+    return ctx
+
+
 def test_the_refund_and_the_hand_back_key_on_evidence_settled_before_the_agent_ran():
     """The refund's gating inputs (the `if:`, not only the comment selection
     the tests above cover): the fix job's `agent_skipped` output — both
@@ -591,23 +609,29 @@ def test_the_refund_and_the_hand_back_key_on_evidence_settled_before_the_agent_r
     the direction the agent cannot push."""
     text = WORKFLOW.read_text()
     assert "id: launched" not in text and "agent_started" not in text and 'echo "value=true"' not in text
-    fix = text[text.index("  fix:\n"):text.index("  land:\n")]
-    outputs = fix[fix.index("    outputs:\n"):fix.index("    steps:\n")]
-    assert "agent_skipped: ${{ steps.claude.outcome == 'skipped' && steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}" in outputs
-    assert ("agent_outcome: ${{ (steps.codexfeedback.outcome == 'failure' || steps.codexprep.outcome == 'failure' || "
-            "steps.codexuser.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || "
-            "(steps.codexfix.outcome == 'success' && 'success') || steps.claude.outcome }}") in outputs
+    # One job per engine: each job's `agent_skipped` reads its own agent
+    # step, and the land job selects the engine's.
+    claude_job = text[text.index("\n  fix:\n"):text.index("\n  fix-codex:\n")]
+    codex_job = text[text.index("\n  fix-codex:\n"):text.index("\n  land:\n")]
+    land_job = text[text.index("\n  land:\n"):]
+    assert "      agent_skipped: ${{ steps.claude.outcome == 'skipped' && 'true' || 'false' }}\n" in claude_job
+    assert "      agent_skipped: ${{ steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}\n" in codex_job
+    assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
+    assert ("      AGENT_SKIPPED: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_skipped "
+            "|| needs.fix.outputs.agent_skipped }}\n") in land_job
+    outputs = claude_job[claude_job.index("    outputs:\n"):claude_job.index("    steps:\n")]
     assert "outputs.value" not in outputs and "-s " not in outputs
     condition = step_if(WORKFLOW, "      - name: Refund infra-crashed round")
     assert condition == ("always() && needs.gate.outputs.act == 'fix' && "
-                         "needs.fix.outputs.agent_skipped == 'true' && "
+                         "env.AGENT_SKIPPED == 'true' && "
                          "steps.land.outputs.pushed != '1'")
-    assert "needs.fix.result" not in condition and "agent_outcome" not in condition
-    for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
-        assert ghx(condition, refund_ctx(fix_result, skipped, pushed)) is refunded, why
-    assert ghx(condition, refund_ctx("failure", "true", "", act="escalate")) is False
+    assert "needs.fix.result" not in condition and "agent_outcome" not in condition and "AGENT_RESULT" not in condition
+    for engine in ("claude", "codex"):
+        for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
+            assert ghx(condition, refund_ctx_split(fix_result, skipped, pushed, engine)) is refunded, (engine, why)
+        assert ghx(condition, refund_ctx_split("failure", "true", "", engine, act="escalate")) is False
     land = text[text.index("      - name: Land\n"):text.index("      # Infra crashes must not burn review rounds")]
-    assert "allow-no-change-handback: ${{ needs.fix.outputs.agent_outcome == 'success' && 'true' || 'false' }}" in land
+    assert "allow-no-change-handback: ${{ env.AGENT_OUTCOME == 'success' && 'true' || 'false' }}" in land
 
 
 # --- escalation's reset (the shared composite) -------------------------------

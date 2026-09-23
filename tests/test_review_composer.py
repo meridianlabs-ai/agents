@@ -25,7 +25,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude-review.yml"
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_manifest.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import run_emit_landing, sh  # noqa: E402
+from test_land_helpers import run_emit_landing, sh, job_block, lift_run  # noqa: E402
 from test_review_fix_gate import lift_step  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("validate_manifest_rc", VALIDATOR)
@@ -34,6 +34,8 @@ spec.loader.exec_module(vm)
 
 PREP = lift_step(WORKFLOW, "        id: claudepost")
 COMPOSE = lift_step(WORKFLOW, "        id: landing")
+# The codex engine has its own job (and composer) since 2026-09-22.
+COMPOSE_CODEX = lift_run(job_block(WORKFLOW.read_text(), "review-codex"), "        id: landing")
 SETTINGS_STEP = lift_step(WORKFLOW, "        id: reviewsettings")
 SHA = "a" * 40
 RUNNER_TEMP = "/home/runner/work/_temp"
@@ -66,7 +68,8 @@ def prep(tmp_path, *, mode="pr", summary=None, verdict=None, inline=None):
 
 
 def compose(tmp_path, *, mode="pr", claudepost="success", landed="true", verdict="clean",
-            codexpost="skipped", codex_verdict="", claude_outcome="success", ack="true", engaged="false"):
+            codexpost="skipped", codex_verdict="", claude_outcome="success", ack="true", engaged="false",
+            engine="claude"):
     landing = tmp_path / "landing"
     landing.mkdir(exist_ok=True)
     extra = tmp_path / "landing-extra.json"
@@ -77,7 +80,7 @@ def compose(tmp_path, *, mode="pr", claudepost="success", landed="true", verdict
         "CODEXPOST_OUTCOME": codexpost, "CODEX_VERDICT": codex_verdict, "ENGAGED": engaged,
         "PROV_NOTE": "", "ERROR_FILE": str(tmp_path / "agent-error.md"),
     }
-    r = sh("bash", "-c", COMPOSE, check=False, env=env)
+    r = sh("bash", "-c", COMPOSE_CODEX if engine == "codex" else COMPOSE, check=False, env=env)
     assert r.returncode == 0, r.stderr + r.stdout
     return json.loads(extra.read_text()), extra
 
@@ -294,9 +297,18 @@ def test_compose_lands_no_review_when_the_prep_step_found_no_summary(tmp_path):
 
 
 def test_compose_codex_path_is_unchanged(tmp_path):
+    # The codex job's own composer (one job per engine since 2026-09-22):
+    # the same manifest the shared composer produced for the codex branch.
     landing = tmp_path / "landing"
     landing.mkdir()
     (landing / "codex-review.md").write_text("codex says\n\n🤖 engine: codex\n")
-    m, _ = compose(tmp_path, claudepost="skipped", landed="", verdict="", codexpost="success", codex_verdict="suggestions",
-                   claude_outcome="skipped")
+    m, _ = compose(tmp_path, engine="codex", claudepost="skipped", landed="", verdict="", codexpost="success",
+                   codex_verdict="suggestions", claude_outcome="skipped")
     assert m == {"comments": [{"number": 42, "body_file": "codex-review.md"}], "review_verdict": "suggestions", "stage": "Review"}
+    # A codex review the loop owns hands nothing back to Review.
+    m, _ = compose(tmp_path, engine="codex", codexpost="success", codex_verdict="clean", engaged="true")
+    assert m == {"comments": [{"number": 42, "body_file": "codex-review.md"}], "review_verdict": "clean"}
+    # A failed codex step: no review, the error only, and the stage move.
+    (tmp_path / "agent-error.md").write_text("⚠️ codex failed")
+    m, _ = compose(tmp_path, engine="codex", codexpost="skipped")
+    assert m == {"stage": "Review", "error": {"message": "⚠️ codex failed", "fail_run": True}}

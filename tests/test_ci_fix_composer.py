@@ -20,13 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import WORKFLOW_FILES_RULE, sh, git, step_block  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, sh, git, step_block, job_block  # noqa: E402
 
 
-def composer_script() -> str:
-    """The step's bash, lifted from the workflow (text extraction: PyYAML is
-    not a test dependency), as in test_review_fix_composer.py."""
-    lines = WORKFLOW.read_text().splitlines()
+def composer_script(engine: str = "claude") -> str:
+    """The step's bash, lifted from the engine's job of the workflow (text
+    extraction: PyYAML is not a test dependency), as in
+    test_review_fix_composer.py. Each engine has its own job and so its own
+    composer since 2026-09-22: `fix` (Claude) and `fix-codex`."""
+    lines = job_block(WORKFLOW.read_text(), "fix-codex" if engine == "codex" else "fix").splitlines()
     start = lines.index("        id: landing")
     run_at = next(i for i in range(start, len(lines)) if lines[i] == "        run: |")
     body = []
@@ -82,7 +84,7 @@ def compose(r, *, engine="claude", claude_outcome="success", merge_sha="", final
         "GIT_DIR": str(r["work"] / ".git"), "GIT_COMMON_DIR": str(r["work"] / ".git"),
         "GIT_WORK_TREE": str(r["work"]),
     }
-    res = sh("bash", "-c", composer_script(), cwd=r["work"], check=False, env=env)
+    res = sh("bash", "-c", composer_script(engine), cwd=r["work"], check=False, env=env)
     assert res.returncode == 0, res.stderr
     return json.loads(extra.read_text()), landing
 
@@ -148,4 +150,4 @@ def test_prompts_forbid_workflow_file_edits():
     # whole bundle otherwise.
     text = WORKFLOW.read_text()
     assert WORKFLOW_FILES_RULE + " in a comment so a maintainer makes it from their machine." in step_block(text, "prompt")
-    assert WORKFLOW_FILES_RULE + " in your final message so a maintainer makes it from their machine." in step_block(text, "codexprep")
+    assert WORKFLOW_FILES_RULE + " in your final message so a maintainer makes it from their machine." in step_block(text, "codexcompose")

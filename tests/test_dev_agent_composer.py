@@ -21,15 +21,16 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude.yml"
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_manifest.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import WORKFLOW_FILES_RULE, run_emit_landing, sh, git, step_block  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, run_emit_landing, sh, git, step_block, job_block  # noqa: E402
 
 
-def composer_script() -> str:
-    """The step's bash, lifted from the workflow (text extraction: PyYAML is
-    not a test dependency). The block scalar under `run: |` is every
-    following line indented by at least its 10 spaces, up to the first that
-    is not."""
-    lines = WORKFLOW.read_text().splitlines()
+def composer_script(engine: str = "claude") -> str:
+    """The step's bash, lifted from the engine's job of the workflow (text
+    extraction: PyYAML is not a test dependency). The block scalar under
+    `run: |` is every following line indented by at least its 10 spaces, up
+    to the first that is not. Each engine has its own job and so its own
+    composer since 2026-09-22: `agent` (Claude) and `agent-codex`."""
+    lines = job_block(WORKFLOW.read_text(), "agent-codex" if engine == "codex" else "agent").splitlines()
     start = lines.index("        id: landing")
     run_at = next(i for i in range(start, len(lines)) if lines[i] == "        run: |")
     body = []
@@ -123,7 +124,7 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
         "GIT_DIR": str(r["work"] / ".git"), "GIT_COMMON_DIR": str(r["work"] / ".git"),
         "GIT_WORK_TREE": str(r["work"]),
     }
-    res = sh("bash", "-c", composer_script(), cwd=r["work"], check=False, env=env)
+    res = sh("bash", "-c", composer_script(engine), cwd=r["work"], check=False, env=env)
     assert res.returncode == 0, res.stderr
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
     return json.loads(extra.read_text()), res, landing, outputs

@@ -269,7 +269,8 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   check escalates on the recorded tip whatever the count reads (a refunded
   round 1 leaves `rounds: 0` with its head marker), the refund → gate
   sequence on an unchanged tip escalates, and the refund's `if:` is pinned
-  to `agent_skipped == 'true'` (the agent step was never entered) plus
+  to `env.AGENT_SKIPPED == 'true'` (the engine's fix job's `agent_skipped`:
+  its agent step was never entered; evaluated for both engines) plus
   nothing pushed — never the agent step's own outcome, the job's result or
   an execution file; a cancellation alone, or missing outputs, keeps the
   recorded count — evaluated over a shared case table (`REFUND_CASES`)
@@ -308,10 +309,13 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   unresolved-merge guard and `emit-landing`'s `write` step run against a
   PLANTED `.venv/bin` of `sudo`, `git`, `find`, `jq` and friends first on
   the job PATH and touch none of it; `provision-fallback` writes nothing to
-  GITHUB_PATH under `add-to-path: false`; and the wiring — the four
-  workflows pass `add-to-path` from the gate's engine, the compose steps
-  discover the tools from `.venv/bin` first, the commit steps pin PATH, the
-  user is created, checked, then granted. `codex_path_smoke.sh` is the
+  GITHUB_PATH under `add-to-path: false`; and the wiring — only the Claude
+  jobs' fallback puts the venv on the job PATH (the default), the codex jobs
+  provision with `user: codex` and pass no `add-to-path`, their compose
+  steps discover the tools from the composite's `bin` directories and never
+  through `command -v`, the commit steps pin PATH, the user is created,
+  checked, then granted, and `create-codex-user`'s `reset-home` mode
+  re-checks and pins PATH. `codex_path_smoke.sh` is the
   hosted-runner counterpart (`.github/workflows/codex-path-smoke.yml`): the
   same lifted bodies with the real codex user, image PATH and sudo, plus a
   control job showing the runner pick a planted interpreter when the venv IS
@@ -336,6 +340,44 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   same text in a human's own issue and a label on an import still are;
   the workflow's agent steps carry no bot allow-list; and the dev stubs
   exclude both machine logins on the label path like everywhere else.
+- `test_engine_job_isolation.py` — one untrusted job per engine (Claude
+  Security findings 4628446 and 4629153): in each reusable workflow the
+  Claude job references no `OPENAI_API_KEY` and runs no codex, the codex
+  job references it only at its codex-action step, the two are selected by
+  the gate's `engine` output at the job level and gate no step on it, the
+  land job waits for both; the codex job `uses:` no action from the
+  checkout, provisions with `provision-fallback` `user: codex` (and the
+  caller's `codex_provision` as `recipe`) after `Create codex user`, runs
+  `Reset codex home` (`create-codex-user` `mode: reset-home`) before the
+  codex-action step, writes nothing into the workspace after the codex user
+  exists (prompt files in RUNNER_TEMP, the exclude lines appended by the
+  prep step), and its prompts take the tool paths from the composite's
+  `bin` directories; the Claude job keeps the runner-side `claude-setup`
+  and fallback; `codex_provision` is declared with a type and reaches only
+  the codex job. Also the composites, lifted and run against stubs:
+  `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
+  codex -H` when `user` is set, the recipe directly otherwise, a caller
+  recipe handed over as a `$RUNNER_TEMP` file and refused when it is not
+  bash, a failing sudo fails the step), `provision.sh` against stub
+  `curl`/`uv` (the venv and the `.[dev]` / `--group dev` install, a caller
+  recipe replacing them after the uv bootstrap, the `.git/info/exclude`
+  lines, the `GITHUB_PATH` appends made only when that file is there),
+  `create-codex-user`'s `codex-home.sh` (a planted `config.toml` symlink
+  and a stray file are replaced by the profile and the server-info file;
+  the link's target is untouched) and its `reset-home` step (kills, then
+  the home script; refuses while `pkill` keeps finding codex processes).
+  The four composer tests lift each engine's composer from its own job
+  (`job_block` / `lift_run` in `test_land_helpers.py`).
+- `secret_delivery_scan.py`, `fixtures/hostile-checkout/` and
+  `fixtures/callers/` are not tests but the hosted canary's pieces
+  (`.github/workflows/engine-isolation-canary.yml`): the root-run scanner
+  that counts synthetic sentinel secrets in the runner processes' memory,
+  the hostile `setup.py` build backend the provisioning-boundary job
+  installs as the codex user, and the four representative caller projects
+  (with the `codex_provision` recipe each caller's stub would set and the
+  checks that its interpreter/Node version, dependency groups and lockfile
+  came out as intended, run as the codex user) — `fixtures/callers/README.md`
+  has the table.
 - `test_import.py` — `skills/import/import.sh` against a stub `gh` that
   answers the upstream issue from a fixture and records the created title
   and body: every trigger phrase and loop marker in the copied title and

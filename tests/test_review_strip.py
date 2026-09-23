@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-review.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import git, sh  # noqa: E402
+from test_land_helpers import git, job_block, sh  # noqa: E402
 from test_review_fix_gate import lift_step  # noqa: E402
 
 STRIP = lift_step(WORKFLOW, "        id: strip")
@@ -876,4 +876,18 @@ def test_workflow_wiring():
     # The compose-settings and scratch steps read the same scratch path.
     assert "SCRATCH: ${{ runner.temp }}/scratch" in step_block("        id: reviewsettings\n")
     assert "SCRATCH: ${{ runner.temp }}/scratch" in step_block("        id: scratch\n")
-    assert text.count("${{ runner.temp }}/scratch") == 3
+    # Counted in the Claude `review` job, the one with the sandbox and the
+    # scratch copy. The codex job (review-codex, one job per engine since the
+    # engine split — findings 4628446 and 4629153) carries an identical copy
+    # of the prompt step, so its one extra occurrence is that copy's.
+    review_job = job_block(text, "review")
+    assert review_job.count("${{ runner.temp }}/scratch") == 3
+    codex_job = job_block(text, "review-codex")
+    assert "\n        id: scratch\n" not in codex_job and codex_job.count("${{ runner.temp }}/scratch") == 1
+    def body(block: str) -> str:  # the step without the next step's leading comment
+        lines = block.rstrip("\n").splitlines()
+        while lines and (lines[-1].startswith("      #") or not lines[-1].strip()):
+            lines.pop()
+        return "\n".join(lines)
+    prompt_step = body(step_block("        id: reviewprompt\n"))
+    assert prompt_step in codex_job and prompt_step in review_job

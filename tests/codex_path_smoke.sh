@@ -183,7 +183,9 @@ grep -o 'job PATH: .*' "$RUNNER_TEMP/smoke-r2-stock-again.log"
 echo "check without protect took $(( $(date +%s) - t0 )) s"
 
 say "4. create-codex-user, step 3 (its second run block): the grant and the rest"
-/bin/bash -c "$(lift create-codex-user 2)"
+# HOME_SCRIPT is the step's env: the grant step ends with the shared
+# codex-home.sh (also run by the composite's reset-home mode).
+HOME_SCRIPT="$root/.github/actions/create-codex-user/codex-home.sh" /bin/bash -c "$(lift create-codex-user 2)"
 stat -c '%A %U:%G %n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.venv/bin"
 
 say "5. as codex: plant into the venv, tamper with .git/config, try the protected dirs"

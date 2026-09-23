@@ -33,7 +33,7 @@ RESET_ACTION = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.ym
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
-from test_review_fix_gate import MARVIN, MARVIN_BOT, workflow_env, step_if, ghx, REFUND_CASES, refund_ctx  # noqa: E402
+from test_review_fix_gate import MARVIN, MARVIN_BOT, workflow_env, step_if, ghx, REFUND_CASES, refund_ctx, refund_ctx_split  # noqa: E402
 
 TRUSTED_LOGINS = workflow_env(WORKFLOW, "TRUSTED_LOGINS")
 
@@ -454,24 +454,30 @@ def test_the_refund_fires_only_on_a_step_the_runner_never_entered():
     refunded round never posts the `@review` that would re-arm the loop."""
     text = WORKFLOW.read_text()
     assert "id: launched" not in text and "agent_started" not in text
-    fix = text[text.index("  fix:\n"):text.index("  land:\n")]
-    outputs = fix[fix.index("    outputs:\n"):fix.index("    steps:\n")]
-    assert "agent_skipped: ${{ steps.claude.outcome == 'skipped' && steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}" in outputs
-    assert ("agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || "
-            "steps.codexfix.outcome == 'failure') && 'failure' || (steps.codexfix.outcome == 'success' && 'success') || "
-            "steps.claude.outcome }}") in outputs
+    # One job per engine: each job's `agent_skipped` reads its own agent
+    # step, and the land job selects the engine's.
+    claude_job = text[text.index("\n  fix:\n"):text.index("\n  fix-codex:\n")]
+    codex_job = text[text.index("\n  fix-codex:\n"):text.index("\n  land:\n")]
+    land_job = text[text.index("\n  land:\n"):]
+    assert "      agent_skipped: ${{ steps.claude.outcome == 'skipped' && 'true' || 'false' }}\n" in claude_job
+    assert "      agent_skipped: ${{ steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}\n" in codex_job
+    assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
+    assert ("      AGENT_SKIPPED: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_skipped "
+            "|| needs.fix.outputs.agent_skipped }}\n") in land_job
     refund_step = text[text.index("      - name: Refund infra-crashed attempt"):]
     refund_step = refund_step[:refund_step.index("        run: |")]
     condition = step_if(WORKFLOW, "      - name: Refund infra-crashed attempt")
     assert condition == ("always() && needs.gate.outputs.act == 'fix' && "
-                         "needs.fix.outputs.agent_skipped == 'true' && "
+                         "env.AGENT_SKIPPED == 'true' && "
                          "steps.land.outputs.pushed != '1'")
-    assert "agent_outcome" not in condition and "needs.fix.result" not in condition and "execution" not in refund_step
-    for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
-        assert ghx(condition, refund_ctx(fix_result, skipped, pushed)) is refunded, why
-    assert ghx(condition, refund_ctx("failure", "true", "", act="escalate")) is False
+    assert "agent_outcome" not in condition and "AGENT_OUTCOME" not in condition and "needs.fix.result" not in condition
+    assert "execution" not in refund_step
+    for engine in ("claude", "codex"):
+        for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
+            assert ghx(condition, refund_ctx_split(fix_result, skipped, pushed, engine)) is refunded, (engine, why)
+        assert ghx(condition, refund_ctx_split("failure", "true", "", engine, act="escalate")) is False
     land = text[text.index("      - name: Land\n"):text.index("      # The revalidation refused")]
-    assert "allow-no-change-handback: ${{ needs.fix.outputs.agent_outcome == 'success' && 'true' || 'false' }}" in land
+    assert "allow-no-change-handback: ${{ env.AGENT_OUTCOME == 'success' && 'true' || 'false' }}" in land
 
 
 # --- Reset the attempt counter (escalation) -----------------------------------

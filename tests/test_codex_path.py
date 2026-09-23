@@ -47,6 +47,7 @@ and a host's own link farms are not what is under test.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -694,9 +695,19 @@ def test_the_checks_own_probes_never_resolve_through_the_job_path(world):
 
 
 def test_create_codex_user_checks_the_path_after_the_user_and_before_the_grant():
+    # Three create-mode steps, then the two of `reset-home` (the engine
+    # split's boundary step between provisioning-as-codex and codex-action,
+    # findings 4628446 and 4629153), which re-runs the check without
+    # `protect` and pins its own PATH like the reclaim.
     steps = composite_steps(CREATE)
-    assert len(steps) == 3, [s.splitlines()[0] for s in steps]
-    first, check_step, grant = steps
+    assert len(steps) == 5, [s.splitlines()[0] for s in steps]
+    first, check_step, grant, reset_check, reset = steps
+    for s in (first, check_step, grant):
+        assert "if: inputs.mode == 'create'" in s
+    for s in (reset_check, reset):
+        assert "if: inputs.mode == 'reset-home'" in s
+    assert ASSERT_USES in reset_check and "user: codex" in reset_check and "protect" not in reset_check
+    assert f"SYSTEM_PATH: {SYSTEM_DIRS}" in reset and reset.index('export PATH="$SYSTEM_PATH"') < reset.index("sudo ")
     assert "sudo adduser --system --home /home/codex --shell /bin/bash --group codex" in first
     assert "sudo usermod -a -G runner codex" in first
     assert "chown" not in first and "chmod" not in first
@@ -884,8 +895,11 @@ def provision(w, add_to_path: str):
     github_path.write_text("")
     env = {"PATH": f"{stubs}:{os.environ['PATH']}", "HOME": str(home), "GITHUB_PATH": str(github_path),
            "ADD_TO_PATH": add_to_path, "UV_LOG": str(w["tmp"] / f"uv-{add_to_path}.log")}
-    r = subprocess.run(["/bin/bash", "-c", composite_runs(PROVISION)[0]], cwd=ws, text=True, capture_output=True, env=env,
-                       check=False)
+    # The recipe is provision.sh next to the composite since the engine
+    # split; the composite's step runs it directly as the runner (no
+    # `user`), with ADD_TO_PATH from `add-to-path` in its environment.
+    r = subprocess.run(["/bin/bash", str(PROVISION.parent / "provision.sh")], cwd=ws, text=True, capture_output=True,
+                       env=env, check=False)
     return r, ws, github_path.read_text(), Path(env["UV_LOG"]).read_text()
 
 
@@ -917,22 +931,48 @@ def step_text(workflow: Path, name: str) -> str:
     return text[start:end if end != -1 else None]
 
 
+CLAUDE_JOB = {"claude.yml": "agent", "claude-review.yml": "review", "claude-auto.yml": "fix", "claude-auto-review.yml": "fix"}
+CODEX_JOB = {"claude.yml": "agent-codex", "claude-review.yml": "review-codex", "claude-auto.yml": "fix-codex",
+             "claude-auto-review.yml": "fix-codex"}
+
+
+def job_text(path: Path, job: str) -> str:
+    text = path.read_text()
+    start = text.index(f"\n  {job}:\n")
+    nxt = re.compile(r"\n  [a-z_-]+:\n").search(text, start + 1)
+    return text[start:nxt.start() if nxt else len(text)]
+
+
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
-def test_provision_fallback_gets_add_to_path_from_the_gates_engine(name):
-    step = step_text(WORKFLOWS[name], "Provision project environment (fallback)")
+def test_only_the_claude_job_puts_the_venv_on_the_job_path(name):
+    # One job per engine (findings 4628446 and 4629153): the Claude job runs
+    # no codex, so its fallback keeps add-to-path's default ("true"); the
+    # codex job provisions as the codex user, whose `env -i` recipe cannot
+    # reach GITHUB_PATH, so nothing under the workspace goes on the job PATH
+    # there (finding 4628448).
+    claude = job_text(WORKFLOWS[name], CLAUDE_JOB[name])
+    step = claude[claude.index("- name: Provision project environment (fallback)"):]
+    step = step[:step.index("\n      - ", 1)]
     assert "uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main" in step
-    assert "add-to-path: ${{ needs.gate.outputs.engine == 'codex' && 'false' || 'true' }}" in step
+    assert "add-to-path" not in step and "user:" not in step
+    codex = job_text(WORKFLOWS[name], CODEX_JOB[name])
+    assert "add-to-path" not in codex
+    assert "uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main\n        with:\n          user: codex\n" in codex
 
 
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
-def test_codex_tool_discovery_looks_in_the_checkouts_venv_first(name):
+def test_codex_tool_discovery_never_consults_a_path(name):
+    # The codex job looks the tools up only in the directories the
+    # provisioning composite reports (the venv's bin, node_modules/.bin,
+    # ~codex/.local/bin), never through `command -v`: no job PATH entry
+    # under the workspace exists to find them by.
     text = WORKFLOWS[name].read_text()
-    loop = ('for t in pytest ruff mypy pyright python3; do\n'
-            '{i}  path="$GITHUB_WORKSPACE/.venv/bin/$t"\n'
-            '{i}  [ -x "$path" ] || path=$(command -v "$t" 2>/dev/null || true)\n')
-    indent = "          " if name == "claude-review.yml" else "            "
-    assert loop.format(i=indent) in text, name
-    assert text.count("for t in pytest ruff mypy pyright python3; do") == 1
+    assert text.count("for t in pytest ruff mypy pyright python3 node pnpm npm; do") == 1
+    codex = job_text(WORKFLOWS[name], CODEX_JOB[name])
+    loop = codex[codex.index('IFS=: read -r -a dirs <<<"$BIN"'):]
+    loop = loop[:loop.index("\n            done\n") if "\n            done\n" in loop else len(loop)]
+    assert '[ -x "$d/$t" ]' in loop and "command -v" not in loop
+    assert "command -v" not in "\n".join(l for l in text.splitlines() if "for t in" in l or "path=" in l)
 
 
 @pytest.mark.parametrize("name,step", [("claude.yml", "Commit codex work"),

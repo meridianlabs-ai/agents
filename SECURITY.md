@@ -49,6 +49,35 @@ text are checked by the tests under `tests/`.
   token minted from it; its own job token is read-only. The Claude action's
   own token, present while that step runs, is the exception described under
   "By design" below.
+- A job that runs the Claude agent references no `OPENAI_API_KEY`. Each
+  reusable workflow runs each engine in a job of its own (`agent` and
+  `agent-codex`, `review` and `review-codex`, `fix` and `fix-codex`), the
+  trusted gate's `engine` output selecting exactly one at the job level,
+  which GitHub evaluates before dispatching a job. A secret a step
+  references is delivered to the job's runner whether or not that step's
+  `if:` ends up true (the runner builds its `secrets` context from the job
+  message before any step runs), so the codex key is referenced only in the
+  codex job's codex-action step and a Claude-engine run's job message never
+  carries it (Claude Security finding 4629153). Measured, not assumed: the
+  hosted canary (design/credential-separation.md → section 6) shows a
+  referenced-but-skipped secret in the runner's memory and none in a job
+  that references nothing, although the caller passed it and a sibling job
+  referenced it — delivery is scoped per job.
+- In a codex job nothing from the checked-out tree executes as the runner:
+  the caller's `claude-setup` action is not run there, and the shared
+  provisioning recipe (uv and a dev-install of the checkout, the tree's own
+  build backend, or the caller stub's `codex_provision` recipe) runs as the
+  unprivileged `codex` user after that user exists and before the
+  codex-action step, so a head the pipeline itself produced from an
+  outsider's issue text meets the same boundary as codex itself: no sudo,
+  no GitHub token, no OIDC request token, no view of the runner's
+  processes (finding 4628446). Between that provisioning and the
+  codex-action step every process running as codex is killed and the codex
+  home is re-created, and the runner writes nothing into the workspace in
+  that interval, so nothing provisioning left behind reaches the action's
+  runner-side reads. A hosted canary exercises both this boundary and the
+  secret delivery against a hostile checkout and synthetic secrets
+  (design/credential-separation.md → section 6).
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -137,9 +166,9 @@ text are checked by the tests under `tests/`.
   gate read. A Claude step that fails lands nothing and keeps its attempt —
   the action's execution-file output is not launch evidence, so the step's
   outcome decides what lands, and a round is refunded only when the agent
-  step was never entered (both engines' steps `skipped`, a step outcome the
-  runner settled before any agent code ran, delivered by the fix job's own
-  outputs — a cancelled job is refunded on that evidence alone, and a
+  step was never entered (the engine's agent step `skipped` — each engine
+  runs in its own fix job — a step outcome the runner settled before any
+  agent code ran, delivered by that job's own outputs — a cancelled job is refunded on that evidence alone, and a
   pending job cancelled before it started, which delivers none, keeps its
   round), never on how the agent's own step ended (Claude Security 4628734 and
   4628735, 2026-09-22); in both loops a manifest with no bundle posts the
@@ -214,8 +243,13 @@ text are checked by the tests under `tests/`.
   controls, in any job that runs an agent or code from a checkout the org
   does not fully control. Not in `env:`, not as an action input, not through
   a composite. The model credential (Workload Identity Federation, or
-  `OPENAI_API_KEY` for codex) and the Claude action's own token are the
-  known exceptions.
+  `OPENAI_API_KEY` in the codex job alone) and the Claude action's own token
+  are the known exceptions. Never reference `OPENAI_API_KEY` in a job that
+  runs the Claude agent — a referenced secret reaches the job's runner
+  whatever the referencing step's `if:` says — and never run code from the
+  checkout as the runner in a codex job: those jobs provision with
+  `provision-fallback` `user: codex` after `create-codex-user`, and no
+  `./`-local action.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
   The skills under `skills/` that a maintainer's local agent runs with their
