@@ -13,7 +13,8 @@ description: >-
   directly after the last step that needs root (the checkout, the caller's
   `claude-setup`, the fallback provisioning, the reviewer's sandbox
   install) and before the agent step, with the agent step's own `if:`, and
-  removes all three while sudo still works, in this order:
+  removes all three, and makes root's default search path root's alone,
+  while sudo still works, in this order:
 
   1. `kernel.yama.ptrace_scope` to 2 (admin-only attach): opening another
      process's `mem`, `process_vm_readv` and `ptrace` attach then need
@@ -29,7 +30,14 @@ description: >-
      started with, and every later step (the agent's included) is a child
      of `Runner.Worker`, which started with `docker`. The socket's own
      permissions are what the agent meets.
-  3. sudo: `/etc/sudoers` is replaced by a policy that grants root alone
+  3. Root's default search path: `/usr/local/sbin` and `/usr/local/bin`,
+     which the hosted image ships mode 777 and which root's services search
+     ahead of `/usr/bin`, become `root:root`, the directory 0755 and nothing
+     inside writable by group or other (review round 1 of #151, B1;
+     decision: Ransom, 2026-09-23). The runner, and so the agent, can no
+     longer install into them (`npm install -g`, a copied binary) after
+     this step; symlinks inside are left as they are.
+  4. sudo: `/etc/sudoers` is replaced by a policy that grants root alone
      (`root ALL=(ALL:ALL) ALL`, no `@includedir`), checked with `visudo -c`
      before it is moved into place, so every grant the image or a caller's
      `claude-setup` made is gone wherever it was written — `/etc/sudoers`,
@@ -38,7 +46,8 @@ description: >-
 
   Then it checks, fail-closed, from the runner user: `sudo -n true` and
   `sudo -n -l` both fail (no passwordless rule is left, for any command);
-  the Yama scope reads back at least 2; no docker socket is writable; the
+  the Yama scope reads back at least 2; no docker socket is writable;
+  nothing but a symlink in those two directories is writable; the
   `mem` file of the `Runner.Worker` this step runs under does not open; and
   the job's processes carry neither the `disk` nor the `lxd` group, each
   of which is root by other means and cannot be dropped from a running
@@ -54,8 +63,8 @@ description: >-
   first one: provisioning may have prepended a workspace venv to the job
   PATH. What stays open is recorded in design/architecture.md: the
   provisioning before this step still runs the tree's build code with
-  sudo, and the image's world-writable `/usr/local/bin` sits on root's
-  default PATH. Referenced fully-qualified
+  sudo, and the image's other world-writable trees (`/opt`) stay as they
+  are. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/drop-runner-root@main); no post
   step. `tests/drop_runner_root_smoke.sh`, run by
   `.github/workflows/root-boundary-smoke.yml`, exercises it on a hosted
@@ -102,7 +111,20 @@ runs:
           echo "docker socket $s is root-only"
         done <<<"$sockets"
 
-        # 3. sudo, last: a root-only policy, validated before it replaces the
+        # 3. The world-writable directories on root's default search path
+        #    (review round 1, B1): root services resolve bare command names
+        #    there ahead of /usr/bin, so they become root's alone, contents
+        #    included. The runner cannot install into them after this.
+        root_dirs="/usr/local/sbin /usr/local/bin"
+        for d in $root_dirs; do
+          [ -d "$d" ] || continue
+          sudo -n chown -R root:root "$d"
+          sudo -n chmod -R go-w "$d"
+          sudo -n chmod 0755 "$d"
+          echo "$d is root's alone"
+        done
+
+        # 4. sudo, last: a root-only policy, validated before it replaces the
         #    old one (a broken /etc/sudoers would also end sudo, but loudly
         #    and for root too).
         policy=$(mktemp)
@@ -124,6 +146,14 @@ runs:
         done <<<"$sockets"
         for s in /run/docker.sock /var/run/docker.sock; do
           if [ -e "$s" ] && [ -w "$s" ]; then fail "$s is still writable by $me"; fi
+        done
+        for d in $root_dirs; do
+          [ -d "$d" ] || continue
+          # A find failure fails the step (set -e): an unlisted entry is unchecked.
+          entries=$(find "$d" -xdev ! -type l)
+          while IFS= read -r f; do
+            if [ -w "$f" ]; then fail "$f (on root's default PATH) is still writable by $me"; fi
+          done <<<"$entries"
         done
         for g in $(id -nG); do
           case "$g" in disk | lxd) fail "this job's processes hold the $g group, which reaches root without sudo" ;; esac

@@ -1082,11 +1082,16 @@ allows it) can open its `/proc/<pid>/mem`.
   of the `docker` group and makes every docker socket under `/run`
   `root:root` 0600 (the group edit alone does nothing for this job: every
   later step is a child of `Runner.Worker` and keeps the groups it started
-  with), and finally replaces `/etc/sudoers` with a `visudo`-checked policy
+  with), makes `/usr/local/sbin` and `/usr/local/bin` — root's and
+  systemd's default search path ahead of `/usr/bin`, shipped mode 777 on
+  the hosted image — `root:root` with nothing inside writable by group or
+  other (review round 1 of #151; decision: Ransom, 2026-09-23), and finally
+  replaces `/etc/sudoers` with a `visudo`-checked policy
   that grants root alone, which removes every grant wherever the image or a
   caller put it. It then fails the step unless, from the runner, `sudo -n
   true` and `sudo -n -l` both fail, the scope reads back 2 or more, no docker
-  socket is writable, `Runner.Worker`'s `mem` does not open, and the job's
+  socket is writable, nothing but a symlink in those two directories is
+  writable, `Runner.Worker`'s `mem` does not open, and the job's
   processes hold neither `disk` nor `lxd`. A failed drop skips the agent
   (fail closed) and the Surface step says why. Nothing after the agent step
   in these jobs uses sudo or docker; claude-code-action@v1 itself calls sudo
@@ -1109,9 +1114,12 @@ bubblewrap sandbox still starting after the drop.
 
 What callers lose: Claude-engine agents have no sudo and no docker for the
 agent step and everything after it, and cannot attach a debugger (`gdb`,
-`strace`, `py-spy`) to their own processes. A caller whose agent ran
-docker-based tests, or whose setup needed root after provisioning, moves that
-work into `claude-setup`, which runs before the drop.
+`strace`, `py-spy`) to their own processes. Nor can they install into
+`/usr/local/bin` or `/usr/local/sbin` (`npm install -g`, a copied binary):
+installs go to `~/.local/bin`, a venv or `node_modules`. A caller whose agent
+ran docker-based tests, whose agent installed tools globally, or whose setup
+needed root after provisioning, moves that work into `claude-setup`, which
+runs before the drop.
 
 What stays open:
 
@@ -1125,16 +1133,15 @@ What stays open:
   venv is in the workspace), so running the drop before it would close this
   for repositories without `claude-setup`; the drop sits after all
   provisioning because that is where the task placed it.
-- **Root-owned world-writable directories.** The hosted image ships
-  `/usr/local/bin` (and `/opt`) mode 777 (actions/runner-images,
-  `configure-environment.sh`), and `/usr/local/bin` is on root's and
-  systemd's default PATH ahead of `/usr/bin`. The drop does not touch it:
-  the runner's own writes there (npm's global bin) are legitimate. It
-  becomes a route to root only if a root process resolves a bare command
-  name during the job. The smoke run of 2026-09-23 confirmed
-  `/usr/local/bin` and the `/opt` tree root-owned and mode 777 on the stock
-  image; it did not establish whether a root process executes from them
-  while an agent runs.
+- **Other root-owned world-writable directories.** The drop protects the
+  two on root's default search path. The hosted image also ships the `/opt`
+  tree mode 777 (actions/runner-images, `configure-environment.sh`;
+  confirmed by the smoke run of 2026-09-23), and symlinks inside
+  `/usr/local/bin` are left as they are, so one that points into `/opt`
+  still reaches a runner-writable file. That matters only where a root
+  process executes from such a place during the job. No hosted test runs a
+  real root service against the protected directories: by decision
+  (Ransom, 2026-09-23), that coverage stays unverified.
 - **Read-mode inspection.** Yama restricts attach-mode access only: the
   runner can still read `Runner.Worker`'s `/proc/<pid>/environ`, `cmdline`
   and `status` (the service environment, not the job's secrets).

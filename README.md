@@ -85,8 +85,9 @@ project — ideally by delegating to your existing CI setup
 cache is shared. Both agents run it automatically when present (a failed setup
 fails the run, so keep it green). It is also the last step with root: from the
 agent step on, a Claude-engine agent has no sudo and no docker, so system
-packages, docker images or anything else that needs either belong in
-`claude-setup`, and tests that need a docker daemon cannot run in the agent. See
+packages, docker images, global installs into `/usr/local/bin` or anything
+else that needs root belong in `claude-setup`, and tests that need a docker
+daemon cannot run in the agent. See
 [design/architecture.md](design/architecture.md) for the mechanics and the
 inspect_ai-fork caveat.
 

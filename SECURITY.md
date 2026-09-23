@@ -83,7 +83,8 @@ text are checked by the tests under `tests/`.
   agent is the runner, so a `drop-runner-root` step between the last step
   that needs root (checkouts, provisioning, the reviewer's sandbox install)
   and the agent step raises `kernel.yama.ptrace_scope` to 2, makes the
-  docker socket root-only, replaces the sudoers policy with one that grants
+  docker socket root-only, makes root's default search path (`/usr/local/sbin`,
+  `/usr/local/bin`) root's alone, replaces the sudoers policy with one that grants
   root alone, and fails the job — before the agent runs — unless `sudo -n
   true` and `sudo -n -l` then fail from the runner and `Runner.Worker`'s
   process memory does not open. In a codex job the agent is the `codex`

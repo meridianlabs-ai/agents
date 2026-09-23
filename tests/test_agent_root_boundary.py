@@ -228,7 +228,8 @@ def write_exe(path: Path, body: str) -> Path:
 
 
 def run_composite(tmp_path: Path, *, sudo_true_rc="1", sudo_list_rc="1", scope="1", sysctl_sets="2",
-                  docker_group=False, sockets="", groups="runner adm docker"):
+                  docker_group=False, sockets="", groups="runner adm docker", root_dirs=None,
+                  chmod_takes=True):
     """The composite's body with its system paths pointed at a scratch tree
     and every privileged or identity command stubbed: `sudo` records its
     argv and dispatches (sysctl writes the scratch Yama file, find prints
@@ -249,7 +250,10 @@ def run_composite(tmp_path: Path, *, sudo_true_rc="1", sudo_list_rc="1", scope="
               '  find) [ -n "$SOCKETS" ] && printf "%s\\n" "$SOCKETS" ;;\n'
               '  install) shift; while [ "$#" -gt 2 ]; do case "$1" in -o|-g|-m) shift 2 ;; *) break ;; esac; done; cp "$1" "$2" ;;\n'
               '  mv) shift; [ "$1" = -f ] && shift; mv -f "$1" "$2" ;;\n'
-              '  visudo|gpasswd|chown|chmod) ;;\n'
+              # A directory chmod stands for root's chown + chmod: the runner
+              # can no longer write it. On a file (the socket stub) it does nothing.
+              '  chmod) [ "$CHMOD_TAKES" = 1 ] && [ -d "${@: -1}" ] && chmod -R a-w "${@: -1}"; exit 0 ;;\n'
+              '  visudo|gpasswd|chown) ;;\n'
               '  *) echo "unexpected sudo $*" >&2; exit 99 ;;\n'
               'esac\n')
     write_exe(bins / "id", '#!/bin/bash\ncase "$1" in -un) echo runner ;; -u) echo 1001 ;; -nG) echo "$GROUPS_OUT" ;; esac\n')
@@ -258,9 +262,12 @@ def run_composite(tmp_path: Path, *, sudo_true_rc="1", sudo_list_rc="1", scope="
             .replace("/proc/sys/kernel/yama/ptrace_scope", str(yama))
             .replace("/etc/sudoers", str(etc / "sudoers"))
             .replace("Runner.Worker", "Not-A-Runner-Worker")
-            .replace("/run/docker.sock /var/run/docker.sock", str(tmp_path / "no-such.sock")))
+            .replace("/run/docker.sock /var/run/docker.sock", str(tmp_path / "no-such.sock"))
+            .replace('root_dirs="/usr/local/sbin /usr/local/bin"',
+                     f'root_dirs="{root_dirs if root_dirs is not None else tmp_path / "no-such-dir"}"'))
     env = {"SYSTEM_PATH": f"{bins}:/usr/bin:/bin", "LOG": str(log), "YAMA": str(yama), "SUDO_TRUE_RC": sudo_true_rc,
-           "SUDO_LIST_RC": sudo_list_rc, "SYSCTL_SETS": sysctl_sets, "SOCKETS": sockets, "GROUPS_OUT": groups}
+           "SUDO_LIST_RC": sudo_list_rc, "SYSCTL_SETS": sysctl_sets, "SOCKETS": sockets, "GROUPS_OUT": groups,
+           "CHMOD_TAKES": "1" if chmod_takes else "0"}
     r = sh("bash", "-c", body, check=False, env=env)
     return r, log.read_text().splitlines() if log.exists() else [], etc
 
@@ -284,6 +291,44 @@ def test_composite_takes_the_runner_out_of_the_docker_group_and_locks_each_socke
     assert r.returncode == 0, r.stdout + r.stderr
     assert log[1:5] == ["sudo gpasswd -d runner docker", "sudo find /run -xdev -type s -group docker",
                         f"sudo chown root:root {sock}", f"sudo chmod 0600 {sock}"], log
+
+
+def test_composite_makes_roots_search_path_directories_root_only(tmp_path):
+    dirs = [tmp_path / "local-sbin", tmp_path / "local-bin"]
+    for d in dirs:
+        d.mkdir()
+        d.chmod(0o777)
+    r, log, _ = run_composite(tmp_path, root_dirs=" ".join(map(str, dirs)))
+    try:
+        assert r.returncode == 0, r.stdout + r.stderr
+        want = []
+        for d in dirs:
+            want += [f"sudo chown -R root:root {d}", f"sudo chmod -R go-w {d}", f"sudo chmod 0755 {d}"]
+        assert log[1:7] == want, log
+        swap = log.index(next(line for line in log if line.startswith("sudo mv ")))
+        assert swap > 6, "the directories are protected while sudo still works"
+        assert f"{dirs[1]} is root's alone" in r.stdout
+    finally:
+        for d in dirs:
+            d.chmod(0o755)
+
+
+def test_composite_fails_when_a_search_path_directory_stays_writable(tmp_path):
+    d = tmp_path / "local-bin"
+    d.mkdir()
+    (d / "tool").write_text("")
+    r, _, _ = run_composite(tmp_path, root_dirs=str(d), chmod_takes=False)
+    assert r.returncode != 0 and "(on root's default PATH) is still writable by runner" in r.stdout, r.stdout
+
+
+def test_the_search_path_directories_are_roots_default_path():
+    body = composite_body()
+    assert 'root_dirs="/usr/local/sbin /usr/local/bin"\n' in body
+    swap = body.index("sudo -n mv -f /etc/sudoers.drop-runner-root /etc/sudoers")
+    for line in ('sudo -n chown -R root:root "$d"', 'sudo -n chmod -R go-w "$d"', 'sudo -n chmod 0755 "$d"'):
+        assert body.index(line) < swap, line
+    check = 'entries=$(find "$d" -xdev ! -type l)'
+    assert body.index(check) > swap
 
 
 def test_composite_fails_when_a_docker_socket_stays_writable(tmp_path):
