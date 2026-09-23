@@ -1997,6 +1997,10 @@ def run_emit_landing(tmp_path, *, cwd, read_only, start_sha, extra=None,
         # caller that made the `nobin` directory of symlinked tools opts in).
         "PATH": str(tmp_path / "nobin") if read_only and (tmp_path / "nobin").is_dir() else os.environ["PATH"],
     }
+    # The step pins its PATH to the `system-path` input before its first
+    # command (finding 4628448; test_codex_path.py plants binaries against
+    # it): here that is the same PATH the test chose above.
+    env["SYSTEM_PATH"] = env["PATH"]
     r = sh("bash", "-c", emit_landing_script(), cwd=cwd, check=False, env=env)
     return r, landing, out.read_text()
 

@@ -44,9 +44,14 @@ else
     uv pip install -e ".[dev]"
   fi
 fi
-if [ -n "${GITHUB_PATH:-}" ]; then
+# The job PATH only as the runner and only when asked (the composite's
+# `add-to-path`, default true): under `user` the environment is `env -i`'s,
+# so neither GITHUB_PATH nor ADD_TO_PATH is set and nothing is appended.
+if [ -n "${GITHUB_PATH:-}" ] && [ "${ADD_TO_PATH:-true}" = "true" ]; then
   echo "$HOME/.local/bin" >>"$GITHUB_PATH"
   echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
+elif [ -n "${GITHUB_PATH:-}" ]; then
+  echo "provision-fallback: add-to-path is '${ADD_TO_PATH}'; nothing added to the job PATH (tools at $PWD/.venv/bin)."
 fi
 # Warm network-fetched caches the agents' tests need, from the runner
 # (which has network) into a place the agent reads from. Evidence-

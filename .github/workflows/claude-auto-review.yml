@@ -2406,6 +2406,12 @@ jobs:
           GIT_CONFIG_VALUE_1: "false"
         run: |
           set -euo pipefail
+          # System tools only, whatever GITHUB_PATH prepended: `Create codex
+          # user` refused any codex-writable job PATH entry before codex ran,
+          # and the reclaim re-checked; this pin is belt and braces on the
+          # step that commits (design/codex-engine.md → Runner-side search
+          # path).
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
           mkdir -p "$DIR"
           # MERGE_HEAD too: a conflict resolution staged byte-identical to
           # HEAD ("ours" on every hunk) leaves status clean while the merge
@@ -2616,7 +2622,7 @@ jobs:
             err="resetting the codex home after provisioning failed before the agent started — processes were still running as codex after repeated kills (a provisioning survivor?) or the home could not be re-created (see the job logs); nothing was attempted."
           fi
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
-            err="the codex user setup failed before the agent started — no fix was attempted this round (a runner-image change breaking adduser/usermod? — see the job logs)."
+            err="the codex user setup failed before the agent started — no fix was attempted this round (a job PATH entry inside the workspace or writable by the codex user — nothing in this job adds to the job PATH before it, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."

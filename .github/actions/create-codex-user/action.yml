@@ -24,7 +24,30 @@ description: >-
      reclaim. `$RUNNER_TEMP` itself stays runner-only (755 runner:runner),
      so codex can read the snapshots but not replace them. The review
      path has no reclaim step and never reads them; harmless there.
-  2. Create the `codex` system user and cross-enrol the groups, then
+  2. Create the `codex` system user and cross-enrol the groups; then, in a
+     nested `assert-runner-only-path` step (`protect: "true"`), make sure
+     no directory on the job PATH — no hop of any entry as written, nor of
+     a symlink hop's target — is inside the workspace or writable by the
+     new user (Claude Security finding 4628448; design/codex-engine.md →
+     Runner-side search path): the runner prepends `GITHUB_PATH` entries to
+     every later step's PATH — and resolves each step's shell interpreter
+     through them — so a codex-writable directory there would let codex
+     plant the `sudo`, `bash` or `git` the first post-codex step runs as
+     `runner`. Checked after the user exists (the probe is `sudo -u codex
+     test -w`) and BEFORE the grant below, which is what would make a
+     workspace directory writable. A workspace entry is refused, so a job
+     whose provisioning put its venv on `GITHUB_PATH` fails here, before
+     codex runs, with the entry named — which the codex jobs never do: they
+     run no caller `claude-setup` and provision as the codex user AFTER this
+     composite, under `env -i`, where `GITHUB_PATH` is unreachable. A writable hop OUTSIDE the
+     workspace is made runner-only instead (`chown runner`, `chmod go-w`)
+     and refused only if still writable: the hosted Ubuntu image ships
+     `/opt` — `/opt/pipx_bin` and `/opt/hostedtoolcache` are on the job
+     PATH — and `/usr/local/bin` mode 777 (actions/runner-images
+     `configure-system.sh`, `install-nodejs.sh`), which any unprivileged
+     user could plant into; protecting them takes that away from codex
+     while runner keeps its own writes (openai/codex-action's `npm install
+     -g` puts the CLI in `/usr/local/bin`). Then
      `chown -R runner:codex` + `chmod -R g+rwX` + setgid on every directory
      of the workspace — the action's `examples/unprivileged-user.yml`
      recipe; the group grant is what lets codex (primary group codex) write
@@ -118,7 +141,10 @@ description: >-
   Runs no git command against the checkout. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
   step (local composite actions with post steps break teardown on the
-  fork). One input, `mode`; the user name, home and the snapshot paths
+  fork). The create mode is three steps so that the PATH check sits between
+  the user's creation and the grant; the workflows' `steps.codexuser.outcome`
+  is the composite's, failed if any of them fails. One input, `mode`; the
+  user name, home and the snapshot paths
   (`$RUNNER_TEMP/git-config.pre-codex`, `$RUNNER_TEMP/embedded-git.pre-codex`)
   are the convention the codex-action steps and `reclaim-codex-workspace`
   are written against.
@@ -140,7 +166,9 @@ inputs:
       environment (the OIDC request token, the key input) into a file codex
       can read. Nothing else the action reads before launching codex lives
       in that home. The workspace, the venv provisioning created and codex's
-      own `.local` stay as codex left them: they are codex's to run.
+      own `.local` stay as codex left them: they are codex's to run. Like
+      the reclaim, it first re-checks the job PATH (`assert-runner-only-path`,
+      no `protect`) and runs its own commands with the system PATH.
     required: false
     default: create
 
@@ -149,17 +177,33 @@ runs:
   steps:
     - shell: bash
       if: inputs.mode == 'create'
-      env:
-        HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
       run: |
         set -euo pipefail
         # 1. Pre-codex snapshots (see description) — before any grant.
         cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
         sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
-        # 2. User, groups, workspace grant.
+        # 2. User and groups — no grant yet: the PATH check in the next step
+        #    probes as this user and must run before the workspace becomes
+        #    writable to it.
         sudo adduser --system --home /home/codex --shell /bin/bash --group codex
         sudo usermod -a -G codex runner
         sudo usermod -a -G runner codex
+
+    # Refuse before the grant if the job PATH has a directory codex could
+    # write (see description, 2). Its own probes run by system path.
+    - if: inputs.mode == 'create'
+      uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
+      with:
+        user: codex
+        protect: "true"
+
+    - shell: bash
+      if: inputs.mode == 'create'
+      env:
+        HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
+      run: |
+        set -euo pipefail
+        # 2, continued: the workspace grant.
         sudo chown -R runner:codex "$GITHUB_WORKSPACE"
         sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
         sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
@@ -172,12 +216,26 @@ runs:
         #    reset-home mode below).
         bash "$HOME_SCRIPT" codex
 
+    # reset-home runs after code ran as codex (provisioning), exactly like
+    # the reclaim runs after codex, so it takes the reclaim's two PATH
+    # layers (Claude Security finding 4628448): the job PATH is re-checked
+    # without `protect` (a hop that became codex-writable since the grant
+    # is refused, not fixed), and the step below pins its own PATH to the
+    # system directories before its first command.
+    - if: inputs.mode == 'reset-home'
+      uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
+      with:
+        user: codex
+
     - shell: bash
       if: inputs.mode == 'reset-home'
       env:
         HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
+        SYSTEM_PATH: /usr/sbin:/usr/bin:/sbin:/bin
       run: |
         set -euo pipefail
+        # System tools only, whatever GITHUB_PATH prepended (see above).
+        export PATH="$SYSTEM_PATH"
         id codex >/dev/null 2>&1 || { echo "::error::no codex user — reset-home runs after the create mode of this composite"; exit 1; }
         # First: nothing may still be running as codex — a background
         # process a hostile build backend left behind during provisioning

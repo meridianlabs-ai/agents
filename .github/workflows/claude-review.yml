@@ -2747,7 +2747,7 @@ jobs:
             err="resetting the codex home after provisioning failed before the agent started — processes were still running as codex after repeated kills (a provisioning survivor?) or the home could not be re-created (see the job logs); nothing was attempted."
           fi
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
-            err="the codex user setup failed before the reviewer started (a runner-image change breaking adduser/usermod? — see the job logs)."
+            err="the codex user setup failed before the reviewer started (a job PATH entry inside the workspace or writable by the codex user — nothing in this job adds to the job PATH before it, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEXINPUTS_OUTCOME:-}" = "failure" ]; then
             err="preparing the codex review inputs (tool discovery, the review schema file) failed before the reviewer started — see the job logs."

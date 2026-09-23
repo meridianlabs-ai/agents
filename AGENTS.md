@@ -21,8 +21,8 @@ take effect on every repo's next run.
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
-  `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
-  `import-codex-final`,
+  `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
+  `reclaim-codex-workspace`, `import-codex-final`,
   `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
@@ -143,9 +143,30 @@ take effect on every repo's next run.
   and the same two `core.*` keys by env as belt and braces; the guard pins
   the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
   (`ls-files` runs no hooks); and every post-codex `git status` passes
-  `--ignore-submodules=dirty`; keep all of that when touching them. See
-  design/architecture.md → No persisted git credentials and
-  design/codex-engine.md → Hook-safe landing.
+  `--ignore-submodules=dirty`; keep all of that when touching them. **The
+  job PATH is part of the same boundary** (finding 4628448, 2026-09-22):
+  the runner prepends every `GITHUB_PATH` entry to every later step's PATH
+  and resolves each step's shell interpreter through it, so a directory
+  the codex user can write there — a workspace venv, after the grant —
+  would hand codex the `sudo`, `bash` or `git` the first post-codex step
+  runs as `runner`. Never put a path under `$GITHUB_WORKSPACE` on
+  `GITHUB_PATH` in a job that runs codex (the codex jobs provision with
+  `provision-fallback` `user: codex`, whose recipe runs under `env -i` and
+  cannot reach `GITHUB_PATH`; the codex prompts get the tools by absolute
+  path from the composite's `bin` output); `create-codex-user` walks every
+  hop of every PATH entry (symlink targets too) before the grant, refuses a
+  workspace hop, makes a codex-writable hop outside the workspace
+  runner-only (the image ships `/opt` and `/usr/local/bin` mode 777) and
+  refuses to start codex if one stays writable; its `reset-home` mode and
+  the reclaim repeat the check without the repair
+  (`assert-runner-only-path`); and every post-codex composite — and the
+  `reset-home` step, which runs after provisioning as codex — pins `PATH`
+  to the root-owned system directories (`system-path`, no `/usr/local`)
+  before its first command; a new post-codex step should too.
+  `tests/codex_path_smoke.sh` runs all of it on a hosted runner. See
+  design/architecture.md → No persisted git credentials,
+  design/codex-engine.md → Hook-safe landing and → Runner-side search
+  path.
 - **One untrusted job per engine** (Claude Security findings 4628446 and
   4629153, 2026-09-22): each reusable workflow has a Claude job (`agent`,
   `review`, `fix`) and a codex job (`agent-codex`, `review-codex`,

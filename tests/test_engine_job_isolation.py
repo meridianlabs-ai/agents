@@ -467,7 +467,9 @@ def reset_step() -> str:
 
 
 def test_reset_mode_kills_codex_processes_then_recreates_the_home(tmp_path):
-    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"))
+    # SYSTEM_PATH: the step pins PATH to it before its first command; the
+    # test points it at the stubs (and the real bash/sleep).
+    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin")
     (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
     bins = tmp_path / "bin"
     write_exe(bins / "id", "#!/usr/bin/env bash\nexit 0\n")
@@ -477,7 +479,8 @@ def test_reset_mode_kills_codex_processes_then_recreates_the_home(tmp_path):
 
 
 def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):
-    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PKILL_RC="0")   # always "killed something"
+    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PKILL_RC="0",   # always "killed something"
+                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin")
     (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
     write_exe(tmp_path / "bin" / "id", "#!/usr/bin/env bash\nexit 0\n")
     r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
@@ -489,7 +492,12 @@ def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):
 
 def test_create_mode_runs_the_same_home_script_last():
     text = (CODEX_USER / "action.yml").read_text()
-    create = lift_run(text, "      if: inputs.mode == 'create'")
+    # The create mode's last step (the grant, after the PATH check) ends
+    # with the shared home script.
+    runs = text[text.index("\nruns:\n"):]
+    grant_at = runs.index("# 2, continued: the workspace grant.")
+    create = runs[grant_at:runs.index("\n    - ", grant_at)]
+    create = "\n".join(l for l in create.splitlines() if not l.startswith("    #"))  # the next step's comment
     assert create.rstrip().endswith('bash "$HOME_SCRIPT" codex')
     assert "config.toml" not in create and "permissions.workspace_net" not in create
     assert "\n  mode:\n" in text and "    default: create\n" in text
