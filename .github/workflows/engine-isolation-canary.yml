@@ -1,6 +1,6 @@
 # Hosted-runner canary for the engine split (Claude Security findings 4628446
 # and 4629153; design/codex-engine.md → One job per engine). Not a caller
-# stub and not an agent run: no real secret, no model, no codex-action. Two
+# stub and not an agent run: no real secret, no model, no codex-action. Four
 # parts on the stock `ubuntu-latest` image:
 #
 #   probe                  the secret-delivery probe
@@ -17,6 +17,17 @@
 #                          and sibling jobs reference them (the fixed Claude
 #                          job, and per-job scoping), and that a used secret
 #                          is found (the codex job's shape).
+#   pipeline-probe         the same sentinels in the agent workflows' own
+#                          shape (engine-isolation-canary-pipeline.yml), run
+#                          once per engine: the three secrets under their
+#                          real names (sentinel A for both App secrets, B
+#                          for the OpenAI key), a gate and a land job that
+#                          reference the App secrets in job env and as
+#                          action inputs, and the two agent jobs selected by
+#                          the gate's `engine` output. Expected: the Claude
+#                          agent job holds no App secret and no OpenAI key,
+#                          the codex job the OpenAI key alone (finding
+#                          4629153, fix criterion 3).
 #   provisioning-boundary  the codex-side boundary of THIS revision, with the
 #                          real codex user, real sudo and the composites
 #                          lifted from the checkout (not `@main`, so a branch
@@ -66,6 +77,8 @@ on:
       - ".github/actions/provision-fallback/**"
       - ".github/workflows/engine-isolation-canary.yml"
       - ".github/workflows/engine-isolation-canary-reusable.yml"
+      - ".github/workflows/engine-isolation-canary-pipeline.yml"
+      - "tests/fixtures/secret-input/**"
       - "tests/secret_delivery_scan.py"
       - "tests/fixtures/hostile-checkout/**"
       - "tests/fixtures/callers/**"
@@ -79,6 +92,19 @@ jobs:
     secrets:
       CANARY_A: ${{ secrets.CANARY_SENTINEL_A }}
       CANARY_B: ${{ secrets.CANARY_SENTINEL_B }}
+
+  pipeline-probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [claude, codex]
+    uses: ./.github/workflows/engine-isolation-canary-pipeline.yml
+    with:
+      engine: ${{ matrix.engine }}
+    secrets:
+      MARVIN_APP_CLIENT_ID: ${{ secrets.CANARY_SENTINEL_A }}
+      MARVIN_APP_PRIVATE_KEY: ${{ secrets.CANARY_SENTINEL_A }}
+      OPENAI_API_KEY: ${{ secrets.CANARY_SENTINEL_B }}
 
   provisioning-boundary:
     runs-on: ubuntu-latest
