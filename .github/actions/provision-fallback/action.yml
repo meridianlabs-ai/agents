@@ -105,7 +105,7 @@ description: >-
   failure, exactly like claude-setup: a repo whose pyproject exists but
   cannot dev-install is a loud signal, not a silent static-only run — the
   callers' Surface steps report a failed outcome. No plain `-e .` fallback:
-  uv (verified on 0.9.4), like pip, only WARNS on an unknown extra, so the
+  uv (verified on 0.12.18), like pip, only WARNS on an unknown extra, so the
   `[dev]` install already succeeds on repos without one — a fallback could
   only mask real failures as a silent static degrade. Dev tools may instead
   live in PEP 735 `[dependency-groups]` (uv-native layouts: inspect_sandboxes

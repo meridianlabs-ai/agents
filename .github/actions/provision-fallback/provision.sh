@@ -16,7 +16,7 @@
 set -euo pipefail
 recipe="${1:-}"
 for attempt in 1 2 3; do
-  curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh && break
+  curl -LsSf https://astral.sh/uv/0.12.18/install.sh | sh && break
   if [ "$attempt" = 3 ]; then
     echo "uv install failed after 3 attempts" >&2; exit 1
   fi
