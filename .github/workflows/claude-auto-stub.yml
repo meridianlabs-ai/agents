@@ -29,6 +29,8 @@ jobs:
       github.event.issue.pull_request != '' &&
       contains(github.event.comment.body, '<!-- claude-review-summary -->')
     uses: meridianlabs-ai/agents/.github/workflows/claude-auto-review.yml@main
+    # Agent runs restore caches, never save them (agents repo: design/agent-cache-scope.md).
+    cache-mode: read
     permissions:
       contents: write
       pull-requests: write

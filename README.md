@@ -81,8 +81,15 @@ build against a bare runner (no deps installed), so they verify with static
 checks only. To give them a real environment, add a
 `.github/actions/claude-setup` composite action to your repo that installs your
 project — ideally by delegating to your existing CI setup
-(`uses: ./.github/actions/<your-setup>`), so nothing is duplicated and the build
-cache is shared. Both agents run it automatically when present (a failed setup
+(`uses: ./.github/actions/<your-setup>`), so nothing is duplicated. Agent
+runs **restore** your CI's caches but never save them: every agent workflow
+declares `cache-mode: read`, so a cache action in your setup restores as usual
+and its save is skipped (or refused with a warning, on older cache actions; a
+restore-only cache step would only silence that message). Keep a trusted
+workflow, such as CI on push to the default branch, saving the entries you
+want agents to hit. If you set `cache-mode` on the job that calls an agent
+workflow, use `read` or `write`: `none` or `write-only` there makes the run
+fail validation. Both agents run it automatically when present (a failed setup
 fails the run, so keep it green). See
 [design/architecture.md](design/architecture.md) for the mechanics and the
 inspect_ai-fork caveat.

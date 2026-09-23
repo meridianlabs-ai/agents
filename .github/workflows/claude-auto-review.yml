@@ -218,6 +218,14 @@ on:
           only by fix rounds on PRs labeled engine:codex.
         required: false
 
+# Agents never write the Actions cache (Claude Security 4629157;
+# design/agent-cache-scope.md). The token every job of this workflow
+# gets can restore caches but not save them, in any scope, on any
+# trigger: the platform enforces it, so it holds whatever the caller's
+# claude-setup nests and whatever the agent runs. Never raise it; a
+# caller that caps its calling job at `read` or wider keeps working.
+cache-mode: read
+
 # Trusted identities, in ONE place (Claude Security 4121983; the Class B
 # principle: a comment drives the loop only if its author is a trusted
 # identity or holds write access). Every author check in this file reads

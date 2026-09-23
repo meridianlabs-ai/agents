@@ -430,6 +430,16 @@ human step.
   exchange, so `OPENAI_API_KEY` is the one secret an agent job names,
   consumed only on items labelled `engine:codex`, and codex itself runs as
   an unprivileged `codex` user with no GitHub credential at all.
+- **The Actions runtime token, cache-read-only.** The runner gives every
+  node action of the job the runtime token (the same value as the OIDC
+  request token), and code running as `runner` can recover it from the job's
+  later steps or the worker whatever reaches the agent's own environment; on
+  the Claude engine the agent is that user. Every reusable workflow declares
+  top-level `cache-mode: read`, which GitHub enforces on that token, so it
+  restores the caller's caches and saves none, in any scope (Claude Security
+  4629157, 2026-09-23; [agent-cache-scope.md](agent-cache-scope.md)). It
+  can also upload the run's artifacts, which the land job already treats as
+  untrusted and validates (section 3.2).
 
 The agent commits and stops (decision: Ransom, 2026-09-09: every comment the
 loop produces is posted by the land job as the machine account after the
@@ -781,3 +791,9 @@ results against the invariant each one tests.
   before the push with a plain report line, and the agent prompts say not
   to edit them (section 3.4). A run that needs a workflow change still
   spends itself before the refusal is posted.
+- **A caller's own cache writers.** A caller that sets `cache-mode: write`
+  on the job calling an agent workflow cannot widen what the reusable
+  workflow declares (the called workflow's `read` holds), but its own
+  non-agent jobs, and agent jobs it defines in workflows of its own, save
+  under its own triggers and are its own concern
+  ([agent-cache-scope.md](agent-cache-scope.md) → Caller-owned agent jobs).

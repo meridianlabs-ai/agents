@@ -1,7 +1,10 @@
 # Agent jobs get read-only Actions cache access
 
-Status: proposed, 2026-09-23; the three design decisions are settled
-(Ransom, 2026-09-23; see "Decisions"). Issue: none (Claude Security finding
+Status: accepted, 2026-09-23; the three design decisions are settled
+(Ransom, 2026-09-23; see "Decisions"). Implementation plan steps 1 and 2
+(the key, the test, the stubs, the docs and the canary) are implemented in
+the same PR as this document; the canary's first run, the caller PRs
+(step 3) and the finding's close (step 4) follow its merge. Issue: none (Claude Security finding
 4629157, MEDIUM, privilege escalation, on the Security board). Author: agent
 (Claude), reviewed by Codex; see the PR.
 
@@ -530,8 +533,34 @@ design changes none of them.
       This is the finding's criterion 3, restoring an agent-run key from
       a default-branch workflow.
     - It then deletes the `-ctl` entry.
+  - As implemented (2026-09-23), with the client tags chosen:
+    - The `-new` save pins `actions/cache/save` to `actions/cache` main at
+      `3edfce9` (2026-07-15, "bump cache toolkit 6.2.0"). It is the first
+      commit bundling `@actions/cache` 6.2.0, and no release tag carries
+      that version yet; v6.1.0 bundles 6.1.0. Its skip is logged as
+      "Cache save skipped: the effective cache-mode 'read' does not permit
+      writes."
+    - The `-old` save, the control and the verify job's restores pin
+      v6.1.0 (`55cc834`). It bundles `@actions/cache` 6.1.0: the v2 service
+      client, without the mode check, and it logs a read-only token's
+      refusal as a `Failed to save: … cache write denied:` warning. The
+      control saves with the same client, so the mode is the only
+      difference between a save that lands and one that must not.
+    - A job cannot read its own log, so the `verify` job reads the probe's
+      and the control's completed logs through the API and checks the
+      "Set up job" lines (`Cache mode: read` for the probe, `Cache mode:
+      write` for the control), the skip line and the `cache write denied:`
+      refusal. It runs under `cache-mode: read` itself, restores the `-ctl`
+      entry as a positive control for the lookup, and deletes every entry
+      under the run's prefix whatever the outcome.
+    - The control job declares `cache-mode: write` explicitly rather than
+      relying on the dispatch default, so the positive control does not
+      depend on trigger classification; it is the test's one listed
+      exception.
   - The canary runs once by dispatch before the change is called done, and
-    again whenever GitHub changes cache-mode semantics.
+    again whenever GitHub changes cache-mode semantics. GitHub dispatches a
+    workflow only once it exists on the default branch or has run once, so
+    the first run follows the merge.
   - The run link is recorded in `design/architecture.md` beside the cache
     bullet.
 - **Dogfood check after merge:** trigger each workflow once in this
