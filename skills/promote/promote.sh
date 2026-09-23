@@ -443,7 +443,11 @@ else
   #     so the fork PR body and its qualified text render identically there
   #     unless the rewrite touched something that is not a reference to an
   #     existing fork issue; then promote refuses rather than publish the
-  #     altered body.
+  #     altered body. The renderer mints fresh identifiers on every call —
+  #     math's `data-run-id`, diagrams' (mermaid, geojson, topojson, stl)
+  #     `data-identity`, and footnotes' `user-content-fn…-<hex>` suffix — so
+  #     exactly those values are blanked before comparing; all text and every
+  #     other attribute still has to match.
   QUAL=$(FPR_BODY="$FPR_BODY" python3 -c '
 import os, re
 print(re.sub(r"(?<!\S)#(\d+)\b", r"meridianlabs-ai/inspect_ai#\1", os.environ["FPR_BODY"]))')
@@ -464,6 +468,11 @@ print(body)')
     jq -n --arg t "$1" --arg c "$2" '{text: $t, mode: "gfm", context: $c}' \
       | gh api markdown --input - 2>/dev/null
   }
+  stable() {  # blank the renderer's per-call identifiers (see step 3)
+    sed -E -e 's/ data-run-id="[0-9a-f]+"/ data-run-id=""/g' \
+      -e 's/ data-identity="[0-9a-f-]+"/ data-identity=""/g' \
+      -e 's/(="#?user-content-fn(ref)?-[^"]*)-[0-9a-f]{32}"/\1-"/g'
+  }
   render_failed() {
     echo "ABORT: could not render the upstream PR body with GitHub's Markdown API (gh api markdown failed) — its references cannot be checked; re-run. Nothing was written." >&2
     exit 5
@@ -477,8 +486,8 @@ print(body)')
     exit 5
   fi
   if [ "$QUAL" != "$FPR_BODY" ]; then
-    R_ORIG=$(render "$FPR_BODY" "$FORK") || render_failed
-    R_QUAL=$(render "$QUAL" "$FORK") || render_failed
+    R_ORIG=$(render "$FPR_BODY" "$FORK" | stable) || render_failed
+    R_QUAL=$(render "$QUAL" "$FORK" | stable) || render_failed
     if [ "$R_ORIG" != "$R_QUAL" ]; then
       echo "ABORT: qualifying bare #M refs would change text in fork PR #$FPR's body that GitHub does not read as a reference to an existing $FORK issue (code, a link destination, a number with no issue behind it). The rendered lines that change:" >&2
       diff <(echo "$R_ORIG") <(echo "$R_QUAL") | grep '^[<>]' | head -20 >&2 || true

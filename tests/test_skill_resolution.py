@@ -73,18 +73,34 @@ case "$args" in
     # link per reference it recognises in the rest (bare `#M` and `GH-M` in
     # the request's context, qualified `owner/repo#M`, issue/PR URLs) — all
     # promote.sh reads. A qualified ref renders as the bare one in its own
-    # repository's context, as GitHub's does. Every request is logged.
+    # repository's context, as GitHub's does. Like GitHub's, it mints fresh
+    # identifiers per call for math, diagrams and footnotes. Every request
+    # is logged.
     cat >"$STUB/markdown_req.json"
     jq -c . "$STUB/markdown_req.json" >>"$STUB/markdown_in.jsonl"
     if [ -f "$STUB/markdown_fail" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
     python3 - "$STUB/markdown_req.json" <<'PY'
-import json, re, sys
+import json, re, sys, uuid
 req = json.load(open(sys.argv[1]))
 text, ctx = req["text"], req["context"]
-fence, span = re.compile(r"^```[^\n]*\n(.*?)^```", re.S | re.M), re.compile(r"`([^`]*)`")
-for c in fence.findall(text):
-    print(f"<pre><code>{c}</code></pre>")
+fence, span = re.compile(r"^```([^\n]*)\n(.*?)^```", re.S | re.M), re.compile(r"`([^`]*)`")
+for lang, c in fence.findall(text):
+    if lang in ("mermaid", "geojson", "topojson", "stl"):
+        print(f'<section data-identity="{uuid.uuid4()}" data-type="{lang}"><pre>{c}</pre></section>')
+    elif lang == "math":
+        print(f'<math-renderer class="js-display-math" data-run-id="{uuid.uuid4().hex}">$${c}$$</math-renderer>')
+    else:
+        print(f"<pre><code>{c}</code></pre>")
 text = fence.sub("", text)
+for c in re.findall(r"\$\$?`?([^$`]+)`?\$\$?", text):
+    print(f'<math-renderer class="js-inline-math" data-run-id="{uuid.uuid4().hex}">${c}$</math-renderer>')
+text = re.sub(r"\$\$?`?[^$`]+`?\$\$?", "", text)
+fn = uuid.uuid4().hex
+for label in re.findall(r"\[\^([^\]]+)\](?!:)", text):
+    print(f'<a href="#user-content-fn-{label}-{fn}" id="user-content-fnref-{label}-{fn}">{label}</a>')
+for label, c in re.findall(r"^\[\^([^\]]+)\]:(.*)$", text, re.M):
+    print(f'<li id="user-content-fn-{label}-{fn}">{c} <a href="#user-content-fnref-{label}-{fn}">back</a></li>')
+text = re.sub(r"\[\^[^\]]+\]:?", "", text)
 for c in span.findall(text):
     print(f"<code>{c}</code>")
 text = span.sub("", text)
@@ -923,6 +939,39 @@ def test_promote_refuses_when_qualifying_would_change_a_non_reference(tmp_path, 
     assert "ABORT: qualifying bare #M refs would change text in fork PR #400's body" in r.stderr
     assert "meridianlabs-ai/inspect_ai#1" in r.stderr or "meridianlabs-ai/inspect_ai#19" in r.stderr  # the diff names it
     assert not any("/merges" in c or c.startswith(f"api repos/{UPSTREAM}/pulls") for c in s.calls())
+
+
+GENERATED_ID_FORMS = {
+    "footnote": "A claim[^1] and[^my-note].\n\n[^1]: A citation.\n[^my-note]: Another.",
+    "inline-math": "$x^2$",
+    "inline-math-backticks": "$`x^2`$",
+    "display-math": "$$x^2$$",
+    "fenced-math": "```math\nx^2\n```",
+    "mermaid": "```mermaid\ngraph TD\nA --> B\n```",
+    "geojson": '```geojson\n{"type":"Point","coordinates":[0,0]}\n```',
+    "topojson": '```topojson\n{"type":"Topology","objects":{},"arcs":[]}\n```',
+    "stl": "```stl\nsolid t\nendsolid t\n```",
+}
+
+
+@pytest.mark.parametrize("text", GENERATED_ID_FORMS.values(), ids=GENERATED_ID_FORMS.keys())
+def test_promote_ignores_renderer_generated_ids_when_comparing(tmp_path, text):
+    # Review round 2 (PR #127): GitHub mints a fresh data-run-id (math),
+    # data-identity (diagrams) or footnote-id suffix on every render, so two
+    # renders of the same body differ there; only those values are blanked
+    # before the comparison, and a body whose rewrite touched real refs only
+    # is accepted.
+    s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a", body=f"Fixes #{N}\n\nSee #8.\n\n{text}\n")]))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [q["context"] for q in rendered_requests(s)] == [UPSTREAM, FORK, FORK]
+    assert f"Fixes meridianlabs-ai/inspect_ai#{N}\n\nSee meridianlabs-ai/inspect_ai#8." in published_body(r.stdout)
+    # ... while a real change next to them is still refused.
+    s2 = Stub(tmp_path / "b", issue([chip(400, branch="claude/issue-42-a",
+                                          body=f"Fixes #{N}\n\n{text}\n\nRun `echo #1`.\n")]))
+    r2 = s2.run(PROMOTE, str(N), "--dry-run")
+    assert r2.returncode == 5, r2.stdout + r2.stderr
+    assert "ABORT: qualifying bare #M refs would change text" in r2.stderr
 
 
 def test_promote_renders_once_when_nothing_needs_qualifying(tmp_path):

@@ -181,7 +181,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   a trusted author, bare refs are qualified, and a stub `gh api markdown`
   (standing in for GitHub's renderer) finding any other upstream reference,
   or rendering the qualified fork PR body differently from the original in
-  the fork's context (code, link destinations), makes promote refuse before
+  the fork's context (code, link destinations; the stub mints fresh math,
+  diagram and footnote identifiers per render, as GitHub does, and those
+  alone do not count), makes promote refuse before
   any write; a trusted header's `Fixes #<up>` is prepended even when the
   body quotes one. Acceptance paths run through
   `--dry-run` only; the test clone's remote is non-routable.

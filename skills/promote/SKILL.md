@@ -97,7 +97,9 @@ qualified `UKGovernmentBEIS/inspect_ai#7` or an upstream issue URL. The
 (or drop an upstream link) in the fork PR body and re-run. The rewrite must
 also change nothing else: the fork PR body and its qualified text are
 rendered in the fork's context, where a qualified fork ref renders exactly
-as the bare one, and promote **refuses with exit 5** if they differ — the
+as the bare one, and promote **refuses with exit 5** if they differ (after
+blanking the identifiers GitHub mints afresh on every render: math's
+`data-run-id`, diagrams' `data-identity`, footnote-id suffixes) — the
 rewrite hit a `#M` that is code (`echo #1`), a link destination
 (`[r]( #1-x )`, `[r]: #1-x`) or a number with no fork issue behind it. The
 `ABORT:` line prints the rendered lines that change: reword each in the fork
