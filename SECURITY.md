@@ -138,7 +138,11 @@ text are checked by the tests under `tests/`.
   gate's read passed verbatim), so a manifest rewritten in the agent job
   after the composing step cannot have the machine account label the PR
   `auto` or switch its engine (Claude Security findings 4628438 and
-  4628441, 2026-09-22). Where a caller's agent job is untrusted
+  4628441, 2026-09-22). The input defaults to none (`[]`), so a land
+  caller that does not pass it has every labelled `pr` refused rather
+  than applied, and a caller whose standing policy labels its PRs
+  (inspect_flow's scheduled workflows) names those labels in the input
+  (issue #143). Where a caller's agent job is untrusted
   after it has read third-party input (the triage workflow in
   `meridianlabs-ai/actions`), the land job's `allowed-issue-labels`,
   `allowed-issue-assignees`, `max-issues` and `refuse-pr` inputs are

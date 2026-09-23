@@ -1347,7 +1347,11 @@ def test_refuse_bundle_external_mode_keeps_the_branch_prefix(tmp_path):
 # --- CLI ---------------------------------------------------------------------
 
 
-def cli(d: Path, *extra, pr_head_ref=BRANCH, event_pr=EVENT_PR, event_issue=EVENT_ISSUE, start_sha=START):
+def cli(d: Path, *extra, pr_head_ref=BRANCH, event_pr=EVENT_PR, event_issue=EVENT_ISSUE, start_sha=START,
+        allowed_pr_labels='["auto"]'):
+    # `allowed_pr_labels` is the list a labelling caller passes for
+    # base_manifest's `pr.labels` (the flag allows none by default); None
+    # omits the flag. A later `--allowed-pr-labels` in `extra` overrides it.
     argv = [
         "--dir", str(d),
         "--repo", REPO,
@@ -1359,6 +1363,7 @@ def cli(d: Path, *extra, pr_head_ref=BRANCH, event_pr=EVENT_PR, event_issue=EVEN
         "--start-sha", start_sha,
         "--event-pr-number", event_pr,
         "--event-issue-number", event_issue,
+        *([] if allowed_pr_labels is None else ["--allowed-pr-labels", allowed_pr_labels]),
         *extra,
     ]
     return vm.main(argv)
@@ -1401,10 +1406,9 @@ def test_cli_event_numbers_default_to_none_named(tmp_path, capsys):
 
 def test_cli_allowed_pr_labels_is_the_gates_json_array(tmp_path, capsys):
     # The flag takes the gate's `pr_labels` output verbatim — a JSON array —
-    # so nothing re-encodes it on the trusted side; `*` (the default) is
-    # unrestricted and an empty value allows none.
+    # so nothing re-encodes it on the trusted side; `*` is unrestricted and
+    # an empty value allows none.
     (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))     # pr.labels: ["auto"]
-    assert cli(tmp_path) == 0
     assert cli(tmp_path, "--allowed-pr-labels", "*") == 0
     assert cli(tmp_path, "--allowed-pr-labels", '["auto","engine:codex"]') == 0
     assert cli(tmp_path, "--allowed-pr-labels", '["engine:codex"]') == 1
@@ -1412,6 +1416,18 @@ def test_cli_allowed_pr_labels_is_the_gates_json_array(tmp_path, capsys):
     assert cli(tmp_path, "--allowed-pr-labels", "") == 1
     assert "pr: label 'auto' is not in the allowed pull-request labels (none)" in capsys.readouterr().out
     assert cli(tmp_path, "--allowed-pr-labels", "[]") == 1
+
+
+def test_cli_allowed_pr_labels_defaults_to_none(tmp_path, capsys):
+    # Issue #143: a caller that passes no list gets no labels rather than
+    # any — the flag's default allows none, as the land composite's does.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))     # pr.labels: ["auto"]
+    assert cli(tmp_path, allowed_pr_labels=None) == 1
+    assert "pr: label 'auto' is not in the allowed pull-request labels (none)" in capsys.readouterr().out
+    unlabelled = base_manifest(tmp_path)
+    unlabelled["pr"]["labels"] = []
+    (tmp_path / "manifest.json").write_text(json.dumps(unlabelled))
+    assert cli(tmp_path, allowed_pr_labels=None) == 0
 
 
 @pytest.mark.parametrize("value", ["auto", "auto,engine:codex", "{}", "[1]", '["auto", 2]', "[", "null"])

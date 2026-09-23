@@ -239,4 +239,5 @@ def test_land_job_pins_the_pr_labels_to_the_gates_read():
     land = LAND.read_text()
     assert re.search(r"^\s*ALLOWED_PR_LABELS: \$\{\{ inputs\.allowed-pr-labels \}\}$", land, re.M)
     assert '--allowed-pr-labels "$ALLOWED_PR_LABELS"' in land
-    assert re.search(r"^  allowed-pr-labels:\n(?:    .*\n)*?    default: \"\*\"$", land, re.M)
+    # Issue #143: a caller that passes no list gets no labels.
+    assert re.search(r"^  allowed-pr-labels:\n(?:    .*\n)*?    default: \"\[\]\"$", land, re.M)
