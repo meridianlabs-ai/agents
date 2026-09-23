@@ -1,6 +1,7 @@
 """Tests for claude.yml's `Detect engine` step: who applied an issue's `auto`
 label decides whether it is the run's opt-in (Claude Security finding
-4628438). Applying a label needs only triage permission, and a triage
+4628438), and who applied a PR's decides whether a landed commit owes the
+`@review` hand-back (agents#140). Applying a label needs only triage permission, and a triage
 account's `auto` — refused as a kickoff by the trig step, but left on the
 issue — used to turn the next write-access human's plain `@claude` into an
 autonomous run: the PR labelled `auto` by the machine account, whose label
@@ -218,12 +219,58 @@ def test_an_unlabelled_issue_reads_no_timeline(tmp_path):
     assert timeline_reads(state) == [] and lookups(state) == []
 
 
-def test_a_prs_label_is_left_to_the_loop_gates(tmp_path):
-    # On a PR run the label's provenance is verify-auto-labeler's check,
-    # made before any loop round runs (and the machine account's own label
-    # is legitimate there); this step only reads the standing.
-    _, o, state = run_engine(tmp_path, is_pr=True, timeline=[labeled("mallory")], perms={"mallory": "read"})
+@pytest.mark.parametrize("login,perm", [("alice", "write"), ("alice", "admin"), (MARVIN, None), (MARVIN_BOT, None)])
+def test_a_prs_label_that_verify_auto_labeler_passes_is_the_opt_in(tmp_path, login, perm):
+    # verify-auto-labeler's `ok`: a writer, or either of the machine
+    # account's logins by name with no lookup (it writes the PR label for a
+    # trusted decider — the PR it opened for a human's `auto` issue, or the
+    # PR a human commented `@auto` on). The landed commit then owes the
+    # `@review` hand-back.
+    _, o, state = run_engine(tmp_path, is_pr=True, timeline=[labeled(login)],
+                             perms={login: perm} if perm else {})
     assert o["auto"] == "true" and o["head_branch"] == "feature"
+    assert timeline_reads(state) == ["timeline"] and lookups(state) == ([login] if perm else [])
+
+
+def test_a_non_writers_pr_label_owes_no_hand_back(tmp_path):
+    # agents#140: a triage account's `auto` on a PR used to set `auto=true`
+    # here, so a writer's `@claude` run that landed a commit posted the
+    # `@review` hand-back — one reviewer run — before the review-fix gate
+    # refused the label and disarmed it. The run is one-shot now; the disarm
+    # itself stays the loop gates' (this step writes nothing).
+    r, o, state = run_engine(tmp_path, is_pr=True, labels=["auto", "engine:codex"], timeline=[labeled("mallory")],
+                             perms={"mallory": "read"})
+    assert o["auto"] == "false" and o["engine"] == "codex" and o["head_branch"] == "feature"
+    assert lookups(state) == ["mallory"]
+    assert "PR #12's 'auto' label was applied by mallory, who does not have write access (permission: read)" in r.stdout
+    # The most recent labeler decides, as in verify-auto-labeler.
+    _, o, _ = run_engine(tmp_path, is_pr=True, timeline=[labeled("alice"), labeled("mallory")],
+                         perms={"alice": "write", "mallory": "read"})
+    assert o["auto"] == "false"
+
+
+@pytest.mark.parametrize("case", ["no-labeled-event", "timeline-fails", "partial-timeline", "app", "lookup-fails"])
+def test_an_unverifiable_pr_label_owes_no_hand_back(tmp_path, case):
+    # verify-auto-labeler's `unverified` cases, which the loop gates refuse
+    # too: no labeled event, a timeline that cannot be read whole, an App
+    # labeler other than the machine account's, a failed permission lookup.
+    kw = {
+        "no-labeled-event": dict(timeline=[]),
+        "timeline-fails": dict(timeline_fails=True),
+        "partial-timeline": dict(partial_text=pages([labeled("alice")]), perms={"alice": "write"}),
+        "app": dict(timeline=[labeled("github-actions[bot]")]),
+        "lookup-fails": dict(timeline=[labeled("ghost")]),
+    }[case]
+    r, o, state = run_engine(tmp_path, is_pr=True, **kw)
+    assert o["auto"] == "false" and o["head_branch"] == "feature"
+    assert lookups(state) == (["ghost", "ghost"] if case == "lookup-fails" else [])
+    assert "PR #12" in r.stdout and "not an opt-in" in r.stdout
+
+
+def test_an_at_auto_comment_on_a_pr_opts_in_without_reading_the_label(tmp_path):
+    _, o, state = run_engine(tmp_path, is_pr=True, timeline=[labeled("mallory")], perms={"mallory": "read"},
+                             phrase="@auto")
+    assert o["auto"] == "true"
     assert timeline_reads(state) == [] and lookups(state) == []
 
 

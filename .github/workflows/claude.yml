@@ -361,7 +361,8 @@ jobs:
       start_sha: ${{ steps.start.outputs.sha }}
       # `true` when this run is in the @auto loop's hands: the trigger is
       # @auto, or the issue/PR carries the `auto` label (an issue's only
-      # when a write-access human applied it — the Detect engine step). A PR
+      # when a write-access human applied it, a PR's only when
+      # verify-auto-labeler would pass it — the Detect engine step). A PR
       # run that lands a commit then owes the `@review` hand-back; an issue
       # run's PR gets the label.
       auto: ${{ steps.engine.outputs.auto }}
@@ -750,45 +751,49 @@ jobs:
             # write access passed the trig step, so no label is consulted.
             auto=true
           elif grep -qx 'auto' <<<"$labels"; then
-            if [ "$IS_PR" = "true" ]; then
-              # A labelled PR: who applied the label is the loop gates'
-              # check (verify-auto-labeler), made before any round runs.
-              auto=true
-            else
-              # A labelled issue: the label is the opt-in only when a
-              # write-access human applied it (the comment above). Same
-              # timeline read as verify-auto-labeler, same lookup as the trig
-              # step, one retry each, every attempt used only on success. The
-              # timeline is captured whole and parsed only after `gh` exits 0:
-              # a paginated read that fails on a later page leaves the earlier
-              # pages' valid JSON on stdout, and parsing that would name the
-              # last labeler of the pages that arrived — a writer whose label
-              # a triage account has since removed and re-applied on the page
-              # that did not (review round 1 of this fix).
+            # A labelled issue: the label is the opt-in only when a
+            # write-access human applied it (the comment above). A labelled
+            # PR: only when verify-auto-labeler would pass it — a writer, or
+            # the machine account as the writer of a trusted decision (that
+            # action's description) — so a non-writer's label no longer
+            # costs the `@review` hand-back's reviewer run before the loop
+            # gates disarm it (agents#140). The disarm and its notice stay
+            # the loop gates'; this step only withholds the hand-back. Same
+            # timeline read as verify-auto-labeler, same lookup as the trig
+            # step, one retry each, every attempt used only on success. The
+            # timeline is captured whole and parsed only after `gh` exits 0:
+            # a paginated read that fails on a later page leaves the earlier
+            # pages' valid JSON on stdout, and parsing that would name the
+            # last labeler of the pages that arrived — a writer whose label
+            # a triage account has since removed and re-applied on the page
+            # that did not (review round 1 of this fix).
+            timeline=""
+            for i in 1 2; do
+              timeline=$(gh api "repos/$REPO/issues/$NUM/timeline?per_page=100" --paginate 2>/dev/null) && break
               timeline=""
+              [ "$i" -lt 2 ] && sleep 5
+            done
+            item="issue #$NUM"
+            [ "$IS_PR" = "true" ] && item="PR #$NUM"
+            labeler=""
+            [ -z "$timeline" ] || labeler=$(jq -rs '[.[][] | select(.event=="labeled" and .label.name=="auto")] | last | .actor.login // empty' <<<"$timeline" 2>/dev/null || true)
+            if [ -z "$labeler" ]; then
+              echo "::warning::$item carries 'auto', but who applied it could not be read from its timeline; not an opt-in — running one-shot."
+            elif [ "$IS_PR" = "true" ] && trusted_login "$labeler"; then
+              auto=true
+            elif trusted_login "$labeler" || [[ "$labeler" == *"[bot]" ]]; then
+              echo "::warning::$item's 'auto' label was applied by $labeler (a bot or the machine account), not by a write-access human; not an opt-in — running one-shot."
+            else
+              perm=""
               for i in 1 2; do
-                timeline=$(gh api "repos/$REPO/issues/$NUM/timeline?per_page=100" --paginate 2>/dev/null) && break
-                timeline=""
+                perm=$(gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission' 2>/dev/null) && break
+                perm=""
                 [ "$i" -lt 2 ] && sleep 5
               done
-              labeler=""
-              [ -z "$timeline" ] || labeler=$(jq -rs '[.[][] | select(.event=="labeled" and .label.name=="auto")] | last | .actor.login // empty' <<<"$timeline" 2>/dev/null || true)
-              if [ -z "$labeler" ]; then
-                echo "::warning::issue #$NUM carries 'auto', but who applied it could not be read from its timeline; not an opt-in — running one-shot."
-              elif trusted_login "$labeler" || [[ "$labeler" == *"[bot]" ]]; then
-                echo "::warning::issue #$NUM's 'auto' label was applied by $labeler (a bot or the machine account), not by a write-access human; not an opt-in — running one-shot."
-              else
-                perm=""
-                for i in 1 2; do
-                  perm=$(gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission' 2>/dev/null) && break
-                  perm=""
-                  [ "$i" -lt 2 ] && sleep 5
-                done
-                case "$perm" in
-                  admin|maintain|write) auto=true ;;
-                  *) echo "::warning::issue #$NUM's 'auto' label was applied by $labeler, who does not have write access (permission: ${perm:-lookup failed}); not an opt-in — running one-shot." ;;
-                esac
-              fi
+              case "$perm" in
+                admin|maintain|write) auto=true ;;
+                *) echo "::warning::$item's 'auto' label was applied by $labeler, who does not have write access (permission: ${perm:-lookup failed}); not an opt-in — running one-shot." ;;
+              esac
             fi
           fi
           # Labels for a PR the land job opens or adopts on an issue run:

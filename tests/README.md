@@ -385,8 +385,11 @@ Testing a change).
   bot's or the machine account's own label, a timeline that names no
   labeler and a failed permission lookup all leave the run one-shot with
   no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; an
-  `@auto` comment opts in without a label read; a PR's label is left to the
-  loop gates. Also that the land job pins the PR labels to the gate's read.
+  `@auto` comment opts in without a label read. A PR's label makes a landed
+  commit owe the `@review` hand-back only when verify-auto-labeler would pass
+  it — a writer, or either machine-account login with no lookup — so a
+  non-writer's or an unverifiable label costs no reviewer run (agents#140).
+  Also that the land job pins the PR labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,
   from text or from an `auto`/`claude` label (Claude Security finding
