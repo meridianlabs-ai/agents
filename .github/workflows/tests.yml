@@ -1,0 +1,42 @@
+# The repo's unit tests (tests/README.md): the full `python3 -m pytest` suite
+# on every PR and on every push to main. No path filter — the suite lifts
+# `run:` bodies out of the reusable workflows, the composites, the stubs and
+# the examples, so almost any change can break it, and a full run takes a
+# few minutes.
+#
+# No secrets, no agent: a read-only job token, no `secrets.` reference, never
+# `pull_request_target` (a fork PR runs its own tree with the fork's
+# read-only token), and the checkout persists no credential (AGENTS.md → No
+# git credential is ever written to the workspace). It posts nothing and
+# pushes nothing, so it starts no agent workflow itself. Its `name:` is the
+# CI workflow this repo's @auto stub (claude-auto-stub.yml) watches through
+# `workflow_run`: a failed run on a same-repo PR reaches the CI-fix gate,
+# which acts only on a PR carrying the `auto` label.
+#
+# What this does NOT cover: the workflows are exercised here only as text
+# and as lifted step scripts against stubs. A live run is still validated by
+# triggering the agents and by the hosted canaries (codex-path-smoke.yml,
+# engine-isolation-canary.yml) — AGENTS.md → Testing a change.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python3 -m pytest

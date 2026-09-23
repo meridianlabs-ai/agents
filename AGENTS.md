@@ -17,8 +17,11 @@ take effect on every repo's next run.
 - `.github/workflows/claude-review.yml` — reusable reviewer workflow (`@review`).
 - `.github/workflows/*-stub.yml` — this repo's OWN caller stubs (dogfood): the
   agents run here too. `-stub` suffix because the canonical stub filenames are
-  taken by the reusable definitions; keep them in sync with `examples/`. No CI
-  here, so the @auto stub omits the CI-fix half.
+  taken by the reusable definitions; keep them in sync with `examples/`. The
+  @auto stub has both halves: its CI-fix half watches `tests` (below).
+- `.github/workflows/tests.yml` — this repo's CI (workflow `name: tests`): the
+  full `python3 -m pytest` suite on every PR and push to main, with a
+  read-only token and no secrets (see Testing a change).
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
   `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
@@ -197,10 +200,20 @@ take effect on every repo's next run.
 
 ## Testing a change
 
-The only unit tests are in `tests/` — `python3 -m pytest` from the root
-covers the land job's manifest validator and the `land` composite's `lib.sh`
-helpers and git contract; run it when touching either. Everything else (the
-workflows and the other composites) is validated by triggering the agents:
+The unit tests are in `tests/` (tests/README.md lists what each file
+covers): `python3 -m pytest` from the root. Run it before pushing any change
+to a workflow, composite, stub, example or script. CI runs the same command
+on every PR and every push to main (`.github/workflows/tests.yml`, check
+`tests / pytest`; no secrets, read-only token), so drift between the
+reusable workflows and the tests that lift their steps shows up on the PR.
+
+What that check covers is the workflows as text and their lifted `run:`
+steps against stubs: the validator, the composites' scripts, the gates' trust
+decisions, the structural rules (engine-job isolation, token minting, the
+codex PATH boundary). What it does not cover is a live run — GitHub's
+expression evaluation, the real actions, auth, the models. Those are still
+validated by triggering the agents and by the hosted canaries
+(`codex-path-smoke.yml`, `engine-isolation-canary.yml`):
 
 - Comment `@claude …` (or add the `claude` label) on an issue/PR in the
   inspect_ai fork to exercise the dev agent; `@review` on a PR for the reviewer.

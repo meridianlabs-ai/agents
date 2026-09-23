@@ -1,7 +1,10 @@
 # tests/
 
-The repo's only unit tests. There is no other test suite here — the agent
-workflows are validated by triggering them (AGENTS.md → Testing a change).
+The repo's unit tests, run by CI (`.github/workflows/tests.yml`) on every PR
+and every push to main. They check the workflows as text and run their
+lifted `run:` steps against stubs; a live run of the agent workflows is
+still validated by triggering them and by the hosted canaries (AGENTS.md →
+Testing a change).
 
 - `test_validate_manifest.py` — the land job's manifest validator
   (`.github/scripts/validate_manifest.py`): one valid manifest, one failing
@@ -426,6 +429,14 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `---` rule, qualified `#N` refs) survives, `--dry-run` previews the
   de-fanged title and creates nothing, and ordinary text is copied
   unchanged.
+- `test_ci_workflow.py` — the CI workflow itself (`.github/workflows/tests.yml`):
+  the full suite on every PR and push to main with no path filter, a
+  read-only token, no `secrets.` reference, no `pull_request_target`, every
+  checkout with `persist-credentials: false`, actions pinned at their major
+  tag and nothing that could start an agent; and the dogfood @auto stub
+  (`claude-auto-stub.yml`) equal to `examples/claude-auto-stub.yml` from
+  `name:` on, both halves included, except the `workflow_run` `workflows:`
+  line, which names that workflow's `name:`.
 - `test_model_defaults.py` — the four Claude workflows' `model` input
   defaults to the `opus` alias (never a dated id) with `fallback_model`
   `default`, and both still reach Claude Code as `--model` /
@@ -443,10 +454,7 @@ pip install pytest
 python3 -m pytest
 ```
 
-CI: `workflow-tests.yml` in this directory is the job that runs the same
-command on pushes and PRs touching the validator, the composites or the
-tests. It lives here rather than under `.github/workflows/` only because the
-agent that opened the plumbing PR cannot write there (GitHub App permission);
-move it to `.github/workflows/tests.yml` in a follow-up PR (a human-opened
-one, or one with a top-level `@review` — see CLAUDE.md on workflow-editing
-PRs).
+CI: `.github/workflows/tests.yml` (workflow `tests`, job `pytest`) runs the
+same command on Python 3.12 on every PR and every push to main, with no path
+filter, a read-only job token and no secrets. It is the CI workflow this
+repo's @auto stub watches (`test_ci_workflow.py`).
