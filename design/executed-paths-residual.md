@@ -3,7 +3,12 @@
 Status: proposed, 2026-09-23. Issue: none (task from Ransom, 2026-09-23).
 Author: agent (Claude), reviewed by Codex; see the PR. Builds on PR #149
 (`security/agent-land-executed-paths`, open when this was written), which
-this design assumes merges as it stands.
+this design assumes merges as it stands. Ransom decided the four
+questions the reviewed draft left open on 2026-09-23. They are recorded
+where they apply: the model-credential exception (What D leaves), the loss
+of sudo and Docker (Compatibility), `runner`-group parity (The agent user)
+and the revised acceptance of criterion 2 for build files (Land: tier-2
+opt-in).
 
 ## Why
 
@@ -61,7 +66,8 @@ Non-goals:
   Workload Identity exchange itself, so the agent user can read the
   audience-bound OIDC JWT and the Anthropic access token it yields. That is
   the declared exception (SECURITY.md → Adding or changing a workflow) and
-  what the agent holds today. A broker is a follow-up (Not this design).
+  what the agent holds today. Accepted as such for now (decision: Ransom,
+  2026-09-23). A broker is a separate change (Not this design).
 - Callers' own CI on agent PRs. A same-repo PR's CI runs the branch's code
   with CI's secrets, whoever pushed it. That is not specific to agents.
 - The direct callers' own agent jobs (Compatibility lists what each needs).
@@ -375,7 +381,13 @@ replace `claude-setup`) and Security (the model credential stays readable).
 - **B + D** adds human latency for little over D. Not recommended.
 
 **Recommendation: D, plus the tier-2 opt-in.** Rejected variants of D are
-under Alternatives considered.
+under Alternatives considered. Ransom accepted the costs this carries
+(decision: Ransom, 2026-09-23):
+- the model credential stays in the agent's reach;
+- Claude agents lose sudo and Docker;
+- `claude-agent` keeps `runner`-group parity with codex;
+- for build files, criterion 2 is met by the tier-2 opt-in rather than by
+  refusal.
 
 ## Design
 
@@ -437,8 +449,12 @@ The user name `claude-agent` matches the actions repository's precedent and
 avoids `agent` (harden-runner hardcodes `/home/agent`).
 
 The `runner`-group membership is kept for parity with codex, since it is
-how the user traverses `/home/runner` (0750). The boundary check below
-decides whether that holds up (Open questions 3).
+how the user traverses `/home/runner` (0750) (decision: Ransom,
+2026-09-23). The isolation check below is the proof that it holds on the
+hosted image. It fails the job if the agent can read another user's
+process memory, a runner command file or the runner's credentials.
+Moving both engines to ACL traversal is a separate change (Not this
+design).
 
 ### Provisioning
 
@@ -907,6 +923,17 @@ instructions and settings, with the symlink and `@import` reach computed
 from them. It is refused as now. Tier 2 is the build and dependency group
 and is not checked. The inputs are fixed values in trusted workflow YAML.
 
+**This is how criterion 2 is met for tier 2** (decision: Ransom,
+2026-09-23: the revised acceptance is accepted). As written, finding
+4628446's criterion 2 asks that bundles touching build configuration be
+refused, or land and hold automation until a human approves. With D and the
+opt-in, such files land. Every automated job that executes them does so
+only as an unprivileged user holding nothing but the read-only job token.
+That is criterion 1's remedy, and it is accepted as meeting criterion 2
+for tier 2. Tier 1 still meets criterion 2 literally, by refusal. The
+implementation PR (plan step 6) records this in SECURITY.md → Guarantees
+with the finding number, and on the finding's Security board item.
+
 A land job may pass the opt-in only when **every automated consumer of the
 branches it pushes** runs both its provisioning and its agent (the CLI and
 every tool call) as a non-runner user. Provisioning alone is D-lite, which
@@ -948,8 +975,8 @@ review-fix round on a Dependabot batch PR lands on the branch the next
 - **The model credential.** The agent user can read the WIF JWT file while
   the step runs, and the Anthropic access token the CLI caches. A hostile
   agent-user process can spend on Meridian's workspace until the job ends.
-  This is what the agent holds today, and it is the declared exception. A
-  runner-side broker that does the exchange (the actions repository's
+  This is what the agent holds today, and it is the declared exception,
+  accepted for now (decision: Ransom, 2026-09-23). A runner-side broker that does the exchange (the actions repository's
   broker is API-key based) would reduce it to a loopback token. See Not
   this design.
 - **The read-only job token** is in the agent's env, as today.
@@ -1008,7 +1035,8 @@ review-fix round on a Dependabot batch PR lands on the branch the next
   identical. Parametrising keeps one body.
 - **Remove the `runner`-group membership and grant ACL traversal instead**
   (isolated-agent's way). It would be tighter for both engines. Parity says
-  change both at once or neither, so it is left to Open questions.
+  change both at once or neither. Ransom kept parity now (decision:
+  2026-09-23), and both engines' move is a separate change.
 
 ## Compatibility and migration
 
@@ -1048,8 +1076,12 @@ but its tools are missing, as on codex today.
   are the agent user's.
 
 Tests needing root or Docker cannot run in the agent. That is inherent to
-D, since Docker group membership is root-equivalent. Rootless Podman for
-the agent user is the route if a caller needs it (Not this design).
+D, since Docker group membership is root-equivalent, and it is accepted
+(decision: Ransom, 2026-09-23). Docker-dependent verification (for
+example inspect_ai's docker sandbox tests, inspect_sandboxes' local
+provider tests) happens elsewhere: in CI or on a maintainer's machine.
+Rootless Podman for the agent user is the route if a caller later needs it
+in the agent (Not this design).
 
 **Direct `land@main` callers.**
 
@@ -1148,7 +1180,7 @@ Untrusted input reaching the new code, and how each is handled:
     processes, behind both the uid boundary and the namespace.
   - The WIF JWT is readable by the agent through a named ACL and a
     read-only bind mount, both removed or gone at exit. That is the
-    accepted model-credential exception.
+    accepted model-credential exception (decision: Ransom, 2026-09-23).
 - **Survivors.** Agent processes end with the namespace. The namespace
   ends when the CLI exits, when the SDK-owned `sudo` dies (by any signal,
   through a parent-death signal on `unshare` and `--kill-child`), or when
@@ -1412,7 +1444,9 @@ Untrusted input reaching the new code, and how each is handled:
 6. **Tier-2 opt-in** (after #149 and step 5 have merged). Add `land`'s
    `allow-build-config` and the `lib.sh` split, and the reusable workflows'
    `allow_build_config` input (default `false`) that their land jobs pass
-   through. Update tests, examples/ and SECURITY.md. Then open the companion
+   through. Update tests and examples/. Update SECURITY.md, recording
+   there, and on the finding's Security board item, that criterion 2 is met
+   for tier 2 by the opt-in (decision: Ransom, 2026-09-23). Then open the companion
    PRs that opt in: inspect_flow (its stubs and its two direct workflows),
    the inspect_ai fork, inspect_harbor, inspect_swe, inspect_sandboxes,
    inspect_scout, actions, and this repository's dogfood stubs. Each PR
@@ -1425,25 +1459,9 @@ Untrusted input reaching the new code, and how each is handled:
 
 ## Open questions
 
-1. **Accept the model credential in the agent user's reach for now?**
-   Recommendation: yes. It is the declared exception and what the agent
-   holds today. Build the WIF broker as its own change.
-2. **Accept that Claude agents lose sudo and Docker?** Recommendation: yes.
-   Docker access is root, so D cannot keep it. Rootless Podman if a caller
-   asks. Does any caller rely on the Claude agent running Docker tests
-   today? inspect_sandboxes is the likely one.
-3. **Keep the `runner`-group cross-enrolment for `claude-agent`, as codex
-   has?** Recommendation: yes for parity now, with the isolation check as
-   the proof. Moving both engines to ACL traversal is a separate change.
-4. **Revise criterion 2's acceptance for build files?** As written,
-   criterion 2 requires refusal, or a human approval before further
-   automation, for build configuration such as `pyproject.toml`. D plus
-   the tier-2 opt-in does not satisfy that literally. Instead it
-   guarantees those files execute only as an unprivileged user with no
-   token but the read-only job token, which is criterion 1's remedy.
-   Recommendation: accept that as the revised acceptance for tier 2 and
-   record it with the finding. Without it, keep tier 2 refused: D alone
-   still closes the residual.
+None. Ransom answered the four open questions of the reviewed draft on
+2026-09-23 ("yes to 1, 2 and 3; accept the revised criterion for 4"). They
+are recorded as decisions in the sections they affect.
 
 ## Not this design
 
