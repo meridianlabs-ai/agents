@@ -968,7 +968,11 @@ the stubs keep passing it; only the codex job reads it. The example stubs
 carry the `codex_provision` guidance as comments.
 
 **The hosted canary** (`.github/workflows/engine-isolation-canary.yml`,
-`workflow_dispatch` and pushes touching the composites or the harness) is
+`workflow_dispatch`, pushes touching the composites or the harness, and a
+weekly schedule on `main` that would catch a change in the platform's
+secret delivery; a failed scheduled run is emailed to whoever last edited
+the cron line, and GitHub disables the schedule after 60 days without
+repository activity) is
 the evidence for both findings on a real `ubuntu-latest` runner, with no
 real secret and no model. Its `probe` job calls a reusable workflow shaped
 like the agent workflows with two synthetic repository secrets

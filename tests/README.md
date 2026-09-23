@@ -377,8 +377,9 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   jobs are selected by the gate's `engine` output like the real ones and
   the land job needs all three under `always()`; each probe job ends with
   the memory scan its references imply, the canary calls the probe per
-  engine with the two sentinels only, and the stand-in action prints
-  lengths, never values.
+  engine with the two sentinels only, the canary keeps a weekly off-the-hour
+  schedule beside its push and dispatch triggers, and the stand-in action
+  prints lengths, never values.
 - `secret_delivery_scan.py`, `fixtures/secret-input/`,
   `fixtures/hostile-checkout/` and `fixtures/callers/` are not tests but
   the hosted canary's pieces

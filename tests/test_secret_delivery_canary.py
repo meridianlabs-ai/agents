@@ -19,7 +19,9 @@ probe keeps their shape, so these checks hold the two together:
   secrets, B for the OpenAI key), and the land job fails unless the
   selected agent job succeeded;
 - the canary calls the probe once per engine with A for both App secrets
-  and B for the OpenAI key, from the repository's sentinel secrets only.
+  and B for the OpenAI key, from the repository's sentinel secrets only;
+- the canary runs weekly (off the hour) as well as on its push paths and by
+  hand.
 """
 
 import re
@@ -131,3 +133,17 @@ def test_the_stand_in_action_prints_lengths_only():
     runs = text[text.index("\nruns:\n"):]
     echoes = [line.strip() for line in runs.splitlines() if line.strip().startswith("echo")]
     assert echoes and all(re.fullmatch(r'echo "[^$]*(\$\{#[A-Z_]+\}[^$]*)+"', e) for e in echoes), echoes
+
+
+def test_the_canary_runs_weekly_as_well_as_on_push_and_by_hand():
+    # Per-job delivery is measured platform behaviour, not a contract, and no
+    # push here would reveal a change in it (decision: Ransom, 2026-09-23).
+    text = workflow(CANARY)
+    on = text[text.index("\non:\n"):text.index("\npermissions:\n")]
+    assert "\n  workflow_dispatch:\n" in on
+    assert "\n  push:\n    paths:\n" in on
+    cron = re.findall(r'^    - cron: "([^"]+)"', on, re.M)
+    assert len(cron) == 1
+    minute, hour, dom, month, dow = cron[0].split()
+    assert minute.isdigit() and minute != "0", "off the top of the hour"
+    assert hour.isdigit() and (dom, month) == ("*", "*") and dow.isdigit(), "once a week"

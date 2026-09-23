@@ -751,7 +751,8 @@ results against the invariant each one tests.
   landing directory (I6).
 - The engine split's hosted canary, `.github/workflows/engine-isolation-canary.yml`
   (`gh workflow run engine-isolation-canary.yml --repo meridianlabs-ai/agents
-  --ref <branch>`, or a push touching the composites or the harness): the
+  --ref <branch>`, a push touching the composites or the harness, or its
+  weekly schedule on `main`, Mondays 06:17 UTC): the
   `probe` job passes two synthetic repository secrets to a called workflow
   shaped like the agent workflows and scans the runner processes' memory
   as root in three jobs — a secret referenced in a never-run step is
@@ -920,9 +921,15 @@ results against the invariant each one tests.
   the key to every reusable workflow (the declaration is kept for backward
   compatibility: a stub naming an undeclared secret fails to load). What
   remains is that this is the platform's current behaviour, not a contract:
-  the canary runs on every push that touches the composites or the harness
-  and by hand, and a change in delivery scoping would turn its
-  `unreferencing` job red.
+  the canary runs weekly on `main` (decision: Ransom, 2026-09-23 — no push
+  here would reveal a platform change), on every push that touches the
+  composites or the harness, and by hand, and a change in delivery scoping
+  would turn its `unreferencing` and pipeline-probe agent jobs red. GitHub
+  emails a failed scheduled run to the user who last modified the cron
+  line, and disables a scheduled workflow after 60 days without repository
+  activity; a quiet stretch in this repository can therefore stop the
+  weekly run, and re-enabling it (`gh workflow enable
+  engine-isolation-canary.yml`) is manual.
 - **The Claude job still executes the checkout as the runner.** Its
   provisioning (the caller's `claude-setup`, the fallback dev-install) and
   the agent's own test runs execute the tree's code unsandboxed, as the
