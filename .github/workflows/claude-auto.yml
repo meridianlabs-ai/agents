@@ -107,7 +107,7 @@ on:
       model:
         required: false
         type: string
-        default: "fable"
+        default: "opus"
       fallback_model:
         required: false
         type: string

@@ -77,8 +77,8 @@ runs:
         file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
         [ -f "$file" ] || { echo "model-provenance: no execution file; nothing to report."; exit 0; }
         msgs='(if type=="array" then . else .messages end)'
-        # The init line's model is the alias RESOLVED (e.g. fable ->
-        # claude-fable-5-1) but still the requested one, not what ran.
+        # The init line's model is the alias RESOLVED (e.g. opus ->
+        # claude-opus-5-5) but still the requested one, not what ran.
         init=$(jq -r "$msgs"' | map(select(.type=="system")) | .[0].model // empty' "$file" 2>/dev/null || true)
         usage=$(jq -c "$msgs"' | map(select(.type=="result")) | last | .modelUsage // {}' "$file" 2>/dev/null || echo '{}')
         [ "$usage" != "{}" ] || { echo "model-provenance: no modelUsage in the result (agent produced no result); nothing to report."; exit 0; }
