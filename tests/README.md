@@ -189,10 +189,18 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   clone, the hook never run, the submodule never initialised, the ts-mono
   companion never looked up (the stub's `gh pr checkout` emulation shows
   the unfixed behaviour fast-forwarding `meridian` and running the hook);
-  a head that moved since the read, a non-SHA `headRefOid` and a worktree
-  root inside the clone are refused; a rerun reuses a clean worktree and
-  refuses a dirty one or a stranger's directory. Promotions keep
-  `gh pr checkout`.
+  a head that moved since the read and a non-SHA `headRefOid` are refused;
+  a rerun reuses a clean worktree and refuses a dirty one. Destination
+  aliases are refused with the clone and every other worktree unchanged: a
+  relative root, a `..` traversal, a symlinked ancestor or a symlink at the
+  path resolving into the clone, a directory inside another linked worktree
+  (pre-created or not), a stranger's directory and a registered worktree on
+  a branch. Inherited command-running configuration is inert on the first
+  run and on reuse: a relative `core.fsmonitor`, and `filter.*` smudge,
+  clean and process drivers (one `required`) selected by the contributor's
+  `.gitattributes`, all pointing at scripts the tip supplies (a plain
+  worktree add of the same tip runs them), leave no marker and the clone's
+  config untouched. Promotions keep `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from

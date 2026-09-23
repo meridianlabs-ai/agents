@@ -113,6 +113,21 @@ check_pr() {
   fi
 }
 
+# physpath <path>: the physical form of <path> — made absolute from $PWD,
+# every existing component resolved through symlinks (the last one
+# included), the not-yet-existing tail appended verbatim. Containment
+# checks compare physical paths only: a lexical prefix test is defeated by
+# a relative root, a `..` or a symlinked ancestor (review of #130).
+physpath() {
+  local p=$1 tail=""
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ ! -d "$p" ]; do
+    tail="/$(basename "$p")$tail"
+    p=$(dirname "$p")
+  done
+  printf '%s%s\n' "$(cd "$p" && pwd -P)" "$tail"
+}
+
 # One GraphQL round trip: title, issue author + labels (the External-proxy
 # test), body (the `Upstream PR:` fallback) and the linked-PR chips WITH
 # head/base refs, author and head repository, so no separate `gh pr view`
@@ -246,14 +261,40 @@ if [ -n "$EXTERNAL" ]; then
   # https URL — never from `origin` by default, which is the fork in some
   # clone layouts and would answer refs/pull/$M/head with an unrelated PR.
   FETCH_FROM=${PR_REMOTE:-https://github.com/$PR_REPO.git}
-  # Outside the clone, so nothing in the tree is under the session's
-  # project directory. CHECKOUT_WORKTREES overrides the root.
+  # Outside the clone — and outside every other worktree of it (an Orca
+  # workspace is another agent session's project directory) and its git
+  # dir — so nothing in the tree is under a project directory.
+  # CHECKOUT_WORKTREES overrides the root. The destination is compared in
+  # physical form; `.`/`..` components are refused outright (a `..` in a
+  # not-yet-existing tail would only resolve once mkdir -p created it).
   WT_ROOT=${CHECKOUT_WORKTREES:-${XDG_STATE_HOME:-$HOME/.local/state}/checkout}
   WT="$WT_ROOT/${PR_REPO%%/*}--${PR_REPO##*/}/pr-$M"
-  TOP=$(git rev-parse --show-toplevel)
-  case "$WT/" in "$TOP"/*)
-    echo "REFUSED: External worktree $WT would be inside this clone ($TOP) — set CHECKOUT_WORKTREES outside it" >&2; exit 1 ;;
+  case "/$WT/" in */../*|*/./*)
+    echo "REFUSED: External worktree path $WT has a . or .. component — set CHECKOUT_WORKTREES to a plain absolute path" >&2; exit 1 ;;
   esac
+  if [ -L "$WT" ]; then
+    echo "REFUSED: $WT is a symlink — an External worktree is a plain directory; move it aside" >&2; exit 1
+  fi
+  WT=$(physpath "$WT")
+  # Every registered worktree root of this clone (the clone itself
+  # included), physical, one per line with a newline before and after each
+  # so a whole-line match is possible; plus the common git dir.
+  COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+  TOP=$(cd "$(git rev-parse --show-toplevel)" && pwd -P)
+  ROOTS=$'\n'
+  while IFS= read -r line; do
+    case "$line" in "worktree "*) ROOTS="$ROOTS$(cd "${line#worktree }" 2>/dev/null && pwd -P || true)"$'\n' ;; esac
+  done <<<"$(git worktree list --porcelain)"
+  case "$WT/" in "$TOP"/|"$COMMON"/|"$COMMON"/*)
+    echo "REFUSED: External worktree path resolves to this clone or its git dir ($WT)" >&2; exit 1 ;;
+  esac
+  while IFS= read -r root; do
+    # Equal to a registered root is the reuse case, judged below.
+    [ -n "$root" ] && [ "$root" != "$WT" ] || continue
+    case "$WT/" in "$root"/*)
+      echo "REFUSED: External worktree $WT would be inside $root (this clone or another worktree of it) — set CHECKOUT_WORKTREES outside them" >&2; exit 1 ;;
+    esac
+  done <<<"$ROOTS"
 fi
 
 if [ -n "$DRY" ]; then
@@ -280,17 +321,39 @@ if [ -n "$EXTERNAL" ]; then
   # .mcp.json, CLAUDE.md, AGENTS.md, .gitmodules — where this session loads
   # project configuration. Instead: fetch the head WITHOUT checking it out,
   # refuse unless it is the commit the API reported, and check that literal
-  # commit out detached in a worktree outside the clone. Every git call here
-  # runs with hooks pointed at an empty directory (a relative core.hooksPath
-  # such as `.githooks` resolves INSIDE the worktree, i.e. to the
-  # contributor's files) and submodule recursion off, so nothing from the
-  # tree executes and nothing is cloned from its .gitmodules.
+  # commit out detached in a worktree outside the clone.
+  #
+  # Every git call from here on runs with the clone's inherited
+  # command-running configuration neutralised, because a relative command
+  # resolves INSIDE the worktree, i.e. to the contributor's files: hooks
+  # pointed at an empty directory (core.hooksPath=.githooks would run their
+  # post-checkout), core.fsmonitor off (a relative monitor runs on the next
+  # run's status), and every filter driver git would read — system, global,
+  # this clone, this worktree — emptied and made optional (their
+  # .gitattributes selects the driver; the smudge runs at checkout, the
+  # clean at status, the process one at either). Submodule recursion off,
+  # so nothing is cloned from their .gitmodules. Built with GIT_CONFIG_*
+  # (highest precedence, single-valued keys) rather than by editing any
+  # config file.
   NOHOOKS=$(mktemp -d)
   trap 'rm -rf "$NOHOOKS"' EXIT
-  export GIT_CONFIG_COUNT=3 \
-    GIT_CONFIG_KEY_0=fetch.recurseSubmodules GIT_CONFIG_VALUE_0=false \
-    GIT_CONFIG_KEY_1=submodule.recurse GIT_CONFIG_VALUE_1=false \
-    GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2="$NOHOOKS"
+  PINS="fetch.recurseSubmodules=false"$'\n'"submodule.recurse=false"$'\n'"core.hooksPath=$NOHOOKS"$'\n'"core.fsmonitor=false"$'\n'
+  DRIVERS=$'\n'
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    name=${key#filter.}; name=${name%.*}
+    case "$DRIVERS" in *$'\n'"$name"$'\n'*) continue ;; esac
+    DRIVERS="$DRIVERS$name"$'\n'
+    PINS="${PINS}filter.$name.smudge="$'\n'"filter.$name.clean="$'\n'"filter.$name.process="$'\n'"filter.$name.required=false"$'\n'
+  done <<<"$( { git config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null;
+                [ -d "$WT" ] && git -C "$WT" config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null; } || true)"
+  i=0
+  while IFS= read -r pin; do
+    [ -n "$pin" ] || continue
+    export "GIT_CONFIG_KEY_$i=${pin%%=*}" "GIT_CONFIG_VALUE_$i=${pin#*=}"
+    i=$((i + 1))
+  done <<<"$PINS"
+  export GIT_CONFIG_COUNT=$i
   git fetch -q --no-tags --no-recurse-submodules "$FETCH_FROM" "refs/pull/$M/head"
   GOT=$(git rev-parse FETCH_HEAD)
   if [ "$GOT" != "$SHA" ]; then
@@ -298,11 +361,19 @@ if [ -n "$EXTERNAL" ]; then
     exit 5
   fi
   if [ -e "$WT" ]; then
-    # A previous run's worktree: reuse it only if it is ours and clean.
-    COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
-    WT_COMMON=$(cd "$WT" 2>/dev/null && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    if [ -z "$WT_COMMON" ] || [ "$(cd "$WT_COMMON" && pwd -P)" != "$COMMON" ]; then
-      echo "REFUSED: $WT exists and is not a worktree of this clone — move it aside" >&2; exit 1
+    # A previous run's worktree: reuse it only if it is exactly a registered
+    # worktree root of this clone (not a stranger's directory, not a
+    # directory inside another worktree, whose git calls would act on THAT
+    # worktree), detached (a branch worktree such as an Orca workspace is
+    # someone's project directory, never an External checkout) and clean.
+    case "$ROOTS" in *$'\n'"$WT"$'\n'*) ;; *)
+      echo "REFUSED: $WT exists and is not a registered worktree of this clone — move it aside" >&2; exit 1 ;;
+    esac
+    if [ "$(cd "$WT" && git rev-parse --show-toplevel | { IFS= read -r t; cd "$t" && pwd -P; })" != "$WT" ]; then
+      echo "REFUSED: $WT is not the root of its own worktree — move it aside" >&2; exit 1
+    fi
+    if ON_BRANCH=$(git -C "$WT" symbolic-ref -q --short HEAD); then
+      echo "REFUSED: $WT is a worktree on branch $ON_BRANCH, not a detached External checkout — set CHECKOUT_WORKTREES elsewhere" >&2; exit 1
     fi
     if [ -n "$(git -C "$WT" status --porcelain --ignore-submodules=dirty)" ]; then
       echo "DIRTY TREE in External worktree $WT — not switching:" >&2
