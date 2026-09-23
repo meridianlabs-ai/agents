@@ -41,6 +41,7 @@ actions and workflows (text extraction; PyYAML is not a test dependency):
 
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -589,6 +590,6 @@ def test_land_hands_the_start_to_the_validator_before_the_fetch():
     assert "START_SHA: ${{ steps.plan.outputs.start_sha }}" in fetch
     assert "inputs.start-sha" not in fetch
     # The input exists and defaults to empty (fail closed on a bundle).
-    assert "  start-sha:\n" in text
     idx = text.index("  start-sha:\n")
-    assert text[idx:idx + 1500].count('    default: ""') >= 1
+    block = text[idx:re.compile(r"\n  \S").search(text, idx + 1).start()]      # up to the next input
+    assert '    default: ""' in block and "required: false" in block

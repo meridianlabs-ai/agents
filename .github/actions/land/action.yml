@@ -163,8 +163,15 @@ inputs:
       SHA, which serves every reachable commit, so an agent job could
       otherwise name a fork PR's head or an old base commit as its start and
       land history the run never began from. Empty refuses every bundle
-      (fail closed); a caller whose agent never commits (`refuse-bundle`)
-      needs none, and a manifest without commits is never compared.
+      (fail closed): every caller whose agent commits must pass it — the
+      reusable workflows pass their gate's read, and a direct caller of this
+      composite records the start in its own trusted job and pins its agent
+      job's checkout to it (the shape in examples/landing-smoke.yml and the
+      emit-landing README; inspect_flow's and ts-mono's callers were
+      updated with #137, decision: Ransom, 2026-09-23 — no compatibility
+      period for callers that pass none). A caller whose agent never commits
+      (`refuse-bundle`) needs none, and a manifest without commits is never
+      compared.
     required: false
     default: ""
   pr-head-ref:
