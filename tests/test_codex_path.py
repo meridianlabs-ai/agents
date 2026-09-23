@@ -550,8 +550,10 @@ def test_protect_makes_writable_image_hops_runner_only_instead_of_refusing(world
     assert r.returncode == 0, r.stdout + r.stderr
     # A hop that stays the user's after protection (chown refused, say) is
     # still refused: the stub's chown is disabled by pointing its log at a
-    # read-only path.
-    r = check(w, job, user=ME, protect="true", FAKE_CODEX_OWNED=str(opt), CHOWN_LOG="/dev/full")
+    # path that cannot be created (not /dev/full: on Linux it reads as an
+    # endless run of NULs, so the stub's grep of the log never returns).
+    no_log = w["tmp"] / "no-such-dir" / "chown.log"
+    r = check(w, job, user=ME, protect="true", FAKE_CODEX_OWNED=str(opt), CHOWN_LOG=str(no_log))
     assert r.returncode == 1 and "is still owned or writable" in r.stdout and f"(at {opt})" in r.stdout
     # Protection never reaches into the workspace: that entry is refused.
     r = check(w, f"{w['planted']}:{w['tail']}", user=ME, protect="true")
