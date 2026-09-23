@@ -9,6 +9,7 @@ and says so on the issue (issue #141). Lifted from the workflow the way
 test_dev_agent_trig.py lifts the trig step, run against a stub `gh`.
 """
 
+import itertools
 import json
 import re
 import sys
@@ -46,6 +47,11 @@ gh() {
     "api repos/o/r/collaborators/"*"/permission --jq .permission")
       local login=${2#repos/o/r/collaborators/}; login=${login%/permission}
       echo "$login" >>"$STATE/lookups"
+      # The issue changing while the lookup is in flight (review round 1
+      # of #141): the next timeline read sees the new state, or fails.
+      [ ! -f "$STATE/timeline-after-lookup.json" ] || mv "$STATE/timeline-after-lookup.json" "$STATE/timeline.json"
+      [ ! -f "$STATE/timeline-gone-after-lookup" ] || rm -f "$STATE/timeline.json"
+      [ ! -f "$STATE/perm-fails-once" ] || { rm "$STATE/perm-fails-once"; echo '{"message":"Server Error"}'; return 1; }
       local p; p=$(awk -v l="$login" '$1==l {print $2}' "$STATE/perms")
       [ -n "$p" ] || { echo '{"message":"Not Found"}'; return 1; }
       echo "$p" ;;
@@ -62,8 +68,15 @@ gh() {
 """
 
 
+_event_ids = itertools.count(1)
+
+
 def labeled(login, name="auto"):
-    return {"event": "labeled", "label": {"name": name}, "actor": {"login": login}}
+    return {"event": "labeled", "id": next(_event_ids), "label": {"name": name}, "actor": {"login": login}}
+
+
+def unlabeled(login, name="auto"):
+    return {"event": "unlabeled", "id": next(_event_ids), "label": {"name": name}, "actor": {"login": login}}
 
 
 def pages(*events_per_page):
@@ -74,10 +87,17 @@ def pages(*events_per_page):
 
 def run_engine(tmp_path, *, labels=("auto",), timeline=(), perms=None, phrase="@claude", is_pr=False,
                timeline_fails=False, timeline_text=None, partial_text=None, labeled_auto=False,
-               unlabel_fails=False):
+               unlabel_fails=False, timeline_after_lookup=None, timeline_gone_after_lookup=False,
+               perm_fails_once=False):
     state = fresh_state(tmp_path)
     if unlabel_fails:
         (state / "unlabel-fails").write_text("")
+    if timeline_after_lookup is not None:
+        (state / "timeline-after-lookup.json").write_text(pages(timeline_after_lookup))
+    if timeline_gone_after_lookup:
+        (state / "timeline-gone-after-lookup").write_text("")
+    if perm_fails_once:
+        (state / "perm-fails-once").write_text("")
     (state / "labels").write_text("".join(f"{x}\n" for x in labels))
     if partial_text is not None:
         (state / "timeline-partial.json").write_text(partial_text)
@@ -134,8 +154,9 @@ def test_a_triage_accounts_issue_label_is_not_an_opt_in(tmp_path):
     assert o["auto"] == "false" and o["pr_labels"] == ["engine:codex"] and o["engine"] == "codex"
     assert lookups(state) == ["mallory"]
     assert "applied by mallory, who does not have write access (permission: read)" in r.stdout
-    # Issue #141: the refused label comes off, and the issue says why.
-    assert writes(state) == ["unlabel", "comment"]
+    # Issue #141: the refused label comes off, and the issue says why —
+    # after a second timeline read shows it is still the label judged.
+    assert writes(state) == ["unlabel", "comment"] and timeline_reads(state) == ["timeline", "timeline"]
     assert "last applied by `mallory` (an account without write access)" in comment(state)
     assert "The label has been removed" in comment(state)
 
@@ -232,6 +253,50 @@ def test_a_failed_permission_lookup_fails_closed_after_one_retry(tmp_path):
     assert lookups(state) == ["ghost", "ghost"]
     assert "permission: lookup failed" in r.stdout
     assert writes(state) == []  # not a decided refusal: the label stays
+
+
+def test_a_label_reapplied_during_the_lookup_is_kept(tmp_path):
+    # Review round 1 (B1): the timeline named a triage labeler, then a
+    # maintainer removed and re-applied `auto` while the permission lookup
+    # ran. The DELETE cannot be conditional, so the timeline is read again
+    # and the newer application keeps the label: nothing is removed and no
+    # note misattributes it. The run itself stays one-shot (the verdict is
+    # the first read's, as before).
+    first = labeled("mallory")
+    newer = [first, unlabeled("alice"), labeled("alice")]
+    r, o, state = run_engine(tmp_path, timeline=[first], perms={"mallory": "read", "alice": "write"},
+                             timeline_after_lookup=newer)
+    assert o["auto"] == "false" and lookups(state) == ["mallory"]
+    assert timeline_reads(state) == ["timeline", "timeline"] and writes(state) == []
+    assert "changed after it was judged" in r.stdout
+
+
+def test_a_label_reapplied_during_the_lookup_retry_is_kept(tmp_path):
+    # The same, with the change landing while the first permission answer
+    # failed and the step slept before its retry — the widest window.
+    first = labeled("mallory")
+    r, o, state = run_engine(tmp_path, timeline=[first], perms={"mallory": "triage", "alice": "admin"},
+                             perm_fails_once=True, timeline_after_lookup=[first, unlabeled("alice"), labeled("alice")])
+    assert o["auto"] == "false" and lookups(state) == ["mallory", "mallory"]
+    assert writes(state) == []
+    assert "changed after it was judged" in r.stdout
+
+
+def test_a_label_removed_during_the_lookup_gets_no_note(tmp_path):
+    # Newest `auto` event an unlabel: the label is already gone, and a note
+    # claiming a failed removal left it on the issue would be wrong.
+    first = labeled("mallory")
+    _, o, state = run_engine(tmp_path, timeline=[first], perms={"mallory": "read"},
+                             timeline_after_lookup=[first, unlabeled("alice")])
+    assert o["auto"] == "false" and writes(state) == []
+
+
+def test_a_failed_second_timeline_read_writes_nothing(tmp_path):
+    # Provenance that cannot be re-established is not acted on.
+    r, o, state = run_engine(tmp_path, timeline=[labeled("mallory")], perms={"mallory": "read"},
+                             timeline_gone_after_lookup=True)
+    assert o["auto"] == "false" and writes(state) == []
+    assert "could not be read again" in r.stdout
 
 
 def test_a_failed_label_removal_is_said_and_does_not_fail_the_run(tmp_path):

@@ -386,9 +386,12 @@ Testing a change).
   labeler and a failed permission lookup all leave the run one-shot with
   no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; a
   decided refusal (a known labeler that is not a write-access human) also
-  removes the label and posts a note saying so, a failed read or a run
-  started by applying `auto` writes nothing, and a failed removal is said
-  (issue #141); an `@auto` comment opts in without a label read; a PR's
+  removes the label and posts a note saying so, but only when a second
+  timeline read still shows the judged `labeled` event as the newest
+  `auto` event (a label re-applied or removed during the permission
+  lookup or its retry is left alone); a failed read or a run started by
+  applying `auto` writes nothing, and a failed removal is said (issue
+  #141); an `@auto` comment opts in without a label read; a PR's
   label is left to the loop gates. Also that the land job pins the PR
   labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the

@@ -803,21 +803,36 @@ jobs:
               # warning-only, since the label may be a maintainer's. Skipped
               # when this run's own event applied `auto`: that labeler passed
               # the trig step, and a timeline that has not caught up would
-              # name an earlier one. The job token, like the fork-head
+              # name an earlier one. The DELETE cannot be made conditional,
+              # and the permission lookup (with its retry) leaves time for a
+              # maintainer to remove and re-apply the label, so the timeline
+              # is read again first: the newest `auto` event must still be
+              # the `labeled` event judged above, or nothing is written — a
+              # newer application or removal, or a re-read that fails (review
+              # round 1 of this fix). The job token, like the fork-head
               # refusal: github-actions writes start no workflows.
               # Best-effort — never fails the run.
               if [ -n "$refused" ] && [ "$LABELED_AUTO" != "true" ]; then
-                if gh api -X DELETE "repos/$REPO/issues/$NUM/labels/auto" --silent >/dev/null 2>&1; then
-                  echo "removed the refused 'auto' label from issue #$NUM"
-                  after='The label has been removed; a maintainer who wants an autonomous run can apply it again.'
-                else
-                  echo "::warning::could not remove the refused 'auto' label from issue #$NUM"
-                  after='Removing the label failed, so it is still on the issue; a maintainer who wants an autonomous run can remove it and apply it again.'
+                judged=$(jq -rs '[.[][] | select(.event=="labeled" and .label.name=="auto")] | last | "\(.event) \(.id) \(.actor.login)"' <<<"$timeline" 2>/dev/null || true)
+                current=""
+                if fresh=$(gh api "repos/$REPO/issues/$NUM/timeline?per_page=100" --paginate 2>/dev/null); then
+                  current=$(jq -rs '[.[][] | select((.event=="labeled" or .event=="unlabeled") and .label.name=="auto")] | last | "\(.event) \(.id) \(.actor.login)"' <<<"$fresh" 2>/dev/null || true)
                 fi
-                body=$(printf 'This run is one-shot, not autonomous: the `auto` label on this issue was last applied by `%s` (%s), and only a write-access human'"'"'s `auto` label opts an issue into the autonomous loop. %s' "$labeler" "$refused" "$after")
-                gh issue comment "$NUM" --repo "$REPO" --body "$body" >/dev/null 2>&1 \
-                  && echo "posted the refused-label note on issue #$NUM" \
-                  || echo "::warning::could not post the refused-label note on issue #$NUM"
+                if [ -z "$judged" ] || [ "$current" != "$judged" ]; then
+                  echo "::warning::issue #$NUM's 'auto' label changed after it was judged, or the timeline could not be read again; leaving it and posting nothing."
+                else
+                  if gh api -X DELETE "repos/$REPO/issues/$NUM/labels/auto" --silent >/dev/null 2>&1; then
+                    echo "removed the refused 'auto' label from issue #$NUM"
+                    after='The label has been removed; a maintainer who wants an autonomous run can apply it again.'
+                  else
+                    echo "::warning::could not remove the refused 'auto' label from issue #$NUM"
+                    after='Removing the label failed, so it is still on the issue; a maintainer who wants an autonomous run can remove it and apply it again.'
+                  fi
+                  body=$(printf 'This run is one-shot, not autonomous: the `auto` label on this issue was last applied by `%s` (%s), and only a write-access human'"'"'s `auto` label opts an issue into the autonomous loop. %s' "$labeler" "$refused" "$after")
+                  gh issue comment "$NUM" --repo "$REPO" --body "$body" >/dev/null 2>&1 \
+                    && echo "posted the refused-label note on issue #$NUM" \
+                    || echo "::warning::could not post the refused-label note on issue #$NUM"
+                fi
               fi
             fi
           fi
