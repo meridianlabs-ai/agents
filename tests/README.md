@@ -365,8 +365,12 @@ Testing a change).
   file runner-only instead of refusing and never touching the workspace,
   and the check's own probes resolving through the pinned system PATH —
   `sudo` is a stub answering the ownership and writability probes from a
-  list and mode bits); the reclaim, `codex-usage`, the
-  unresolved-merge guard and `emit-landing`'s `write` step run against a
+  list and mode bits; the system directories the check is handed are a
+  small fixture image under the test's directory — `bin -> usr/bin`,
+  symlinked tools into the real binaries' directories, an
+  /etc/alternatives chain — never the host's real /bin or /usr/bin, and a
+  check that lists a directory outside the test's own fails the test); the
+  reclaim, `codex-usage`, the unresolved-merge guard and `emit-landing`'s `write` step run against a
   PLANTED `.venv/bin` of `sudo`, `git`, `find`, `jq` and friends first on
   the job PATH and touch none of it; `provision-fallback` writes nothing to
   GITHUB_PATH under `add-to-path: false`; and the wiring — only the Claude
