@@ -58,7 +58,34 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `review_comments` — the lenient verdict read, the malformed-inline
   fallbacks, external mode's single comment, the codex branch untouched —
   with the pr-mode and external results run on through `emit-landing` and
-  the validator under the land job's `refuse-bundle`.
+  the validator under the land job's `refuse-bundle`. Also the `Compose
+  settings` step: the review-dir allow and posting denies, and on the
+  sandboxed paths the overlay — the checkout and the review dir on
+  `denyWrite`, the scratch copy the one `allowWrite`, `claudeMdExcludes`
+  and the agents-md `instructionFiles` option composed with the caller's
+  entries, a caller's `allowWrite` and `tlsTerminate` dropped.
+- `test_review_strip.py` — `claude-review.yml`'s untrusted-checkout
+  preparation and post-agent check (Claude Security 4628445), lifted the
+  same way and run against local repos: the strip renames `CLAUDE.md` /
+  `CLAUDE.local.md` / `AGENTS.md` to `*.untrusted` and deletes `.claude` /
+  `.mcp.json` at every depth and writes a raw snapshot tree of the stripped
+  checkout; the scratch step copies the stripped tree with its
+  credential-free `.git`; the post-agent check compares the whole checkout
+  with that snapshot tree against tree and passes on a clean tree and on
+  exactly what claude-code-action does on PR events (the base-branch restore
+  of its sensitive roots when object-identical to `origin/<base>` — PR-deleted
+  roots, a restored `.claude/` subtree, symlinked roots and PR content behind
+  them included — and its `.claude-pr/` copy), and fails on a nested or root
+  configuration entry, a changed or added file anywhere (behind a link at
+  any depth, through an intermediate link followed by `..`, behind a
+  glob-character target), an attribute-normalised or mode change, a
+  retargeted or newline-retargeted link, a configuration root reaching
+  outside the checkout or into `.git`, a root `AGENTS.md`, and a missing
+  base ref or snapshot (fail-closed, a hostile `BASE_REF` included) — with
+  the checkout's hooks, fsmonitor and external diff never run. Also the
+  wiring: `--setting-sources user` on the agent step after the caller's args, the three steps gated on the sandboxed
+  paths, the landing prep gated on the check, the 2.1.246 version floor, the
+  Surface step's outcomes and note, and the prompt's scratch-copy guidance.
 - `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
   step, lifted the same way: the PR open for an issue run (title, body,
   labels, base, the hand-back an `auto`-labelled PR owes and the
