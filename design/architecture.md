@@ -787,7 +787,8 @@ the agent push mid-run:
   `pr.base` from `base_branch`, `pr.labels` from the gate's label read
   (`auto` on an `@auto` run or an `auto`-labelled issue — the issue's label
   counting only when a write-access human applied it, finding 4628438 —
-  plus the issue's `engine:*` labels — read in the trusted job, not after
+  plus the issue's `engine:*` labels, each under the same labeler check
+  (#139) — read in the trusted job, not after
   the agent ran; the land job passes that same read to the validator as
   `allowed-pr-labels`, so the manifest may not name a label the gate did
   not, finding 4628441) and `pr.issue` for the link comment. `land` adopts an open PR for the

@@ -386,19 +386,23 @@ Testing a change).
   with write access (Claude Security 4628438) — a triage account's, a
   bot's or the machine account's own label, a timeline that names no
   labeler and a failed permission lookup all leave the run one-shot with
-  no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; a
+  no `auto` in `pr_labels`; a
   decided refusal (a known labeler that is not a write-access human) also
   removes the label and posts a note saying so, but only when a second
   timeline read still shows the judged `labeled` event as the newest
   `auto` event (a label re-applied or removed during the permission
   lookup or its retry is left alone); a failed read or a run started by
   applying `auto` writes nothing, and a failed removal is said (issue
-  #141); an `@auto` comment opts in without a label read. A PR's label
-  makes a landed commit owe the `@review` hand-back only when
-  verify-auto-labeler would pass it — a writer, or either machine-account
-  login with no lookup — so a non-writer's or an unverifiable label costs
-  no reviewer run, and nothing is written to the PR (agents#140). Also
-  that the land job pins the PR labels to the gate's read.
+  #141); an `@auto` comment opts in without a label read. Each of an
+  issue's `engine:*` labels gets the same check (#139), one label at a time
+  and sharing the `auto` check's timeline read: one that fails stays out of
+  `pr_labels`, and a failed `engine:codex` leaves the Claude engine; a PR's
+  engine label is not checked there. A PR's `auto` label makes a landed
+  commit owe the `@review` hand-back only when verify-auto-labeler would
+  pass it — a writer, or either machine-account login with no lookup — so a
+  non-writer's or an unverifiable label costs no reviewer run, and nothing
+  is written to the PR (agents#140). Also that the land job pins the PR
+  labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,
   from text or from an `auto`/`claude` label (Claude Security finding
@@ -417,14 +421,16 @@ Testing a change).
   the gate's `engine` output at the job level and gate no step on it, the
   land job waits for both; the codex job `uses:` no action from the
   checkout, provisions with `provision-fallback` `user: codex` (and the
-  caller's `codex_provision` as `recipe`) after `Create codex user`, runs
-  `Reset codex home` (`create-codex-user` `mode: reset-home`) before the
+  caller's `provision`, else `codex_provision`, as `recipe`) after
+  `Create codex user`, runs `Reset codex home` (`create-codex-user`
+  `mode: reset-home`) before the
   codex-action step, writes nothing into the workspace after the codex user
   exists (prompt files in RUNNER_TEMP, the exclude lines appended by the
   prep step), and its prompts take the tool paths from the composite's
   `bin` directories; the Claude job keeps the runner-side `claude-setup`
-  and fallback; `codex_provision` is declared with a type and reaches only
-  the codex job. Also the composites, lifted and run against stubs:
+  and fallback; `provision` and `codex_provision` are declared with a type
+  and reach only the codex job. Also the composites, lifted and run
+  against stubs:
   `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
   codex -H` when `user` is set, the recipe directly otherwise, a caller
   recipe handed over as a `$RUNNER_TEMP` file and refused when it is not

@@ -21,7 +21,11 @@ battle and scale badly with token count. So:
   `codex` would read as "run codex now" rather than "whichever verb
   fires, use codex". Read via the API at gate time, not from the event
   payload (stale on comment triggers). Relabeling mid-loop deliberately
-  switches subsequent rounds.
+  switches subsequent rounds. On an issue run the label counts, and is
+  copied onto the PR the run opens, only when a write-access human
+  applied it most recently — the same fail-closed timeline check as the
+  issue's `auto` label; otherwise the run uses Claude and the PR gets no
+  engine label (#139).
 - **Same reusable workflows**, engine picked by step conditionals. The
   scaffolding around the agent step — trust gates, TOCTOU head-pinning,
   board staging, round counters, hand-back backstops, the landed-work

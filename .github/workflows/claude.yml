@@ -103,32 +103,45 @@ on:
         required: false
         type: string
         default: "high"
+      provision:
+        description: >-
+          The caller's provisioning recipe (bash), run as the unprivileged
+          agent user in the checkout after that user exists and before the
+          agent starts. Today only CODEX runs use it (as the codex user):
+          Claude runs keep the repository's `.github/actions/claude-setup`
+          action, with the generic recipe as the runner-side fallback, until
+          they move to an agent user of their own and take this recipe too
+          (design/executed-paths-residual.md). It is the codex-run
+          counterpart of claude-setup, which the codex job never runs (a
+          composite action can only run as the runner, and nothing from the
+          checkout may run as the runner in that job: Claude Security
+          finding 4628446). Empty (the default) falls back to
+          `codex_provision`; with both empty the generic recipe runs — `uv
+          venv` and `uv pip install -e .[dev]` (`--group dev` when the
+          project declares one) — where the checkout has a pyproject.toml.
+          Set it to keep what the repository's claude-setup does: a Python
+          pin (`uv venv --python 3.11`), a lockfile sync (`uv sync --dev`),
+          Node tooling (`corepack enable --install-directory ~/.local/bin &&
+          pnpm install --frozen-lockfile`). The recipe runs with uv
+          bootstrapped on PATH and network on; it has no sudo, HOME is the
+          agent user's (/home/codex), PATH is sudo's default plus
+          ~/.local/bin, and it must create the project's `.venv` for the
+          prompts' tool discovery (which also looks in `node_modules/.bin`
+          and ~/.local/bin). It runs under `bash --noprofile --norc -eo
+          pipefail`, like a `shell: bash` step: a failing command fails
+          provisioning (handle an expected failure with `|| true`). A recipe
+          runs whether or not the checkout has a pyproject.toml — only the
+          generic recipe needs one. It comes from the caller's workflow
+          file, so it is trusted like every other input here; keep it free
+          of anything derived from the run's event.
+        required: false
+        type: string
+        default: ""
       codex_provision:
         description: >-
-          The caller's provisioning recipe for CODEX runs (bash), run as the
-          unprivileged codex user in the checkout after the codex user
-          exists and before codex starts — the codex-run counterpart of the
-          repository's `.github/actions/claude-setup` action, which the codex
-          job never runs (a composite action can only run as the runner, and
-          nothing from the checkout may run as the runner in that job:
-          Claude Security finding 4628446). Empty (the default) runs the
-          generic recipe — `uv venv` and `uv pip install -e .[dev]`
-          (`--group dev` when the project declares one) — where the checkout
-          has a pyproject.toml. Set it to keep what the repository's
-          claude-setup does: a Python pin (`uv venv --python 3.11`), a
-          lockfile sync (`uv sync --dev`), Node tooling (`corepack enable
-          --install-directory ~/.local/bin && pnpm install
-          --frozen-lockfile`). The recipe runs with uv bootstrapped on PATH
-          and network on; it has no sudo, HOME is /home/codex, PATH is
-          sudo's default plus ~/.local/bin, and it must create the project's
-          `.venv` for the prompts' tool discovery (which also looks in
-          `node_modules/.bin` and ~/.local/bin). It runs under `bash
-          --noprofile --norc -eo pipefail`, like a `shell: bash` step: a
-          failing command fails provisioning (handle an expected failure
-          with `|| true`). A recipe runs whether or not the checkout has a
-          pyproject.toml — only the generic recipe needs one. It comes from
-          the caller's workflow file, so it is trusted like every other input
-          here; keep it free of anything derived from the run's event.
+          The earlier name of `provision`, kept so the stubs that set it keep
+          working: used, with the same semantics, when `provision` is empty,
+          and ignored when `provision` is set.
         required: false
         type: string
         default: ""
@@ -843,10 +856,54 @@ jobs:
               fi
             fi
           fi
+          # An issue's engine:* labels count only when a write-access human
+          # applied them (issue #139): applying a label needs only triage
+          # permission, and each one picks this run's engine and is copied
+          # onto the PR the land job opens, whose later runs all read it.
+          # Same rule as the issue's `auto` above — the label's most recent
+          # labeled event, no bot or machine account, write access, one
+          # retry each, fail-closed — reusing the timeline the `auto` check
+          # read when it read one. A label that fails is left off the PR,
+          # and engine:codex failing leaves the default engine. A PR's own
+          # labels are not checked here.
+          if [ "$IS_PR" != "true" ] && grep -q '^engine:' <<<"$labels"; then
+            if [ -z "${timeline:-}" ]; then
+              for i in 1 2; do
+                timeline=$(gh api "repos/$REPO/issues/$NUM/timeline?per_page=100" --paginate 2>/dev/null) && break
+                timeline=""
+                [ "$i" -lt 2 ] && sleep 5
+              done
+            fi
+            kept=$(grep -v '^engine:' <<<"$labels" || true)
+            while IFS= read -r name; do
+              labeler=""
+              [ -z "$timeline" ] || labeler=$(jq -rs --arg n "$name" '[.[][] | select(.event=="labeled" and .label.name==$n)] | last | .actor.login // empty' <<<"$timeline" 2>/dev/null || true)
+              if [ -z "$labeler" ]; then
+                echo "::warning::issue #$NUM carries '$name', but who applied it could not be read from its timeline; not counted — the label stays off the PR."
+                continue
+              elif trusted_login "$labeler" || [[ "$labeler" == *"[bot]" ]]; then
+                echo "::warning::issue #$NUM's '$name' label was applied by $labeler (a bot or the machine account), not by a write-access human; not counted — the label stays off the PR."
+                continue
+              fi
+              perm=""
+              for i in 1 2; do
+                perm=$(gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission' 2>/dev/null) && break
+                perm=""
+                [ "$i" -lt 2 ] && sleep 5
+              done
+              case "$perm" in
+                admin|maintain|write) kept+=$'\n'"$name" ;;
+                *) echo "::warning::issue #$NUM's '$name' label was applied by $labeler, who does not have write access (permission: ${perm:-lookup failed}); not counted — the label stays off the PR." ;;
+              esac
+            done < <(grep '^engine:' <<<"$labels")
+            labels=$kept
+            engine=claude
+            grep -qx 'engine:codex' <<<"$labels" && engine=codex
+          fi
           # Labels for a PR the land job opens or adopts on an issue run:
           # `auto` whenever this is an @auto run, plus the whole engine:*
-          # namespace (not just engine:codex, so future engines need no
-          # change here) — every PR-scoped run reads the PR's own labels, so
+          # namespace the check above kept (not just engine:codex, so future
+          # engines need no change here) — every PR-scoped run reads the PR's own labels, so
           # without the copy an issue-selected engine would silently revert
           # to Claude the moment the PR opens.
           pr_labels=$(jq -nc --arg auto "$auto" --arg labels "$labels" \
@@ -2358,15 +2415,15 @@ jobs:
       - name: Provision project environment (as the codex user)
         id: setup
         timeout-minutes: 10
-        if: hashFiles('pyproject.toml') != '' || inputs.codex_provision != ''
+        if: hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != ''
         continue-on-error: ${{ steps.sync.outputs.conflicts != '' }}
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
         with:
           user: codex
-          # The caller's own recipe for codex runs, if its stub set one (the
-          # trusted counterpart of its claude-setup); empty runs the generic
-          # dev-install.
-          recipe: ${{ inputs.codex_provision }}
+          # The caller's own recipe, if its stub set one (the trusted
+          # counterpart of its claude-setup): `provision`, else the earlier
+          # `codex_provision`; both empty runs the generic dev-install.
+          recipe: ${{ inputs.provision || inputs.codex_provision }}
 
       # The boundary between provisioning-as-codex and codex-action (Claude
       # Security finding 4628446, review round 1): kill every process still
