@@ -975,6 +975,13 @@ jobs:
           hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
           hashFiles('pyproject.toml') != ''
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+        with:
+          # A codex run puts NOTHING on the job PATH: the venv would be
+          # codex-writable after the user's grant, and `Create codex user`
+          # refuses to run codex behind a workspace directory on PATH
+          # (design/codex-engine.md → Runner-side search path). The compose
+          # step finds the tools at .venv/bin instead.
+          add-to-path: ${{ needs.gate.outputs.engine == 'codex' && 'false' || 'true' }}
 
       # The review is FILES, not posts (issue #114): the OUTPUT block appended
       # here names the directory ($OUT_DIR, created by this step — outside
@@ -1812,14 +1819,21 @@ jobs:
           # "command not found" inside codex even though the venv is right
           # there (observed: inspect_ai#392's review reported pytest/ruff/
           # mypy unavailable and degraded to static). Discover the ABSOLUTE
-          # paths here, where PATH is intact, and hand them to the prompt;
-          # group perms from the composite's workspace grants make them
-          # runnable.
+          # paths here and hand them to the prompt: from the checkout's
+          # .venv/bin first — where provision-fallback and the fork's
+          # claude-setup create the venv, and NOT on the job PATH on a codex
+          # run (the provisioning step passes add-to-path: false; a
+          # workspace directory on PATH would be codex-writable, and Create
+          # codex user refuses one — design/codex-engine.md → Runner-side
+          # search path) — then from this step's PATH for a caller that
+          # provisions elsewhere; group perms from the composite's workspace
+          # grants make them runnable.
           # Same list as the dev-verb and loop compose steps discover, so
           # every codex prompt describes one toolset.
           tools=""
           for t in pytest ruff mypy pyright python3; do
-            path=$(command -v "$t" 2>/dev/null || true)
+            path="$GITHUB_WORKSPACE/.venv/bin/$t"
+            [ -x "$path" ] || path=$(command -v "$t" 2>/dev/null || true)
             [ -n "$path" ] && tools="$tools$t=$path "
           done
           echo "discovered tools: ${tools:-none}"
@@ -2171,7 +2185,7 @@ jobs:
           # failed setup or context step SKIPS the codex step, so each needs
           # its own check or the failure is a silent red job.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
-            err="the codex user setup failed before the reviewer started (a runner-image change breaking adduser/usermod? — see the job logs)."
+            err="the codex user setup failed before the reviewer started (a job PATH entry inside the workspace or writable by the codex user — a caller's claude-setup putting its venv on GITHUB_PATH — or a runner-image change breaking adduser/usermod; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEXINPUTS_OUTCOME:-}" = "failure" ]; then
             err="preparing the codex review inputs (tool discovery, the review schema file) failed before the reviewer started — see the job logs."
