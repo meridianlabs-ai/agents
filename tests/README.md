@@ -210,11 +210,13 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   with and without a pre-created parent, and a destination path with a
   newline — lexical or after resolution — is refused. The diff and removal
   recipes SKILL.md gives the operator are lifted from its ```sh block and
-  run, with a worktree root holding a space, a tab and a glob character,
-  against an inherited clean filter and textconv driver: no marker, the
-  worktree gone and pruned, unrelated sibling files intact; the plain
-  in-worktree status the skill no longer recommends does run the clean
-  filter. Promotions keep `gh pr checkout`.
+  run, with a worktree root holding a space, a tab, a glob character, a
+  `$VAR`, both command-substitution forms, both quote characters and
+  backslashes (the path enters the recipe as heredoc data, never as
+  command text), against an inherited clean filter and textconv driver:
+  no marker, no substitution run, the worktree gone and pruned, unrelated
+  sibling files intact; the plain in-worktree status the skill no longer
+  recommends does run the clean filter. Promotions keep `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from

@@ -782,14 +782,20 @@ def test_checkout_external_documented_diff_and_removal_run_nothing_from_the_tree
     s.git("config", "diff.project.textconv", "./a-convert.sh")
     (s.dir / "graphql.json").write_text(json.dumps(external_issue(q["tip"])))
     # A root with a space, a tab and a glob character (review round 3: the
-    # unquoted recipe split or expanded the path), and unrelated siblings
-    # that a split or expanded `rm -rf` would have hit.
-    root = tmp_path / "wts\tcopy*"
+    # unquoted recipe split or expanded the path) and with a `$VAR`, both
+    # command-substitution forms, both quote characters and backslashes
+    # (review round 4: a path pasted into double-quoted shell source is
+    # still expanded), plus unrelated siblings that a split, expanded or
+    # substituted `rm -rf` would have hit, and a marker a substitution
+    # would have run.
+    ran = tmp_path / "recipe-ran"
+    root = tmp_path / f"wts $UNSET_RECIPE_VAR$(touch '{ran}')`touch '{ran}'`\"q'\\\\*\tcopy"
     wt = root / "UKGovernmentBEIS--inspect_ai" / "pr-5001"
-    survivors = [tmp_path / "wts" / "keep.txt", tmp_path / "wts-unrelated" / "UKGovernmentBEIS--inspect_ai" / "pr-5001" / "keep.txt",
-                 tmp_path / "wts\tcopy-other" / "keep.txt", tmp_path / "copy*" / "keep.txt"]
+    survivors = [tmp_path / "wts" / "UKGovernmentBEIS--inspect_ai" / "pr-5001" / "keep.txt", tmp_path / "wts" / "keep.txt",
+                 tmp_path / "wts-unrelated" / "UKGovernmentBEIS--inspect_ai" / "pr-5001" / "keep.txt",
+                 tmp_path / "wts copy-other" / "keep.txt", tmp_path / "copy*" / "keep.txt"]
     for f in survivors:
-        f.parent.mkdir(parents=True)
+        f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("keep\n")
     r = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(root)})
     assert r.returncode == 0, r.stderr
@@ -798,19 +804,22 @@ def test_checkout_external_documented_diff_and_removal_run_nothing_from_the_tree
     # the OK line printed the path.
     block = (skill_follow_up_block().replace("<base-remote>/<base>", "upstream/main").replace("<sha>", q["tip"])
              .replace("<path>", str(wt)))
-    assert "git diff --no-ext-diff --no-textconv" in block and 'rm -rf -- "' in block and "git worktree prune" in block
+    assert "git diff --no-ext-diff --no-textconv" in block and "git worktree prune" in block
     r = subprocess.run(["bash", "-e", "-c", block], cwd=s.clone, text=True, capture_output=True,
                        env={**os.environ, **GIT_ENV})
     assert r.returncode == 0, r.stderr
-    assert not marker.exists()
+    assert not marker.exists() and not ran.exists()
+    assert all(f.read_text() == "keep\n" for f in survivors)
     assert "+raw z" in r.stdout and "a-convert.sh" in r.stdout  # the PR's changes, unconverted
     assert not wt.exists() and f"worktree {wt}" not in s.git("worktree", "list", "--porcelain").stdout
-    assert all(f.read_text() == "keep\n" for f in survivors)
+    # ...because the path is heredoc data, never command text.
+    assert 'rm -rf -- "$checkout_path"' in block and "<<'PATH_FROM_OK_LINE'" in block and f"\n{wt}\nPATH_FROM_OK_LINE\n" in block
     # The recipes the skill no longer gives are the potent ones: a plain
     # status in the worktree runs the clean filter, a plain diff the textconv.
-    r2 = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(q["wts"])})
+    plain = tmp_path / "plain" / "UKGovernmentBEIS--inspect_ai" / "pr-5001"
+    r2 = s.run(CHECKOUT, str(N), env={"CHECKOUT_WORKTREES": str(tmp_path / "plain")})
     assert r2.returncode == 0, r2.stderr
-    subprocess.run(["git", "-C", str(q["wt"]), "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status",
+    subprocess.run(["git", "-C", str(plain), "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status",
                     "--porcelain"], capture_output=True, env={**os.environ, **GIT_ENV})
     assert marker.exists()
 
