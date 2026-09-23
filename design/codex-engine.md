@@ -169,7 +169,15 @@ plus two grants its demo never needs: a codex-owned `$RUNNER_TEMP/codex`
 dir for the explicit `output-file` (`$RUNNER_TEMP` itself is 755
 `runner:runner` on the hosted image and stays that way — group-writing the
 temp root would expose the runner's step scripts and per-step
-`GITHUB_ENV`/`GITHUB_OUTPUT` files to a sandbox-escaped codex), and the
+`GITHUB_ENV`/`GITHUB_OUTPUT` files to a sandbox-escaped codex; and since
+the directory entry is codex's to replace, no runner-side step reads the
+output file in place — the `import-codex-final` composite, right after the
+reclaim, opens it once with `O_NOFOLLOW`, refuses anything but a regular
+codex-owned file, and copies it to `$RUNNER_TEMP/codex-final.md`, the only
+path the commit subject, `resolve-reported-threads` and the summary read;
+finding 4628447, 2026-09-22: a symlink planted there would otherwise have
+had the runner read, and the land job publish, files codex itself cannot
+read), and the
 checkout added to the codex user's git `safe.directory` (the repo stays
 runner-owned, so git run as codex otherwise refuses with "dubious
 ownership", and no profile sandbox lets the agent add the exemption
@@ -547,10 +555,18 @@ Verification for a change here, all cases prompted to codex (any verb):
   `$RUNNER_TEMP/codex` made its awk die on the first write — the ids were
   lost and every one of inspect_ai#428's ten overnight rounds posted
   "(codex produced no final message)" while codex's summary sat unread; a
-  codex-owned dir was also a symlink hazard for a runner-side write. If
-  the copy is still missing the composite warns and the post step falls
-  back to the unstripped final message (a read needs no write permission)
-  before it gives up with the placeholder. Same rule as the Claude path's
+  codex-owned dir was also a symlink hazard for a runner-side write. The
+  READ has the same hazard (2026-09-22, finding 4628447): the composite's
+  awk follows a symlink as readily as `[ -f ]` does, so the callers no
+  longer hand it the codex-owned output file but the runner-owned copy the
+  `import-codex-final` composite verified (`O_NOFOLLOW`, regular file,
+  codex-owned) and it refuses a symlink or non-regular `final-message`
+  itself. If
+  the stripped copy is still missing the composite warns and the post step
+  falls back to the unstripped imported copy (a read needs no write
+  permission) before it gives up with the placeholder — which is also what
+  a refused (redirected) final message yields, along with the default
+  commit subject. Same rule as the Claude path's
   REVIEW_ETIQUETTE: never resolve what was declined or only answered with
   rationale.
 - **Branch sync is deterministic, not prompted** (was a limitation; fixed

@@ -176,8 +176,9 @@ open_or_adopt_pr() {
 # WORKFLOW_FILES is the `workflows` step's list of the files under
 # .github/workflows/ the bundle changes — agent-chosen paths, so they are
 # de-fanged here; empty with `workflows` failed means the step could not list
-# the paths at all and refused the bundle unchecked. Everything else is our
-# own text, so the line names no live trigger token.
+# the paths at all (the listing failed, or the push would create the branch
+# and no base tip was fetched) and refused the bundle unchecked. Everything
+# else is our own text, so the line names no live trigger token.
 landing_failure_hint() {
   local failed="$1" pushed="$2" withheld="${3:-}" files="${4:-}" hint="" list owed
   # Report joins with ", "; match on step names with the spaces removed.
@@ -190,7 +191,7 @@ landing_failure_hint() {
       if [ -n "$files" ]; then
         hint="The agent's commits change workflow files ($(defang_str "$files")), which the machine account may not push (it has no Workflows permission); changes under \`.github/workflows/\` are made from a maintainer's machine. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
       else
-        hint="The landing could not check whether the agent's commits change workflow files (listing the bundle's paths failed, see the run log), so the bundle was refused unchecked. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
+        hint="The landing could not check whether the agent's commits change workflow files (the listing failed, or a new branch had no base tip to list against; see the run log), so the bundle was refused unchecked. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
       fi ;;
     *,fetch,*|*,push,*) hint="The agent's commits were **not** pushed." ;;
     *) [ -z "$pushed" ] || hint="The agent's commits were pushed; only what follows the push is affected." ;;

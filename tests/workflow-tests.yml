@@ -15,6 +15,7 @@ on:
       - ".github/actions/verify-auto-labeler/**"
       - ".github/actions/bind-ci-run/**"
       - "skills/merge-approved-prs/**"
+      - "skills/import/**"
       - ".github/workflows/claude-review.yml"
       - ".github/workflows/claude.yml"
       - ".github/workflows/atlas-sync.yml"
@@ -22,6 +23,8 @@ on:
       - ".github/actions/sync-branch/**"
       - "examples/**"
       - ".github/actions/reset-auto-counters/**"
+      - ".github/actions/import-codex-final/**"
+      - ".github/actions/resolve-reported-threads/**"
       - "tests/**"
       - "pytest.ini"
   pull_request:
@@ -34,6 +37,7 @@ on:
       - ".github/actions/verify-auto-labeler/**"
       - ".github/actions/bind-ci-run/**"
       - "skills/merge-approved-prs/**"
+      - "skills/import/**"
       - ".github/workflows/claude-review.yml"
       - ".github/workflows/claude.yml"
       - ".github/workflows/atlas-sync.yml"
@@ -41,6 +45,8 @@ on:
       - ".github/actions/sync-branch/**"
       - "examples/**"
       - ".github/actions/reset-auto-counters/**"
+      - ".github/actions/import-codex-final/**"
+      - ".github/actions/resolve-reported-threads/**"
       - "tests/**"
       - "pytest.ini"
 
