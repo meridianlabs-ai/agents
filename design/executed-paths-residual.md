@@ -450,7 +450,7 @@ avoids `agent` (harden-runner hardcodes `/home/agent`).
 
 The `runner`-group membership is kept for parity with codex, since it is
 how the user traverses `/home/runner` (0750) (decision: Ransom,
-2026-09-23). The isolation check below is the proof that it holds on the
+2026-09-23). The in-namespace isolation check (The agent namespace, setup step 6) is the proof that it holds on the
 hosted image. It fails the job if the agent can read another user's
 process memory, a runner command file or the runner's credentials.
 Moving both engines to ACL traversal is a separate change (Not this
@@ -493,7 +493,7 @@ moves into `reclaim.sh` next to its `action.yml`, so the launcher can run it
 too. The composite's step runs the script.
 
 The kill here also means that nothing runs as `claude-agent` outside the
-agent namespace (launch step 6) from this point on. The wrapper starts the
+agent namespace (launch step 7) from this point on. The wrapper starts the
 CLI inside that namespace, and nothing can join it from outside.
 
 ### The launcher (step 5) and the wrapper
@@ -520,27 +520,14 @@ pre-agent reclaim. It does four things:
    agent's settings file cannot be written here: the action merges the
    settings inside its own step, so the wrapper copies them at launch,
    below.)
-4. **Runs the isolation check as the user**: `check_isolation.sh` from
-   `meridianlabs-ai/actions`, adapted with no broker probes and with the
-   grant mode's expectations. In `workspace` mode the checkout is
-   writable. In `none` mode, as the user, it cannot:
-   - create or rename an entry at the workspace root;
-   - write a tracked file;
-   - write or rename `.git`.
-
-   The check runs through the same namespace launch as the CLI (launch
-   step 6), so it sees exactly what the agent will see. In both modes it
-   fails the job before the action step if the user can:
-   - sudo, or reach Docker;
-   - read another user's `/proc/<pid>/environ` or `mem`;
-   - connect to a `.NET` diagnostic socket;
-   - write a runner command file;
-   - read `.credentials_rsaparams`;
-   - see any process outside its namespace in `/proc`;
-   - read anything under `/home/runner` or `$RUNNER_TEMP` beyond the
-     bind-mounted paths.
-
-   It also fails when Yama `ptrace_scope` is below 1.
+4. **Runs the pre-action user check** as the user, with plain `sudo -n -u
+   claude-agent` and no namespace. It checks only what exists before the
+   action and does not depend on its process or files. It fails the job
+   before the action step if the user can sudo or reach Docker, or if Yama
+   `ptrace_scope` is below 1. Everything that depends on the namespace,
+   the action's process or the WIF files is checked later, inside the
+   prepared namespace, immediately before the CLI starts (The agent
+   namespace, setup step 6). Only then do all three exist.
 
 The claude-code-action step gains `path_to_claude_code_executable:
 /opt/meridian-agent/bin/claude`.
@@ -705,7 +692,36 @@ It builds the view in this order:
    `/run/agent-ns/`, so no path reaches the original tree.
 5. It closes every descriptor except 0-2 and the pidfd (`close_range`), so
    the CLI inherits no directory or setup descriptor.
-6. It opens the final workspace bind by its absolute path, freshly
+6. **It runs the isolation check, inside the finished namespace**, as the
+   user and exactly as the CLI will run: the same `setpriv` drop, the same
+   cwd and the same environment. That is `check_isolation.sh` from
+   `meridianlabs-ai/actions`, adapted with no broker probes. PID 1 runs it
+   as its first child. If it exits non-zero, PID 1 exits non-zero without
+   starting the CLI, the launch fails, and the action step fails before
+   any agent code runs. At this point the action's process exists (its
+   pidfd is held) and the WIF dir exists (the action created it before
+   spawning the executable, run.ts:250), so none of the checks is vacuous.
+
+   It fails if the user can:
+   - sudo, or reach Docker;
+   - see any process outside its namespace in `/proc`, or read another
+     process's `environ` or `mem`;
+   - connect to any `.NET` diagnostic socket (its `/tmp` is private);
+   - open the runner command files, `.credentials_rsaparams`, `_actions`
+     or anything else under `/home/runner` beyond the four binds;
+   - reach the original tree through a relative path, a held descriptor
+     or `/proc/self/cwd`.
+
+   It also fails when Yama `ptrace_scope` is below 1. The launcher passes
+   the absolute paths it expects to be unreachable (the command files, the
+   runner root) in the handoff file, so the probes test real paths.
+
+   The grant mode's expectations are checked too. In `workspace` mode the
+   checkout is writable. In `none` mode the user cannot create or rename a
+   root entry, write a tracked file, or write or rename `.git`, and can
+   write scratch. A missing WIF dir, workspace or landing dir fails the
+   setup closed rather than skipping its bind.
+7. It opens the final workspace bind by its absolute path, freshly
    resolved, and starts the child with that as its cwd. That is `setpriv
    --reuid claude-agent --regid claude-agent --init-groups
    --inh-caps=-all --bounding-set=-all -- env -i <env…> <real claude>
@@ -1135,8 +1151,9 @@ Untrusted input reaching the new code, and how each is handled:
   are refused.
 - **Processes the agent user leaves.** They are killed before the action
   step, which makes the argv window empty, and again after the CLI. The
-  isolation check proves the user cannot read other users' process memory
-  or environ, or reach the runner's diagnostic socket.
+  in-namespace isolation check, which runs right before the CLI, proves
+  the user cannot read other users' process memory or environ, or reach
+  the runner's diagnostic socket or files.
 - **The wrapper's input** (argv and env from the SDK). The argv carries
   caller-supplied `claude_args` and the prompt text, which holds issue text.
   It is handled as an array, never evaluated. `--mcp-config` is parsed as
@@ -1255,12 +1272,27 @@ Untrusted input reaching the new code, and how each is handled:
   - `test_dev_agent_composer.py` covers `resolve_threads` from the Claude
     manifest-extra.
 - **The action's post-CLI window, against the real SDK.**
-  `tests/sdk_barrier/` is a small Node harness pinned to the SDK version the
-  action's lockfile resolves (0.3.280 today). It runs in the canary job,
-  and locally when `node` is present (skipped otherwise). It drives
-  `query()` as `run-claude-sdk.ts` does, breaking on the result and
-  catching errors, through the real wrapper and namespace launch. The synthetic
-  CLI answers the initialize handshake and then does one of these:
+  `tests/sdk_barrier/` is a small harness pinned to the SDK version the
+  action's lockfile resolves (0.3.280 today). It runs **under Bun**, at
+  the version the action pins (`bun-version` in its `action.yml`,
+  installed with the same `oven-sh/setup-bun`). It runs from a canary
+  workflow step, so its ancestry (Runner.Worker, the step's shell, then
+  `bun`) is exactly what `agent-ns-launch` checks for the action's
+  process. The production check is not relaxed for tests, and the scripts
+  carry no test switch.
+
+  It first writes a `$RUNNER_TEMP/claude-workload-identity` dir (0700,
+  with a dummy token file) as the action's `setupWorkloadIdentity` would.
+  It then drives `query()` as `run-claude-sdk.ts` does, breaking on the
+  result and catching errors, through the real wrapper, `agent-ns-launch`
+  and `agent-ns-init`. Every variant therefore goes setup → in-namespace
+  isolation check → CLI, in both grant modes. Two control cases:
+  - a harness run under Node instead of Bun is refused by
+    `agent-ns-launch`'s process check;
+  - a setup with the WIF dir missing is refused by `agent-ns-init`.
+
+  The synthetic CLI answers the initialize handshake and then does one of
+  these:
   - emits a result;
   - emits a malformed `control_response`;
   - is aborted by the harness's `AbortController`;
@@ -1269,8 +1301,9 @@ Untrusted input reaching the new code, and how each is handled:
   Every variant leaves a background process in the agent namespace that
   keeps rewriting `.git/config` (a `core.fsmonitor` that writes a marker
   with `id -un`), and a `reclaim.sh` stand-in that takes 10 seconds. The
-  harness runs as root on Linux (the canary), since the namespace needs
-  it; locally without root it is skipped.
+  harness needs a runner's process tree and sudo, so it runs only in the
+  canary. Locally, pytest covers the scripts' pure parts: argument and
+  handoff parsing, and the bind list per grant mode.
 
   Asserted:
   - the harness regains control within the SDK's grace in every variant
