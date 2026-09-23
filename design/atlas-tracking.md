@@ -496,7 +496,27 @@ and adds a second closing ref — bare `Fixes #<up>` — to the upstream PR body
 it creates. Bare refs resolve fine there (upstream PRs base on upstream
 `main`), so the upstream issue gets the native linked-PR chip and auto-closes
 on merge; the fork issue closes via the hourly sync as usual. Creation-time
-only: an adopted (pre-existing) upstream PR's body is never edited.
+only: an adopted (pre-existing) upstream PR's body is never edited. The line
+is honoured only as the import header — the body's literal first line,
+with the `---` rule below it — and only when the fork issue's author is a trusted login or
+has write access on the fork (the same rule the fork PR passes; a failed
+lookup is untrusted), since the fork is public and an issue body stays
+editable by its author; any other occurrence is ignored and reported. For
+the same reason the fork PR body's refs must not reach upstream bare: a
+`#M` at a line start or after whitespace is qualified to
+`meridianlabs-ai/inspect_ai#M`, then the body is rendered by GitHub's
+Markdown API in upstream's context and promote refuses (exit 5, before any
+write) if it resolves any upstream issue or PR other than `<up>` — so the
+only upstream reference the PR carries is that `Fixes #<up>`, which a trusted
+header always prepends (a copy in the body may be quoted and close nothing).
+It also refuses when the rewrite changed anything else — the fork PR body
+and its qualified text must render identically in the fork's context, so a
+`#M` in code, a link destination or naming no fork issue is never altered
+silently (agents#127 review, 2026-09-23). GitHub's own
+parser decides what is a reference; a hand-written Markdown scanner was
+tried first and did not converge under review (agents#127, 2026-09-23).
+The script prints the body as it will be published, in `--dry-run` and in
+the real run (findings 4629156 and 4629152, fixed 2026-09-22).
 
 **Not the External-proxy mechanism.** Imports are our own work in the normal
 `Todo → Agent → Review → Sign-off → …` pipeline — no `External` label, no

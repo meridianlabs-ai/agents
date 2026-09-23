@@ -22,8 +22,10 @@ bash <skill-base-dir>/promote.sh <N> [--dry-run] [--pr <number>]
 ```
 
 `--dry-run` prints every candidate with its verdict, the decision
-(`RESOLVED: fork PR #M (STATE) via <how>`) and each write that would happen;
-nothing is written.
+(`RESOLVED: fork PR #M (STATE) via <how>`), the upstream PR body exactly as
+it would be published (the `upstream PR body (as published):` block — the
+real run prints it too, before the PR is created) and each write that would
+happen; nothing is written.
 
 **Trust rule, applied before any PR text is read.** A fork PR qualifies only
 when its head repository is `meridianlabs-ai/inspect_ai` itself AND its
@@ -78,10 +80,42 @@ API — org-fork heads take no maintainer edits and these branches trail the
 fork's main mirror, so a fresh promotion usually opens behind; a conflict,
 commonly CHANGELOG, aborts with exit 5 BEFORE any upstream PR is opened, for
 a human to resolve on the branch) and creates it with the fully-qualified
-`Fixes meridianlabs-ai/inspect_ai#N` (bare `#N` refs are rewritten — they
-would rebind to upstream's tracker), plus a bare `Fixes #<up>` when the
-fork issue was imported from upstream (its `Upstream issue:` body line —
-see the import skill; creation-time only, adopted PRs aren't edited); assigns +
+`Fixes meridianlabs-ai/inspect_ai#N` (a `#M` at a line start or after
+whitespace in the fork PR body is rewritten to `meridianlabs-ai/inspect_ai#M`
+— republished on a PR based on upstream main it would rebind to upstream's
+tracker and a `Closes #M` would close upstream's issue M on merge; a closing
+keyword in any of GitHub's spellings before the qualified ref counts as the
+ref to the issue, else one is prepended), plus a bare `Fixes #<up>`, always
+prepended, when the fork issue was imported from upstream (a `Fixes …#<up>`
+already in the body may be quoted in code or a comment and close nothing).
+The result is then rendered by
+GitHub's Markdown API in upstream's context, and promote **refuses with exit
+5, before any write,** if GitHub resolves any upstream issue or PR other than
+`<up>` in it — spellings the rewrite leaves (`(#7)`, `Fixes:#7`, `GH-7`), a
+qualified `UKGovernmentBEIS/inspect_ai#7` or an upstream issue URL. The
+`ABORT:` line names each ref: qualify it as `meridianlabs-ai/inspect_ai#M`
+(or drop an upstream link) in the fork PR body and re-run. The rewrite must
+also change nothing else: the fork PR body and its qualified text are
+rendered in the fork's context, where a qualified fork ref renders exactly
+as the bare one, and promote **refuses with exit 5** if they differ (after
+blanking the identifiers GitHub mints afresh on every render: math's
+`data-run-id`, diagrams' `data-identity`, footnote-id suffixes) — the
+rewrite hit a `#M` that is code (`echo #1`), a link destination
+(`[r]( #1-x )`, `[r]: #1-x`) or a number with no fork issue behind it. The
+`ABORT:` line prints the rendered lines that change: reword each in the fork
+PR body so no `#M` follows whitespace there, and re-run. A failed render
+also exits 5. That
+`Upstream issue:` line is believed ONLY as /import's machine-written header
+— the body's literal first line, with the `---` rule below it and the
+upstream author's snapshot under that — and ONLY when the fork issue's author passes the same trust rule
+as the PR (trusted login or write access on the fork; a failed lookup is
+untrusted): the fork is public and an issue body stays editable by its
+author, so the line is free text anywhere else and would close whichever
+upstream issue it names (findings 4629156 / 4629152, 2026-09-22). An ignored
+line is reported on stderr (`note: issue #N's 'Upstream issue:' … ignored`),
+and the `ADVISORY:` line ends with `upstream issue: #<up>` or `none` — relay
+it, and check the printed body's closing refs before confirming. Creation-time
+only, adopted PRs aren't edited; assigns +
 requests review from `dragonstyle` on open PRs (the default — `REVIEWER=<login>`
 overrides it, see Cautions); sets the board's `Upstream PR` field (the sync's
 join key — the #90 lesson), stage → Sign-off + Status → In progress (never
@@ -103,8 +137,11 @@ hit the limit (re-run, or pin with `--pr`); the resolved PR's head is
 `main`/`meridian` (never promote it); the fork branch moved past the
 resolved PR's head (re-run — the PR data was stale, or someone pushed); a
 `REVIEWER` who is provably not a collaborator on upstream or on the ts-mono
-companion's repo; or a conflict merging upstream main into the branch
-(resolve on the branch and re-run). No upstream PR was opened in any of
+companion's repo; the upstream PR body references an upstream issue or PR
+other than the import's, qualifying its bare refs would change text that
+is not a reference, or it could not be rendered to check (edit the named
+refs or text in the fork PR body and re-run); or a conflict merging upstream
+main into the branch (resolve on the branch and re-run). No upstream PR was opened in any of
 these; **6** ambiguous — more
 than one fork PR qualifies at the same step (stderr lists them): ask the
 user which one and re-run with `--pr <number>`. Never guess — the
