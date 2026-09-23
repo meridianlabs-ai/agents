@@ -126,6 +126,20 @@ jobs:
       id-token: write
       actions: read
     with:
+      # codex_provision (optional; agents#136): the repository's provisioning
+      # recipe for CODEX runs — bash run as the unprivileged codex user in
+      # the checkout, in place of the generic `uv venv && uv pip install -e
+      # .[dev]`. The codex job never runs this repository's claude-setup
+      # action (a composite runs as the runner; nothing from the checkout may
+      # run as the runner there), so put here what claude-setup does that the
+      # generic recipe does not. uv is on PATH, HOME is /home/codex, no sudo,
+      # network on; create .venv so the agent's tools are found. Examples —
+      # a Python pin:          uv venv --python 3.11 && uv pip install -e ".[dev]"
+      # a lockfile sync:       uv venv --python 3.11 && uv sync --dev
+      # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
+      # codex_provision: |
+      #   uv venv --python 3.11
+      #   uv sync --dev
       # trigger_phrase is single-valued, so resolve it from the SAME source the
       # action will check for this event (comment > review > issue), not from a
       # union of all sources — otherwise a stale @claude in an enclosing issue
@@ -235,5 +249,19 @@ jobs:
       id-token: write
       actions: read
     with:
+      # codex_provision (optional; agents#136): the repository's provisioning
+      # recipe for CODEX runs — bash run as the unprivileged codex user in
+      # the checkout, in place of the generic `uv venv && uv pip install -e
+      # .[dev]`. The codex job never runs this repository's claude-setup
+      # action (a composite runs as the runner; nothing from the checkout may
+      # run as the runner there), so put here what claude-setup does that the
+      # generic recipe does not. uv is on PATH, HOME is /home/codex, no sudo,
+      # network on; create .venv so the agent's tools are found. Examples —
+      # a Python pin:          uv venv --python 3.11 && uv pip install -e ".[dev]"
+      # a lockfile sync:       uv venv --python 3.11 && uv sync --dev
+      # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
+      # codex_provision: |
+      #   uv venv --python 3.11
+      #   uv sync --dev
       trigger_phrase: "@auto"
       label_trigger: "auto"

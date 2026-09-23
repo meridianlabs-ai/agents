@@ -1,0 +1,82 @@
+# The secret-delivery probe of the engine-isolation canary (Claude Security
+# finding 4629153; called by engine-isolation-canary.yml, which passes two
+# synthetic repository secrets — CANARYA-<hex> and CANARYB-<hex>, never a
+# real key). A reusable workflow with three jobs, the same shape as the four
+# agent workflows (a caller stub passing secrets to a called workflow whose
+# jobs may or may not reference them):
+#
+#   referencing-skipped-step  references CANARY_A in a step whose `if:` is
+#                             false — the pre-fix shape of the Claude job
+#                             (the codex-action step behind `engine ==
+#                             'codex'`). Expected: A IS in Runner.Worker's
+#                             memory (a referenced secret reaches the runner
+#                             whatever the step's `if:` says), B is not.
+#   unreferencing             references nothing — the fixed Claude job.
+#                             Expected: neither sentinel, although the
+#                             CALLER passed both to this workflow and
+#                             sibling jobs reference each. This is the
+#                             guarantee under test; B here also settles
+#                             whether the service scopes referenced
+#                             secrets per job (absent) or per called
+#                             workflow (present).
+#   referencing-run-step      uses CANARY_B in a step that runs — the codex
+#                             job's shape. Expected: B present, A absent.
+#
+# Each job's last step runs tests/secret_delivery_scan.py as root over the
+# memory of the runner processes and prints only match counts.
+
+name: engine isolation canary (probe)
+
+on:
+  workflow_call:
+    secrets:
+      CANARY_A:
+        required: true
+      CANARY_B:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  referencing-skipped-step:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Never true (a run always has an id), but not a constant either, so
+      # the runner evaluates it at step time exactly as the agent workflows'
+      # `engine == 'codex'` used to be evaluated.
+      - name: A step that is never run but references sentinel A
+        if: github.run_id == ''
+        env:
+          NEVER_USED: ${{ secrets.CANARY_A }}
+        run: echo "this step is skipped"
+      - name: Scan runner memory (expect A present, B absent)
+        run: sudo python3 tests/secret_delivery_scan.py present absent
+
+  unreferencing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Scan runner memory (expect neither sentinel)
+        run: sudo python3 tests/secret_delivery_scan.py absent absent
+
+  referencing-run-step:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: A step that uses sentinel B
+        env:
+          USED: ${{ secrets.CANARY_B }}
+        run: echo "sentinel B has ${#USED} characters"
+      - name: Scan runner memory (expect A absent, B present)
+        run: sudo python3 tests/secret_delivery_scan.py absent present

@@ -44,13 +44,21 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the gate's, on escalation), the no-change relay, and the two failure
   paths that land nothing — a failed Claude step, whatever the execution
   file says (the base merge and a commit of the run included; 4628657) and a
-  codex round whose guard did not succeed.
+  codex round whose guard did not succeed. The failed step's attempt is
+  kept: `test_ci_fix_gate.py` pins the refund to a step the runner never
+  entered, and runs the refund → gate sequence against the cap (4628735).
+- `test_land_helpers.py` also runs the `land` composite's `plan` step: a
+  `handback` on a manifest with no bundle is dropped unless the caller's
+  `allow-no-change-handback` is "true" (the loops pass the agent step's
+  success), a bundled one is never touched, and the drop reaches the final
+  report (4628734).
 - `test_review_fix_composer.py` — `claude-auto-review.yml`'s `Compose
   landing manifest` step, lifted from the workflow the same way: the
   review loop's ending contract (exactly one hand-back), the agent-field
-  normalization, and the codex path's hand-back / hand-off decision — with
-  the codex no-thread-ids case run on through `emit-landing` and the
-  validator.
+  normalization, the codex path's hand-back / hand-off decision, and the
+  rule that a hand-back without a commit needs a successful agent step
+  (4628734) — with the codex no-thread-ids case run on through
+  `emit-landing` and the validator.
 - `test_review_composer.py` — `claude-review.yml`'s `Prepare Claude review
   for landing` and `Compose landing manifest` steps, lifted the same way
   (issue #114): the reviewer's summary / verdict / inline.json files become
@@ -58,7 +66,34 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   `review_comments` — the lenient verdict read, the malformed-inline
   fallbacks, external mode's single comment, the codex branch untouched —
   with the pr-mode and external results run on through `emit-landing` and
-  the validator under the land job's `refuse-bundle`.
+  the validator under the land job's `refuse-bundle`. Also the `Compose
+  settings` step: the review-dir allow and posting denies, and on the
+  sandboxed paths the overlay — the checkout and the review dir on
+  `denyWrite`, the scratch copy the one `allowWrite`, `claudeMdExcludes`
+  and the agents-md `instructionFiles` option composed with the caller's
+  entries, a caller's `allowWrite` and `tlsTerminate` dropped.
+- `test_review_strip.py` — `claude-review.yml`'s untrusted-checkout
+  preparation and post-agent check (Claude Security 4628445), lifted the
+  same way and run against local repos: the strip renames `CLAUDE.md` /
+  `CLAUDE.local.md` / `AGENTS.md` to `*.untrusted` and deletes `.claude` /
+  `.mcp.json` at every depth and writes a raw snapshot tree of the stripped
+  checkout; the scratch step copies the stripped tree with its
+  credential-free `.git`; the post-agent check compares the whole checkout
+  with that snapshot tree against tree and passes on a clean tree and on
+  exactly what claude-code-action does on PR events (the base-branch restore
+  of its sensitive roots when object-identical to `origin/<base>` — PR-deleted
+  roots, a restored `.claude/` subtree, symlinked roots and PR content behind
+  them included — and its `.claude-pr/` copy), and fails on a nested or root
+  configuration entry, a changed or added file anywhere (behind a link at
+  any depth, through an intermediate link followed by `..`, behind a
+  glob-character target), an attribute-normalised or mode change, a
+  retargeted or newline-retargeted link, a configuration root reaching
+  outside the checkout or into `.git`, a root `AGENTS.md`, and a missing
+  base ref or snapshot (fail-closed, a hostile `BASE_REF` included) — with
+  the checkout's hooks, fsmonitor and external diff never run. Also the
+  wiring: `--setting-sources user` on the agent step after the caller's args, the three steps gated on the sandboxed
+  paths, the landing prep gated on the check, the 2.1.246 version floor, the
+  Surface step's outcomes and note, and the prompt's scratch-copy guidance.
 - `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
   step, lifted the same way: the PR open for an issue run (title, body,
   labels, base, the hand-back an `auto`-labelled PR owes and the
@@ -168,6 +203,12 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   step 3 block with the helper and `gh` stubbed — that the companion merge
   happens only after `companion_mergeable.py` passes on the head as it is
   then, pinned to the SHA it returned, and never after a failed recheck.
+  Also lifts the CHANGELOG-section check and the conflicted-paths block
+  (finding 4628737): entries carrying apostrophes, backticks, `$(…)`, quotes
+  and regex specials are each reported with their heading and none of them
+  runs (the block fails on an entry under a released heading, a dropped
+  entry, or a copy under both), and a conflicted file name with spaces,
+  quotes and `$(…)` is inspected without reaching the shell's parser.
 - `test_checks_at_head.py` — the merge queue's deferral of External PR
   trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
   Claude Security 4122327 criterion 2): the decision on canned payloads
@@ -200,8 +241,56 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   permission lookup admits write-access collaborators and fails closed, the
   External-proxy body line is honoured only on a genuine proxy, and promote
   refuses ambiguity without `--pr`, resolves with it, and falls back to
-  closing refs / the branch convention when no chip exists. Acceptance paths
+  closing refs / the branch convention when no chip exists. The upstream PR
+  body: the `Upstream issue:` header is believed only in /import's shape from
+  a trusted author, bare refs are qualified, and a stub `gh api markdown`
+  (standing in for GitHub's renderer) finding any other upstream reference,
+  or rendering the qualified fork PR body differently from the original in
+  the fork's context (code, link destinations; the stub mints fresh math,
+  diagram and footnote identifiers per render, as GitHub does, and those
+  alone do not count), makes promote refuse before
+  any write; a trusted header's `Fixes #<up>` is prepended even when the
+  body quotes one. Acceptance paths
   run through `--dry-run` only; the test clone's remote is non-routable.
+  Except checkout's External path (Claude Security 4629158, 4629155), run
+  for real against local repos: an outsider's upstream PR head named
+  `meridian`, carrying `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, a `post-checkout` hook the clone's
+  `core.hooksPath` would resolve, and a `.gitmodules` adding a submodule
+  and an out-of-tree "ts-mono" path, lands detached in a worktree outside
+  the clone at the SHA the API reported — the local `meridian`, HEAD,
+  branch config and `.git/config` unchanged, nothing of the tree in the
+  clone, the hook never run, the submodule never initialised, the ts-mono
+  companion never looked up (the stub's `gh pr checkout` emulation shows
+  the unfixed behaviour fast-forwarding `meridian` and running the hook);
+  a head that moved since the read and a non-SHA `headRefOid` are refused;
+  a rerun reuses a clean worktree and refuses a dirty one. Destination
+  aliases are refused with the clone and every other worktree unchanged: a
+  relative root, a `..` traversal, a symlinked ancestor or a symlink at the
+  path resolving into the clone, a directory inside another linked worktree
+  (pre-created or not), a stranger's directory and a registered worktree on
+  a branch. Inherited command-running configuration is inert on the first
+  run and on reuse: a relative `core.fsmonitor`, and `filter.*` smudge,
+  clean and process drivers (one `required`) selected by the contributor's
+  `.gitattributes`, all pointing at scripts the tip supplies (a plain
+  worktree add of the same tip runs them), leave no marker and the clone's
+  config untouched — including drivers an `includeIf gitdir:` condition
+  defines only inside the linked worktree, discovered after `worktree add
+  --no-checkout` and before the first checkout. Registered worktree paths
+  are read NUL-delimited and captured losslessly (a `$(…)` capture drops a
+  trailing newline), so a worktree whose path holds an embedded or one or
+  two trailing newlines still bounds the destination, reached through a
+  newline-free symlink alias from the clone and from inside that worktree,
+  with and without a pre-created parent, and a destination path with a
+  newline — lexical or after resolution — is refused. The diff and removal
+  recipes SKILL.md gives the operator are lifted from its ```sh block and
+  run, with a worktree root holding a space, a tab, a glob character, a
+  `$VAR`, both command-substitution forms, both quote characters and
+  backslashes (the path enters the recipe as heredoc data, never as
+  command text), against an inherited clean filter and textconv driver:
+  no marker, no substitution run, the worktree gone and pruned, unrelated
+  sibling files intact; the plain in-worktree status the skill no longer
+  recommends does run the clean filter. Promotions keep `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
@@ -215,7 +304,18 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   budget; the no-id lookup follows the review gate's rule (the loop's own
   marker or nothing) and is covered too, as is the composite's
   `trusted-logins` default (both machine-account logins; an explicit empty
-  string resets nothing).
+  string resets nothing). Since Claude Security 4628734: the no-progress
+  check escalates on the recorded tip whatever the count reads (a refunded
+  round 1 leaves `rounds: 0` with its head marker), the refund → gate
+  sequence on an unchanged tip escalates, and the refund's `if:` is pinned
+  to `env.AGENT_SKIPPED == 'true'` (the engine's fix job's `agent_skipped`:
+  its agent step was never entered; evaluated for both engines) plus
+  nothing pushed — never the agent step's own outcome, the job's result or
+  an execution file; a cancellation alone, or missing outputs, keeps the
+  recorded count — evaluated over a shared case table (`REFUND_CASES`)
+  that `test_ci_fix_gate.py` runs against the CI-fix refund too, with the
+  Land step admitting a bundle-less hand-back only on the agent step's
+  success.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS` (the machine
@@ -223,7 +323,42 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the caller's `allowed_bots` names (same-repo heads only) — with the fork
   head admitted sandboxed and a failed lookup refused (Claude Security
   4085111). Also that the review step's `allowed_bots` is the caller's list
-  plus `TRUSTED_LOGINS`.
+  plus `TRUSTED_LOGINS`, and that `issue_comment` is the only event the step
+  admits: a `pull_request` / `pull_request_target` run fails it red with an
+  error naming the caller stub (the path was removed 2026-09-22), and no
+  expression in the workflow or the stubs reads the PR-event payload.
+- `test_codex_path.py` — the codex path's runner-side search path (Claude
+  Security 4628448): the `assert-runner-only-path` check `create-codex-user`
+  runs before its grant and `reclaim-codex-workspace` runs after codex
+  (a workspace entry by path or symlink — inward, outward, and through an
+  intermediate symlink component or a writable symlink parent — a relative
+  or empty entry, an entry or ancestor the user can write, a not-yet-existing
+  entry the user could create, the sticky-directory exception, a symlink
+  loop, a clean PATH, ownership as authority — an owned read-only
+  directory, an owned sticky parent, an owned 0755 executable — the files
+  inside an entry followed through their symlinks (into the workspace, to a
+  writable file, to a file in a replaceable directory, a chain, a shared
+  chain probed once), a sticky directory accepted for one child vouching for
+  no other use (a missing sibling, the directory itself, a dangling link into
+  it — each after the safe child), `protect` making a writable or owned image hop or
+  file runner-only instead of refusing and never touching the workspace,
+  and the check's own probes resolving through the pinned system PATH —
+  `sudo` is a stub answering the ownership and writability probes from a
+  list and mode bits); the reclaim, `codex-usage`, the
+  unresolved-merge guard and `emit-landing`'s `write` step run against a
+  PLANTED `.venv/bin` of `sudo`, `git`, `find`, `jq` and friends first on
+  the job PATH and touch none of it; `provision-fallback` writes nothing to
+  GITHUB_PATH under `add-to-path: false`; and the wiring — only the Claude
+  jobs' fallback puts the venv on the job PATH (the default), the codex jobs
+  provision with `user: codex` and pass no `add-to-path`, their compose
+  steps discover the tools from the composite's `bin` directories and never
+  through `command -v`, the commit steps pin PATH, the user is created,
+  checked, then granted, and `create-codex-user`'s `reset-home` mode
+  re-checks and pins PATH. `codex_path_smoke.sh` is the
+  hosted-runner counterpart (`.github/workflows/codex-path-smoke.yml`): the
+  same lifted bodies with the real codex user, image PATH and sudo, plus a
+  control job showing the runner pick a planted interpreter when the venv IS
+  on GITHUB_PATH.
 - `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
   the same way against a stub `gh`: an issue's `auto` label is the run's
   opt-in only when the account that applied it most recently is a human
@@ -244,6 +379,44 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   same text in a human's own issue and a label on an import still are;
   the workflow's agent steps carry no bot allow-list; and the dev stubs
   exclude both machine logins on the label path like everywhere else.
+- `test_engine_job_isolation.py` — one untrusted job per engine (Claude
+  Security findings 4628446 and 4629153): in each reusable workflow the
+  Claude job references no `OPENAI_API_KEY` and runs no codex, the codex
+  job references it only at its codex-action step, the two are selected by
+  the gate's `engine` output at the job level and gate no step on it, the
+  land job waits for both; the codex job `uses:` no action from the
+  checkout, provisions with `provision-fallback` `user: codex` (and the
+  caller's `codex_provision` as `recipe`) after `Create codex user`, runs
+  `Reset codex home` (`create-codex-user` `mode: reset-home`) before the
+  codex-action step, writes nothing into the workspace after the codex user
+  exists (prompt files in RUNNER_TEMP, the exclude lines appended by the
+  prep step), and its prompts take the tool paths from the composite's
+  `bin` directories; the Claude job keeps the runner-side `claude-setup`
+  and fallback; `codex_provision` is declared with a type and reaches only
+  the codex job. Also the composites, lifted and run against stubs:
+  `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
+  codex -H` when `user` is set, the recipe directly otherwise, a caller
+  recipe handed over as a `$RUNNER_TEMP` file and refused when it is not
+  bash, a failing sudo fails the step), `provision.sh` against stub
+  `curl`/`uv` (the venv and the `.[dev]` / `--group dev` install, a caller
+  recipe replacing them after the uv bootstrap, the `.git/info/exclude`
+  lines, the `GITHUB_PATH` appends made only when that file is there),
+  `create-codex-user`'s `codex-home.sh` (a planted `config.toml` symlink
+  and a stray file are replaced by the profile and the server-info file;
+  the link's target is untouched) and its `reset-home` step (kills, then
+  the home script; refuses while `pkill` keeps finding codex processes).
+  The four composer tests lift each engine's composer from its own job
+  (`job_block` / `lift_run` in `test_land_helpers.py`).
+- `secret_delivery_scan.py`, `fixtures/hostile-checkout/` and
+  `fixtures/callers/` are not tests but the hosted canary's pieces
+  (`.github/workflows/engine-isolation-canary.yml`): the root-run scanner
+  that counts synthetic sentinel secrets in the runner processes' memory,
+  the hostile `setup.py` build backend the provisioning-boundary job
+  installs as the codex user, and the four representative caller projects
+  (with the `codex_provision` recipe each caller's stub would set and the
+  checks that its interpreter/Node version, dependency groups and lockfile
+  came out as intended, run as the codex user) — `fixtures/callers/README.md`
+  has the table.
 - `test_import.py` — `skills/import/import.sh` against a stub `gh` that
   answers the upstream issue from a fixture and records the created title
   and body: every trigger phrase and loop marker in the copied title and
@@ -271,6 +444,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   exactly the control entry exists and restores, each job's "Set up job"
   line shows its mode, and the probe's log shows the client's skip and the
   service's `cache write denied:` refusal; red, with the reason, otherwise.
+- `test_model_defaults.py` — the four Claude workflows' `model` input
+  defaults to the `opus` alias (never a dated id) with `fallback_model`
+  `default`, and both still reach Claude Code as `--model` /
+  `--fallback-model` (design/architecture.md → Model selection).
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc

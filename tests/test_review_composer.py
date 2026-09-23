@@ -25,7 +25,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude-review.yml"
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_manifest.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import run_emit_landing, sh  # noqa: E402
+from test_land_helpers import run_emit_landing, sh, job_block, lift_run  # noqa: E402
 from test_review_fix_gate import lift_step  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("validate_manifest_rc", VALIDATOR)
@@ -34,9 +34,14 @@ spec.loader.exec_module(vm)
 
 PREP = lift_step(WORKFLOW, "        id: claudepost")
 COMPOSE = lift_step(WORKFLOW, "        id: landing")
+# The codex engine has its own job (and composer) since 2026-09-22.
+COMPOSE_CODEX = lift_run(job_block(WORKFLOW.read_text(), "review-codex"), "        id: landing")
 SETTINGS_STEP = lift_step(WORKFLOW, "        id: reviewsettings")
 SHA = "a" * 40
-OUT_DIR = "/home/runner/work/_temp/review"
+RUNNER_TEMP = "/home/runner/work/_temp"
+OUT_DIR = f"{RUNNER_TEMP}/review"
+SCRATCH = f"{RUNNER_TEMP}/scratch"
+WORKSPACE = "/home/runner/work/repo/repo"
 
 
 def outputs(path: Path) -> dict:
@@ -63,7 +68,8 @@ def prep(tmp_path, *, mode="pr", summary=None, verdict=None, inline=None):
 
 
 def compose(tmp_path, *, mode="pr", claudepost="success", landed="true", verdict="clean",
-            codexpost="skipped", codex_verdict="", claude_outcome="success", ack="true", engaged="false"):
+            codexpost="skipped", codex_verdict="", claude_outcome="success", ack="true", engaged="false",
+            engine="claude"):
     landing = tmp_path / "landing"
     landing.mkdir(exist_ok=True)
     extra = tmp_path / "landing-extra.json"
@@ -74,7 +80,7 @@ def compose(tmp_path, *, mode="pr", claudepost="success", landed="true", verdict
         "CODEXPOST_OUTCOME": codexpost, "CODEX_VERDICT": codex_verdict, "ENGAGED": engaged,
         "PROV_NOTE": "", "ERROR_FILE": str(tmp_path / "agent-error.md"),
     }
-    r = sh("bash", "-c", COMPOSE, check=False, env=env)
+    r = sh("bash", "-c", COMPOSE_CODEX if engine == "codex" else COMPOSE, check=False, env=env)
     assert r.returncode == 0, r.stderr + r.stdout
     return json.loads(extra.read_text()), extra
 
@@ -102,8 +108,9 @@ def compose_settings(tmp_path, settings: dict, *, sandboxed: bool) -> dict:
     out = tmp_path / "settings-out.txt"
     out.write_text("")
     r = sh("bash", "-c", SETTINGS_STEP, check=False, env={
-        "SETTINGS": json.dumps(settings), "OUT_DIR": OUT_DIR, "SANDBOXED": "true" if sandboxed else "false",
-        "GITHUB_WORKSPACE": "/home/runner/work/repo/repo", "GITHUB_OUTPUT": str(out)})
+        "SETTINGS": json.dumps(settings), "OUT_DIR": OUT_DIR, "SCRATCH": SCRATCH, "RUNNER_TEMP": RUNNER_TEMP,
+        "SANDBOXED": "true" if sandboxed else "false",
+        "GITHUB_WORKSPACE": WORKSPACE, "GITHUB_OUTPUT": str(out)})
     assert r.returncode == 0, r.stderr
     lines = out.read_text().splitlines()
     assert lines[0] == "value<<SETTINGS_EOF" and lines[-1] == "SETTINGS_EOF"
@@ -136,19 +143,37 @@ def test_sandboxed_settings_deny_subprocess_writes_to_the_review_dir(tmp_path):
     # sandbox's denyWrite closes that; the deny holds inside the wider allow
     # and does not govern the in-process Write tool. Caller entries survive.
     caller = json.loads(json.dumps(CALLER_SETTINGS))
-    caller["sandbox"] = {"filesystem": {"denyWrite": ["~/.ssh"]},
+    caller["sandbox"] = {"filesystem": {"denyWrite": ["~/.ssh"], "allowWrite": ["~/.kube"]},
                          "credentials": {"files": [{"path": "~/.npmrc", "mode": "deny"}]},
                          "network": {"tlsTerminate": {"enabled": True}}}
+    caller["claudeMdExcludes"] = ["**/other-team/CLAUDE.md"]
     s = compose_settings(tmp_path, caller, sandboxed=True)
-    assert s["sandbox"]["filesystem"]["denyWrite"] == ["~/.ssh", OUT_DIR]
+    # Claude Security 4628445: the checkout is read-only to sandboxed
+    # commands — the strip's paths cannot be re-planted at any depth — and
+    # the scratch copy is the one writable tree; a caller's allowWrite would
+    # only widen and is not carried over.
+    assert s["sandbox"]["filesystem"]["denyWrite"] == ["~/.ssh", OUT_DIR, WORKSPACE]
+    assert s["sandbox"]["filesystem"]["allowWrite"] == [SCRATCH]
     assert s["sandbox"]["enabled"] is True and s["sandbox"]["allowUnsandboxedCommands"] is False
     assert s["sandbox"]["excludedCommands"] == ["gh *"]
     assert s["sandbox"]["credentials"]["files"][0] == {"path": "~/.npmrc", "mode": "deny"}
     assert "tlsTerminate" not in s["sandbox"]["network"]
     assert f"Edit(//{OUT_DIR.lstrip('/')}/**)" in s["permissions"]["allow"]
-    # Without caller sandbox settings the deny list is the output dir alone.
+    # The load side: no CLAUDE.md under the checkout or the runner temp is
+    # ever loaded (caller entries kept), and AGENTS.md is not read as
+    # project instructions.
+    assert s["claudeMdExcludes"] == ["**/other-team/CLAUDE.md", f"{WORKSPACE}/**", f"{RUNNER_TEMP}/**"]
+    assert s["pluginConfigs"] == {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}
+    assert s["disableAllHooks"] is True
+    # Without caller sandbox settings the lists are the overlay's alone.
     s = compose_settings(tmp_path, CALLER_SETTINGS, sandboxed=True)
-    assert s["sandbox"]["filesystem"]["denyWrite"] == [OUT_DIR]
+    assert s["sandbox"]["filesystem"]["denyWrite"] == [OUT_DIR, WORKSPACE]
+    assert s["sandbox"]["filesystem"]["allowWrite"] == [SCRATCH]
+    assert s["claudeMdExcludes"] == [f"{WORKSPACE}/**", f"{RUNNER_TEMP}/**"]
+    # Same-repo heads get none of it.
+    s = compose_settings(tmp_path, caller, sandboxed=False)
+    assert "claudeMdExcludes" not in s or s["claudeMdExcludes"] == ["**/other-team/CLAUDE.md"]
+    assert "pluginConfigs" not in s and s["sandbox"]["filesystem"]["allowWrite"] == ["~/.kube"]
 
 
 # --- Prepare Claude review for landing --------------------------------------
@@ -272,9 +297,18 @@ def test_compose_lands_no_review_when_the_prep_step_found_no_summary(tmp_path):
 
 
 def test_compose_codex_path_is_unchanged(tmp_path):
+    # The codex job's own composer (one job per engine since 2026-09-22):
+    # the same manifest the shared composer produced for the codex branch.
     landing = tmp_path / "landing"
     landing.mkdir()
     (landing / "codex-review.md").write_text("codex says\n\n🤖 engine: codex\n")
-    m, _ = compose(tmp_path, claudepost="skipped", landed="", verdict="", codexpost="success", codex_verdict="suggestions",
-                   claude_outcome="skipped")
+    m, _ = compose(tmp_path, engine="codex", claudepost="skipped", landed="", verdict="", codexpost="success",
+                   codex_verdict="suggestions", claude_outcome="skipped")
     assert m == {"comments": [{"number": 42, "body_file": "codex-review.md"}], "review_verdict": "suggestions", "stage": "Review"}
+    # A codex review the loop owns hands nothing back to Review.
+    m, _ = compose(tmp_path, engine="codex", codexpost="success", codex_verdict="clean", engaged="true")
+    assert m == {"comments": [{"number": 42, "body_file": "codex-review.md"}], "review_verdict": "clean"}
+    # A failed codex step: no review, the error only, and the stage move.
+    (tmp_path / "agent-error.md").write_text("⚠️ codex failed")
+    m, _ = compose(tmp_path, engine="codex", codexpost="skipped")
+    assert m == {"stage": "Review", "error": {"message": "⚠️ codex failed", "fail_run": True}}

@@ -58,9 +58,13 @@ missing).
 
 ## The loop closes at promotion
 
-promote.sh reads the `Upstream issue:` body line and adds a second closing
-ref — bare `Fixes #<upstream-N>` — to the upstream PR body it creates (bare
-refs resolve fine there: upstream PRs base on upstream `main`). So the
+promote.sh reads the `Upstream issue:` header — the body's first line with
+the `---` rule below it, as this skill writes them, and only when the fork issue's author is a trusted
+login or has write access on the fork (the import is the operator's issue;
+anyone can file a fork issue carrying the same line, or paste it below the
+`---` rule) — and adds a second closing ref — bare `Fixes #<upstream-N>` —
+to the upstream PR body it creates (bare refs resolve fine there: upstream
+PRs base on upstream `main`). So the
 upstream issue gets the native linked-PR chip and auto-closes when the PR
 merges; the fork issue closes via the hourly sync as usual. Creation-time
 only — promote never edits an adopted (pre-existing) upstream PR's body, so

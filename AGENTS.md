@@ -21,9 +21,9 @@ take effect on every repo's next run.
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
-  `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
-  `import-codex-final`,
-  `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
+  `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
+  `reclaim-codex-workspace`, `import-codex-final`,
+  `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
@@ -149,9 +149,50 @@ take effect on every repo's next run.
   and the same two `core.*` keys by env as belt and braces; the guard pins
   the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
   (`ls-files` runs no hooks); and every post-codex `git status` passes
-  `--ignore-submodules=dirty`; keep all of that when touching them. See
-  design/architecture.md → No persisted git credentials and
-  design/codex-engine.md → Hook-safe landing.
+  `--ignore-submodules=dirty`; keep all of that when touching them. **The
+  job PATH is part of the same boundary** (finding 4628448, 2026-09-22):
+  the runner prepends every `GITHUB_PATH` entry to every later step's PATH
+  and resolves each step's shell interpreter through it, so a directory
+  the codex user can write there — a workspace venv, after the grant —
+  would hand codex the `sudo`, `bash` or `git` the first post-codex step
+  runs as `runner`. Never put a path under `$GITHUB_WORKSPACE` on
+  `GITHUB_PATH` in a job that runs codex (the codex jobs provision with
+  `provision-fallback` `user: codex`, whose recipe runs under `env -i` and
+  cannot reach `GITHUB_PATH`; the codex prompts get the tools by absolute
+  path from the composite's `bin` output); `create-codex-user` walks every
+  hop of every PATH entry (symlink targets too) before the grant, refuses a
+  workspace hop, makes a codex-writable hop outside the workspace
+  runner-only (the image ships `/opt` and `/usr/local/bin` mode 777) and
+  refuses to start codex if one stays writable; its `reset-home` mode and
+  the reclaim repeat the check without the repair
+  (`assert-runner-only-path`); and every post-codex composite — and the
+  `reset-home` step, which runs after provisioning as codex — pins `PATH`
+  to the root-owned system directories (`system-path`, no `/usr/local`)
+  before its first command; a new post-codex step should too.
+  `tests/codex_path_smoke.sh` runs all of it on a hosted runner. See
+  design/architecture.md → No persisted git credentials,
+  design/codex-engine.md → Hook-safe landing and → Runner-side search
+  path.
+- **One untrusted job per engine** (Claude Security findings 4628446 and
+  4629153, 2026-09-22): each reusable workflow has a Claude job (`agent`,
+  `review`, `fix`) and a codex job (`agent-codex`, `review-codex`,
+  `fix-codex`), the gate's `engine` output selecting one at the job level,
+  and the land job `needs` both. `OPENAI_API_KEY` is referenced in the codex
+  job's codex-action step and nowhere else — never add a reference to a
+  job that runs the Claude agent: a referenced secret reaches the runner
+  whatever the step's `if:` says. In a codex job nothing from the checkout
+  runs as the runner: no `uses: ./...`, and provisioning is
+  `provision-fallback` with `user: codex` (plus the caller's
+  `codex_provision` as `recipe`), placed after `Create codex user`, and
+  followed by `Reset codex home` (`create-codex-user` with `mode:
+  reset-home`: codex processes killed, `~codex/.codex` re-created) before
+  the codex-action step. Once the codex user exists the runner writes
+  nothing into the workspace until the reclaim: prompt files go to
+  `$RUNNER_TEMP`, and `.git/info/exclude` is appended by the prep step
+  before the user is created. A step that must exist on both engines
+  is copied into both jobs (the checkout, assert, base and sync steps
+  already are); the composers and Surface steps are per-engine.
+  `tests/test_engine_job_isolation.py` enforces all of this.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat
   them as sensitive, and don't add API-key secrets; auth is Workload Identity
   Federation.

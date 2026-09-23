@@ -55,6 +55,35 @@ text are checked by the tests under `tests/`.
   on the job's token, so nothing an agent does or a caller's setup nests can
   place content in a cache a trusted workflow restores (Claude Security
   finding 4629157; design/agent-cache-scope.md).
+- A job that runs the Claude agent references no `OPENAI_API_KEY`. Each
+  reusable workflow runs each engine in a job of its own (`agent` and
+  `agent-codex`, `review` and `review-codex`, `fix` and `fix-codex`), the
+  trusted gate's `engine` output selecting exactly one at the job level,
+  which GitHub evaluates before dispatching a job. A secret a step
+  references is delivered to the job's runner whether or not that step's
+  `if:` ends up true (the runner builds its `secrets` context from the job
+  message before any step runs), so the codex key is referenced only in the
+  codex job's codex-action step and a Claude-engine run's job message never
+  carries it (Claude Security finding 4629153). Measured, not assumed: the
+  hosted canary (design/credential-separation.md → section 6) shows a
+  referenced-but-skipped secret in the runner's memory and none in a job
+  that references nothing, although the caller passed it and a sibling job
+  referenced it — delivery is scoped per job.
+- In a codex job nothing from the checked-out tree executes as the runner:
+  the caller's `claude-setup` action is not run there, and the shared
+  provisioning recipe (uv and a dev-install of the checkout, the tree's own
+  build backend, or the caller stub's `codex_provision` recipe) runs as the
+  unprivileged `codex` user after that user exists and before the
+  codex-action step, so a head the pipeline itself produced from an
+  outsider's issue text meets the same boundary as codex itself: no sudo,
+  no GitHub token, no OIDC request token, no view of the runner's
+  processes (finding 4628446). Between that provisioning and the
+  codex-action step every process running as codex is killed and the codex
+  home is re-created, and the runner writes nothing into the workspace in
+  that interval, so nothing provisioning left behind reaches the action's
+  runner-side reads. A hosted canary exercises both this boundary and the
+  secret delivery against a hostile checkout and synthetic secrets
+  (design/credential-separation.md → section 6).
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -107,6 +136,24 @@ text are checked by the tests under `tests/`.
   (Claude Security findings 4628442 and 4628439, 2026-09-22).
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
+- No runner-side step after a Codex run resolves a command, or its shell
+  interpreter, through a directory the codex user can write or replace. A
+  job that may run codex puts nothing under its workspace on
+  `GITHUB_PATH`; before the codex user is given write access to the
+  checkout, every hop of every PATH entry (symlink targets included) and
+  every file inside an entry that the user owns, can write or reaches
+  through a symlink is checked: one inside the workspace fails the job, one
+  the user owns or can write outside it — the hosted image ships `/opt` and
+  `/usr/local/bin` world-writable — is made runner-only first and fails the
+  job if it stays the user's, so codex never runs behind a hijackable
+  search path; the
+  reclaim step repeats the check after codex without the repair, and every
+  post-codex composite runs its commands with `PATH` pinned to the
+  root-owned system directories. Codex cannot add to the job PATH itself:
+  the per-step `GITHUB_PATH` file is runner-only. A hosted smoke workflow
+  runs the check and the post-codex steps against a planted venv with the
+  real codex user (Claude Security finding 4628448, 2026-09-22;
+  design/codex-engine.md → Runner-side search path).
 - The reviewer runs only when a trusted commenter asks for it, except inside
   the `@auto` loop, where the machine account requests each round's review.
 - A CI-fix round acts on the PR its failed run is bound to, not on the
@@ -122,9 +169,19 @@ text are checked by the tests under `tests/`.
   access, a run re-run, a branch pushed or a PR retargeted at any point
   after the run stop the round rather than guess, before any counter, stage
   move, merge or model work; the runner merges exactly the base tip the
-  gate read. A Claude step that fails lands nothing and is refunded — the
-  action's execution-file output is not launch evidence, so the step's
-  outcome decides. What this establishes is the run's head commit, the base
+  gate read. A Claude step that fails lands nothing and keeps its attempt —
+  the action's execution-file output is not launch evidence, so the step's
+  outcome decides what lands, and a round is refunded only when the agent
+  step was never entered (the engine's agent step `skipped` — each engine
+  runs in its own fix job — a step outcome the runner settled before any
+  agent code ran, delivered by that job's own outputs — a cancelled job is refunded on that evidence alone, and a
+  pending job cancelled before it started, which delivers none, keeps its
+  round), never on how the agent's own step ended (Claude Security 4628734 and
+  4628735, 2026-09-22); in both loops a manifest with no bundle posts the
+  `@review` hand-back only when the agent step succeeded, so a round that
+  landed nothing and did not complete cannot re-arm the loop, and the
+  review-fix stall check keys on the recorded tip, not on a count a refund
+  may have taken to 0. What this establishes is the run's head commit, the base
   branch it was merged into and the base tip that is merged now, and that
   no other PR can be the run's origin — not which PR GitHub considered the
   trigger, not the merge commit the run built, and not the base tip it
@@ -172,6 +229,38 @@ text are checked by the tests under `tests/`.
   manifest names: the manifest's `start_sha` is the agent job's to write,
   and origin serves any reachable commit — a fork PR's head, an old base
   commit — as a start (Claude Security finding 4628444, 2026-09-22).
+- The same refusal covers the entry points and configuration files a later
+  automated job on the branch executes or loads — not everything those
+  run (see the accepted gap below) — since the machine account's push would
+  otherwise move agent-written files into the same-repo tree the next run
+  provisions from as `runner` or reads as instructions
+  (Claude Security finding 4628446, criterion 2, 2026-09-23): anything
+  under `.github/` (the composite actions a workflow runs with `uses:
+  ./…`, the callers' `claude-setup` among them); agent instructions and
+  settings at any depth (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  `AGENTS.override.md`, `.claude/`, `.mcp.json`, `.claude.json`,
+  `.codex/`, `.agents/`, `.gitmodules`, `.ripgreprc`, `.husky/`); and
+  build and dependency configuration at any depth (`pyproject.toml`,
+  `setup.py`, `setup.cfg`, `uv.lock`, `uv.toml`, `.python-version`,
+  `requirements*.txt`, `package.json`, the npm, pnpm and yarn lockfiles,
+  `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc`,
+  `.yarnrc.yml`, `.yarn/`). Symlink targets and `CLAUDE.md` `@path`
+  imports reached from these paths are refused too. **Accepted gap**
+  (decision: Ransom, 2026-09-23): this does not close the class. The list
+  names entry points and loaded configuration, not the code they run, so
+  an agent's edit to an ordinary file that UNCHANGED configuration
+  executes still lands: a script a `claude-setup` step, a settings hook or
+  an MCP server command runs, a build backend on `backend-path`, a module
+  a `setup.py` or build hook imports, any file a caller's recipe reads.
+  The next automated run executes it during provisioning or at agent start
+  — as the codex user on codex jobs (finding 4628446, criterion 1), as
+  `runner` on Claude jobs, where the Claude agent itself already runs the
+  tree's code (tests, `conftest.py`) as `runner`. Closing it is a separate
+  design follow-up (Ransom, 2026-09-23) comparing approval gating (a head
+  the machine account pushed gets fork-head treatment in every later
+  automated job until a write-access human approves that exact head),
+  heuristic dependency following at landing, and running the Claude engine
+  as an unprivileged user that also provisions, as codex does.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The
@@ -192,10 +281,19 @@ text are checked by the tests under `tests/`.
   controls, in any job that runs an agent or code from a checkout the org
   does not fully control. Not in `env:`, not as an action input, not through
   a composite. The model credential (Workload Identity Federation, or
-  `OPENAI_API_KEY` for codex) and the Claude action's own token are the
-  known exceptions.
+  `OPENAI_API_KEY` in the codex job alone) and the Claude action's own token
+  are the known exceptions. Never reference `OPENAI_API_KEY` in a job that
+  runs the Claude agent — a referenced secret reaches the job's runner
+  whatever the referencing step's `if:` says — and never run code from the
+  checkout as the runner in a codex job: those jobs provision with
+  `provision-fallback` `user: codex` after `create-codex-user`, and no
+  `./`-local action.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
+  The skills under `skills/` that a maintainer's local agent runs with their
+  `gh` login follow the same rule for text from a PR or its tree — entry
+  text, file names, branch names, titles: a quoted variable, the environment
+  or stdin, never a value pasted into a command template (finding 4628737).
 - Every author check goes through `TRUSTED_LOGINS` or a permission lookup
   that fails closed; never a substring of a comment or issue body.
 - Every write the agent asks the machine account for goes through the

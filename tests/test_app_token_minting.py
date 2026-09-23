@@ -97,9 +97,12 @@ CONDITIONAL_MINT = {("claude.yml", "gate"), ("claude.yml", "land")}
 # The one workflow that keeps `|| github.token` (the marvin-less degradation).
 JOB_TOKEN_FALLBACK = {"claude.yml"}
 
-# Reusable workflow → the job that runs the agent (untrusted).
-AGENT_JOBS = {"claude.yml": "agent", "claude-review.yml": "review",
-              "claude-auto.yml": "fix", "claude-auto-review.yml": "fix"}
+# Reusable workflow → the jobs that run the agent (untrusted): one per
+# engine since 2026-09-22 (Claude Security findings 4628446 and 4629153 —
+# the codex job is the only one that names OPENAI_API_KEY; see
+# test_engine_job_isolation.py), the Claude job first.
+AGENT_JOBS = {"claude.yml": ["agent", "agent-codex"], "claude-review.yml": ["review", "review-codex"],
+              "claude-auto.yml": ["fix", "fix-codex"], "claude-auto-review.yml": ["fix", "fix-codex"]}
 REUSABLE = sorted(AGENT_JOBS)
 # The three that create runner-side commits (the base merge, the codex commit).
 COMMITTING = ["claude.yml", "claude-auto.yml", "claude-auto-review.yml"]
@@ -219,9 +222,10 @@ def test_loop_gate_has_no_presence_check(name):
 @pytest.mark.parametrize("name", REUSABLE)
 def test_agent_job_never_sees_the_app_secrets_or_a_minted_token(name):
     text = workflow(name)
-    agent = jobs(text)[AGENT_JOBS[name]]
-    for needle in ("MARVIN_APP", "steps.mint", PAT, "HAS_APP_SECRETS"):
-        assert not [line for line in code_lines(agent) if needle in line], needle
+    for job in AGENT_JOBS[name]:
+        agent = jobs(text)[job]
+        for needle in ("MARVIN_APP", "steps.mint", PAT, "HAS_APP_SECRETS"):
+            assert not [line for line in code_lines(agent) if needle in line], (job, needle)
     # And the app secrets are named by no job but the trusted two.
     trusted = {j for (n, j) in WRITE_SETS if n == name}
     for job, block in jobs(text).items():
@@ -241,12 +245,13 @@ def test_commit_identity_follows_the_gate_token(name):
     assert ("      git_user_email: ${{ steps.mint.outcome == 'success' && "
             "'330132053+meridian-marvin[bot]@users.noreply.github.com' || "
             "'i-am-marvin@users.noreply.github.com' }}\n") in gate
-    agent = jobs(text)[AGENT_JOBS[name]]
-    sync = [s for s in steps(agent) if "sync-branch@main" in s]
-    assert len(sync) == 1
-    assert "          user-name: ${{ needs.gate.outputs.git_user_name }}\n" in sync[0]
-    assert "          user-email: ${{ needs.gate.outputs.git_user_email }}\n" in sync[0]
-    prep = [s for s in steps(agent) if "\n        id: codexprep\n" in s]
+    claude_job, codex_job = (jobs(text)[j] for j in AGENT_JOBS[name])
+    for agent in (claude_job, codex_job):
+        sync = [s for s in steps(agent) if "sync-branch@main" in s]
+        assert len(sync) == 1
+        assert "          user-name: ${{ needs.gate.outputs.git_user_name }}\n" in sync[0]
+        assert "          user-email: ${{ needs.gate.outputs.git_user_email }}\n" in sync[0]
+    prep = [s for s in steps(codex_job) if "\n        id: codexprep\n" in s]
     assert len(prep) == 1
     assert "          GIT_USER_NAME: ${{ needs.gate.outputs.git_user_name }}\n" in prep[0]
     assert "          GIT_USER_EMAIL: ${{ needs.gate.outputs.git_user_email }}\n" in prep[0]

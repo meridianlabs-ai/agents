@@ -1,0 +1,110 @@
+# Hosted-runner smoke test for the codex path's runner-side search path
+# (Claude Security finding 4628448; design/codex-engine.md → Runner-side
+# search path). Not a caller stub and not an agent run: no secret, no model,
+# no codex-action. Two jobs on the stock `ubuntu-latest` image:
+#
+#   guard      runs tests/codex_path_smoke.sh — the reviewed composite bodies
+#              of THIS revision (lifted from the checkout, not `@main`, so a
+#              branch is tested as itself) with the real codex user, the real
+#              image PATH and real sudo: the pre-grant check passes on the
+#              stock PATH by protecting the image's world-writable hops,
+#              refuses a workspace venv and an outward workspace symlink, the
+#              grant runs, a "codex" plants sudo/bash/git/find/jq into the
+#              venv and cannot plant into the protected directories, and the
+#              reclaim, codex-usage and the guard complete without running
+#              any planted file. A last `shell: bash` step confirms the
+#              runner's interpreter for later steps was not the planted one
+#              (nothing put the venv on GITHUB_PATH).
+#   mechanism  the control: puts the workspace venv on GITHUB_PATH the way
+#              provision-fallback used to, plants a harmless `bash` there,
+#              and shows the runner choosing it as the interpreter of the
+#              next `shell: bash` step — the hole the guard's refusal closes
+#              — then runs the check against that PATH and requires the
+#              refusal.
+#
+# Runs on pushes that touch the composites or the harness, and by hand.
+
+name: codex path smoke
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/actions/assert-runner-only-path/**"
+      - ".github/actions/create-codex-user/**"
+      - ".github/actions/reclaim-codex-workspace/**"
+      - ".github/actions/codex-usage/**"
+      - ".github/actions/unresolved-merge-guard/**"
+      - "tests/codex_path_smoke.sh"
+      - ".github/workflows/codex-path-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run the smoke harness against this revision
+        run: bash tests/codex_path_smoke.sh
+      # The runner chose this step's interpreter from the job PATH, which
+      # never held the workspace venv: the planted bash did not run.
+      - name: "The interpreter of a later step is the system bash"
+        shell: bash
+        run: |
+          echo "interpreter: $(readlink -f "/proc/$$/exe")"
+          case "$(readlink -f "/proc/$$/exe")" in
+            "$GITHUB_WORKSPACE"/*) echo "::error::a later step ran under an interpreter inside the workspace"; exit 1 ;;
+          esac
+          if [ -e /tmp/codex-path-smoke.hijack.log ]; then cat /tmp/codex-path-smoke.hijack.log; echo "::error::a planted file ran"; exit 1; fi
+          echo "no planted file ran across steps."
+
+  mechanism:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Put the workspace venv on GITHUB_PATH and plant a bash there (the pre-fix shape)
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.venv/bin"
+          printf '#!/bin/bash\necho "HIJACKED interpreter: $0" >>"%s/interpreter.log"\nexec /usr/bin/bash "$@"\n' "$RUNNER_TEMP" >"$GITHUB_WORKSPACE/.venv/bin/bash"
+          chmod +x "$GITHUB_WORKSPACE/.venv/bin/bash"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >>"$GITHUB_PATH"
+      - name: "A later shell: bash step runs under the planted interpreter"
+        shell: bash
+        run: echo "this step's script ran; PATH starts with ${PATH%%:*}"
+      - name: Confirm the runner picked the planted bash, and that the check refuses this PATH
+        # `sh` was not planted, so this step's own interpreter is the system one.
+        shell: sh
+        run: |
+          set -eu
+          test -f "$RUNNER_TEMP/interpreter.log" || { echo "::error::the planted bash was NOT chosen — the mechanism this fix guards against did not reproduce; re-check actions/runner's ScriptHandler"; exit 1; }
+          cat "$RUNNER_TEMP/interpreter.log"
+          script=$(python3 - "$GITHUB_WORKSPACE/.github/actions/assert-runner-only-path/action.yml" <<'PY'
+          import sys
+          lines = open(sys.argv[1]).read().splitlines()
+          i = lines.index("      run: |")
+          body = []
+          for later in lines[i + 1:]:
+              if later.strip() == "":
+                  body.append("")
+              elif later.startswith("        "):
+                  body.append(later[8:])
+              else:
+                  break
+          print("\n".join(body))
+          PY
+          )
+          # No user to probe as, so no elevation: the path rules alone refuse.
+          if ASSERT_RUNNER_ONLY_PATH_ELEVATED=1 USER_NAME=nobody-here PROTECT=true SYSTEM_PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/bash -c "$script" >"$RUNNER_TEMP/refusal.log" 2>&1; then
+            cat "$RUNNER_TEMP/refusal.log"; echo "::error::the check passed a job PATH holding the workspace venv"; exit 1
+          fi
+          cat "$RUNNER_TEMP/refusal.log"
+          grep -q "lies inside the workspace" "$RUNNER_TEMP/refusal.log"
+          echo "the runner chose the planted interpreter, and the check refuses exactly this PATH."

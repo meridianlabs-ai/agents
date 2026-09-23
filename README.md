@@ -18,7 +18,7 @@ the auto-review and permission tradeoffs — see [design/architecture.md](design
 | Tools | file edits + verify loop (tests/lint) + `gh` | verify loop + `gh` + inline comments; **denies** edits/git writes |
 
 Both authenticate the same way (Workload Identity Federation) and default to
-the same model (Fable, falling back to the account default). The hard
+the same model (Opus, falling back to the account default). The hard
 privilege boundary between them is the GitHub token scope, not the prompt —
 neither job that runs an agent holds a write token: the reviewer physically
 cannot push regardless of what it's asked to do, and the dev agent's commits
@@ -139,12 +139,17 @@ The reviewer posts a top-level summary plus inline comments on a PR. It runs:
 
 - **On demand** when someone comments `@review` on a PR (or on an
   `External`-labeled issue).
-- **Never on its own.** Auto-review on PR open / reopen / ready-for-review is
-  off in every Meridian repo (decision: Ransom, 2026-09-16, after inspect_ai#501
-  was reviewed unasked; actions went first on 2026-09-14 after actions#110).
-  Reviews are driven from Orca workspaces instead. The example stub keeps the
-  `pull_request` trigger as a commented-out block for a repo that wants it
-  back.
+- **Never on its own.** Auto-review on PR open / reopen / ready-for-review was
+  switched off as policy on 2026-09-16 (decision: Ransom, after inspect_ai#501
+  was reviewed unasked; actions went first on 2026-09-14 after actions#110),
+  and the reusable workflow's `pull_request` / `pull_request_target` path was
+  removed on 2026-09-22: an `@review` comment is the only event it admits, and
+  a stub that still fires a PR event gets a red run naming the fix. Eight of
+  the ten deployed stubs were comment-only at the removal; inspect_harbor (a
+  `synchronize` trigger for its nightly registry PR, whose stub must post
+  `@review` instead) and inspect_vscode (its PR #200) still have to migrate.
+  Reviews are driven from Orca workspaces instead; a repo that wants a review
+  from CI posts a top-level `@review` comment as a write-access identity.
 
 It is read-only: it can run tests to verify a finding but cannot modify code or
 push. Its findings are confidence-filtered (few high-signal items over many
@@ -153,10 +158,13 @@ speculative ones).
 A collaborator's `@review` comment
 reviews one — treated as untrusted code: nothing from the fork's tree is
 executed on the runner itself, the reviewer installs and tests inside an
-OS-level sandbox, and the fork's `.claude/` / `.mcp.json` are deleted from the
-checkout first while its `CLAUDE.md` is renamed so it loads as untrusted text,
-not instructions (review those files from the diff). Findings still
-land on the PR. Codex-engine reviews are not sandboxed, so a fork PR labeled
+OS-level sandbox in a scratch copy of the checkout (the checkout itself is
+read-only to its commands, and Claude Code reads no settings or instruction
+files from it), and the fork's `.claude/` / `.mcp.json` are deleted from the
+checkout first while its `CLAUDE.md` / `AGENTS.md` are renamed so they load as
+untrusted text, not instructions (review those files from the diff). Findings
+still land on the PR — unless such a file has reappeared in the checkout
+after the run, in which case the review is withheld and a note says so. Codex-engine reviews are not sandboxed, so a fork PR labeled
 `engine:codex` is reviewed by Claude instead.
 
 ### The review → fix loop
@@ -187,11 +195,20 @@ runs to Codex"`). Codex v1 differences: review findings arrive as one
 summary comment (no inline comments; codex fix rounds do resolve the
 Claude reviewer's inline threads they report as addressed), and
 external proxy reviews always use Claude. Codex reviews run tests to
-verify findings like the Claude reviewer — via the repo's claude-setup
-action, or a fallback uv dev-install when the checkout has a
-pyproject.toml but no claude-setup (fork PR branches, and any Python
-caller repo that never added the action); non-Python repos degrade to
-static review.
+verify findings like the Claude reviewer. Codex runs provision the
+checkout differently from Claude runs: every codex run uses the shared uv
+dev-install recipe when the checkout has a `pyproject.toml`, executed as
+the unprivileged codex user, and never the repo's `claude-setup` action
+(which runs as the runner, ahead of the codex sandbox) — so a repo that
+pins a Python version or installs non-Python tooling in `claude-setup`
+sets the reusable workflows' `codex_provision` input in its stub instead —
+bash run as the codex user (`uv venv --python 3.11 && uv sync --dev`, or
+`corepack enable --install-directory ~/.local/bin && pnpm install
+--frozen-lockfile`; the example stubs show the shape). Without it a
+non-Python repo gets no provisioning on codex runs (codex may install what
+it needs inside its sandbox, which has network). Claude runs keep using
+`claude-setup`, with the uv dev-install as the fallback when the checkout
+lacks it.
 Details: [design/codex-engine.md](design/codex-engine.md).
 
 ## The inspect_ai fork
