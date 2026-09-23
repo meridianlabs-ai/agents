@@ -41,9 +41,16 @@ check re-executes itself once under sudo and probes directly; the tests set
 ASSERT_RUNNER_ONLY_PATH_ELEVATED so it stays this user and goes through the
 stub instead. On macOS the same
 directory carries a `cp` shim for GNU's `--remove-destination`. The job
-PATH under test ends in the stub directory and `/bin` (`tail`), not this
-process's whole PATH: the check now follows every symlink in every entry,
-and a host's own link farms are not what is under test.
+PATH under test ends in the stub directory and a fixture image's `/bin`
+(`tail`), and the clean-PATH case is the image's four system directories
+(`image_path`), never the host's real ones: the check lists every entry
+and follows every symlink it finds, and the hosted image's /usr/bin holds
+thousands of them (listing it took most of the suite's ~9 minutes there).
+The image is a small tree in the hosted image's shape — `bin -> usr/bin`,
+`sbin -> usr/sbin`, tools that are symlinks to the real binaries (followed
+into the real directories hop by hop, never listed), an /etc/alternatives
+chain two links share — and `check` fails a test whose check lists a
+directory outside the test's own. The real image is `codex_path_smoke.sh`'s.
 """
 
 import os
@@ -176,9 +183,11 @@ exec "${0##*/}" "$@"
 
 @pytest.fixture
 def world(tmp_path):
-    """A workspace with a planted `.venv/bin`, a stub "system" directory and
-    the two PATHs: the job PATH (planted first) and the system PATH the
-    steps pin to (the stub directory, then this process's PATH)."""
+    """A workspace with a planted `.venv/bin`, a stub "system" directory, a
+    fixture image tree and the PATHs: the job PATH (planted first), the
+    system PATH the steps pin to (the stub directory, then the real tools'
+    directories), and the image's system directories the check is handed
+    (`image_path`, and `tail` = the stub directory and the image's `/bin`)."""
     ws = tmp_path / "work" / "repo"
     ws.mkdir(parents=True)
     system = tmp_path / "system"
@@ -192,16 +201,44 @@ def world(tmp_path):
     # The system PATH the steps pin to: the stub directory, then the
     # directories the real tools live in — not this process's whole PATH,
     # whose extra entries (a macOS /System/Cryptexes chain passes through a
-    # world-writable directory) are not what is under test.
+    # world-writable directory) are not what is under test. The steps
+    # resolve their tools through it; no test hands it to the check.
     tool_dirs = []
+    tools = {}
     for tool in ("git", "jq", "find", "sort", "cmp", "diff", "cp", "mv", "rm", "mkdir", "cat", "grep", "tr",
                  "head", "cut", "mktemp", "sleep", "dirname", "basename", "id", "pkill", "chmod", "wc", "sed"):
         found = shutil.which(tool)
         assert found, tool
+        tools[tool] = found
         d = os.path.dirname(found)
         if d not in tool_dirs:
             tool_dirs.append(d)
     system_path = ":".join([str(system), *tool_dirs])
+    # The system directories as the check sees them: a small tree in the
+    # hosted image's shape (merged /usr: `bin -> usr/bin`, `sbin ->
+    # usr/sbin`; tools that are symlinks; an /etc/alternatives chain two
+    # links share), so the check never lists the host's real /bin or
+    # /usr/bin — thousands of entries on the hosted image, most of the
+    # suite's time before this tree. Two tools link to the real binaries,
+    # which the check follows into their real directories hop by hop
+    # without listing them; nothing resolves through the tree (every check
+    # walks it, so it stays small).
+    image = tmp_path / "image"
+    ubin = image / "usr" / "bin"
+    ubin.mkdir(parents=True)
+    (image / "usr" / "sbin").mkdir()
+    (image / "bin").symlink_to("usr/bin")
+    (image / "sbin").symlink_to("usr/sbin")
+    for tool in ("cat", "git"):
+        (ubin / tool).symlink_to(tools[tool])
+    (ubin / "vi.basic").write_text("#!/bin/sh\n")
+    (ubin / "vi.basic").chmod(0o755)
+    alternatives = image / "etc" / "alternatives"
+    alternatives.mkdir(parents=True)
+    (alternatives / "editor").symlink_to(ubin / "vi.basic")
+    for name in ("editor", "vi"):
+        (ubin / name).symlink_to(alternatives / "editor")
+    image_path = ":".join([str(system), *(f"{image}{d}" for d in SYSTEM_DIRS.split(":"))])
     planted = ws / ".venv" / "bin"
     planted.mkdir(parents=True)
     for name in PLANTED:
@@ -229,7 +266,7 @@ def world(tmp_path):
         "GIT_CONFIG_NOSYSTEM": "1",
     }
     return {"tmp": tmp_path, "ws": ws, "planted": planted, "system": system, "system_path": system_path,
-            "tail": f"{system}:/bin", "temp": temp, "hijack": hijack, "sudo_log": sudo_log,
+            "image": image, "image_path": image_path, "tail": f"{system}:{image}/bin", "temp": temp, "hijack": hijack, "sudo_log": sudo_log,
             "chown_log": chown_log, "env": env}
 
 
@@ -270,8 +307,18 @@ ASSERT_SCRIPT = composite_runs(ASSERT)[0]
 def check(w, job_path, user="nobody-here", protect="false", **more):
     """The check with the given job PATH; `user` defaults to a login that does
     not exist, so only the path rules apply; pass ME to probe writability
-    (answered by the stub sudo from mode bits and FAKE_CODEX_OWNED)."""
-    return run(ASSERT_SCRIPT, w, PATH=job_path, USER_NAME=user, PROTECT=protect, **more)
+    (answered by the stub sudo from mode bits and FAKE_CODEX_OWNED). The
+    check's directory listings (its candidate `find`) must stay inside the
+    test's directory: listing the host's real system directories is what
+    made this module slow on the hosted image."""
+    r = run(ASSERT_SCRIPT, w, PATH=job_path, USER_NAME=user, PROTECT=protect, **more)
+    root = os.path.realpath(w["tmp"])
+    log = w["sudo_log"].read_text().splitlines() if w["sudo_log"].exists() else []
+    for line in log:
+        listed = re.match(r"find (.+) -mindepth ", line)
+        if listed:
+            assert listed.group(1) == root or listed.group(1).startswith(root + "/"), line
+    return r
 
 
 def writable(*paths):
@@ -313,24 +360,28 @@ def test_refuses_relative_and_empty_entries(world):
     assert r.returncode == 1 and "'.' is a relative path" in r.stdout
     # An empty component means the current directory too: in the middle and
     # as a trailing colon.
-    r = check(w, f"{w['system_path']}::/usr/bin")
+    r = check(w, f"{w['image_path']}::{w['image']}/usr/bin")
     assert r.returncode == 1 and "is empty" in r.stdout
-    r = check(w, f"{w['system_path']}:")
+    r = check(w, f"{w['image_path']}:")
     assert r.returncode == 1 and "is empty" in r.stdout
 
 
 def test_a_clean_path_passes_and_the_system_directories_are_checked_too(world):
     w = world
-    r = check(w, w["system_path"])
+    r = check(w, w["image_path"])
     assert r.returncode == 0, r.stdout + r.stderr
     assert "none inside the workspace" in r.stdout and "writable" not in r.stdout
     # With the user present every entry and ancestor is probed as that user
-    # — the real tool directories included, symlinked tools and all.
-    r = check(w, w["system_path"], user=ME)
+    # — through the merged-/usr links, along the alternatives chain, and into
+    # the real tool directories the symlinked tools point at (hop by hop:
+    # `check` fails if one is listed).
+    r = check(w, w["image_path"], user=ME)
     assert r.returncode == 0, r.stdout + r.stderr
     assert f"or owned or writable by {ME}" in r.stdout
     probes = w["sudo_log"].read_text().splitlines()
-    for d in (os.path.dirname(shutil.which("cat")), "/"):
+    image = w["image"]
+    for d in (image / "usr" / "bin", image / "usr" / "sbin", image / "usr", image / "etc" / "alternatives", image,
+              os.path.dirname(shutil.which("cat")), "/"):
         assert f"-u {ME} test -w {d}" in probes
 
 
@@ -467,10 +518,12 @@ def test_a_sticky_directory_accepted_for_one_child_vouches_for_no_other(world):
 def test_symlink_hops_are_checked_where_they_live_not_only_where_they_point(world):
     # Review round 1 of #131: resolving the entry first and checking the
     # target let `ws/tools -> /usr/bin` through; after the grant codex
-    # replaces `tools` with a directory holding `bash`.
+    # replaces `tools` with a directory holding `bash`. The image's /usr/bin
+    # stands in for the host's.
     w = world
+    usr_bin = w["image"] / "usr" / "bin"
     out = w["ws"] / "tools"
-    out.symlink_to("/usr/bin")
+    out.symlink_to(usr_bin)
     r = check(w, f"{out}:{w['tail']}")
     assert r.returncode == 1, r.stdout
     assert f"'{out}' lies inside the workspace" in r.stdout and f"(at {w['ws']})" in r.stdout
@@ -479,7 +532,7 @@ def test_symlink_hops_are_checked_where_they_live_not_only_where_they_point(worl
     parent = w["tmp"] / "codex-owned"
     parent.mkdir()
     link = parent / "tools"
-    link.symlink_to("/usr/bin")
+    link.symlink_to(usr_bin)
     writable(parent)
     r = check(w, f"{link}:{w['tail']}", user=ME)
     assert r.returncode == 1 and f"'{link}' is writable by the {ME} user (at {parent})" in r.stdout

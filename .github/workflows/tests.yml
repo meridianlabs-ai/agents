@@ -3,10 +3,11 @@
 # `run:` bodies out of the reusable workflows, the composites, the stubs and
 # the examples, so almost any change can break it.
 #
-# A full run takes about ten minutes on the hosted image, most of it in
-# test_codex_path.py, whose PATH checks walk every symlink in the image's
-# real /bin (the whole suite takes about a minute in a slim Ubuntu
-# container); the timeout leaves room for that.
+# A full run takes about two minutes on the hosted image (pytest step 118 s
+# on PR #160's run, 2026-09-23). It took ~9.5 minutes, ~450 s of it in
+# test_codex_path.py, while that module's PATH checks listed the image's
+# real /bin, thousands of symlinks; they now check a small fixture tree.
+# The timeout is well above the run time and still stops a hung test early.
 #
 # No secrets, no agent: a read-only job token, no `secrets.` reference, never
 # `pull_request_target` (a fork PR runs its own tree with the fork's
@@ -35,7 +36,7 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
