@@ -21,8 +21,9 @@ take effect on every repo's next run.
   here, so the @auto stub omits the CI-fix half.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
-  `reset-origin-url`, `create-codex-user`, `reclaim-codex-workspace`,
-  `unresolved-merge-guard`, `push-base-merge`, `provision-fallback`,
+  `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
+  `reclaim-codex-workspace`, `import-codex-final`,
+  `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
@@ -45,6 +46,9 @@ take effect on every repo's next run.
 
 ## Conventions
 
+- **All changes land via PR; main rejects direct pushes** (repo ruleset;
+  policy: Ransom, 2026-08-26). The ruleset requires no GitHub approvals,
+  but the agent review requirement below still applies.
 - **Make changes from a throwaway worktree, not the primary clone**
   (Ransom, 2026-08-27): Ransom works in his checkout (IDE open,
   in-progress state), so never branch-switch it — `git worktree add
@@ -72,13 +76,11 @@ take effect on every repo's next run.
 - **Do NOT label PRs `auto`, and do not post `@auto`** (policy: Ransom,
   2026-09-11 — reverses the 2026-08-27 default of labeling every PR
   `auto` so the review-fix loop drove rounds to convergence). Agent work
-  and review are driven from Orca workspaces now (orca-pr-sync mirrors
-  PRs into workspaces; a local review skill runs the review), so the
-  GitHub-hosted autonomous loop is not engaged on new PRs. The `@auto`
-  workflows themselves stay in place for now — this is a policy change,
-  not a removal. Still request the CI review with a top-level `@review`
-  comment (mandatory for workflow-editing PRs; see CLAUDE.md), then
-  address its findings yourself on the branch. If a PR does carry the
+  and review happen outside the GitHub-hosted autonomous loop, which is
+  not engaged on new PRs. The `@auto` workflows themselves stay in place
+  for now — this is a policy change, not a removal. Every PR requires
+  agent review before merge; include a short review summary in its PR
+  description and address findings on the branch. If a PR does carry the
   label (a Marvin-opened PR from an `auto` issue inherits it), don't
   race the loop — it is serialized per PR, and a session push mid-round
   invalidates its state.
@@ -129,14 +131,62 @@ take effect on every repo's next run.
   the Surface steps set their
   error on `!= success`, not `= failure`, so a reclaim cancelled mid-run
   skips their git calls too) and put nothing that runs git between codex
-  and it. The landing steps additionally pin
+  and it. Right after it, `import-codex-final` copies codex's final
+  message out of the codex-owned `$RUNNER_TEMP/codex` (opened once with
+  `O_NOFOLLOW`, refused unless a regular codex-owned file) to
+  `$RUNNER_TEMP/codex-final.md`; every later reader — the commit subject,
+  `resolve-reported-threads`, the summary body — takes that copy, and no
+  runner-side step opens a path under the codex-owned dir (finding
+  4628447: a planted symlink would have had the runner publish its
+  target). The landing steps additionally pin
   `GIT_DIR`/`GIT_COMMON_DIR`/`GIT_WORK_TREE`, `GIT_CONFIG_GLOBAL=/dev/null`
   and the same two `core.*` keys by env as belt and braces; the guard pins
   the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
   (`ls-files` runs no hooks); and every post-codex `git status` passes
-  `--ignore-submodules=dirty`; keep all of that when touching them. See
-  design/architecture.md → No persisted git credentials and
-  design/codex-engine.md → Hook-safe landing.
+  `--ignore-submodules=dirty`; keep all of that when touching them. **The
+  job PATH is part of the same boundary** (finding 4628448, 2026-09-22):
+  the runner prepends every `GITHUB_PATH` entry to every later step's PATH
+  and resolves each step's shell interpreter through it, so a directory
+  the codex user can write there — a workspace venv, after the grant —
+  would hand codex the `sudo`, `bash` or `git` the first post-codex step
+  runs as `runner`. Never put a path under `$GITHUB_WORKSPACE` on
+  `GITHUB_PATH` in a job that runs codex (the codex jobs provision with
+  `provision-fallback` `user: codex`, whose recipe runs under `env -i` and
+  cannot reach `GITHUB_PATH`; the codex prompts get the tools by absolute
+  path from the composite's `bin` output); `create-codex-user` walks every
+  hop of every PATH entry (symlink targets too) before the grant, refuses a
+  workspace hop, makes a codex-writable hop outside the workspace
+  runner-only (the image ships `/opt` and `/usr/local/bin` mode 777) and
+  refuses to start codex if one stays writable; its `reset-home` mode and
+  the reclaim repeat the check without the repair
+  (`assert-runner-only-path`); and every post-codex composite — and the
+  `reset-home` step, which runs after provisioning as codex — pins `PATH`
+  to the root-owned system directories (`system-path`, no `/usr/local`)
+  before its first command; a new post-codex step should too.
+  `tests/codex_path_smoke.sh` runs all of it on a hosted runner. See
+  design/architecture.md → No persisted git credentials,
+  design/codex-engine.md → Hook-safe landing and → Runner-side search
+  path.
+- **One untrusted job per engine** (Claude Security findings 4628446 and
+  4629153, 2026-09-22): each reusable workflow has a Claude job (`agent`,
+  `review`, `fix`) and a codex job (`agent-codex`, `review-codex`,
+  `fix-codex`), the gate's `engine` output selecting one at the job level,
+  and the land job `needs` both. `OPENAI_API_KEY` is referenced in the codex
+  job's codex-action step and nowhere else — never add a reference to a
+  job that runs the Claude agent: a referenced secret reaches the runner
+  whatever the step's `if:` says. In a codex job nothing from the checkout
+  runs as the runner: no `uses: ./...`, and provisioning is
+  `provision-fallback` with `user: codex` (plus the caller's
+  `codex_provision` as `recipe`), placed after `Create codex user`, and
+  followed by `Reset codex home` (`create-codex-user` with `mode:
+  reset-home`: codex processes killed, `~codex/.codex` re-created) before
+  the codex-action step. Once the codex user exists the runner writes
+  nothing into the workspace until the reclaim: prompt files go to
+  `$RUNNER_TEMP`, and `.git/info/exclude` is appended by the prep step
+  before the user is created. A step that must exist on both engines
+  is copied into both jobs (the checkout, assert, base and sync steps
+  already are); the composers and Surface steps are per-engine.
+  `tests/test_engine_job_isolation.py` enforces all of this.
 - **The WIF IDs in the workflows are identifiers, not secrets** — don't treat
   them as sensitive, and don't add API-key secrets; auth is Workload Identity
   Federation.

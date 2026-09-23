@@ -21,15 +21,16 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude.yml"
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_manifest.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import WORKFLOW_FILES_RULE, run_emit_landing, sh, git, step_block  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, run_emit_landing, sh, git, step_block, job_block  # noqa: E402
 
 
-def composer_script() -> str:
-    """The step's bash, lifted from the workflow (text extraction: PyYAML is
-    not a test dependency). The block scalar under `run: |` is every
-    following line indented by at least its 10 spaces, up to the first that
-    is not."""
-    lines = WORKFLOW.read_text().splitlines()
+def composer_script(engine: str = "claude") -> str:
+    """The step's bash, lifted from the engine's job of the workflow (text
+    extraction: PyYAML is not a test dependency). The block scalar under
+    `run: |` is every following line indented by at least its 10 spaces, up
+    to the first that is not. Each engine has its own job and so its own
+    composer since 2026-09-22: `agent` (Claude) and `agent-codex`."""
+    lines = job_block(WORKFLOW.read_text(), "agent-codex" if engine == "codex" else "agent").splitlines()
     start = lines.index("        id: landing")
     run_at = next(i for i in range(start, len(lines)) if lines[i] == "        run: |")
     body = []
@@ -123,7 +124,7 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
         "GIT_DIR": str(r["work"] / ".git"), "GIT_COMMON_DIR": str(r["work"] / ".git"),
         "GIT_WORK_TREE": str(r["work"]),
     }
-    res = sh("bash", "-c", composer_script(), cwd=r["work"], check=False, env=env)
+    res = sh("bash", "-c", composer_script(engine), cwd=r["work"], check=False, env=env)
     assert res.returncode == 0, res.stderr
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
     return json.loads(extra.read_text()), res, landing, outputs
@@ -198,6 +199,41 @@ def test_auto_kickoff_opens_pr_with_handback_and_validates(repo):
     assert manifest["has_bundle"] is True and manifest["handback"] is True and manifest["pr"]["labels"] == ["auto"]
     v = validate(landing, "--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-")
     assert v.returncode == 0, v.stdout
+
+
+def test_pr_labels_the_gate_did_not_read_are_refused_by_the_land_job(repo):
+    # Finding 4628441: the composer copies the gate's read into `pr.labels`,
+    # but it runs in the agent job after the agent, and emit-landing writes
+    # manifest.json there too. The land job passes the gate's read as the
+    # validator's allow-list, so the manifest the composer wrote passes and
+    # one grown afterwards — `auto` to arm the loop, an engine switch — is
+    # refused whole, before anything is pushed, labelled or handed back.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    gate_read = '["engine:codex"]'
+    m, _, _, out = compose(repo, is_pr=False, trigger="@claude", auto="false", pr_labels=gate_read)
+    assert m["pr"]["labels"] == ["engine:codex"] and "handback" not in m
+    extra = repo["tmp"] / "landing-extra.json"
+    res, landing, _ = run_emit_landing(repo["tmp"], cwd=repo["work"], read_only=False, start_sha=repo["start"],
+                                       extra=extra, branch=out["branch"], pr_number="", issue_number="12")
+    assert res.returncode == 0, res.stderr
+    pin = ("--event-pr-number", "", "--event-issue-number", "12", "--branch-prefix", "claude/issue-12-",
+           "--allowed-pr-labels", gate_read)
+    assert validate(landing, *pin).returncode == 0
+    manifest = json.loads((landing / "manifest.json").read_text())
+    for grown in (["engine:codex", "auto"], ["auto"], ["engine:other"]):
+        manifest["pr"]["labels"] = grown
+        (landing / "manifest.json").write_text(json.dumps(manifest))
+        v = validate(landing, *pin)
+        assert v.returncode == 1 and "is not in the allowed pull-request labels (engine:codex)" in v.stdout, v.stdout
+    # A gate read that failed (an empty allow-list) lands the composer's
+    # empty label list and nothing else.
+    manifest["pr"]["labels"] = []
+    (landing / "manifest.json").write_text(json.dumps(manifest))
+    assert validate(landing, *pin[:-1], "").returncode == 0
+    manifest["pr"]["labels"] = ["auto"]
+    (landing / "manifest.json").write_text(json.dumps(manifest))
+    assert validate(landing, *pin[:-1], "").returncode == 1
 
 
 def test_claude_trigger_on_an_auto_labelled_issue_owes_the_handback(repo):

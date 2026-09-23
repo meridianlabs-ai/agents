@@ -8,31 +8,100 @@ description: >-
   and claude-auto-review.yml, which keep their own `if:` (the hashFiles
   guards and each workflow's trigger gate), `timeout-minutes` and
   `continue-on-error` — only the recipe lives here, so a tweak to the uv
-  version, the retry or the extras/group detection is made once. Referenced
-  fully-qualified (meridianlabs-ai/agents/.github/actions/provision-fallback@main);
-  NO post step (local composite actions with post steps break teardown on
-  the fork).
+  version, the retry or the extras/group detection is made once. The
+  recipe itself is `provision.sh` next to this file (so the one step can
+  run it as another user; the script is the same bash the step used to
+  inline). Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/provision-fallback@main); NO post
+  step (local composite actions with post steps break teardown on the
+  fork).
 
-  Who it serves: PR heads on the inspect_ai fork, whose branches are cut
-  from pristine main and carry no meridian files, and Python caller repos
-  that never added the action. NEVER a cross-repository fork head (issue
-  #59): `uv pip install -e` runs the checkout's build backend as `runner`
-  with sudo, unrestricted egress and the job token present — every caller
-  excludes those before this step (the reviewer's fork_head gate, the
-  CI-fix stub's `head_repository.full_name == github.repository` filter,
-  the review-fix gate's `isCrossRepository` skip).
+  Who it serves: on the Claude engine, PR heads on the inspect_ai fork,
+  whose branches are cut from pristine main and carry no meridian files,
+  and Python caller repos that never added the action; on the codex
+  engine, EVERY provisioned checkout — the codex jobs never run the
+  caller's `claude-setup` (below). NEVER a cross-repository fork head
+  (issue #59): `uv pip install -e` runs the checkout's build backend, as
+  `runner` with sudo, unrestricted egress and the job token present on the
+  Claude path — every caller excludes those before this step (the
+  reviewer's fork_head gate, the CI-fix stub's `head_repository.full_name
+  == github.repository` filter, the review-fix gate's `isCrossRepository`
+  skip).
+
+  The `user` input (Claude Security findings 4628446 and 4629153, 2026-09-22):
+  the four codex jobs pass `user: codex` and run this step AFTER the
+  `create-codex-user` composite, so the recipe — the uv bootstrap into
+  that user's home, the venv, the checkout's build backend and the cache
+  warm — executes as the unprivileged `codex` user (`sudo -u codex -H`,
+  sudo's reset environment, the workspace group grant for the writes),
+  never as the runner. A same-repo head the pipeline itself authored (a
+  `claude/issue-N-*` branch an earlier agent run produced from an
+  outsider's issue text) can carry a hostile `pyproject.toml` build hook
+  or a `claude-setup` action; on the codex path that code now runs with
+  exactly what codex itself has — the codex uid, no sudo, no GitHub
+  token, no OIDC request token, and no way to read the runner's processes
+  — instead of as `runner` ahead of the codex-action step that holds
+  `OPENAI_API_KEY`. The same reasoning is why those jobs use this recipe
+  even where the caller defines `claude-setup`: a composite action can
+  only run as the runner. The Claude jobs keep the runner-side recipe (no
+  `user`): the Claude agent itself runs unsandboxed as the runner on every
+  same-repo head and executes the tree's code when it runs the tests, so
+  pre-agent provisioning gains hostile code nothing there — and those jobs
+  name no OPENAI_API_KEY any more (design/codex-engine.md → Auth). The
+  script is copied into `$RUNNER_TEMP` (755 runner:runner, readable by the
+  codex user) before the `sudo`, so it never depends on the permissions
+  of the action's own checkout directory.
+
+  The `recipe` input (review round 1 of the same fix): a caller's own bash,
+  run in place of the default venv + dev-install after the uv bootstrap —
+  the reusable workflows' `codex_provision` input, which the caller's stub
+  (a trusted workflow file, resolved from its default branch) supplies as
+  the codex-run counterpart of its `claude-setup` action, since a composite
+  action can only run as the runner and is never run on the codex path. It
+  runs with the same environment as the default recipe (as `user` when
+  set: no sudo, an explicit minimal environment — HOME=/home/<user>, the
+  system PATH plus `~/.local/bin` for uv, no runner or XDG variables — cwd
+  the checkout, network), so it can pin a Python (`uv venv --python
+  3.11`), sync a lockfile (`uv sync --dev`), or install Node tooling
+  (`corepack enable --install-directory ~/.local/bin && pnpm install
+  --frozen-lockfile`). It runs under `bash --noprofile --norc -eo
+  pipefail`, the options a `shell: bash` step gets, so any failing command
+  fails the provisioning step (a caller handles an expected failure with
+  `|| true`). The composite writes it to `$RUNNER_TEMP` (readable by the
+  user) and passes the path as the script's one argument. Empty (the
+  default) keeps the generic recipe. With a recipe the step is not gated on
+  `pyproject.toml`: a Node repository's recipe runs too (the workflows'
+  `if:`), and only the generic recipe needs the Python project.
+
+  The `bin` output is the directories the codex compose steps look the
+  tools up in, colon-separated and absolute — `<workspace>/.venv/bin`,
+  `<workspace>/node_modules/.bin` and, under `user`, `/home/<user>/.local/bin`
+  (where a recipe's `corepack enable --install-directory` or `uv tool
+  install` puts binaries): codex starts under `sudo -u codex` with a reset
+  PATH, so its prompts name every tool by absolute path, and with the recipe
+  running as codex there is no runner PATH to discover them from.
 
   The recipe (decision: Ransom, 2026-09-01), mirroring the fork's
   claude-setup: the uv installer curl is retried — its tarball download
-  flaked repeatedly on 2026-08-12; uv's own HTTP retries internally. Both
-  bin dirs go on GITHUB_PATH so pytest/ruff/mypy resolve for the Claude
-  engine and for the runner-side steps. NOT for codex's own tool calls:
-  under the unprivileged-user strategy codex-action launches codex via
+  flaked repeatedly on 2026-08-12; uv's own HTTP retries internally. With
+  `add-to-path: true` (the default) and no `user`, both bin dirs go on
+  GITHUB_PATH so pytest/ruff/mypy resolve for the Claude engine, which runs
+  as the runner with the job PATH. Under `user` NOTHING goes on
+  GITHUB_PATH, whatever `add-to-path` says: the recipe runs under `env -i`,
+  so the file is not even reachable (Claude Security finding 4628448;
+  design/codex-engine.md → Runner-side search path: the runner prepends
+  every GITHUB_PATH entry to every later step's PATH and resolves each
+  step's shell interpreter through it, and the checkout — `.venv/bin`
+  included — is codex-writable after `create-codex-user`'s grant, so a
+  venv on the job PATH would let codex plant the `sudo`, `bash` or `git`
+  the first runner-side step after it executes; `create-codex-user`
+  refuses to start codex behind a workspace or codex-writable job PATH
+  entry, and the reclaim re-checks). NOT for codex's own tool calls either
+  way: under the unprivileged-user strategy codex-action launches codex via
   `sudo -u codex` (no -E), and sudo's env_reset/secure_path replaces PATH
   before codex starts (the drop-sudo strategy would forward the runner
   PATH; this repo does not use it), so the codex prompts name these tools
-  by absolute path, discovered by the compose steps (which run as the
-  runner with this PATH in effect). Fatal on
+  by absolute path, taken from the `bin` output by the compose steps. Fatal on
   failure, exactly like claude-setup: a repo whose pyproject exists but
   cannot dev-install is a loud signal, not a silent static-only run — the
   callers' Surface steps report a failed outcome. No plain `-e .` fallback:
@@ -65,83 +134,91 @@ description: >-
   After the install it warms network-fetched caches the tests need
   (2026-09-09): tiktoken's BPE files into its default /tmp cache, readable
   by the codex user (and the dir left sticky-writable so codex can cache
-  encodings outside the list). Evidence-driven — add an entry when a run
+  encodings outside the list; run as codex, the files are codex's own).
+  Evidence-driven — add an entry when a run
   reports a blocked download; a failed or stalled warm (bounded by
   `timeout`) only costs a slower first test.
+
+inputs:
+  add-to-path:
+    description: >-
+      "true" (default) puts `$HOME/.local/bin` (uv) and the checkout's
+      `.venv/bin` on GITHUB_PATH for the rest of the job — the Claude
+      engine's bare `pytest`/`ruff`/`mypy` — when the recipe runs as the
+      runner. "false" adds nothing to the job PATH. Ignored under `user`,
+      where nothing is ever added (see the description): the codex jobs
+      provision as the codex user, after its grant, and their compose steps
+      find the tools through the `bin` output.
+    required: false
+    default: "true"
+  recipe:
+    description: >-
+      A caller's own provisioning bash (the reusable workflows'
+      `codex_provision` input), run after the uv bootstrap in place of the
+      generic venv + dev-install; empty keeps the generic recipe. See the
+      description.
+    required: false
+    default: ""
+  user:
+    description: >-
+      Run the recipe as this unprivileged user (`sudo -u <user> -H`) instead
+      of the runner. The codex jobs pass `codex`, after the
+      `create-codex-user` composite has created the user and group-granted
+      the workspace; empty (the default) runs it as the runner, as the
+      Claude jobs do.
+    required: false
+    default: ""
+
+outputs:
+  bin:
+    description: >-
+      Where prompts that must name the tools by absolute path look them up:
+      colon-separated absolute directories — the venv's bin, node_modules'
+      bin and, under `user`, that user's `~/.local/bin`.
+    value: ${{ github.workspace }}/.venv/bin:${{ github.workspace }}/node_modules/.bin${{ inputs.user != '' && format(':/home/{0}/.local/bin', inputs.user) || '' }}
 
 runs:
   using: composite
   steps:
     - shell: bash
+      env:
+        AS_USER: ${{ inputs.user }}
+        ADD_TO_PATH: ${{ inputs.add-to-path }}
+        RECIPE: ${{ github.action_path }}/provision.sh
+        CALLER_RECIPE: ${{ inputs.recipe }}
       run: |
         set -euo pipefail
-        for attempt in 1 2 3; do
-          curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh && break
-          if [ "$attempt" = 3 ]; then
-            echo "uv install failed after 3 attempts" >&2; exit 1
-          fi
-          echo "uv install attempt $attempt failed; retrying..." >&2
-          sleep $((attempt * 10))
-        done
-        export PATH="$HOME/.local/bin:$PATH"
-        printf '%s\n' .venv/ '*.egg-info/' >>.git/info/exclude
-        uv venv
-        if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
-          uv pip install -e ".[dev]" --group dev
-        else
-          uv pip install -e ".[dev]"
+        # The caller's recipe, if any, as a file under RUNNER_TEMP (readable
+        # by the user); passed as the script's one argument, never as
+        # environment (sudo resets it) and never as shell text.
+        args=()
+        if [ -n "${CALLER_RECIPE:-}" ]; then
+          printf '%s\n' "$CALLER_RECIPE" >"$RUNNER_TEMP/provision-recipe.sh"
+          chmod 644 "$RUNNER_TEMP/provision-recipe.sh"
+          bash -n "$RUNNER_TEMP/provision-recipe.sh"
+          args=("$RUNNER_TEMP/provision-recipe.sh")
         fi
-        echo "$HOME/.local/bin" >>"$GITHUB_PATH"
-        echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
-        # Warm network-fetched caches the agents' tests need, from the runner
-        # (which has network) into a place the agent reads from. Evidence-
-        # driven list — extend it when a run reports another blocked
-        # download. tiktoken: inspect_ai's token-counting tests fetch BPE
-        # files on first use and the codex reviewer on inspect_ai#428
-        # (2026-09-09) stopped "on an unavailable tokenizer download"; the
-        # cache dir is tiktoken's default (TIKTOKEN_CACHE_DIR unset in the
-        # agents' env → tempfile.gettempdir()/data-gym-cache, i.e. /tmp on
-        # the runner and under codex, which codex-action launches via `sudo
-        # -u codex` — sudo's env_reset drops TMPDIR, which is not in the
-        # default env_keep — and whose bubblewrap sandbox binds the host
-        # /tmp). The Python resolves the dir exactly as tiktoken does —
-        # TIKTOKEN_CACHE_DIR, then DATA_GYM_CACHE_DIR, each honored when SET
-        # even if empty (an empty value means tiktoken caches nothing, so
-        # there is nothing to warm), then the tempdir default — and prints
-        # it, so a runner whose TMPDIR diverges from codex's /tmp is visible
-        # in the log rather than a silent no-op; it then makes the files
-        # world-readable (the codex user reads what the runner wrote) and the
-        # dir sticky-writable like /tmp itself, so codex can still cache an
-        # encoding outside this list once it has egress (tiktoken hash-checks
-        # known encodings on read, so a shared cache is not a poisoning
-        # vector). Best-effort and bounded: tiktoken downloads with no
-        # request timeout, so without the `timeout` a stalled blob host would
-        # hold the step to the caller's timeout-minutes and FAIL
-        # provisioning; with it, a stall (rc 124) lands in the warning branch
-        # like any other failure — a failed warm is a slower first test, never
-        # a failed provisioning.
-        if .venv/bin/python -c 'import tiktoken' 2>/dev/null; then
-          if ! timeout 120 .venv/bin/python - <<'PY'
-        import os, tempfile
-        from pathlib import Path
-        import tiktoken
-        cache_dir = os.environ.get(
-            "TIKTOKEN_CACHE_DIR",
-            os.environ.get(
-                "DATA_GYM_CACHE_DIR", os.path.join(tempfile.gettempdir(), "data-gym-cache")
-            ),
-        )
-        if cache_dir == "":
-            print("tiktoken caching disabled by env; nothing to warm")
-            raise SystemExit(0)
-        names = ("cl100k_base", "o200k_base")
-        for name in names:
-            tiktoken.get_encoding(name)
-        cache = Path(cache_dir)
-        for f in cache.iterdir():
-            f.chmod(0o644)
-        cache.chmod(0o1777)
-        print(f"warmed tiktoken encodings into {cache}: {' '.join(names)}")
-        PY
-          then echo "::warning::tiktoken cache warm failed or timed out (tests needing it will try to download at run time)"; fi
+        if [ -z "${AS_USER:-}" ]; then
+          # As the runner: the job PATH only when asked (ADD_TO_PATH reaches
+          # the script through this step's environment).
+          bash "$RECIPE" ${args[@]+"${args[@]}"}
+        else
+          # A copy under RUNNER_TEMP (755 runner:runner on the hosted image,
+          # so readable by the user) rather than the action's own path, and
+          # an EXPLICIT minimal environment (`env -i`): sudo's env_reset
+          # alone is not enough — the hosted image's sudoers keeps the XDG_*
+          # variables, and the first hosted run of the canary had the uv
+          # installer, running as codex, try to write its receipt to the
+          # runner's `$XDG_CONFIG_HOME/uv` (EACCES, three times, provisioning
+          # failed). HOME, USER and LOGNAME are the user's; PATH is the
+          # image's system path (the recipe prepends ~/.local/bin itself);
+          # no GITHUB_*, no runner PATH, no XDG_* reaches the recipe. sudo
+          # keeps the working directory, so the venv lands in the checkout
+          # as in the runner case.
+          install -m 644 "$RECIPE" "$RUNNER_TEMP/provision-fallback.sh"
+          echo "provisioning as $AS_USER"
+          sudo -u "$AS_USER" -H -- env -i \
+            HOME="/home/$AS_USER" USER="$AS_USER" LOGNAME="$AS_USER" LANG=C.UTF-8 \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            bash "$RUNNER_TEMP/provision-fallback.sh" ${args[@]+"${args[@]}"}
         fi

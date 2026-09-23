@@ -1,0 +1,13 @@
+# A hostile checkout for the hosted provisioning-boundary harness
+# (.github/workflows/engine-isolation-canary.yml, job `provisioning-boundary`;
+# Claude Security finding 4628446, review round 1). Its build backend is
+# setup.py, which runs whatever the installing user can do; the harness
+# dev-installs it exactly as the codex jobs provision a checkout and then
+# checks what that code could and could not reach.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hostile-checkout"
+version = "0"
