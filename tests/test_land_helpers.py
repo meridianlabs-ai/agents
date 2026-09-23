@@ -1043,6 +1043,70 @@ def test_post_review_comment_file_retry_policy(tmp_path, scenario, rc, attempts)
     assert calls[0] == f"api repos/o/r/pulls/5/comments -F body=@{body} -f commit_id={'c' * 40} -f path=src/a b.py -F line=7 -f side=LEFT --silent"
 
 
+# --- the plan step's no-change hand-back rule (Claude Security 4628734) ------
+
+
+def run_plan(tmp_path, manifest: dict, *, allow="true"):
+    landing = tmp_path / "landing"
+    landing.mkdir(exist_ok=True)
+    (landing / "manifest.json").write_text(json.dumps(manifest))
+    out = tmp_path / "plan-out"
+    out.write_text("")
+    env = {"DIR": str(landing), "GITHUB_OUTPUT": str(out), "ALLOW_NO_CHANGE_HANDBACK": allow}
+    r = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step_script("plan"), check=False, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r, dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+
+
+PLAN_BASE = {"branch": "claude/issue-9-x", "start_sha": "a" * 40, "head_sha": "a" * 40,
+             "has_bundle": False, "pr_number": 42, "handback": True}
+
+
+@pytest.mark.parametrize("allow", ["false", "", "skipped", "FALSE"])
+def test_plan_drops_a_bundle_less_handback_the_caller_did_not_allow(tmp_path, allow):
+    # The loops pass the agent step's success; anything but the literal
+    # "true" withholds. The rest of the plan is untouched, and the report
+    # step learns of the drop.
+    r, o = run_plan(tmp_path, PLAN_BASE, allow=allow)
+    assert o["handback"] == "false" and o["handback_dropped"] == "true", allow
+    assert o["has_bundle"] == "false" and o["pr_number"] == "42" and o["branch"] == "claude/issue-9-x"
+    assert "::warning::land: the manifest asks for a re-review but carries no bundle" in r.stdout
+
+
+def test_plan_keeps_a_bundle_less_handback_by_default_and_when_the_agent_step_succeeded(tmp_path):
+    for allow in ("true",):
+        _, o = run_plan(tmp_path, PLAN_BASE, allow=allow)
+        assert o["handback"] == "true" and o["handback_dropped"] == "false"
+    # A manifest without a hand-back has nothing to drop, whatever the input.
+    _, o = run_plan(tmp_path, {**PLAN_BASE, "handback": False}, allow="false")
+    assert o["handback"] == "false" and o["handback_dropped"] == "false"
+    _, o = run_plan(tmp_path, {k: v for k, v in PLAN_BASE.items() if k != "handback"}, allow="false")
+    assert o["handback"] == "false" and o["handback_dropped"] == "false"
+
+
+def test_plan_never_touches_a_bundled_handback(tmp_path):
+    # The push is what re-runs CI; a landed commit owes its hand-back
+    # whatever the agent step's outcome (a Claude step that committed and
+    # then failed).
+    _, o = run_plan(tmp_path, {**PLAN_BASE, "has_bundle": True, "head_sha": "b" * 40}, allow="false")
+    assert o["handback"] == "true" and o["handback_dropped"] == "false"
+
+
+def test_the_land_input_defaults_open_and_the_drop_reaches_the_hand_back_step_and_the_report():
+    text = LAND.read_text()
+    inp = text[text.index("  allow-no-change-handback:\n"):text.index("\noutputs:\n")]
+    assert 'default: "true"' in inp
+    plan = step_block(text, "plan", indent=4)
+    assert "ALLOW_NO_CHANGE_HANDBACK: ${{ inputs.allow-no-change-handback }}" in plan
+    handback = step_block(text, "handback", indent=4)
+    assert handback.splitlines()[1].strip() == "if: steps.plan.outputs.handback == 'true'"
+    report = step_block(text, "report", indent=4)
+    assert "HANDBACK_DROPPED: ${{ steps.plan.outputs.handback_dropped }}" in report
+    assert "was not posted: nothing landed and the agent step did not succeed" in report
+    # Our own text on the PR, so no live trigger token in it.
+    assert "@review" not in report[report.index("HANDBACK_DROPPED:-"):]
+
+
 def test_land_outputs_what_the_reviewer_landed():
     # claude-review.yml's landed-review check reads these instead of counting
     # the agent's comments (it posts none): the verdict comment is the review

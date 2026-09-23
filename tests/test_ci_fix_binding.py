@@ -35,9 +35,10 @@ head branch — from fixtures, one case per rule:
 The fix job has no launch signal at all: the Claude action's own
 `execution_file` output is published by its error handler from whatever
 file sits at the default path (which the PR's provisioning step can
-pre-create), so a failed Claude step lands nothing and is refunded on the
-step's outcome alone — checked structurally here, behaviourally in
-test_ci_fix_composer.py.
+pre-create), so a failed Claude step lands nothing on the step's outcome
+alone — checked structurally here, behaviourally in test_ci_fix_composer.py.
+Its attempt is kept: the refund fires only for a step the runner never
+entered (test_ci_fix_gate.py pins that condition; Claude Security 4628735).
 
 Every fixture is synthetic: no case here reproduces GitHub's event
 generation, the contents or order of a real completed-event association
@@ -624,7 +625,10 @@ def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_f
     PR's provisioning step can pre-create — so no "did the agent launch"
     signal exists that the fix job could trust. The landing composer and
     emit-landing withhold on the Claude step's OUTCOME being `failure`, and
-    the refund keys on the agent outcome and the push only."""
+    the refund reads no execution file either (its exact condition —
+    `agent_skipped == 'true'` and nothing pushed; a cancellation alone or
+    missing outputs keeps the recorded count — is pinned in
+    test_ci_fix_gate.py)."""
     text = WORKFLOW.read_text()
     assert "id: launched" not in text and "agent_started" not in text and "AGENT_STARTED" not in text
     # One job per engine since 2026-09-22: the Claude job's composer and
@@ -644,7 +648,13 @@ def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_f
             "|| needs.fix.outputs.agent_outcome }}\n") in land
     refund = text[text.index("- name: Refund infra-crashed attempt"):]
     refund = refund[:refund.index("run: |")]
-    assert "env.AGENT_OUTCOME != 'success' &&" in refund
+    # agent_skipped per engine job (each job has one agent step), selected
+    # by the gate's engine in the land job (Claude Security 4628735).
+    assert "      agent_skipped: ${{ steps.claude.outcome == 'skipped' && 'true' || 'false' }}\n" in claude_job
+    assert "      agent_skipped: ${{ steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}\n" in codex_job
+    assert ("      AGENT_SKIPPED: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_skipped "
+            "|| needs.fix.outputs.agent_skipped }}\n") in land
+    assert "env.AGENT_SKIPPED == 'true'" in refund
     assert "steps.land.outputs.pushed != '1'" in refund
     assert "execution" not in refund
 

@@ -163,9 +163,19 @@ text are checked by the tests under `tests/`.
   access, a run re-run, a branch pushed or a PR retargeted at any point
   after the run stop the round rather than guess, before any counter, stage
   move, merge or model work; the runner merges exactly the base tip the
-  gate read. A Claude step that fails lands nothing and is refunded — the
-  action's execution-file output is not launch evidence, so the step's
-  outcome decides. What this establishes is the run's head commit, the base
+  gate read. A Claude step that fails lands nothing and keeps its attempt —
+  the action's execution-file output is not launch evidence, so the step's
+  outcome decides what lands, and a round is refunded only when the agent
+  step was never entered (the engine's agent step `skipped` — each engine
+  runs in its own fix job — a step outcome the runner settled before any
+  agent code ran, delivered by that job's own outputs — a cancelled job is refunded on that evidence alone, and a
+  pending job cancelled before it started, which delivers none, keeps its
+  round), never on how the agent's own step ended (Claude Security 4628734 and
+  4628735, 2026-09-22); in both loops a manifest with no bundle posts the
+  `@review` hand-back only when the agent step succeeded, so a round that
+  landed nothing and did not complete cannot re-arm the loop, and the
+  review-fix stall check keys on the recorded tip, not on a count a refund
+  may have taken to 0. What this establishes is the run's head commit, the base
   branch it was merged into and the base tip that is merged now, and that
   no other PR can be the run's origin — not which PR GitHub considered the
   trigger, not the merge commit the run built, and not the base tip it
