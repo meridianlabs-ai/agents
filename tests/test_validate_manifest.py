@@ -102,6 +102,7 @@ def run(
     branch_prefix="",
     refuse_bundle=False,
     refuse_pr=False,
+    allow_review=False,
     allowed_labels=None,
     allowed_assignees=None,
     max_issues=None,
@@ -121,6 +122,7 @@ def run(
         branch_prefix=branch_prefix,
         refuse_bundle=refuse_bundle,
         refuse_pr=refuse_pr,
+        allow_review=allow_review,
         allowed_issue_labels=allowed_labels,
         allowed_issue_assignees=allowed_assignees,
         max_issues=max_issues,
@@ -826,12 +828,13 @@ def test_refuse_pr_refuses_pull_request_fields_on_a_read_only_caller(tmp_path, e
         assert any("refuses pull-request fields (--refuse-pr) but the manifest carries `pr`" in e for e in errs), errs
     if extra.get("handback"):
         assert any("refuses pull-request fields (--refuse-pr) but the manifest sets handback" in e for e in errs), errs
-    # Without --refuse-pr the same manifests pass (`handback` alone fails its
-    # own PR requirement) — which is the gap the flag closes for that caller.
+    # Without --refuse-pr the same manifests are refused by --refuse-bundle
+    # instead (since 2026-09-22 nothing that lands nothing may carry `pr` or a
+    # hand-back, finding 4628439) — under that flag's own violation; this flag
+    # still states the PR-side policy on its own.
     without = triage_run(tmp_path, m)
-    if "pr" in extra and extra["pr"].get("open"):
-        assert not any("refuse-pr" in e for e in without)
-        assert without == [], without
+    assert not any("refuse-pr" in e for e in without)
+    assert any("refuses bundles (--refuse-bundle)" in e for e in without), without
 
 
 def test_refuse_pr_accepts_what_triage_lands_and_is_off_by_default(tmp_path):
@@ -891,24 +894,26 @@ def test_pr_title_too_long(tmp_path):
 
 
 # --- review_verdict (claude-review.yml's codex path) --------------------------
+# The review fields are accepted only under the reviewer's `allow_review`
+# (finding 4628442, below); these shape tests run with it set.
 
 
 @pytest.mark.parametrize("verdict", vm.VERDICTS)
 def test_every_review_verdict(tmp_path, verdict):
-    assert run(tmp_path, base_manifest(tmp_path, review_verdict=verdict)) == []
+    assert run(tmp_path, base_manifest(tmp_path, review_verdict=verdict), allow_review=True) == []
 
 
 @pytest.mark.parametrize("verdict", ["Clean", "approved", "", 1, True])
 def test_bad_review_verdict(tmp_path, verdict):
-    errs = run(tmp_path, base_manifest(tmp_path, review_verdict=verdict))
-    assert any("review_verdict" in e for e in errs)
+    errs = run(tmp_path, base_manifest(tmp_path, review_verdict=verdict), allow_review=True)
+    assert any("review_verdict must be" in e for e in errs)
 
 
 def test_review_verdict_needs_pr_number(tmp_path):
     # The verdict is posted on pr_number (never pr.open: the reviewer's land
     # job opens no PRs).
     m = base_manifest(tmp_path, pr_number=None, replies=[], resolve_threads=[], handback=False, review_verdict="clean")
-    errs = run(tmp_path, m, pr_head_ref="", event_pr="")
+    errs = run(tmp_path, m, pr_head_ref="", event_pr="", allow_review=True)
     assert any("review_verdict needs pr_number" in e for e in errs)
 
 
@@ -923,12 +928,13 @@ def test_comment_review_flag_needs_a_verdict(tmp_path):
     # review_verdict — may set it; no other agent's comment can pose as a review.
     m = base_manifest(tmp_path)
     m["comments"][0]["review"] = True
-    errs = run(tmp_path, m)
+    errs = run(tmp_path, m, allow_review=True)
     assert any("comments[0]: review needs review_verdict" in e for e in errs)
     m["review_verdict"] = "clean"
-    assert run(tmp_path, m) == []
+    assert run(tmp_path, m, allow_review=True) == []
     m["comments"][0]["review"] = False
     del m["review_verdict"]
+    # `review: false` is no claim: fine on any caller.
     assert run(tmp_path, m) == []
 
 
@@ -936,7 +942,7 @@ def test_comment_review_flag_needs_a_verdict(tmp_path):
 def test_comment_review_flag_must_be_boolean(tmp_path, value):
     m = base_manifest(tmp_path, review_verdict="clean")
     m["comments"][0]["review"] = value
-    assert any("comments[0]: review must be a boolean" in e for e in run(tmp_path, m))
+    assert any("comments[0]: review must be a boolean" in e for e in run(tmp_path, m, allow_review=True))
 
 
 def review_comment(d: Path, **overrides) -> dict:
@@ -952,8 +958,8 @@ def test_review_comments_valid_shapes(tmp_path):
         review_comment(tmp_path, side=None),  # optional: RIGHT by default in land
         {"path": "x", "line": 1, "body_file": write(tmp_path, "rc2.md")},
     ]
-    assert run(tmp_path, base_manifest(tmp_path, review_comments=rcs)) == []
-    assert run(tmp_path, base_manifest(tmp_path, review_comments=[])) == []
+    assert run(tmp_path, base_manifest(tmp_path, review_comments=rcs), allow_review=True) == []
+    assert run(tmp_path, base_manifest(tmp_path, review_comments=[]), allow_review=True) == []
 
 
 @pytest.mark.parametrize(
@@ -982,13 +988,13 @@ def test_review_comment_shape(tmp_path, override, needle):
             del rc[k]
         else:
             rc[k] = v
-    errs = run(tmp_path, base_manifest(tmp_path, review_comments=[rc]))
+    errs = run(tmp_path, base_manifest(tmp_path, review_comments=[rc]), allow_review=True)
     assert any(needle in e and "review_comments[0]" in e for e in errs), errs
 
 
 @pytest.mark.parametrize("value", [{"path": "x"}, "src/a.py", [1]])
 def test_review_comments_must_be_a_list_of_objects(tmp_path, value):
-    errs = run(tmp_path, base_manifest(tmp_path, review_comments=value))
+    errs = run(tmp_path, base_manifest(tmp_path, review_comments=value), allow_review=True)
     assert any("review_comments must be a list" in e or "review_comments[0]: must be an object" in e for e in errs), errs
 
 
@@ -996,8 +1002,86 @@ def test_review_comments_need_pr_number(tmp_path):
     # An issue run has no diff to annotate.
     m = base_manifest(tmp_path, pr_number=None, replies=[], resolve_threads=[], handback=False,
                       review_comments=[review_comment(tmp_path)])
-    errs = run(tmp_path, m, event_pr="")
+    errs = run(tmp_path, m, event_pr="", allow_review=True)
     assert any("review_comments need pr_number" in e for e in errs)
+
+
+# --- allow_review: only the reviewer's land job may carry a review (Claude
+# Security finding 4628442, 2026-09-22). Every rule that kept other callers'
+# manifests free of review_verdict, comments[].review and review_comments
+# lived in the compose steps of the agent job — the runner whose compromise
+# the validator assumes — and the land job posts them as the machine account,
+# byte-identical to the reviewer's, so the flag is caller policy here. -------
+
+
+def pr_run_manifest(d: Path, **overrides) -> dict:
+    """What a forged artifact needs on a pushing caller's PR-run land job
+    (claude.yml's `@claude` on a PR, claude-auto.yml, claude-auto-review.yml:
+    `pr-number` from the event, no refuse-bundle, no allow-review): only the
+    core fields the agent job knows — pr_number = the event's PR, branch = its
+    head ref, head_sha = start_sha, no bundle — plus what the forgery adds."""
+    m = {
+        "schema": 1, "repo": REPO, "run_id": int(RUN_ID), "branch": BRANCH,
+        "start_sha": START, "head_sha": START, "has_bundle": False, "pr_number": 456, "issue_number": None,
+    }
+    m.update(overrides)
+    return m
+
+
+NOT_ALLOWED = "this land job does not accept review fields (--allow-review is not set)"
+
+
+def test_forged_verdict_on_a_pushing_callers_land_job_is_refused(tmp_path):
+    # The finding's manifest: a `review`-flagged comment and a `clean` verdict
+    # on the dev agent's or a loop's land job, which would have made the land
+    # job post attacker text under the live review-comment marker and then the
+    # fixed `clean` verdict body, as the machine account — converging the
+    # @auto loop with no review having run. The only violations are the two
+    # allow-review refusals: the manifest is otherwise valid, so this flag is
+    # what closes the channel.
+    m = pr_run_manifest(tmp_path, comments=[{"number": 456, "body_file": write(tmp_path, "x.md"), "review": True}],
+                        review_verdict="clean")
+    errs = run(tmp_path, m, event_issue="")
+    assert errs == [
+        f"manifest: {NOT_ALLOWED} but the manifest carries review_verdict",
+        f"comments[0]: review marks the reviewer's review comment; {NOT_ALLOWED}",
+    ]
+    # The same manifest under claude-review.yml's land inputs is the reviewer's landing.
+    assert run(tmp_path, m, event_issue="", refuse_bundle=True, allow_review=True) == []
+
+
+@pytest.mark.parametrize("extra", [
+    {"review_verdict": "suggestions"},
+    {"review_comments": [{"path": "src/app.py", "line": 42, "body_file": "rc1.md"}]},
+    {"review_comments": []},                        # presence is the claim; fail closed on an empty list too
+])
+def test_each_review_field_needs_allow_review(tmp_path, extra):
+    write(tmp_path, "rc1.md")
+    m = pr_run_manifest(tmp_path, **extra)
+    (key,) = extra
+    assert run(tmp_path, m, event_issue="") == [f"manifest: {NOT_ALLOWED} but the manifest carries {key}"]
+    assert run(tmp_path, m, event_issue="", allow_review=True) == []
+
+
+def test_allow_review_relaxes_nothing_else(tmp_path):
+    # The flag admits the three review fields and no more: the verdict still
+    # needs the run's PR, and the review flag still needs a verdict.
+    m = pr_run_manifest(tmp_path, comments=[{"number": 456, "body_file": write(tmp_path, "x.md"), "review": True}])
+    assert run(tmp_path, m, event_issue="", allow_review=True) == ["comments[0]: review needs review_verdict (only a reviewer's manifest marks its review comment)"]
+    m = pr_run_manifest(tmp_path, pr_number=None, review_verdict="clean")
+    errs = run(tmp_path, m, event_pr="", event_issue="", pr_head_ref="", allow_review=True)
+    assert errs == ["manifest: review_verdict needs pr_number (the PR the verdict is for)"]
+
+
+def test_allow_review_and_refuse_bundle_are_independent(tmp_path):
+    # A read-only caller that is not the reviewer (the actions repo's triage
+    # workflow passes refuse-bundle and refuse-pr, never allow-review) refuses
+    # a review like every pushing caller does.
+    m = pr_run_manifest(tmp_path, comments=[{"number": 456, "body_file": write(tmp_path, "x.md"), "review": True}],
+                        review_verdict="clean")
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True)
+    assert any("carries review_verdict" in e and NOT_ALLOWED in e for e in errs)
+    assert any(e.startswith("comments[0]: review marks") for e in errs)
 
 
 # --- refuse_bundle (a land job whose agent never commits) --------------------
@@ -1028,19 +1112,19 @@ def review_manifest(d: Path, **overrides) -> dict:
 
 
 def test_refuse_bundle_accepts_the_reviewers_manifest(tmp_path):
-    assert run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True) == []
+    assert run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True, allow_review=True) == []
 
 
 def test_refuse_bundle_accepts_a_review_without_inline_comments(tmp_path):
     # The codex shape, and a Claude review with nothing line-level to say.
     m = review_manifest(tmp_path, review_comments=None, comments=[{"number": 456, "body_file": write(tmp_path, "codex-review.md")}])
-    assert run(tmp_path, m, event_issue="", refuse_bundle=True) == []
+    assert run(tmp_path, m, event_issue="", refuse_bundle=True, allow_review=True) == []
 
 
 def test_refuse_bundle_refuses_a_review_of_another_pr(tmp_path):
     # A review job cannot steer its summary, inline comments and verdict at a
     # PR other than the one the run's event names.
-    errs = run(tmp_path, review_manifest(tmp_path, pr_number=457), event_issue="", refuse_bundle=True)
+    errs = run(tmp_path, review_manifest(tmp_path, pr_number=457), event_issue="", refuse_bundle=True, allow_review=True)
     assert any("pr_number 457 is not the PR this run's event names (#456)" in e for e in errs)
 
 
@@ -1050,25 +1134,71 @@ def test_refuse_bundle_refuses_commits(tmp_path):
     # push channel; both the flag and the file are refused.
     (tmp_path / "commits.bundle").write_bytes(b"# v2 git bundle\n")
     m = review_manifest(tmp_path, head_sha=HEAD, has_bundle=True)
-    errs = run(tmp_path, m, event_issue="", refuse_bundle=True)
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True, allow_review=True)
     assert any("refuses bundles" in e and "carries commits" in e for e in errs)
     assert any("refuses bundles" in e and "commits.bundle is present" in e for e in errs)
     # Without the flag the same manifest is a normal landing.
-    assert run(tmp_path, m, event_issue="") == []
+    assert run(tmp_path, m, event_issue="", allow_review=True) == []
 
 
 def test_refuse_bundle_refuses_a_moved_head_even_without_a_bundle(tmp_path):
     # has_bundle false but head_sha != start_sha is already inconsistent;
     # under refuse_bundle it is ALSO named as carrying commits.
     m = review_manifest(tmp_path, head_sha=HEAD)
-    errs = run(tmp_path, m, event_issue="", refuse_bundle=True)
+    errs = run(tmp_path, m, event_issue="", refuse_bundle=True, allow_review=True)
     assert any("refuses bundles" in e and "carries commits" in e for e in errs)
 
 
 def test_refuse_bundle_refuses_a_stray_bundle_file(tmp_path):
     (tmp_path / "commits.bundle").write_bytes(b"# v2 git bundle\n")
-    errs = run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True)
+    errs = run(tmp_path, review_manifest(tmp_path), event_issue="", refuse_bundle=True, allow_review=True)
     assert errs == ["manifest: this land job refuses bundles (--refuse-bundle) but commits.bundle is present in the artifact"]
+
+
+REFUSES_BUNDLES = "manifest: this land job refuses bundles (--refuse-bundle) but the manifest"
+FIX_AGENT_FIELDS = [
+    # the finding's manifest: the reviewer's own fields plus `handback: true`
+    # — the land job posted exactly `@review` as the machine account, which
+    # every caller stub and the reviewer's gate admit, so the reviewer re-ran
+    # on its own PR, without bound
+    ({"handback": True}, f"{REFUSES_BUNDLES} sets handback (the live `@review`; nothing lands here to hand back)"),
+    ({"handoff_body_file": "handoff.md"}, f"{REFUSES_BUNDLES} carries handoff_body_file (owed by a landed commit or a loop's fix agent, never by a read-only reviewer)"),
+    ({"resolve_threads": ["PRRT_kwDOC7YMCM5abc-123_x"]}, f"{REFUSES_BUNDLES} carries resolve_threads (owed by a landed commit or a loop's fix agent, never by a read-only reviewer)"),
+    ({"resolve_threads": []}, f"{REFUSES_BUNDLES} carries resolve_threads (owed by a landed commit or a loop's fix agent, never by a read-only reviewer)"),
+    ({"replies": [{"review_comment_id": 789, "body_file": "r1.md"}]}, f"{REFUSES_BUNDLES} carries replies (owed by a landed commit or a loop's fix agent, never by a read-only reviewer)"),
+    ({"pr": {"open": True, "title": "Adopt me", "body_file": "pr-body.md", "labels": ["auto"]}}, f"{REFUSES_BUNDLES} carries pr (owed by a landed commit or a loop's fix agent, never by a read-only reviewer)"),
+    ({"pr": {"open": False, "title": "Adopt me", "body_file": "pr-body.md"}}, f"{REFUSES_BUNDLES} carries pr (owed by a landed commit or a loop's fix agent, never by a read-only reviewer)"),
+]
+
+
+@pytest.mark.parametrize("extra,violation", FIX_AGENT_FIELDS)
+def test_refuse_bundle_refuses_the_fix_agents_fields(tmp_path, extra, violation):
+    # Claude Security finding 4628439 (2026-09-22): nothing ever lands under
+    # refuse_bundle, so nothing a landed commit or a loop's fix agent owes may
+    # be carried — the reviewer neither opens PRs nor answers, resolves or
+    # concludes anything. Exactly one violation: the manifest is otherwise the
+    # reviewer's valid landing, so the flag is what closes each field.
+    for name in ("handoff.md", "r1.md", "pr-body.md"):
+        write(tmp_path, name)
+    m = review_manifest(tmp_path, **extra)
+    assert run(tmp_path, m, event_issue="", refuse_bundle=True, allow_review=True) == [violation]
+
+
+@pytest.mark.parametrize("extra,violation", FIX_AGENT_FIELDS)
+def test_pushing_callers_keep_the_fix_agents_fields_on_a_bundle_less_manifest(tmp_path, extra, violation):
+    # The same fields on a land job that pushes (the loops' no-change round:
+    # a hand-off or replies with nothing landed) stay accepted — the rule is
+    # the reviewer's, not a new rule for every bundle-less manifest.
+    for name in ("handoff.md", "r1.md", "pr-body.md"):
+        write(tmp_path, name)
+    m = review_manifest(tmp_path, comments=[{"number": 456, "body_file": write(tmp_path, "c.md")}],
+                        review_comments=None, review_verdict=None, **extra)
+    assert run(tmp_path, m, event_issue="") == []
+
+
+def test_refuse_bundle_accepts_an_explicit_no_hand_back(tmp_path):
+    # `handback: false` claims nothing, like `review: false`.
+    assert run(tmp_path, review_manifest(tmp_path, handback=False), event_issue="", refuse_bundle=True, allow_review=True) == []
 
 
 def test_refuse_bundle_accepts_a_fork_heads_main_as_branch(tmp_path):
@@ -1077,7 +1207,7 @@ def test_refuse_bundle_accepts_a_fork_heads_main_as_branch(tmp_path):
     # refuse_bundle, so neither the default-branch rule nor the refused list
     # may fail the reviewer's landing over it …
     m = review_manifest(tmp_path, branch="main")
-    assert run(tmp_path, m, pr_head_ref="main", event_issue="", refuse_bundle=True) == []
+    assert run(tmp_path, m, pr_head_ref="main", event_issue="", refuse_bundle=True, allow_review=True) == []
     # … while the same manifest on a pushing land job is refused by both.
     errs = run(tmp_path, m, pr_head_ref="main", event_issue="")
     assert any("must not be the default branch" in e for e in errs)
@@ -1101,7 +1231,7 @@ def test_refuse_bundle_accepts_any_head_ref_git_accepts(tmp_path, branch):
     # rules refuse): the head ref is whatever the PR's author named it, and
     # the pin below is what ties the manifest to the run.
     m = review_manifest(tmp_path, branch=branch)
-    assert run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True) == []
+    assert run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True, allow_review=True) == []
     errs = run(tmp_path, m, pr_head_ref=branch, event_issue="")
     assert errs, "the same name must still be refused on a pushing land job"
 
@@ -1110,7 +1240,7 @@ def test_refuse_bundle_keeps_the_head_ref_pin(tmp_path):
     # Relaxing the shape rules must not loosen the pin: a review job may not
     # name any branch but the run's PR head ref.
     m = review_manifest(tmp_path, branch="main")
-    errs = run(tmp_path, m, pr_head_ref="feature", event_issue="", refuse_bundle=True)
+    errs = run(tmp_path, m, pr_head_ref="feature", event_issue="", refuse_bundle=True, allow_review=True)
     assert errs == ["manifest: branch 'main' is not PR #456's head ref ('feature')"]
 
 
@@ -1123,7 +1253,7 @@ def test_refuse_bundle_still_refuses_unsafe_branch_values(tmp_path, branch):
     # would let through (it matches before a final newline); the validator
     # uses fullmatch so the trailing newline is refused like an embedded one.
     m = review_manifest(tmp_path, branch=branch)
-    errs = run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True)
+    errs = run(tmp_path, m, pr_head_ref=branch, event_issue="", refuse_bundle=True, allow_review=True)
     assert errs, repr(branch)
     assert all("is not PR" not in e for e in errs), "refused by shape, not merely by the pin"
 
@@ -1276,7 +1406,8 @@ def test_cli_refuse_bundle(tmp_path, capsys):
     assert "refuses bundles" in out
     (tmp_path / "commits.bundle").unlink()
     (tmp_path / "manifest.json").write_text(
-        json.dumps(base_manifest(tmp_path, head_sha=START, has_bundle=False, pr=None, handback=False))
+        json.dumps(base_manifest(tmp_path, head_sha=START, has_bundle=False, pr=None, handback=False,
+                                 replies=None, resolve_threads=None, handoff_body_file=None))
     )
     (tmp_path / "commits.bundle").unlink()
     assert cli(tmp_path, "--refuse-bundle") == 0
@@ -1286,7 +1417,8 @@ def test_cli_refuse_bundle_relaxes_the_branch_rules(tmp_path, capsys):
     # The reviewer's landing on a fork-head PR whose branch is `main`: the
     # composite passes --default-branch main and --refused-branches main, and
     # the manifest must still validate.
-    m = base_manifest(tmp_path, branch="main", head_sha=START, has_bundle=False, pr=None, handback=False)
+    m = base_manifest(tmp_path, branch="main", head_sha=START, has_bundle=False, pr=None, handback=False,
+                      replies=None, resolve_threads=None, handoff_body_file=None)
     (tmp_path / "commits.bundle").unlink()
     (tmp_path / "manifest.json").write_text(json.dumps(m))
     assert cli(tmp_path, pr_head_ref="main") == 1
@@ -1317,6 +1449,32 @@ def test_cli_refuse_pr(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "refuses pull-request fields (--refuse-pr) but the manifest carries `pr`" in out
     assert "refuses pull-request fields (--refuse-pr) but the manifest sets handback" in out
+
+
+def test_cli_refuse_bundle_refuses_the_fix_agents_fields(tmp_path, capsys):
+    # The composite splices --refuse-bundle from its input; the reviewer's
+    # inputs plus a forged hand-back name every refused field.
+    m = base_manifest(tmp_path, head_sha=START, has_bundle=False)
+    (tmp_path / "commits.bundle").unlink()
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path, "--refuse-bundle") == 1
+    out = capsys.readouterr().out
+    for key in ("pr", "replies", "resolve_threads", "handoff_body_file"):
+        assert f"refuses bundles (--refuse-bundle) but the manifest carries {key}" in out, out
+    assert "refuses bundles (--refuse-bundle) but the manifest sets handback" in out
+
+
+def test_cli_allow_review(tmp_path, capsys):
+    # The composite splices --allow-review from its input (claude-review.yml
+    # alone sets it); without it the reviewer's own manifest is refused.
+    m = review_manifest(tmp_path)
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path, "--refuse-bundle", event_issue="") == 1
+    out = capsys.readouterr().out
+    assert "does not accept review fields (--allow-review is not set) but the manifest carries review_verdict" in out
+    assert "does not accept review fields (--allow-review is not set) but the manifest carries review_comments" in out
+    assert "comments[0]: review marks the reviewer's review comment" in out
+    assert cli(tmp_path, "--refuse-bundle", "--allow-review", event_issue="") == 0
 
 
 def test_cli_max_issues_must_be_a_number(tmp_path):

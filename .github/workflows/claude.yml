@@ -456,8 +456,25 @@ jobs:
               # codex branch and PR). A matching label is handled above.
               text=""
               if [ "$EVENT_ACTION" = "opened" ]; then
-                text="$IBODY
+                # An imported upstream issue (skills/import/import.sh): the
+                # body opens with the machine-readable `Upstream issue:` line,
+                # and the title and the snapshot below the importer's header
+                # are the upstream author's text — any GitHub account's —
+                # republished under the importing maintainer's login, which
+                # is the actor judged below. import.sh backticks the phrases
+                # before it posts; this is the gate's own refusal behind that,
+                # so no caller's stub or an older import.sh has to be right
+                # (Claude Security 4629154). The first line only, the shape
+                # import.sh writes: a maintainer's own issue that cites an
+                # upstream issue further down is theirs. A `claude`/`auto`
+                # label or a later comment starts work on an import, judged
+                # by its own actor.
+                if printf '%s' "$IBODY" | head -n1 | grep -qE '^Upstream issue:[[:space:]]*https?://'; then
+                  echo "::notice::imported upstream issue: its body and title are the upstream author's text, not a trigger; label it or comment to start the agent."
+                else
+                  text="$IBODY
           $ITITLE"
+                fi
               fi
             fi
             esc=$(printf '%s' "$PHRASE" | sed 's/[.[\*^$()+?{|]/\\&/g')
@@ -1534,6 +1551,27 @@ jobs:
         if: always() && steps.codexuser.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
 
+      # Bring codex's final message across the user boundary ONCE, right
+      # after the reclaim's kill loop has ended every codex process: the
+      # output file sits in the codex-owned $RUNNER_TEMP/codex, whose entry
+      # codex could swap for a symlink, and every reader below runs as the
+      # runner. The composite opens it with O_NOFOLLOW, refuses anything
+      # but a regular codex-owned file, and copies it to
+      # $RUNNER_TEMP/codex-final.md (runner-only); the commit subject, the
+      # RESOLVED-THREADS parse and the summary read that copy and nothing
+      # else under the codex-owned dir (finding 4628447). A refused or
+      # missing message leaves no copy and the readers fall back to their
+      # defaults (default subject, the no-final-message placeholder).
+      # Gated like the guard; runs no git. continue-on-error: the copy is
+      # best-effort like the parse — a failure here (a misconfigured owner,
+      # an unwritable destination) must leave no copy, not strand the
+      # commit behind the readers' implicit success() gate.
+      - name: Import codex final message
+        id: codexfinal
+        continue-on-error: true
+        if: steps.codexrun.outcome == 'success' && steps.codexreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
+
       # Token split for the codex run: the CLI's step-log "tokens used" is one
       # blended number (non-cached input + output), so this reads the session
       # rollout codex wrote under its CODEX_HOME and puts input / cached /
@@ -1598,7 +1636,9 @@ jobs:
         env:
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           START_SHA: ${{ steps.codexprep.outputs.sha }}
-          OUT: ${{ runner.temp }}/codex/codex-final.md
+          # The copy `Import codex final message` verified, never the
+          # codex-owned output file (finding 4628447).
+          OUT: ${{ runner.temp }}/codex-final.md
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           GIT_DIR: ${{ github.workspace }}/.git
           GIT_COMMON_DIR: ${{ github.workspace }}/.git
@@ -1674,7 +1714,7 @@ jobs:
           token: ${{ github.token }}
           repo: ${{ github.repository }}
           pr: ${{ github.event.issue.number || github.event.pull_request.number }}
-          final-message: ${{ runner.temp }}/codex/codex-final.md
+          final-message: ${{ runner.temp }}/codex-final.md
           stripped: ${{ runner.temp }}/codex-final.stripped.md
           resolve: "false"
 
@@ -1692,8 +1732,9 @@ jobs:
       # posts the codex reviewer's real one — so this is the footer's only
       # layer). Gated on the parse step (which is gated on the commit step):
       # the summary states the thread count, and OUT is the stripped copy it
-      # wrote — falling back to FINAL, codex's message unstripped, when that
-      # copy is missing (the composite warned; a stray RESOLVED-THREADS line
+      # wrote — falling back to FINAL, the imported copy of codex's message
+      # unstripped (never the codex-owned output file; finding 4628447), when
+      # that copy is missing (the composite warned; a stray RESOLVED-THREADS line
       # in a comment beats the summary going unread — inspect_ai#428's ten
       # blind rounds). The footer lines say "committed", never "pushed": this
       # step cannot know the push happened (emit-landing may still lose the
@@ -1704,7 +1745,7 @@ jobs:
         env:
           DIR: ${{ runner.temp }}/landing
           OUT: ${{ runner.temp }}/codex-final.stripped.md
-          FINAL: ${{ runner.temp }}/codex/codex-final.md
+          FINAL: ${{ runner.temp }}/codex-final.md
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           COMMITTED: ${{ steps.codexcommit.outputs.committed }}
           MERGE_ONLY: ${{ steps.codexcommit.outputs.merge_only }}
@@ -2502,6 +2543,14 @@ jobs:
           # composed from the trusted issue number, keeps the push off the
           # branches of PRs opened for other issues. Ignored on PR runs.
           branch-prefix: ${{ !github.event.issue.pull_request && github.event.issue.number && format('claude/issue-{0}-', github.event.issue.number) || '' }}
+          # The branch an issue run's new branch was cut from (Record base
+          # SHA / the codex prep step resolve the same input): what the
+          # composite's `workflows` step compares a branch the push creates
+          # against. Without it the default branch stands in — on the
+          # inspect_ai fork that is `meridian`, whose extra workflow files
+          # would read as the agent's deletions on every `main`-cut issue
+          # branch. Empty (most callers) keeps the default branch.
+          base-branch: ${{ inputs.base_branch }}
           # The dev-agent manifest never files follow-up issues; an empty
           # allow-list makes the validator refuse any that appear.
           allowed-issue-repos: ""

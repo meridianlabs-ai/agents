@@ -160,11 +160,13 @@ inputs:
       `pr` (open or adopt a PR for `branch`, label it — `auto` opts it into
       the autonomous loops, whose gates accept the machine account as the
       labeler) or `handback: true` (the live `@review` comment), before any
-      step reads them. Distinct from `refuse-bundle`: a `pr.open` needs no
-      push, it adopts or opens a PR for a branch that already exists on
-      origin, so a read-only caller whose token reaches this repository's
-      pull requests (the PAT fallback) needs this too. Callers that open
-      PRs keep the default.
+      step reads them. `refuse-bundle` refuses both as well (since
+      2026-09-22); this flag states the PR-side policy on its own, and
+      exists because a `pr.open` needs no push — it adopts or opens a PR
+      for a branch that already exists on origin, so a read-only caller
+      whose token reaches this repository's pull requests (the PAT
+      fallback) needs the refusal whether or not bundles are refused.
+      Callers that open PRs keep the default.
     required: false
     default: "false"
   pr-head-ref:
@@ -188,6 +190,20 @@ inputs:
       prefix; landing on it is the adopt path). Ignored on PR runs (the head-ref pin is stricter); empty leaves the
       branch agent-chosen on runs that name no PR, bounded only by shape, the
       default branch and `refused-branches`.
+    required: false
+    default: ""
+  base-branch:
+    description: >-
+      The branch the run's new branches are cut from, when the CALLER's
+      trusted configuration names one (claude.yml's `base_branch`; the
+      inspect_ai fork's stubs pass `main`, its pristine mirror, while its
+      default branch `meridian` carries workflow files `main` does not).
+      The `workflows` step lists a branch the push creates against this
+      branch's tip on origin; compared against the default branch instead,
+      every default-only workflow file would read as deleted and a
+      source-only issue run would be refused. Empty (the default): the
+      default branch. On a PR run the PR's own base wins; the
+      `default-branch` refusal of the manifest's `branch` is unaffected.
     required: false
     default: ""
   pr-number:
@@ -247,8 +263,31 @@ inputs:
       `default-branch`, `refused-branches`) are off under this flag: the
       branch is the run's PR head ref — `main` on a fork-head PR, or any
       name git accepts — and only the head-ref pin / `branch-prefix` and a
-      control-character/length check apply. Pair with `emit-landing`'s
-      `read-only`, the convenience side.
+      control-character/length check apply. The validator also refuses
+      every field only a landed commit or a loop's fix agent owes — `pr`,
+      `replies`, `resolve_threads`, `handoff_body_file` and `handback:
+      true` — so a forged manifest cannot make this job post the live
+      `@review` (which would restart the reviewer on its own PR without
+      bound), the `auto-handoff` stop marker or resolve a human's review
+      threads with nothing landed (Claude Security finding 4628439,
+      2026-09-22). Pair with `emit-landing`'s `read-only`, the convenience
+      side.
+    required: false
+    default: "false"
+  allow-review:
+    description: >-
+      "true" for the reviewer's land job (claude-review.yml) and no other
+      caller: the validator accepts `review_verdict`, `comments[].review`
+      and `review_comments[]` only under it, and refuses a manifest
+      carrying any of them otherwise. Those fields make this action post a
+      review as the machine account — the fixed verdict body with the @auto
+      loop's live markers, the review-comment anchor, inline comments —
+      byte-identical to the reviewer's, and the steps that keep the other
+      callers' manifests free of them run in the agent job, so a forged
+      manifest on the dev agent's or a loop's PR-run land job would
+      otherwise converge or steer the loop with no review having run
+      (Claude Security finding 4628442, 2026-09-22). Default false: every
+      caller that pushes refuses them.
     required: false
     default: "false"
 
@@ -344,6 +383,7 @@ runs:
         BRANCH_PREFIX: ${{ inputs.branch-prefix }}
         REFUSE_BUNDLE: ${{ inputs.refuse-bundle == 'true' && '1' || '' }}
         REFUSE_PR: ${{ inputs.refuse-pr == 'true' && '1' || '' }}
+        ALLOW_REVIEW: ${{ inputs.allow-review == 'true' && '1' || '' }}
         ALLOWED_LABELS: ${{ inputs.allowed-issue-labels }}
         ALLOWED_ASSIGNEES: ${{ inputs.allowed-issue-assignees }}
         MAX_ISSUES: ${{ inputs.max-issues }}
@@ -355,7 +395,7 @@ runs:
           --default-branch "$DEFAULT_BRANCH" --refused-branches "$REFUSED" \
           --allowed-issue-repos "$ALLOWED" --pr-head-ref "$PR_HEAD_REF" \
           --event-pr-number "$EVENT_PR_NUMBER" --event-issue-number "$EVENT_ISSUE_NUMBER" \
-          --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} \
+          --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} ${ALLOW_REVIEW:+--allow-review} \
           --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
           --max-issues "$MAX_ISSUES" --allowed-pr-labels "$ALLOWED_PR_LABELS" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
@@ -393,10 +433,14 @@ runs:
     # started from. `git fetch <bundle>` needs the bundle's prerequisite
     # (start_sha) present, so that is fetched from origin first, by SHA.
     # Also fetches the tip of the run's base branch (the PR's base, else the
-    # default branch — trusted context, not the manifest) as refs/land/base:
+    # caller's `base-branch`, else the default branch — trusted context, not
+    # the manifest) as refs/land/base:
     # the reference the `workflows` step below tells the runner's base merge
-    # from the agent's own changes by. A failed base fetch is a warning; it
-    # only costs that exemption.
+    # from the agent's own changes by, and lists a NEW branch's changes
+    # against. A failed base fetch is a warning here; it costs that
+    # exemption, and a branch the push would create is refused unchecked.
+    # The branch's live tip goes out as `remote_sha` for the same step: what
+    # the push changes on origin is head_sha against that tip.
     - id: fetch
       if: steps.plan.outputs.has_bundle == 'true'
       shell: bash
@@ -407,7 +451,7 @@ runs:
         BRANCH: ${{ steps.plan.outputs.branch }}
         START_SHA: ${{ steps.plan.outputs.start_sha }}
         HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
-        BASE: ${{ steps.lookup.outputs.base || inputs.default-branch || steps.lookup.outputs.default_branch }}
+        BASE: ${{ steps.lookup.outputs.base || inputs.base-branch || inputs.default-branch || steps.lookup.outputs.default_branch }}
         GIT_CONFIG_GLOBAL: /dev/null
         # Step-scoped credential (design/architecture.md → "No persisted git
         # credentials"): the READ token, under the one variable name every
@@ -461,13 +505,14 @@ runs:
         else
           echo "land: origin/$BRANCH does not exist yet; the push creates it."
         fi
+        echo "remote_sha=$remote" >>"$GITHUB_OUTPUT"
         echo "land: bundle verified — $(git rev-list --count "$START_SHA..$HEAD_SHA") commit(s) $START_SHA..$HEAD_SHA for $BRANCH."
         base_sha=""
         if [ -n "$BASE" ] && git fetch --quiet --no-tags "$URL" "refs/heads/$BASE:refs/land/base"; then
           base_sha=$(git rev-parse refs/land/base)
           echo "land: origin/$BASE is at $base_sha (the base the workflows check compares against)."
         else
-          echo "::warning::land: no base branch tip (base '${BASE:-?}'); workflow files the base merge changed cannot be told from the agent's."
+          echo "::warning::land: no base branch tip (base '${BASE:-?}'); workflow files the base merge changed cannot be told from the agent's, and a branch the push would create cannot be checked at all."
         fi
         echo "base_sha=$base_sha" >>"$GITHUB_OUTPUT"
 
@@ -478,23 +523,38 @@ runs:
     # deep in the push step's log, after the agent had spent its whole run
     # (agents #114). Refuse it here, by name, before the push: workflow
     # changes are made from a maintainer's machine, never by a CI agent, and
-    # Report says so in one line. Only the AGENT's changes count (decision:
+    # Report says so in one line. The paths checked are those the push
+    # would CHANGE ON ORIGIN: head_sha against the branch's live tip (the
+    # fetch step's ls-remote — an ancestor of head_sha, so held here), or,
+    # when the push creates the branch, against origin's base tip. Never
+    # against the manifest's start_sha: the agent job writes it, origin
+    # serves any reachable SHA to the fetch step (a fork PR's head under
+    # refs/pull/, an old base commit), and a file identical at a start the
+    # agent chose and at head_sha would never be listed (Claude Security
+    # 4628444, 2026-09-22). Only the AGENT's changes count (decision:
     # Ransom, 2026-09-18): the runner merges the base branch into the branch
     # before the agent starts (sync-branch), and a workflow change that
-    # merge brought in is already on origin. A changed path is exempt when
+    # merge brought in is already on origin. A listed path is exempt when
     # its blob at head_sha equals its blob at a trusted reference: the base
     # branch's tip on origin (refs/land/base, fetched by the fetch step from
-    # trusted context), or the EFFECTIVE base — the merge base(s) of head_sha
-    # and that tip, i.e. the newest base commit(s) already in the branch's
-    # history: the base as sync-branch merged it (or fast-forwarded to it),
-    # or as the branch forked from it, should the base have moved since.
-    # Both are fixed by ancestry against origin's tip: nothing the agent
-    # commits can move a branch on origin, and naming an older base commit
-    # as an extra parent of a merge does not make it the merge base while a
-    # newer one is already an ancestor (round 3 trusted every such parent,
-    # which let an agent pick the historical version it wanted). Absent at
-    # both (the base deleted it) is equal too. With no base tip nothing is
-    # exempt. Skipped when origin already sits at
+    # trusted context), or — on a branch that IS on origin — the EFFECTIVE
+    # base: the merge base(s) of head_sha and that tip, i.e. the newest base
+    # commit(s) already in the branch's history: the base as sync-branch
+    # merged it (or fast-forwarded to it), or as the branch forked from it,
+    # should the base have moved since. Both are fixed by ancestry against
+    # origin's tip: nothing the agent commits can move a branch on origin,
+    # and naming an older base commit as an extra parent of a merge does not
+    # make it the merge base while a newer one is already an ancestor (round
+    # 3 trusted every such parent, which let an agent pick the historical
+    # version it wanted). Absent at both (the base deleted it) is equal too.
+    # On a NEW branch the base tip is the only trusted reference: an issue
+    # run cuts its branch from that tip, so the merge base of head_sha and
+    # the tip is the tip itself unless the base moved during the run or the
+    # agent chose a lower start — indistinguishable here, and content that
+    # is on no branch of origin is what GitHub's own check exists to refuse.
+    # A run that raced a base workflow change is refused and re-run. With no
+    # base tip nothing is exempt, and a new branch is refused unchecked.
+    # Skipped when origin already sits at
     # head_sha: nothing would be pushed, so nothing is refused. The paths
     # are agent-chosen: read NUL-separated for the blob lookups, shown
     # shell-quoted (%q) so a hostile name stays on one line; the list is
@@ -508,36 +568,51 @@ runs:
       shell: bash
       env:
         WORK: ${{ runner.temp }}/landing-repo
-        START_SHA: ${{ steps.plan.outputs.start_sha }}
         HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+        REMOTE_SHA: ${{ steps.fetch.outputs.remote_sha }}
         BASE_SHA: ${{ steps.fetch.outputs.base_sha }}
         GIT_CONFIG_GLOBAL: /dev/null
       run: |
         set -euo pipefail
         cd "$WORK"
+        # The baseline (above): the branch's tip on origin, else the base tip.
+        if [ -n "$REMOTE_SHA" ]; then
+          from="$REMOTE_SHA"
+          what="the branch's tip on origin ($from)"
+          new_branch=""
+        elif [ -n "$BASE_SHA" ]; then
+          from="$BASE_SHA"
+          what="origin's base tip ($from)"
+          new_branch=" (the branch is new on origin)"
+        else
+          echo "::error::land: the push creates the branch and no base tip was fetched, so there is nothing trusted to list the bundle's workflow changes against; refusing the bundle unchecked."
+          exit 1
+        fi
         # --no-renames: a file moved out of the directory is listed as its
         # deletion, which the push would be refused for just the same. The
         # listings are written out and checked, not streamed: a process
         # substitution's exit status is invisible to set -e, and a failed
         # diff must not read as "no workflow files". (A file, not a variable:
         # the NUL separators a shell variable cannot hold.)
-        if ! git diff -z --name-only --no-renames "$START_SHA" "$HEAD_SHA" -- .github/workflows/ >"$RUNNER_TEMP/workflow-paths"; then
+        if ! git diff -z --name-only --no-renames "$from" "$HEAD_SHA" -- .github/workflows/ >"$RUNNER_TEMP/workflow-paths"; then
           echo "::error::land: could not list the paths the bundle changes (git diff failed, see above); refusing the bundle unchecked."
           exit 1
         fi
         paths=()
         while IFS= read -r -d '' p; do paths+=("$p"); done <"$RUNNER_TEMP/workflow-paths"
         if [ "${#paths[@]}" -eq 0 ]; then
-          echo "land: no workflow files in $START_SHA..$HEAD_SHA."
+          echo "land: no workflow files between $what and $HEAD_SHA$new_branch."
           exit 0
         fi
-        # The trusted references (above): the base tip and the effective
-        # base. merge-base exits 1 with no output when the histories are
-        # unrelated (then the tip is the only reference); anything else
-        # non-zero is a failed read.
+        # The trusted references (above): the base tip and, on a branch that
+        # is on origin, the effective base. merge-base exits 1 with no output
+        # when the histories are unrelated (then the tip is the only
+        # reference); anything else non-zero is a failed read.
         trusted=()
         if [ -n "$BASE_SHA" ]; then
           trusted+=("$BASE_SHA")
+        fi
+        if [ -n "$BASE_SHA" ] && [ -n "$REMOTE_SHA" ]; then
           rc=0
           bases=$(git merge-base --all "$HEAD_SHA" "$BASE_SHA") || rc=$?
           if [ "$rc" -gt 1 ]; then
@@ -575,7 +650,7 @@ runs:
           echo "::error::land: the agent's commits change workflow files ($files), which the machine account may not push (it has no Workflows permission); refusing the bundle — changes under .github/workflows/ are made from a maintainer's machine."
           exit 1
         fi
-        echo "land: ${#paths[@]} workflow file(s) in $START_SHA..$HEAD_SHA changed only by the base merge (matching origin's base at ${BASE_SHA}); not the agent's."
+        echo "land: ${#paths[@]} workflow file(s) between $what and $HEAD_SHA changed only by the base merge (matching origin's base at ${BASE_SHA}); not the agent's."
 
     # Push, part 2 (the write, privileged token). A separate step because
     # a step has one GIT_TOKEN; nothing but the push happens here.

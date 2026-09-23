@@ -460,7 +460,11 @@ Three rules define the shape:
   One marker is `land`'s own: the `<!-- claude-review-comment -->` it
   appends, after the de-fang, to a `comments[]` body flagged `review` (the
   reviewer's top-level review — the flag is admitted only next to a
-  `review_verdict`, so no other agent's comment can pose as a review).
+  `review_verdict` and only on a land job whose caller passes
+  `allow-review`, which claude-review.yml alone does, so no other agent's
+  comment can pose as a review; since 2026-09-22 `review_verdict` and
+  `review_comments[]` are refused on every other caller the same way,
+  Claude Security finding 4628442).
   The codex reviewer's `engine: codex` anchor footer is deliberately NOT
   on `land`'s list: the reviewer posts its real footer through this same
   composite, so workflows whose bodies must not pose as a review (the
@@ -880,7 +884,12 @@ the dev-agent shape did not:
   git in the workspace codex had write access to, which is why the reviewer
   needs no reclaim step); `land`'s `refuse-bundle` input is the enforcing
   side: the validator refuses any manifest that carries commits, claims
-  HEAD moved or ships a `commits.bundle`, whatever the review job uploaded.
+  HEAD moved or ships a `commits.bundle`, whatever the review job uploaded —
+  and, since 2026-09-22, any that carries `pr`, `replies`,
+  `resolve_threads`, `handoff_body_file` or `handback: true`, the fields
+  only a landed commit or a loop's fix agent owes (a forged `handback`
+  would otherwise post the live `@review` and re-run the reviewer on its
+  own PR without bound; Claude Security finding 4628439).
   The same flag turns the push-side branch rules off (charset, default
   branch, refused list): with nothing pushed, `branch` is only the pin to
   the run's PR head ref, and a fork-head PR whose branch is `main` — the

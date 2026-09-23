@@ -59,7 +59,11 @@ text are checked by the tests under `tests/`.
   permissions that job uses, from the GitHub App's secrets, and are revoked at
   job end.
 - Whether a comment, label or issue-body line is believed is decided by its
-  author's login or verified write access, never by the text itself.
+  author's login or verified write access, never by the text itself. Text a
+  maintainer republishes from the public upstream tracker (`/import`) is
+  de-fanged before it is posted under their login, and `claude.yml`'s trigger
+  check reads no body or title text on an opened issue whose first line is
+  the import's `Upstream issue:` line.
 - A label the machine account applies is a write, not a decision, and never
   starts the dev agent: `claude.yml`'s trigger check refuses both of its
   logins on the `auto`/`claude` label path as it does on text. The machine
@@ -86,6 +90,15 @@ text are checked by the tests under `tests/`.
   commission the autonomous agent — through an issue label, or through a
   PR opened, adopted or labelled for a branch already on origin — however
   the artifact was produced (Claude Security finding 4628345, 2026-09-22).
+- Only the reviewer's land job (`claude-review.yml`, the one caller that
+  passes `land`'s `allow-review`) may carry a review: the validator refuses
+  `review_verdict`, a `review`-flagged comment and inline review comments on
+  every other caller, so a forged manifest on the dev agent's or a loop's
+  land job cannot post the machine account's verdict. Under the reviewer's
+  `refuse-bundle` it refuses the hand-back, hand-off, thread resolutions,
+  replies and PR operations a read-only reviewer never owes, so a forged
+  review manifest cannot re-trigger the reviewer from its own land job
+  (Claude Security findings 4628442 and 4628439, 2026-09-22).
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - The reviewer runs only when a trusted commenter asks for it, except inside
@@ -147,7 +160,12 @@ text are checked by the tests under `tests/`.
   made from a maintainer's machine, under a maintainer's review. The land
   job refuses a bundle in which the agent changed them before pushing, with
   a report naming the files; changes the runner's base merge brought in
-  pass.
+  pass. The files it checks are the ones the push would change on origin
+  (the bundle's tip against the branch's live tip, or against the base
+  branch's tip when the push creates the branch), never a range the
+  manifest names: the manifest's `start_sha` is the agent job's to write,
+  and origin serves any reachable commit — a fork PR's head, an old base
+  commit — as a start (Claude Security finding 4628444, 2026-09-22).
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The
