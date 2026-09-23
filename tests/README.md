@@ -283,7 +283,10 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   the caller's `allowed_bots` names (same-repo heads only) — with the fork
   head admitted sandboxed and a failed lookup refused (Claude Security
   4085111). Also that the review step's `allowed_bots` is the caller's list
-  plus `TRUSTED_LOGINS`.
+  plus `TRUSTED_LOGINS`, and that `issue_comment` is the only event the step
+  admits: a `pull_request` / `pull_request_target` run fails it red with an
+  error naming the caller stub (the path was removed 2026-09-22), and no
+  expression in the workflow or the stubs reads the PR-event payload.
 - `test_codex_path.py` — the codex path's runner-side search path (Claude
   Security 4628448): the `assert-runner-only-path` check `create-codex-user`
   runs before its grant and `reclaim-codex-workspace` runs after codex

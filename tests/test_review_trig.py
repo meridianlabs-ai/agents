@@ -46,7 +46,8 @@ gh() {
 
 
 def run_trig(tmp_path, *, actor, perms=None, allowed_bots="", head_repo="o/r",
-             is_pr=True, external=False, ibody="", actor_type=None):
+             is_pr=True, external=False, ibody="", actor_type=None,
+             event="issue_comment", expect_rc=0):
     # The payload's account type: "Bot" for a GitHub App (with or without a
     # `[bot]` suffix), "User" otherwise.
     if actor_type is None:
@@ -59,15 +60,47 @@ def run_trig(tmp_path, *, actor, perms=None, allowed_bots="", head_repo="o/r",
     out = tmp_path / "out"
     out.write_text("")
     env = {
-        "GITHUB_OUTPUT": str(out), "STATE": str(state), "EVENT": "issue_comment",
+        "GITHUB_OUTPUT": str(out), "STATE": str(state), "EVENT": event,
         "ACTOR": actor, "GH_REPO": "o/r", "COMMENT": "@review", "IS_PR": "true" if is_pr else "false",
         "PR_NUM": "7", "EXTERNAL": "true" if external else "false", "IBODY": ibody,
-        "HEAD_REPO": "", "HEAD_REF": "", "TRUSTED_LOGINS": TRUSTED_LOGINS, "ALLOWED_BOTS": allowed_bots,
+        "TRUSTED_LOGINS": TRUSTED_LOGINS, "ALLOWED_BOTS": allowed_bots,
         "ACTOR_TYPE": actor_type,
     }
     r = sh(*STEP_BASH, GH_STUB + lift_step(WORKFLOW, "        id: trig"), check=False, env=env)
-    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.returncode == expect_rc, r.stdout + r.stderr
     return r, outputs(out), state
+
+
+@pytest.mark.parametrize("event", ["pull_request", "pull_request_target"])
+def test_pull_request_family_events_fail_the_gate_loudly(tmp_path, event):
+    # The PR-event admission path is gone (2026-09-22): a caller stub that
+    # still fires one — inspect_harbor's `synchronize` trigger for its
+    # nightly registry PR — must get a RED run with an error naming the fix,
+    # not a green no-op that silently drops the review it expected. Before
+    # the removal a same-repo pull_request event was admitted (ok=true,
+    # ack=true) with no commenter and no lookup at all; now nothing is
+    # decided and no output is written — the run stops at the error.
+    r, o, state = run_trig(tmp_path, actor="i-am-marvin", event=event, expect_rc=1)
+    assert "::error::" in r.stdout and "removed on 2026-09-22" in r.stdout and event in r.stdout
+    assert o == {} and lookups(state) == []
+
+
+def test_the_reviewer_reads_no_pull_request_event_payload():
+    # No expression reads `github.event.pull_request` (the PR-event payload)
+    # and no step branches on the event name for a PR event: the number,
+    # head and PR-ness all come from the issue_comment payload
+    # (`github.event.issue.*`) or from trig's API lookup. The gate carries
+    # no `if:` any more (its only clause skipped release-please PRs on PR
+    # events), and both stubs fire on issue_comment alone.
+    text = WORKFLOW.read_text()
+    assert "github.event.pull_request" not in text
+    assert "== 'pull_request" not in text and "!= 'pull_request" not in text
+    assert '"$EVENT" = "pull_request' not in text
+    for stub in (ROOT / ".github" / "workflows" / "claude-review-stub.yml",
+                 ROOT / "examples" / "claude-review-stub.yml"):
+        stub_text = stub.read_text()
+        assert "\n  pull_request:" not in stub_text and "# pull_request:" not in stub_text, stub
+        assert "github.event_name == 'pull_request'" not in stub_text, stub
 
 
 def test_outsider_is_refused_on_a_same_repo_head(tmp_path):

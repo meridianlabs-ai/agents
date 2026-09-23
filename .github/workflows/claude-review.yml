@@ -7,20 +7,21 @@ name: Claude review (reusable)
 # posts them through the landing manifest as the machine account, exactly as
 # the codex engine's review has landed since #81. Same WIF auth as the dev
 # agent. Callers add a stub (see
-# examples/claude-review-stub.yml) that triggers on pull_request events
-# (auto-review; a pull_request_target switch was attempted 2026-08-26 and
-# reverted — Anthropic's token exchange rejects prt-shaped OIDC subjects —
-# but this workflow keeps its dual-event handling, inert under pull_request,
-# for the day prt returns; see design/architecture.md → auto-review
-# tradeoffs) and/or @review comments.
-#
-# Auto-review-on-open only fires where this workflow file exists on the PR's
-# base branch (GitHub resolves pull_request-family workflows from the PR's
-# branches, not the default branch). On a pristine-base mirror like the
-# inspect_ai fork — whose PRs target an upstream-mirror `main` that has no
-# meridian workflows — pull_request never fires; only the @review comment
-# path (issue_comment, resolved from the default branch) works there, and
-# the dev agent posts @review on PR open instead. See README.
+# examples/claude-review-stub.yml) that triggers on issue_comment: a
+# top-level @review comment on a PR, or on an External-labeled proxy issue.
+# That is the ONLY admitted event — the comment-only contract. The
+# pull_request / pull_request_target path (auto-review on PR open; prt
+# attempted 2026-08-26 and reverted — Anthropic's token exchange rejects
+# prt-shaped OIDC subjects) was removed on 2026-09-22: auto-review had been
+# switched off as policy on 2026-09-16 and eight of the ten deployed callers
+# were already comment-only, but two were not — inspect_harbor's stub fires
+# `synchronize` for the machine account's pushes to its nightly registry PR,
+# a review it still needs (so its stub must post a top-level @review on those
+# pushes instead: a dependent change after this lands), and inspect_vscode's
+# main still carries the open/ready trigger its PR #200 removes. The trig
+# step fails RED on any other event so a stub that still fires one is
+# noticed rather than silently no-oped. See design/architecture.md → The
+# reviewer: auto-review tradeoffs.
 #
 # Callers MUST grant id-token: write at the calling job level (GitHub does not
 # pass id-token to reusable workflows implicitly).
@@ -192,9 +193,8 @@ on:
           "*" for all. Empty by default, which means claude-code-action rejects
           ALL bot-authored events (its checkHumanActor runs even in prompt/agent
           mode). The fork sets "claude[bot]" so the dev agent can kick off a
-          review by posting a top-level @review comment when it opens a PR —
-          auto-review-on-open can't fire there (the workflow isn't on the PR's
-          base branch). Keep this empty on the dev workflow: allowing bots there
+          review by posting a top-level @review comment when it opens a PR.
+          Keep this empty on the dev workflow: allowing bots there
           would let the reviewer's own comments retrigger the dev agent.
           The trig step reads it too: a `[bot]` commenter's @review is
           admitted only when named here (same-repo heads only; the fork
@@ -272,15 +272,6 @@ jobs:
   # event payload directly, `head_ref` from trig's API lookup).
   gate:
     runs-on: ubuntu-latest
-    # Skip auto-review of release-please PRs: they are generated
-    # changelog/version bumps with nothing to review, and the run would only
-    # fail fast anyway (bot author, rejected by checkHumanActor), leaving a
-    # red X on every release PR. Gated here rather than in the caller stubs so
-    # all repos pick it up without recopying. An explicit @review comment
-    # (issue_comment event) still works.
-    if: >
-      (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') ||
-      !startsWith(github.event.pull_request.head.ref, 'release-please--')
     permissions:
       contents: read
       pull-requests: read     # trig's PR lookups; the 👀 and stage are marvin's
@@ -324,9 +315,8 @@ jobs:
 
       # Ack + stage run BEFORE the checkout (no workspace needed; the clone
       # costs ~1 min on large repos and the 👀 should land in seconds).
-      # Word-boundary gate for comment events so a summary that merely quotes
-      # `@review` in backticks doesn't ack; pull_request events (auto-review on
-      # open/ready) always count. Marvin's own loop-posted @review DOES get the
+      # Word-boundary gate so a summary that merely quotes `@review` in
+      # backticks doesn't ack. Marvin's own loop-posted @review DOES get the
       # ack — it doubles as "reviewer engaged" observability.
       # `ok` gates the whole run pipeline (checkout, agent, verify): the
       # caller stub's cheap substring gate admits events this word-boundary /
@@ -339,8 +329,7 @@ jobs:
       # claude-code-action's own actor gate fires, so on a public repo a fork
       # PR plus the attacker's own @review comment could otherwise execute
       # attacker-supplied setup code with the job token and OIDC minting
-      # available (issue #13 — the comment-path twin of the prt fork-head
-      # refusal above). Admission requires a TRUSTED commenter whatever the
+      # available (issue #13). Admission requires a TRUSTED commenter whatever the
       # head repo (Claude Security 4085111): a TRUSTED_LOGINS login (the
       # loops' hand-back, posted by their land jobs as the machine account),
       # a bot the caller named in allowed_bots (same-repo heads only), or an
@@ -387,8 +376,6 @@ jobs:
           PR_NUM: ${{ github.event.issue.number }}
           EXTERNAL: ${{ contains(github.event.issue.labels.*.name, 'External') && 'true' || 'false' }}
           IBODY: ${{ github.event.issue.body }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           ALLOWED_BOTS: ${{ inputs.allowed_bots }}
           # The commenter's account type from the payload: a GitHub App
           # actor is "Bot" whether or not its login carries a `[bot]` suffix
@@ -396,13 +383,24 @@ jobs:
           # check tells bots from users.
           ACTOR_TYPE: ${{ github.event.comment.user.type }}
         run: |
+          # issue_comment is the only admitted event (the @review comment
+          # path). The pull_request / pull_request_target path was removed
+          # (2026-09-22): a caller stub that still fires one gets a RED run
+          # with this error, not a silent no-op — inspect_harbor's stub
+          # (`synchronize`, its nightly registry PR: it must post a top-level
+          # @review instead) and inspect_vscode's (open/ready, until its #200
+          # lands) still did at removal time.
+          if [ "$EVENT" != "issue_comment" ]; then
+            echo "::error::claude-review.yml admits issue_comment (a top-level @review comment) only; the pull_request / pull_request_target path was removed on 2026-09-22. This run came from a '$EVENT' event — drop that trigger from the caller stub, or have it post a top-level @review comment instead."
+            exit 1
+          fi
           ok=false mode=pr upstream="" trusted=false allowed_bot=false head_sha="" continuation=false fork_head=false
           # head_ref: the admitted PR's head branch name — the landing
           # manifest's `branch` (the reviewer never pushes to it; the
           # validator pins a PR run's branch to the PR's head ref, and this
           # is the trusted value it is compared against). Empty in external
           # mode and whenever the run is refused.
-          head_ref="$HEAD_REF"
+          head_ref=""
           # One retry for the gating lookups: they refuse fail-closed, so a
           # transient API blip shouldn't block a legitimate review outright.
           # Each attempt is captured and emitted only on success: a failed
@@ -418,22 +416,7 @@ jobs:
             if out=$(gh api "$@" 2>/dev/null); then printf '%s' "$out"; return 0; fi
             return 1
           }
-          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
-            # Defense in depth (stubs gate this too, but stub copies drift):
-            # pull_request_target runs with base-repo secrets and this
-            # workflow checks out the PR head — NEVER for a fork head.
-            if [ "$EVENT" = "pull_request_target" ] && [ "$HEAD_REPO" != "$GH_REPO" ]; then
-              # loud: this firing means a caller stub lost its same-repo gate
-              echo "::warning::fork head on pull_request_target — refusing (same-repo only); check the caller stub's gate"
-            else
-              ok=true
-              # A pull_request run with a fork head cannot normally reach
-              # here (no OIDC token → the job dies at startup; the stubs gate
-              # it too). Recorded anyway so the sandboxed path applies if a
-              # caller stub ever admits one.
-              [ "$HEAD_REPO" = "$GH_REPO" ] || fork_head=true
-            fi
-          elif printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
+          if printf '%s' "$COMMENT" | grep -qE '(^|[[:space:]])@review([[:space:],.!?;:]|$)'; then
             # Commenter trust, in order. A TRUSTED_LOGINS login (the loops'
             # hand-back identity — a User with write today, an App bot after
             # Phase 2, hence decided before the [bot] case and without a
@@ -544,13 +527,7 @@ jobs:
             fi
           fi
           ack=false
-          if [ "$ok" = "true" ]; then
-            if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
-              ack=true  # auto-review on open; same-repo enforced above
-            else
-              ack=$trusted
-            fi
-          fi
+          [ "$ok" = "true" ] && ack=$trusted
           [ "$ok" = "true" ] && [ "$mode" = "pr" ] || head_ref=""
           echo "ok=$ok  ack=$ack  mode=$mode  fork_head=$fork_head  head_ref=$head_ref  upstream=$upstream"
           {
@@ -587,7 +564,7 @@ jobs:
           stage: Agent
           token: ${{ steps.mint.outputs.token }}
           repo: ${{ github.repository }}
-          issue: ${{ github.event.issue.number || github.event.pull_request.number }}
+          issue: ${{ github.event.issue.number }}
 
       # Engine selection (design/codex-engine.md): an engine:codex label on
       # the PR routes this review to Codex. Read via the API at gate time —
@@ -608,7 +585,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          NUM: ${{ github.event.issue.number }}
           MODE: ${{ steps.trig.outputs.mode }}
           FORK_HEAD: ${{ steps.trig.outputs.fork_head }}
         run: |
@@ -655,7 +632,7 @@ jobs:
     # was cancelled (no artifact to land; a "landing failed" note would be
     # noise) — so there is no partial review to orphan.
     concurrency:
-      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: claude-review-${{ github.repository }}-${{ github.event.issue.number }}
       cancel-in-progress: true
     permissions:
       contents: read          # read code to review; cannot push
@@ -671,9 +648,8 @@ jobs:
       agent_launched: ${{ steps.launched.outputs.value }}
       mention: ${{ steps.who.outputs.mention }}
     steps:
-      # On a pull_request event the default checkout is the PR merge ref. On an
-      # @review comment (issue_comment) the default would be the repo default
-      # branch, so resolve the PR head explicitly.
+      # On an @review comment (issue_comment) the default checkout would be
+      # the repo default branch, so resolve the PR head explicitly.
       # persist-credentials:false in ALL modes (issue #59): checkout otherwise
       # writes the job token into the workspace's git config, where code the
       # sandbox runs on a fork head could read it, and nothing after this
@@ -689,15 +665,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          # issue_comment default would be the repo default branch;
-          # pull_request_target's would be the BASE branch (the action requires
-          # not defaulting to an untrusted ref — same-repo PRs, our only
-          # auto-review population, are same-trust as comment-triggered
-          # reviews, which also check out the head). Resolve explicitly. The
-          # comment path pins the SHA trig captured when it decided trust —
-          # refs/pull/N/head would re-resolve here, AFTER the gate (TOCTOU);
-          # prt keeps the ref (later pushes there are same-repo, same trust).
-          ref: ${{ (github.event_name == 'issue_comment' && needs.gate.outputs.head_sha) || (github.event_name == 'pull_request_target' && format('refs/pull/{0}/head', github.event.pull_request.number)) || '' }}
+          # The issue_comment default would be the repo default branch, so
+          # resolve explicitly: the SHA trig captured when it decided trust —
+          # refs/pull/N/head would re-resolve here, AFTER the gate (TOCTOU).
+          ref: ${{ needs.gate.outputs.head_sha }}
 
       # External-review mode checks out the UPSTREAM PR's head (public read)
       # so the reviewer has the tree for context. The claude-setup provisioning
@@ -724,8 +695,7 @@ jobs:
       # ran. The reviewer never commits, so emit-landing runs read-only at
       # the end of this job (no git after the agent, head_sha = this) and the
       # land job refuses any manifest that claims otherwise; the value only
-      # has to be a real SHA. On pull_request events it is the merge ref's
-      # commit, on comment runs the pinned head — either is fine. rev-parse
+      # has to be a real SHA (the pinned head, on a PR run). rev-parse
       # on its own line under -e, so a failure is this step's (not echo's
       # success with an empty sha); Surface agent errors reads the outcome,
       # and the emit step falls back to github.sha so the manifest carrying
@@ -1031,7 +1001,7 @@ jobs:
           PROXY: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           DEFAULT_PROMPT: ${{ inputs.review_prompt }}
-          THIS_PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          THIS_PR: ${{ github.event.issue.number }}
           CONTINUATION: ${{ needs.gate.outputs.continuation }}
           OUT_DIR: ${{ runner.temp }}/review
           SCRATCH: ${{ runner.temp }}/scratch
@@ -1078,7 +1048,7 @@ jobs:
             if [ "${FORK_HEAD:-}" = "true" ]; then
               fork_note=" FORK-HEAD PR: this PR's head lives in a fork, so its tree is treated as untrusted code and the run is sandboxed. $SANDBOX_NOTE $STRIP_NOTE"
             fi
-            printf 'value=%s %s%s%s %s\n' "$DEFAULT_PROMPT" "TARGET: you are reviewing PR #$THIS_PR of $REPO and nothing else. Its head (or, on pull_request triggers, its merge preview with the base) is checked out in the workspace. Review PR #$THIS_PR ONLY — never any other PR or issue, no matter what gh pr list, the git log, or any workspace state suggests; the workflow posts what you write to PR #$THIS_PR. If the checked-out tree seems to disagree with PR #$THIS_PR's diff, say so in your summary rather than switching targets." "$closed_note" "$fork_note" "$output_note" >>"$GITHUB_OUTPUT"
+            printf 'value=%s %s%s%s %s\n' "$DEFAULT_PROMPT" "TARGET: you are reviewing PR #$THIS_PR of $REPO and nothing else. Its head is checked out in the workspace. Review PR #$THIS_PR ONLY — never any other PR or issue, no matter what gh pr list, the git log, or any workspace state suggests; the workflow posts what you write to PR #$THIS_PR. If the checked-out tree seems to disagree with PR #$THIS_PR's diff, say so in your summary rather than switching targets." "$closed_note" "$fork_note" "$output_note" >>"$GITHUB_OUTPUT"
             exit 0
           fi
           printf 'value=%s %s\n' "$DEFAULT_PROMPT" "EXTERNAL-REVIEW ADJUSTMENTS — these OVERRIDE any conflicting instruction above or in your system prompt. You are reviewing an EXTERNAL contributor's upstream pull request, $UP_REPO#$UP_NUM, on behalf of the maintainer; its head is checked out in the workspace. Read the diff with \`gh pr diff $UP_NUM --repo $UP_REPO\` and \`gh pr view $UP_NUM --repo $UP_REPO --json title,body,commits\`, and verify claims by reading the checked-out code. Post NOTHING anywhere yourself — not on the upstream PR (no summary comment, no inline comments, no reviews, no reactions; the maintainer decides what feedback to relay), and nothing on this repo either. Instead write your ENTIRE review (summary verdict line — looks ready to approve / changes needed / needs discussion — plus line-level findings with file:line references, each tagged blocking or non-blocking) as ONE markdown file, $OUT_DIR/summary.md, with the Write tool (the directory exists and is the only place you may write; rewrite the file whole when you update it): the workflow posts it as ONE comment on the tracking issue $REPO#$PROXY after your run ends. Write no verdict file and no inline-comment file — this review is for a human, not the automation loop. Repo guidance in your system prompt about directing PR authors to reply with top-level @claude comments applies only to this repo's OWN PRs and does NOT apply here: the upstream PR and its author have no agent integration and nothing you write reaches them directly (the maintainer relays), so do not include any such instruction in your findings. Guidance about never writing the literal review-trigger token DOES still apply — your comment lands on the tracking issue, where that token would retrigger this workflow. $SANDBOX_NOTE $STRIP_NOTE You MUST write $OUT_DIR/summary.md within THIS run — your output is not surfaced anywhere else, and a run cannot resume after your turn ends." >>"$GITHUB_OUTPUT"
@@ -1439,7 +1409,8 @@ jobs:
       #      `.ripgreprc`, `CLAUDE.md`, `CLAUDE.local.md` and `.husky` and
       #      checks them out from `origin/<base>` (the PR's base ref on
       #      pull_request events, the repository default branch on comments —
-      #      the same expression BASE_REF carries). No such ref, or any
+      #      this workflow's only event, and what BASE_REF carries). No such
+      #      ref, or any
       #      difference, and the root fails (external mode restores nothing
       #      and differs in nothing). Fail-closed price, documented: a head
       #      `.gitattributes` that makes `git checkout` transform one of these
@@ -1480,7 +1451,7 @@ jobs:
           steps.claude.outcome != 'skipped' &&
           (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true')
         env:
-          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          BASE_REF: ${{ github.event.repository.default_branch }}
           STRIP_TREE: ${{ steps.strip.outputs.tree }}
           GIT_DIR: ${{ github.workspace }}/.git
           GIT_WORK_TREE: ${{ github.workspace }}
@@ -1885,7 +1856,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          NUM: ${{ github.event.issue.number }}
           REVIEW_PROMPT: ${{ steps.reviewprompt.outputs.value }}
           TOOLS: ${{ steps.codexinputs.outputs.tools || 'none — the environment is unprovisioned' }}
         run: |
@@ -2050,8 +2021,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-          IS_PR: ${{ (github.event.issue.pull_request != null || github.event.pull_request != null) && 'true' || 'false' }}
+          NUM: ${{ github.event.issue.number }}
+          IS_PR: ${{ github.event.issue.pull_request != null && 'true' || 'false' }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
         run: |
           set -uo pipefail
@@ -2235,10 +2206,9 @@ jobs:
 
       # Whether the agent launched at all, for the land job's landed-review
       # check: the execution file exists only on this runner. No file = the
-      # action skipped itself before launching (actor check, or workflow
-      # validation on a pull_request run whose PR edits the reviewer's own
-      # files) — a deliberate no-op, not a silent stall; a real stall (agent
-      # ran, posted nothing) always leaves an execution file.
+      # action skipped itself before launching (its actor check) — a
+      # deliberate no-op, not a silent stall; a real stall (agent ran,
+      # posted nothing) always leaves an execution file.
       - name: Record whether the agent launched
         id: launched
         if: always() && needs.gate.outputs.ok == 'true'
@@ -2265,7 +2235,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          NUM: ${{ github.event.issue.number }}
         run: |
           set -uo pipefail
           n=$(gh api "repos/$REPO/issues/$NUM/labels" \
@@ -2300,7 +2270,7 @@ jobs:
         env:
           DIR: ${{ runner.temp }}/landing
           EXTRA: ${{ runner.temp }}/landing-extra.json
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          NUM: ${{ github.event.issue.number }}
           MODE: ${{ needs.gate.outputs.mode }}
           ACK: ${{ needs.gate.outputs.ack }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
@@ -2382,7 +2352,7 @@ jobs:
           # mode has no PR of ours, so a fixed name the land job's
           # branch-prefix pins to — never pushed to either way.
           branch: ${{ needs.gate.outputs.head_ref || format('review/external-{0}', github.event.issue.number) }}
-          pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
+          pr-number: ${{ github.event.issue.pull_request && github.event.issue.number || '' }}
           issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
           read-only: "true"
@@ -2465,7 +2435,7 @@ jobs:
           # the trusted fallback target for the final report when the
           # manifest never validated — from the EVENT payload, never from
           # the manifest.
-          pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
+          pr-number: ${{ github.event.issue.pull_request && github.event.issue.number || '' }}
           issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
           # From the gate job's API lookup (trusted: before any untrusted
           # code ran), so the validator needs no lookup of its own; empty in
@@ -2498,8 +2468,7 @@ jobs:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           MODE: ${{ needs.gate.outputs.mode }}
-          EVENT: ${{ github.event_name }}
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          NUM: ${{ github.event.issue.number }}
           MENTION: ${{ needs.review.outputs.mention }}
           LAUNCHED: ${{ needs.review.outputs.agent_launched }}
           CONTINUATION: ${{ needs.gate.outputs.continuation }}
@@ -2515,55 +2484,18 @@ jobs:
           # after the `cc @` would turn a nudge into a live trigger.
           [[ "${MENTION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] && ! [[ "${MENTION,,}" =~ ^(review|claude|auto)$ ]] || MENTION=""
           # The agent never launched (the review job recorded no execution
-          # file): a pre-launch self-skip (the action's actor check rejecting
-          # a bot-authored PR open, or workflow validation on a pull_request
-          # run whose PR edits the reviewer's own files). A deliberate
-          # no-op, not a silent stall — a real stall (agent ran, posted
-          # nothing) always leaves an execution file.
+          # file): a pre-launch self-skip — the action's own actor check
+          # refusing the commenter. A deliberate no-op, not a silent stall —
+          # a real stall (agent ran, posted nothing) always leaves an
+          # execution file. Log-level only; a permitted human's re-trigger
+          # is the fix.
           if [ "${LAUNCHED:-}" != "true" ]; then
-            # Distinguish the two skip causes cheaply: a pull_request-family
-            # run whose PR touches .github/workflows/ was skipped by the
-            # token exchange's workflow validation — the check goes green
-            # with nothing visible, and the mitigation (a manual top-level
-            # @review comment, resolved from the default branch) relies on a
-            # human remembering it. Nudge visibly for that case; the
-            # bot-actor skip on ordinary PRs stays a log-level notice. The
-            # nudge writes the trigger token in BACKTICKS only: it posts
-            # from a write-access account, and trig's word-boundary gate
-            # deliberately ignores a backticked token — bare, it would start
-            # a review run on a PR that may not want one yet.
-            # Capture first, then grep a here-string — no pipeline anywhere:
-            # grep -q exits at first match, and under pipefail the resulting
-            # SIGPIPE to the writer would flip the condition false on long
-            # output.
-            prfiles=""
-            if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; then
-              prfiles=$(gh api "repos/$REPO/pulls/$NUM/files" --paginate \
-                          --jq '.[].filename' 2>/dev/null || true)
-            fi
-            if grep -q '^\.github/workflows/' <<<"$prfiles"; then
-              marker='<!-- claude-review-nudge -->'
-              # Once per PR: reopen/ready_for_review re-fires this path, and
-              # repeating the same nudge is noise. case, not grep: no
-              # pipeline, so no SIGPIPE interaction with pipefail at all.
-              comments=$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
-                           --jq '.[].body' 2>/dev/null || true)
-              case "$comments" in *"$marker"*)
-                echo "::notice::workflow-validation skip on PR #$NUM — nudge already posted; not repeating."
-                exit 0 ;;
-              esac
-              echo "::notice::auto-review could not run from this PR event (PR edits .github/workflows/ — usually workflow validation); posting the re-trigger nudge."
-              cc=""
-              [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
-              gh issue comment "$NUM" --repo "$REPO" --body "$(printf 'ℹ️ Auto-review skipped: this PR edits `.github/workflows/` files, and the automatic review could not run from this PR event (usually server-side workflow validation). To get it reviewed, post a top-level `@review` comment — that resolves the workflow from the default branch.%s\n\n%s' "$cc" "$marker")" || true
-              exit 0
-            fi
-            echo "::notice::no execution output — the action skipped itself before launching (actor check or workflow validation); nothing to verify. A comment-triggered re-review runs it as a permitted human actor."
+            echo "::notice::no execution output — the action skipped itself before launching (its actor check); nothing to verify. A comment-triggered re-review runs it as a permitted human actor."
             exit 0
           fi
           # A PR merged or closed mid-review needs no review: the
           # immediate-merge flow for low-blast-radius PRs (CLAUDE.md) races
-          # the auto-review by design, and the reviewer correctly writes
+          # an in-flight review by design, and the reviewer correctly writes
           # nothing on a finished PR (observed: agents#11 drew a spurious ⚠️).
           # EXCEPT a live-branch continuation (see trig): there the closed PR
           # is the loop's working surface and the verdict comment is the only
