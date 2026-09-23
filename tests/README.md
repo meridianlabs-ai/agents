@@ -250,8 +250,47 @@ workflows are validated by triggering them (AGENTS.md → Testing a change).
   diagram and footnote identifiers per render, as GitHub does, and those
   alone do not count), makes promote refuse before
   any write; a trusted header's `Fixes #<up>` is prepended even when the
-  body quotes one. Acceptance paths run through
-  `--dry-run` only; the test clone's remote is non-routable.
+  body quotes one. Acceptance paths
+  run through `--dry-run` only; the test clone's remote is non-routable.
+  Except checkout's External path (Claude Security 4629158, 4629155), run
+  for real against local repos: an outsider's upstream PR head named
+  `meridian`, carrying `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, a `post-checkout` hook the clone's
+  `core.hooksPath` would resolve, and a `.gitmodules` adding a submodule
+  and an out-of-tree "ts-mono" path, lands detached in a worktree outside
+  the clone at the SHA the API reported — the local `meridian`, HEAD,
+  branch config and `.git/config` unchanged, nothing of the tree in the
+  clone, the hook never run, the submodule never initialised, the ts-mono
+  companion never looked up (the stub's `gh pr checkout` emulation shows
+  the unfixed behaviour fast-forwarding `meridian` and running the hook);
+  a head that moved since the read and a non-SHA `headRefOid` are refused;
+  a rerun reuses a clean worktree and refuses a dirty one. Destination
+  aliases are refused with the clone and every other worktree unchanged: a
+  relative root, a `..` traversal, a symlinked ancestor or a symlink at the
+  path resolving into the clone, a directory inside another linked worktree
+  (pre-created or not), a stranger's directory and a registered worktree on
+  a branch. Inherited command-running configuration is inert on the first
+  run and on reuse: a relative `core.fsmonitor`, and `filter.*` smudge,
+  clean and process drivers (one `required`) selected by the contributor's
+  `.gitattributes`, all pointing at scripts the tip supplies (a plain
+  worktree add of the same tip runs them), leave no marker and the clone's
+  config untouched — including drivers an `includeIf gitdir:` condition
+  defines only inside the linked worktree, discovered after `worktree add
+  --no-checkout` and before the first checkout. Registered worktree paths
+  are read NUL-delimited and captured losslessly (a `$(…)` capture drops a
+  trailing newline), so a worktree whose path holds an embedded or one or
+  two trailing newlines still bounds the destination, reached through a
+  newline-free symlink alias from the clone and from inside that worktree,
+  with and without a pre-created parent, and a destination path with a
+  newline — lexical or after resolution — is refused. The diff and removal
+  recipes SKILL.md gives the operator are lifted from its ```sh block and
+  run, with a worktree root holding a space, a tab, a glob character, a
+  `$VAR`, both command-substitution forms, both quote characters and
+  backslashes (the path enters the recipe as heredoc data, never as
+  command text), against an inherited clean filter and textconv driver:
+  no marker, no substitution run, the worktree gone and pruned, unrelated
+  sibling files intact; the plain in-worktree status the skill no longer
+  recommends does run the clean filter. Promotions keep `gh pr checkout`.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
   `Converged handoff` and `Refund infra-crashed round` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
