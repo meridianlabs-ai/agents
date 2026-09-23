@@ -1772,6 +1772,47 @@ def test_protected_link_to_the_repository_root_protects_the_whole_tree(repos, li
     assert outputs["files"] == f"`{path}`"
 
 
+@pytest.mark.parametrize("aliases", [0, 21])
+def test_rule_import_behind_many_directory_aliases_is_followed(repos, aliases):
+    # Review round 2: `.claude -> .agents`, `.agents/rules -> ../shared` and
+    # sibling aliases of `shared` under `.agents/`. Every name `shared/policy.md`
+    # is reachable under is derived, so `.claude/rules/policy.md` is among
+    # them however many siblings there are, and its import is protected.
+    r = repos
+    commit_path(r, "shared/policy.md", "@../payload.md\n")
+    commit_path(r, "payload.md", "safe\n")
+    for i in range(aliases):
+        commit_link(r, f".agents/alias{i:02d}", "../shared")
+    commit_link(r, ".agents/rules", "../shared")
+    commit_link(r, ".claude", ".agents")
+    on_base(r)
+    commit_path(r, "payload.md", "hostile instructions\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`payload.md`"
+
+
+def test_link_inside_its_own_target_fails_closed(repos):
+    # `.claude/rules/up -> ..` resolves to `.claude`, so every file under
+    # `.claude` has endlessly many names; the walk refuses unchecked rather
+    # than classify from a truncated set.
+    r = repos
+    commit_path(r, ".claude/rules/policy.md", "@../../payload.md\n")
+    commit_link(r, ".claude/rules/up", "..")
+    on_base(r)
+    commit_path(r, "src/agent.py")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0
+    assert "files" not in outputs
+    assert "reachable under more than 256 names through directory links" in res.stderr + res.stdout
+    assert "could not follow the symlinks and imports of the protected paths" in res.stdout
+    assert remote_tip(r) == r["start"]
+
+
 def test_protected_link_leaving_the_tree_protects_only_the_link(repos):
     # The outside-tree control: `.claude/skills -> ../../elsewhere` reaches
     # nothing a bundle can change, so ordinary work beside it lands.

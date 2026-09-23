@@ -312,12 +312,21 @@ resolve_tree_path() {
 # reachable under through the directory links protected_reach has resolved
 # so far (LINK_ENDS[i] reached from LINK_AT[i]; `.` is the root): a file
 # under `.agents/` read through `.claude -> .agents` is `.claude/...` to
-# Claude Code, and is classified by that name (review round 1). Capped at
-# 20 names — a link to the root makes the names endless.
+# Claude Code, and is classified by that name (review round 1). Every name
+# is derived, never a truncated set (review round 2: a cap of 20 let sibling
+# aliases crowd out the `.claude/rules/...` name, so a rule's import went
+# unprotected). The names are finite unless a link sits inside its own
+# target (`a/b/up -> ..`): past 256 names this returns 1, and protected_reach
+# fails closed. A link to the root never gets here — protected_reach stops
+# walking once the whole tree is protected.
 logical_names() {
   local i=0 k n r l c y seen
   LN_NAMES=("$1")
-  while [ "$i" -lt "${#LN_NAMES[@]}" ] && [ "${#LN_NAMES[@]}" -lt 20 ]; do
+  while [ "$i" -lt "${#LN_NAMES[@]}" ]; do
+    if [ "${#LN_NAMES[@]}" -gt 256 ]; then
+      echo "::error::land: $(printf '%q' "$1") is reachable under more than 256 names through directory links (a link inside its own target?)." >&2
+      return 1
+    fi
     n="${LN_NAMES[$i]}"
     k=0
     while [ "$k" -lt "${#LINK_ENDS[@]}" ]; do
@@ -348,11 +357,13 @@ logical_names() {
 # names as well as its physical one; `~/` and absolute imports are outside
 # the tree. To a fixed point: what a reached path contains is walked too, so
 # a link inside a linked directory or an import of an import is followed;
-# more than 20 rounds fails. Over-matching is the safe direction: an `@` word
+# more than 20 rounds fails, and so does a file with too many names
+# (logical_names). Reaching the root (`.`) ends the walk: the whole tree is
+# then protected. Over-matching is the safe direction: an `@` word
 # that is not an import (a mention) names a path that is normally absent,
 # and the imports of code spans are taken too. Returns 1 on a failed read.
 protected_reach() {
-  local rev="$1" empty meta path mode oid content round=0 added imp seen f g x y d n _
+  local rev="$1" empty meta path mode oid content round=0 added imp seen f g x y d n rooted="" _
   shift
   local -a specs=("$@") found=() imported=() cands=() dirs=()
   LINK_ENDS=() LINK_AT=()
@@ -370,7 +381,7 @@ protected_reach() {
     # shellcheck disable=SC2094  # the loop removes its input only on the way out (return 1)
     while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
       read -r _ mode _ oid _ <<<"$meta"
-      logical_names "$path"
+      logical_names "$path" || { rm -f "$f" "$g"; return 1; }
       imp=""
       for n in "${LN_NAMES[@]}"; do
         case "/$n" in */CLAUDE.md | */CLAUDE.local.md | */AGENTS.md | */.claude/rules/*) imp=1; break ;; esac
@@ -416,8 +427,13 @@ protected_reach() {
         seen=""
         for y in ${found[@]+"${found[@]}"}; do [ "$y" != "$x" ] || { seen=1; break; }; done
         [ -n "$seen" ] || { found+=("$x"); added=1; }
+        [ "$x" != "." ] || rooted=1
       done
+      # The root is reached: `.` already protects every path in the tree,
+      # so no further link or import can add one.
+      [ -z "$rooted" ] || break
     done <"$f"
+    [ -z "$rooted" ] || break
     [ -n "$added" ] || break
   done
   rm -f "$f" "$g"
