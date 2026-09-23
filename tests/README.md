@@ -386,7 +386,7 @@ Testing a change).
   with write access (Claude Security 4628438) — a triage account's, a
   bot's or the machine account's own label, a timeline that names no
   labeler and a failed permission lookup all leave the run one-shot with
-  no `auto` in `pr_labels`, the issue's `engine:*` labels still copied; a
+  no `auto` in `pr_labels`; a
   decided refusal (a known labeler that is not a write-access human) also
   removes the label and posts a note saying so, but only when a second
   timeline read still shows the judged `labeled` event as the newest
@@ -394,7 +394,11 @@ Testing a change).
   lookup or its retry is left alone); a failed read or a run started by
   applying `auto` writes nothing, and a failed removal is said (issue
   #141); an `@auto` comment opts in without a label read; a PR's
-  label is left to the loop gates. Also that the land job pins the PR
+  label is left to the loop gates. Each of an issue's
+  `engine:*` labels gets the same check (#139), one label at a time and
+  sharing the `auto` check's timeline read: one that fails stays out of
+  `pr_labels`, and a failed `engine:codex` leaves the Claude engine; a PR's
+  engine label is not checked there. Also that the land job pins the PR
   labels to the gate's read.
 - `test_dev_agent_trig.py` — `claude.yml`'s `Check trigger` step, lifted the
   same way: neither of the machine account's logins kicks the dev agent off,

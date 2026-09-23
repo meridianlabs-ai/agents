@@ -1,8 +1,9 @@
 """Tests for claude.yml's `Detect engine` step: who applied an issue's `auto`
 label decides whether it is the run's opt-in (Claude Security finding
-4628438). Applying a label needs only triage permission, and a triage
-account's `auto` — refused as a kickoff by the trig step, but left on the
-issue — used to turn the next write-access human's plain `@claude` into an
+4628438), and who applied its engine:* labels whether they count (#139).
+Applying a label needs only triage permission, and a triage account's
+`auto` — refused as a kickoff by the trig step, but left on the issue —
+used to turn the next write-access human's plain `@claude` into an
 autonomous run: the PR labelled `auto` by the machine account, whose label
 the loop gates trust by login. A decided refusal also removes the label
 and says so on the issue (issue #141). Lifted from the workflow the way
@@ -137,10 +138,11 @@ def test_a_write_access_humans_issue_label_is_the_opt_in(tmp_path):
     # The preserved route: a maintainer labelled the issue `auto`, and a
     # later `@claude` (or the `auto` label event itself) runs autonomously —
     # the PR the land job opens carries `auto` and owes the hand-back.
-    _, o, state = run_engine(tmp_path, labels=["auto", "engine:codex"], timeline=[labeled("alice")],
-                             perms={"alice": "write"})
+    _, o, state = run_engine(tmp_path, labels=["auto", "engine:codex"],
+                             timeline=[labeled("alice", "engine:codex"), labeled("alice")], perms={"alice": "write"})
     assert o["auto"] == "true" and o["pr_labels"] == ["auto", "engine:codex"] and o["engine"] == "codex"
-    assert timeline_reads(state) == ["timeline"] and lookups(state) == ["alice"]
+    # One timeline read serves both checks (issue #139).
+    assert timeline_reads(state) == ["timeline"] and lookups(state) == ["alice", "alice"]
     assert writes(state) == []
 
 
@@ -148,11 +150,12 @@ def test_a_triage_accounts_issue_label_is_not_an_opt_in(tmp_path):
     # The finding: the label persists after the triage account's own
     # kickoff was refused; the write-access human's plain `@claude` must
     # stay a one-shot run — no `auto` in pr_labels, no hand-back — while the
-    # issue's engine label is still copied.
-    r, o, state = run_engine(tmp_path, labels=["auto", "engine:codex"], timeline=[labeled("mallory")],
-                             perms={"mallory": "read"})
+    # issue's engine label, which a maintainer applied, is still copied.
+    r, o, state = run_engine(tmp_path, labels=["auto", "engine:codex"],
+                             timeline=[labeled("alice", "engine:codex"), labeled("mallory")],
+                             perms={"alice": "write", "mallory": "read"})
     assert o["auto"] == "false" and o["pr_labels"] == ["engine:codex"] and o["engine"] == "codex"
-    assert lookups(state) == ["mallory"]
+    assert lookups(state) == ["mallory", "alice"]
     assert "applied by mallory, who does not have write access (permission: read)" in r.stdout
     # Issue #141: the refused label comes off, and the issue says why —
     # after a second timeline read shows it is still the label judged.
@@ -342,8 +345,8 @@ def test_an_at_auto_comment_opts_in_without_reading_the_label(tmp_path):
 
 
 def test_an_unlabelled_issue_reads_no_timeline(tmp_path):
-    _, o, state = run_engine(tmp_path, labels=["engine:codex"])
-    assert o["auto"] == "false" and o["pr_labels"] == ["engine:codex"]
+    _, o, state = run_engine(tmp_path, labels=["claude"])
+    assert o["auto"] == "false" and o["pr_labels"] == [] and o["engine"] == "claude"
     assert timeline_reads(state) == [] and lookups(state) == []
 
 
@@ -354,6 +357,107 @@ def test_a_prs_label_is_left_to_the_loop_gates(tmp_path):
     _, o, state = run_engine(tmp_path, is_pr=True, timeline=[labeled("mallory")], perms={"mallory": "read"})
     assert o["auto"] == "true" and o["head_branch"] == "feature"
     assert timeline_reads(state) == [] and lookups(state) == [] and writes(state) == []
+
+
+# Issue #139: an issue's engine:* labels get the same labeler check as its
+# `auto` label. A triage account's engine:codex used to route the next
+# write-access human's `@claude` to Codex and was copied onto the PR the
+# machine account opened, where every later run read it.
+
+def test_a_write_access_humans_engine_label_picks_the_engine(tmp_path):
+    _, o, state = run_engine(tmp_path, labels=["engine:codex"], timeline=[labeled("alice", "engine:codex")],
+                             perms={"alice": "maintain"})
+    assert o["engine"] == "codex" and o["pr_labels"] == ["engine:codex"] and o["auto"] == "false"
+    assert timeline_reads(state) == ["timeline"] and lookups(state) == ["alice"]
+
+
+def test_a_triage_accounts_engine_label_is_not_counted(tmp_path):
+    r, o, state = run_engine(tmp_path, labels=["engine:codex"], timeline=[labeled("mallory", "engine:codex")],
+                             perms={"mallory": "triage"})
+    assert o["engine"] == "claude" and o["pr_labels"] == []
+    assert lookups(state) == ["mallory"]
+    assert "'engine:codex' label was applied by mallory, who does not have write access (permission: triage)" in r.stdout
+
+
+def test_the_engine_labels_own_most_recent_labeler_decides(tmp_path):
+    # Removed and re-applied by a triage account: theirs now.
+    _, o, _ = run_engine(tmp_path, labels=["engine:codex"],
+                         timeline=[labeled("alice", "engine:codex"),
+                                   {"event": "unlabeled", "label": {"name": "engine:codex"}, "actor": {"login": "mallory"}},
+                                   labeled("mallory", "engine:codex")],
+                         perms={"alice": "write", "mallory": "read"})
+    assert o["engine"] == "claude" and o["pr_labels"] == []
+    _, o, _ = run_engine(tmp_path, labels=["engine:codex"],
+                         timeline=[labeled("mallory", "engine:codex"), labeled("alice", "engine:codex")],
+                         perms={"alice": "write", "mallory": "read"})
+    assert o["engine"] == "codex" and o["pr_labels"] == ["engine:codex"]
+    # A maintainer's `auto` does not vouch for the engine label beside it.
+    _, o, _ = run_engine(tmp_path, labels=["auto", "engine:codex"],
+                         timeline=[labeled("mallory", "engine:codex"), labeled("alice")],
+                         perms={"alice": "write", "mallory": "read"})
+    assert o["auto"] == "true" and o["engine"] == "claude" and o["pr_labels"] == ["auto"]
+
+
+def test_each_engine_label_is_checked_on_its_own(tmp_path):
+    # The whole engine:* namespace is copied, so each label is checked:
+    # the one that passes is kept, the one that fails is dropped, and the
+    # engine follows engine:codex's own result.
+    _, o, state = run_engine(tmp_path, labels=["engine:codex", "engine:next"],
+                             timeline=[labeled("alice", "engine:codex"), labeled("mallory", "engine:next")],
+                             perms={"alice": "write", "mallory": "read"})
+    assert o["engine"] == "codex" and o["pr_labels"] == ["engine:codex"]
+    assert lookups(state) == ["alice", "mallory"]
+    _, o, _ = run_engine(tmp_path, labels=["engine:codex", "engine:next"],
+                         timeline=[labeled("mallory", "engine:codex"), labeled("alice", "engine:next")],
+                         perms={"alice": "write", "mallory": "read"})
+    assert o["engine"] == "claude" and o["pr_labels"] == ["engine:next"]
+
+
+@pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT, "github-actions[bot]"])
+def test_a_bot_or_machine_account_engine_label_is_not_counted(tmp_path, login):
+    r, o, state = run_engine(tmp_path, labels=["engine:codex"], timeline=[labeled(login, "engine:codex")],
+                             perms={MARVIN: "write"})
+    assert o["engine"] == "claude" and o["pr_labels"] == [] and lookups(state) == []
+    assert f"'engine:codex' label was applied by {login} (a bot or the machine account)" in r.stdout
+
+
+def test_an_unreadable_engine_labeler_fails_closed(tmp_path):
+    # No labeled event for it, a timeline read that fails twice, or one
+    # that fails after a good page (the `auto` check's B1): default engine.
+    r, o, _ = run_engine(tmp_path, labels=["engine:codex"], timeline=[labeled("alice")], perms={"alice": "write"})
+    assert o["engine"] == "claude" and o["pr_labels"] == []
+    assert "carries 'engine:codex', but who applied it could not be read from its timeline" in r.stdout
+    _, o, state = run_engine(tmp_path, labels=["engine:codex"], timeline_fails=True)
+    assert o["engine"] == "claude" and o["pr_labels"] == []
+    assert timeline_reads(state) == ["timeline", "timeline"] and lookups(state) == []
+    _, o, state = run_engine(tmp_path, labels=["engine:codex"], partial_text=pages([labeled("alice", "engine:codex")]),
+                             perms={"alice": "write"})
+    assert o["engine"] == "claude" and o["pr_labels"] == []
+    assert timeline_reads(state) == ["timeline", "timeline"] and lookups(state) == []
+
+
+def test_a_failed_engine_labeler_lookup_fails_closed_after_one_retry(tmp_path):
+    r, o, state = run_engine(tmp_path, labels=["engine:codex"], timeline=[labeled("ghost", "engine:codex")])
+    assert o["engine"] == "claude" and o["pr_labels"] == []
+    assert lookups(state) == ["ghost", "ghost"]
+    assert "permission: lookup failed" in r.stdout
+
+
+def test_an_at_auto_run_still_checks_the_engine_label(tmp_path):
+    # The mention skips the `auto` check's timeline read; the engine check
+    # makes its own.
+    _, o, state = run_engine(tmp_path, labels=["engine:codex"], timeline=[labeled("mallory", "engine:codex")],
+                             perms={"mallory": "read"}, phrase="@auto")
+    assert o["auto"] == "true" and o["engine"] == "claude" and o["pr_labels"] == ["auto"]
+    assert timeline_reads(state) == ["timeline"] and lookups(state) == ["mallory"]
+
+
+def test_a_prs_engine_label_is_not_checked_here(tmp_path):
+    # A PR run reads the PR's own labels; pr_labels are for issue runs.
+    _, o, state = run_engine(tmp_path, labels=["engine:codex"], is_pr=True,
+                             timeline=[labeled("mallory", "engine:codex")], perms={"mallory": "read"})
+    assert o["engine"] == "codex"
+    assert timeline_reads(state) == [] and lookups(state) == []
 
 
 def test_land_job_pins_the_pr_labels_to_the_gates_read():

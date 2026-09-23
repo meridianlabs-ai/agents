@@ -849,10 +849,54 @@ jobs:
               fi
             fi
           fi
+          # An issue's engine:* labels count only when a write-access human
+          # applied them (issue #139): applying a label needs only triage
+          # permission, and each one picks this run's engine and is copied
+          # onto the PR the land job opens, whose later runs all read it.
+          # Same rule as the issue's `auto` above — the label's most recent
+          # labeled event, no bot or machine account, write access, one
+          # retry each, fail-closed — reusing the timeline the `auto` check
+          # read when it read one. A label that fails is left off the PR,
+          # and engine:codex failing leaves the default engine. A PR's own
+          # labels are not checked here.
+          if [ "$IS_PR" != "true" ] && grep -q '^engine:' <<<"$labels"; then
+            if [ -z "${timeline:-}" ]; then
+              for i in 1 2; do
+                timeline=$(gh api "repos/$REPO/issues/$NUM/timeline?per_page=100" --paginate 2>/dev/null) && break
+                timeline=""
+                [ "$i" -lt 2 ] && sleep 5
+              done
+            fi
+            kept=$(grep -v '^engine:' <<<"$labels" || true)
+            while IFS= read -r name; do
+              labeler=""
+              [ -z "$timeline" ] || labeler=$(jq -rs --arg n "$name" '[.[][] | select(.event=="labeled" and .label.name==$n)] | last | .actor.login // empty' <<<"$timeline" 2>/dev/null || true)
+              if [ -z "$labeler" ]; then
+                echo "::warning::issue #$NUM carries '$name', but who applied it could not be read from its timeline; not counted — the label stays off the PR."
+                continue
+              elif trusted_login "$labeler" || [[ "$labeler" == *"[bot]" ]]; then
+                echo "::warning::issue #$NUM's '$name' label was applied by $labeler (a bot or the machine account), not by a write-access human; not counted — the label stays off the PR."
+                continue
+              fi
+              perm=""
+              for i in 1 2; do
+                perm=$(gh api "repos/$REPO/collaborators/$labeler/permission" --jq '.permission' 2>/dev/null) && break
+                perm=""
+                [ "$i" -lt 2 ] && sleep 5
+              done
+              case "$perm" in
+                admin|maintain|write) kept+=$'\n'"$name" ;;
+                *) echo "::warning::issue #$NUM's '$name' label was applied by $labeler, who does not have write access (permission: ${perm:-lookup failed}); not counted — the label stays off the PR." ;;
+              esac
+            done < <(grep '^engine:' <<<"$labels")
+            labels=$kept
+            engine=claude
+            grep -qx 'engine:codex' <<<"$labels" && engine=codex
+          fi
           # Labels for a PR the land job opens or adopts on an issue run:
           # `auto` whenever this is an @auto run, plus the whole engine:*
-          # namespace (not just engine:codex, so future engines need no
-          # change here) — every PR-scoped run reads the PR's own labels, so
+          # namespace the check above kept (not just engine:codex, so future
+          # engines need no change here) — every PR-scoped run reads the PR's own labels, so
           # without the copy an issue-selected engine would silently revert
           # to Claude the moment the PR opens.
           pr_labels=$(jq -nc --arg auto "$auto" --arg labels "$labels" \
