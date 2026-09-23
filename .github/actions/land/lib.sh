@@ -206,8 +206,9 @@ landing_failure_hint() {
   printf '%s' "$hint"
 }
 
-# PROTECTED_PATHSPECS — the paths a later automated job on an agent's
-# branch executes or loads as configuration, as git pathspecs; the `workflows`
+# PROTECTED_PATHSPECS — the entry points and configuration files a later
+# automated job on an agent's branch executes or loads, as git pathspecs
+# (not everything those run: see below); the `workflows`
 # step refuses a bundle in which the agent changed any of them (Claude
 # Security 4628446, criterion 2, 2026-09-23): the machine account's push
 # would otherwise move agent-written files into the same-repo tree the next
@@ -238,12 +239,17 @@ landing_failure_hint() {
 #     `uv sync` (uv.lock), pip requirements files, or `pnpm install`, which
 #     runs every package.json lifecycle script, .pnpmfile.cjs hooks and
 #     yarn's .yarn/ plugins, from the registries .npmrc / .yarnrc name.
-# What the list cannot see: ordinary files UNCHANGED configuration executes
-# — a script a claude-setup step, a settings hook or an MCP server command
-# runs, a build backend on `backend-path`, a module a setup.py or build hook
-# imports, any file a caller's recipe reads — an agent's change to one still
-# lands (SECURITY.md → Guarantees states the residual). Links and CLAUDE.md
-# imports out of these paths are followed by protected_reach below.
+# Accepted gap (decision: Ransom, 2026-09-23), so this does not close the
+# class: ordinary files UNCHANGED configuration executes — a script a
+# claude-setup step, a settings hook or an MCP server command runs, a build
+# backend on `backend-path`, a module a setup.py or build hook imports, any
+# file a caller's recipe reads — are not listed, and an agent's change to
+# one still lands; the next run executes it during provisioning or at
+# agent start (as the codex user on codex jobs, as `runner` on Claude jobs).
+# Closing it is a separate design follow-up (approval gating, dependency
+# following, or an unprivileged Claude user); SECURITY.md → Guarantees
+# states it. Links and CLAUDE.md imports out of these paths are followed by
+# protected_reach below.
 # shellcheck disable=SC2034  # read by the land composite's `workflows` step
 PROTECTED_PATHSPECS=(
   .github
