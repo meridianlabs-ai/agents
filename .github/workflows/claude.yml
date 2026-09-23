@@ -719,7 +719,10 @@ jobs:
       # transient error would otherwise leave the run unpinned. Best-effort
       # past that: an empty value fails no run here (a closed PR's deleted
       # head 404s legitimately, and a comment-only run needs no start);
-      # the agent job warns and the land job refuses the commits.
+      # the agent job warns and the land job refuses the commits — an
+      # agent run spent for nothing on that path is accepted (decision:
+      # Ransom, 2026-09-23), as is the sync refusing a head that moved
+      # between this read and the checkout (sync-branch's head-sha).
       - name: Record run start
         id: start
         if: steps.trig.outputs.ok == 'true'
