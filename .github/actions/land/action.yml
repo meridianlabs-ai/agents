@@ -393,9 +393,13 @@ inputs:
       (design/executed-paths-residual.md → Land: tier-2 opt-in): the rule is
       per repository, since other writers push to the same branches. Claude
       Security finding 4628446's criterion 2 is then met for tier 2 by that
-      isolation instead of by refusal (decision: Ransom, 2026-09-23). A
-      fixed value in the caller's workflow file, never one derived from the
-      event.
+      isolation instead of by refusal (decision: Ransom, 2026-09-23). The
+      rule covers CI too: no workflow that runs code from those branches may
+      hold a secret, an App token, `id-token: write` or a non-read
+      permission, and a credentialed `workflow_dispatch` or tag-push
+      workflow must be restricted to trusted refs (decision: Ransom,
+      2026-09-24). A fixed value in the caller's workflow file, never one
+      derived from the event.
     required: false
     default: "false"
 

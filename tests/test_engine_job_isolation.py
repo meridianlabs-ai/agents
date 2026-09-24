@@ -321,9 +321,11 @@ def test_the_example_stubs_document_the_build_config_opt_in_and_leave_it_off(stu
 @pytest.mark.parametrize("stub", ["claude-stub.yml", "claude-auto-stub.yml"])
 def test_this_repos_own_stubs_opt_in_to_build_config(stub):
     # This repository opts in (decision: Ransom, 2026-09-24): its only other
-    # automation that runs agent-landed branches as the runner is the
-    # push-triggered smoke and canary workflows, which count as CI. Every job
-    # that calls a pushing workflow sets it; none leaves it commented.
+    # automation that runs agent-landed branches as the runner is `tests`
+    # and the push-triggered smoke and canary workflows, which hold a
+    # read-only token and no real secret (the canary's are synthetic
+    # sentinels), as the opt-in rule for CI asks. Every job that calls a
+    # pushing workflow sets it; none leaves it commented.
     text = (WORKFLOWS / stub).read_text()
     calls = [l for l in text.splitlines() if l.startswith("    uses: meridianlabs-ai/agents/.github/workflows/")]
     assert calls and all("claude-review.yml" not in l for l in calls)

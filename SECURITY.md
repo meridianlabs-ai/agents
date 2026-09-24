@@ -352,8 +352,18 @@ text are checked by the tests under `tests/`.
   that executes them does so only as an unprivileged user holding the
   read-only job token (and the model credential, the declared exception
   above), which is criterion 1's remedy. Tier 1 meets criterion 2
-  literally, by refusal. Callers' own CI on agent PRs is outside this
-  rule, as for every same-repo branch.
+  literally, by refusal. The rule covers the repository's CI and other
+  credentialed automation too (decision: Ransom, 2026-09-24, applied to
+  finding 4628446 when the step-6 companions opted in): no workflow that
+  runs agent-landed branch code (a same-repo `pull_request`, a `push` to a
+  non-default branch, `workflow_run`, a schedule that checks out an agent
+  branch) may hold a secret, an App token, `id-token: write` or any
+  permission beyond read while it runs that code; ordinary CI with a
+  read-only token and no secrets is fine. A workflow a person runs on a
+  chosen ref (`workflow_dispatch`, a tag push) counts when it holds
+  credentials and is restricted to trusted refs, not exempted as a human
+  choice. Any other automation that runs code from an agent-reachable
+  branch with a credential is fixed before the repository opts in.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The

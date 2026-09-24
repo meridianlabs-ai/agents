@@ -196,9 +196,13 @@ on:
           every writer's branches are every consumer's input
           (design/executed-paths-residual.md → Land: tier-2 opt-in). Claude Security finding 4628446's criterion
           2 is then met for those files by that isolation instead of by
-          refusal (decision: Ransom, 2026-09-23). Callers' own CI on agent
-          PRs is not part of this rule. It comes from the caller's workflow
-          file, so it is trusted like every other input here.
+          refusal (decision: Ransom, 2026-09-23). The rule covers CI too: no
+          workflow that runs agent-landed branch code may hold a secret, an
+          App token, `id-token: write` or a non-read permission, and a
+          credentialed `workflow_dispatch` or tag-push workflow must be
+          restricted to trusted refs (decision: Ransom, 2026-09-24). It comes
+          from the caller's workflow file, so it is trusted like every other
+          input here.
         required: false
         type: boolean
         default: false

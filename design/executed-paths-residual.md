@@ -70,6 +70,10 @@ Non-goals:
   2026-09-23). A broker is a separate change (Not this design).
 - Callers' own CI on agent PRs. A same-repo PR's CI runs the branch's code
   with CI's secrets, whoever pushed it. That is not specific to agents.
+  This design's mechanism does not change callers' CI. Revised 2026-09-24:
+  the tier-2 opt-in rule does cover it, so a repository whose CI holds
+  credentials while running agent-landed code fixes that before it opts
+  in (Land: tier-2 opt-in).
 - The direct callers' own agent jobs (Compatibility lists what each needs).
 - Relaxing #149's other two groups (`.github/` and agent instructions).
 
@@ -979,8 +983,39 @@ review-fix round on a Dependabot batch PR lands on the branch the next
   the Claude jobs to `claude-agent`. It is a trusted per-caller decision:
   the stub is a workflow file on the default branch. A caller's stubs set
   it to `true` only when no other automation in that repository executes
-  agent-landed branches as `runner`. Callers' CI is out of scope here, as
-  under Goals.
+  agent-landed branches as `runner`. As first written, callers' CI was out
+  of scope here, as under Non-goals; the revision below brings it in.
+- **Revised 2026-09-24: CI and credentialed automation count** (decision:
+  Ransom, 2026-09-24, applied when the step-6 companions opted in). A
+  caller may pass `allow_build_config: true` or `allow-build-config:
+  "true"` only when all of the following hold:
+  1. No workflow that runs agent-landed branch code (a same-repo
+     `pull_request`, a `push` to a non-default branch, `workflow_run`, a
+     schedule that checks out an agent branch) holds a secret, an App
+     token, `id-token: write` or any permission other than read while it
+     runs that code. Ordinary CI with a read-only token and no secrets
+     stays fine. inspect_flow#861, inspect_harbor#185 and
+     inspect_sandboxes#93 made `build.yaml` read-only for every job that
+     runs branch code and moved the coverage comment and data writes to
+     jobs that run none; inspect_vscode#205 made `proxy-routes.yml`'s
+     pull-request path read-only.
+  2. A workflow a person runs on a chosen ref counts too when it holds
+     credentials: `workflow_dispatch` runs the selected branch's code and
+     a tag push runs the tagged commit. Such workflows are restricted to
+     trusted refs, not exempted as a human choice. ts-mono#700 pinned
+     `dependabot-fix.yml`'s gate checkout to the default branch, and
+     ts-mono's `npm` environment got a deployment policy allowing only
+     `main` and `[0-9]*.[0-9]*.[0-9]*` tags. inspect_flow#861 made
+     `inspect-update.yml` and `inspect-ai-main-failure.yml` refuse a
+     dispatch from any branch but the default one. Ransom judged that last
+     guard cheap and of low value, since the credential it protects is the
+     model credential agents already hold (the declared exception), and
+     kept it so the rule holds literally.
+  3. Any other automation that runs code from an agent-reachable branch
+     with a credential is fixed first. inspect_scout#655 hardened
+     `release-pin-deps.yml`, which runs a script from the Release Please
+     branch while holding the release App token, before inspect_scout
+     opted in.
 - **Direct callers pass `allow-build-config` under the same rule.**
   inspect_flow's `inspect-update.yml` and `inspect-ai-main-failure.yml`
   start from the default branch every run. inspect_flow's only other
