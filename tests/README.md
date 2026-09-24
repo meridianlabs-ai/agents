@@ -394,9 +394,35 @@ Testing a change).
   either user, run twice in a row with the agent tampering in between
   (idempotent), and refusing an unknown user. `codex_path_smoke.sh` is the
   hosted-runner counterpart (`.github/workflows/codex-path-smoke.yml`): the
-  same lifted bodies with the real codex user, image PATH and sudo, plus a
-  control job showing the runner pick a planted interpreter when the venv IS
-  on GITHUB_PATH.
+  same lifted bodies with the real codex user, image PATH and sudo — and,
+  as a second matrix leg, the claude-agent user (`SMOKE_USER`), where it
+  also checks that the launcher's root-owned `/opt/meridian-agent/bin`
+  passes on the job PATH — plus a control job showing the runner pick a
+  planted interpreter when the venv IS on GITHUB_PATH.
+- `test_claude_agent_launcher.py` — the `claude-agent-launcher` composite
+  (design/executed-paths-residual.md → The launcher). The wrapper
+  (`claude`) run from a throwaway `/opt/meridian-agent` layout against a
+  stub `sudo` (keeps the handoff) and a `git` that answers `ls-remote`
+  with a chosen status: the five MCP servers the action composes and any
+  server holding a privileged token dropped, a caller's clean server kept,
+  variadic and `=` forms rewritten; a privileged token elsewhere (argv,
+  built env, git helper, settings, `.git/config`) refusing the launch;
+  job-token mode proceeding with the job token as `GH_TOKEN`; a
+  `github_token` override other than the job token treated as privileged;
+  malformed and file-path `--mcp-config`, `plugin` and a second
+  `--settings` refused; `--version` and non-action calls passed through;
+  the env allow-list; the origin URL reset and the snapshot retaken; and
+  the new-branch precondition for an issue run, closed and merged PRs, a
+  PR closed after the gate and the fixed-clock collision (only "no such
+  ref" proceeds), with no lookup for an open-PR follow-up or a detached
+  review. `agent_ns.py`'s pure parts: the handoff format, the bind plan per
+  grant mode, the POSIX ACL encoding, the action-process check against a
+  fake `/proc`, the run-file and handoff-file checks. The composite as
+  text (order, root-owned installs, every value the wrapper and the
+  namespace read is recorded, the pinned-version pattern against sample
+  `run.ts` files), the isolation check's arguments, and `reclaim.sh`'s
+  removal of the WIF ACL and the agent's config dir (real xattrs on Linux).
+  The namespace itself runs in the hosted canary's `claude-launcher` job.
 - `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
   the same way against a stub `gh`: an issue's `auto` label is the run's
   opt-in only when the account that applied it most recently is a human

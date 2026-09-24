@@ -226,7 +226,8 @@ if [ "$cur" != "$recorded_head" ]; then
     *) die "HEAD is '$cur', neither the checkout the launcher recorded ('$recorded_head') nor a new branch" ;;
   esac
   rc=0
-  GIT_TOKEN=$job GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+  # shellcheck disable=SC2016 # the helper expands $GIT_TOKEN when git runs it
+  GIT_TOKEN=$job GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
     GIT_CONFIG_KEY_1="credential.$GITHUB_SERVER_URL.helper" \
     GIT_CONFIG_VALUE_1='!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' \
     GIT_TERMINAL_PROMPT=0 gitr ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1 || rc=$?

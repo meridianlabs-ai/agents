@@ -25,7 +25,7 @@ take effect on every repo's next run.
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
   `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
-  `reclaim-codex-workspace`, `import-codex-final`,
+  `reclaim-codex-workspace`, `import-codex-final`, `claude-agent-launcher`,
   `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `drop-runner-root`,

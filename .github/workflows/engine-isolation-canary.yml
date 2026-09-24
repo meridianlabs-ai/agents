@@ -63,6 +63,27 @@
 #                          codex-action's launch shape, then the fixture's
 #                          own checks (interpreter/Node version, groups,
 #                          lockfile unchanged).
+#   claude-launcher        the Claude agent's launcher of THIS revision
+#                          (design/executed-paths-residual.md → The
+#                          launcher), once per grant mode: `create-codex-user`
+#                          and, in `workspace` mode, the pre-agent reclaim
+#                          with `user: claude-agent`, then
+#                          `claude-agent-launcher`. Asserted: Claude Code is
+#                          installed root-owned at the version
+#                          claude-code-action@v1 pins, the wrapper, the
+#                          namespace script and the check are root-owned and
+#                          closed to others, the run directory records this
+#                          job's values, `--version` passes through the
+#                          wrapper, the launcher's bin directory on the job
+#                          PATH passes `assert-runner-only-path`, and no
+#                          claude-agent process is left; a launch from a
+#                          step shell (not the action's bun) is refused by
+#                          agent-ns-launch's process check before anything
+#                          starts; then the post-agent reclaim runs. It does
+#                          not run the action or a model, and it plants no
+#                          hostile probe: the boundary inside the namespace
+#                          is assessed by Claude Security scans instead
+#                          (decision: Ransom, 2026-09-24).
 #
 # Runs on pushes that touch the composites, the harness, the scanner or the
 # fixtures, by hand, and weekly on `main`: per-job secret delivery is the
@@ -82,6 +103,8 @@ on:
     paths:
       - ".github/actions/create-codex-user/**"
       - ".github/actions/provision-fallback/**"
+      - ".github/actions/reclaim-codex-workspace/**"
+      - ".github/actions/claude-agent-launcher/**"
       - ".github/workflows/engine-isolation-canary.yml"
       - ".github/workflows/engine-isolation-canary-reusable.yml"
       - ".github/workflows/engine-isolation-canary-pipeline.yml"
@@ -279,3 +302,124 @@ jobs:
           LOCK_BEFORE: ${{ steps.fx.outputs.lock }}
           AS_CODEX: sudo -u codex -H --
         run: bash "tests/fixtures/callers/$FIXTURE/check.sh"
+
+  claude-launcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        grant: [workspace, none]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Never runs: it names claude-code-action@v1 so the runner downloads
+      # it at job start, which is where the launcher reads the pinned CLI
+      # version from, as it will in the agent jobs.
+      - name: claude-code-action (downloaded, not run)
+        if: false
+        uses: anthropics/claude-code-action@v1
+
+      - name: Create the claude-agent user (this revision)
+        id: agentuser
+        uses: ./.github/actions/create-codex-user
+        with:
+          user: claude-agent
+          grant: ${{ matrix.grant }}
+
+      # The reviewer's fork-head shape: the scratch copy, the agent's own.
+      - name: Scratch copy (none mode)
+        if: matrix.grant == 'none'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/scratch"
+          cp -a "$GITHUB_WORKSPACE" "$RUNNER_TEMP/scratch/src"
+          sudo chown -R claude-agent:claude-agent "$RUNNER_TEMP/scratch"
+
+      - name: Pre-agent reclaim (this revision)
+        if: matrix.grant == 'workspace'
+        uses: ./.github/actions/reclaim-codex-workspace
+        with:
+          user: claude-agent
+
+      - name: Launcher (this revision)
+        id: launcher
+        uses: ./.github/actions/claude-agent-launcher
+        with:
+          grant: ${{ matrix.grant }}
+          path-prefix: ${{ github.workspace }}/.venv/bin
+
+      - name: What the launcher installed and recorded
+        env:
+          GRANT: ${{ matrix.grant }}
+          EXECUTABLE: ${{ steps.launcher.outputs.executable }}
+        run: |
+          set -euo pipefail
+          opt=/opt/meridian-agent
+          fail() { echo "::error::$*"; exit 1; }
+          [ "$EXECUTABLE" = "$opt/bin/claude" ] || fail "executable output is '$EXECUTABLE'"
+          # Root-owned and closed to others, all the way down.
+          bad=$(sudo find "$opt" \( ! -user root -o -perm /022 \) ! -type l -print)
+          [ -z "$bad" ] || fail "not root-owned or writable by others: $bad"
+          for f in claude agent-ns-launch agent-ns-init; do [ -x "$opt/bin/$f" ] || fail "$opt/bin/$f is not executable"; done
+          run_ts="${RUNNER_WORKSPACE%/*}/_actions/anthropics/claude-code-action/v1/src/entrypoints/run.ts"
+          pinned=$(sed -nE 's/^[[:space:]]*const claudeCodeVersion = "([0-9.]+)";.*/\1/p' "$run_ts")
+          echo "claude-code-action@v1 pins Claude Code $pinned"
+          cli=$(cat "$opt/run/cli")
+          case "$cli" in "$opt/claude/"*) ;; *) fail "run/cli is '$cli'" ;; esac
+          "$cli" --version | grep -qF "$pinned" || fail "the installed CLI is not $pinned"
+          # The passthrough: --version reaches the real CLI as the runner.
+          got=$("$opt/bin/claude" --version)
+          echo "through the wrapper: $got"
+          case "$got" in *"$pinned"*) ;; *) fail "the wrapper's --version passthrough printed '$got'" ;; esac
+          for kv in "grant=$GRANT" "workspace=$GITHUB_WORKSPACE" "runner-temp=$RUNNER_TEMP" "runner-home=$HOME" \
+                    "system-path=/usr/sbin:/usr/bin:/sbin:/bin" "head=$(git symbolic-ref -q HEAD || echo "detached:$(git rev-parse HEAD)")"; do
+            [ "$(cat "$opt/run/${kv%%=*}")" = "${kv#*=}" ] || fail "run/${kv%%=*} is '$(cat "$opt/run/${kv%%=*}")', not '${kv#*=}'"
+          done
+          case "$(cat "$opt/run/path")" in "$GITHUB_WORKSPACE/.venv/bin:$opt/claude/.local/bin:"*) ;; *) fail "run/path is '$(cat "$opt/run/path")'" ;; esac
+          [ -n "$(cat "$opt/run/runner-root")" ] || fail "run/runner-root is empty (no Runner.Worker found)"
+          if sudo pgrep -u claude-agent -a; then fail "a claude-agent process survived the launcher"; fi
+          # The directory claude-code-action appends to GITHUB_PATH.
+          echo "$opt/bin" >>"$GITHUB_PATH"
+          echo "launcher of this revision installed Claude Code $pinned root-owned (grant $GRANT)"
+
+      - name: The launcher's bin directory on the job PATH passes the check (this revision)
+        uses: ./.github/actions/assert-runner-only-path
+        with:
+          user: claude-agent
+
+      # A launch from a step shell, not from the action's bun: the wrapper
+      # prepares and hands off, and agent-ns-launch refuses before the
+      # namespace exists.
+      - name: A launch from outside the action is refused
+        env:
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          mkdir -p ~/.claude
+          [ -f ~/.claude/settings.json ] || echo '{}' >~/.claude/settings.json
+          out=$(CLAUDE_CODE_ACTION=1 DEFAULT_WORKFLOW_TOKEN=$JOB_TOKEN /opt/meridian-agent/bin/claude --output-format stream-json 2>&1)
+          rc=$?
+          echo "$out"
+          [ "$rc" -ne 0 ] || { echo "::error::the launch was not refused"; exit 1; }
+          grep -q "agent-ns-launch: refusing to launch the agent: the action process [0-9]* runs .*, not bun" <<<"$out" || { echo "::error::refused, but not by the action-process check"; exit 1; }
+          if sudo pgrep -u claude-agent -a; then echo "::error::a claude-agent process is running"; exit 1; fi
+          echo "refused by agent-ns-launch's process check; nothing started"
+
+      - name: Post-agent reclaim (this revision)
+        if: always() && steps.agentuser.outcome == 'success'
+        uses: ./.github/actions/reclaim-codex-workspace
+        with:
+          user: claude-agent
+
+      - name: After the reclaim
+        run: |
+          set -euo pipefail
+          stat -c '%A %U:%G %n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.git"
+          [ "$(stat -c %U "$GITHUB_WORKSPACE/.git")" = runner ] || { echo "::error::.git is not runner-owned"; exit 1; }
+          if [ -n "$(find "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.git" -maxdepth 0 -perm /020)" ]; then echo "::error::the root or .git is still group-writable"; exit 1; fi
+          [ ! -e /home/claude-agent/.anthropic-config ] || { echo "::error::the agent's config dir survived"; exit 1; }
+          git status --short >/dev/null
+          echo "reclaimed: .git and the root runner-owned and closed to the group"
