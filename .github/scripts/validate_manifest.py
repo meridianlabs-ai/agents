@@ -192,6 +192,7 @@ EVENT_NUMBER_RE = re.compile(r"^[1-9][0-9]{0,9}$")
 # create --assignee` / `gh issue edit --add-assignee` as-is, and the land
 # job's `pr-assignees` input to `gh pr edit --add-assignee`.
 LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$")
+MAX_LOGIN_CHARS = 39  # GitHub's cap on a login's length
 MAX_ASSIGNEES = 10  # GitHub's cap per issue or PR
 
 # Atlas Stage options (.github/actions/set-stage/action.yml).
@@ -943,7 +944,10 @@ def main(argv=None) -> int:
         ap.error(f"--pr-draft must be `true` or `false`, not {args.pr_draft!r}")
     if args.pr_assignees != "":
         logins = args.pr_assignees.split(",")
-        if not all(LOGIN_RE.fullmatch(x) for x in logins):
+        # LOGIN_RE bounds the hyphen-alphanumeric pairs, not the total, so a
+        # hyphenated name passes it at up to 77 characters: the 39-character
+        # cap is checked on its own.
+        if not all(LOGIN_RE.fullmatch(x) and len(x) <= MAX_LOGIN_CHARS for x in logins):
             ap.error(f"--pr-assignees must be comma-separated GitHub logins with no spaces or empty entries, not {args.pr_assignees!r}")
         if len({x.lower() for x in logins}) != len(logins):
             ap.error(f"--pr-assignees must not repeat a login, not {args.pr_assignees!r}")

@@ -1536,6 +1536,8 @@ def test_cli_malformed_allowed_pr_labels_is_a_usage_error(tmp_path, capsys, valu
     ("true", "ransomr"),
     ("true", "ransomr,meridian-marvin"),
     ("false", ",".join(f"u{i}" for i in range(10))),
+    ("true", "a" * 39),
+    ("true", "a" + "-b" * 19),      # 39 characters, hyphenated
 ])
 def test_cli_pr_draft_and_assignees_accept_well_formed_values(tmp_path, draft, assignees):
     # The land job's `pr-draft` / `pr-assignees` inputs: its own PR policy,
@@ -1571,6 +1573,9 @@ def test_cli_malformed_pr_draft_is_a_usage_error(tmp_path, capsys, value):
     ("ransomr;other", "must be comma-separated GitHub logins"),
     ("ransomr\nother", "must be comma-separated GitHub logins"),
     ("a" * 40, "must be comma-separated GitHub logins"),
+    # Over 39 characters with hyphens: LOGIN_RE alone would pass these.
+    ("a" + "-b" * 20, "must be comma-separated GitHub logins"),
+    ("ransomr," + "a" + "-b" * 38, "must be comma-separated GitHub logins"),
     ("ransomr,RansomR", "must not repeat a login"),
     (",".join(f"u{i}" for i in range(11)), "lists 11 logins; the cap is 10"),
 ])
