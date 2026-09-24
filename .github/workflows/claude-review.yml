@@ -134,35 +134,37 @@ on:
         default: "xhigh"
       provision:
         description: >-
-          The caller's provisioning recipe (bash), run as the unprivileged
-          agent user in the checkout after that user exists and before the
-          agent starts. Today only CODEX runs use it (as the codex user):
-          Claude runs keep the repository's `.github/actions/claude-setup`
-          action, with the generic recipe as the runner-side fallback, until
-          they move to an agent user of their own and take this recipe too
-          (design/executed-paths-residual.md). It is the codex-run
-          counterpart of claude-setup, which the codex job never runs (a
+          The caller's provisioning recipe (bash), run by the
+          `provision-fallback` composite as the engine's unprivileged agent
+          user (`claude-agent` in the Claude job, `codex` in the codex job)
+          in the checkout, after that user exists and before the agent
+          starts. Both engines use it since plan step 5 of
+          design/executed-paths-residual.md (2026-09-24). No agent job runs
+          the repository's `.github/actions/claude-setup` action: a
           composite action can only run as the runner, and nothing from the
-          checkout may run as the runner in that job: Claude Security
-          finding 4628446). Empty (the default) falls back to
+          checkout may run as the runner in an agent job (Claude Security
+          findings 4628446 and 4629153). Empty (the default) falls back to
           `codex_provision`; with both empty the generic recipe runs — `uv
           venv` and `uv pip install -e .[dev]` (`--group dev` when the
           project declares one) — where the checkout has a pyproject.toml.
-          Set it to keep what the repository's claude-setup does: a Python
+          Set it to keep what the repository's claude-setup did: a Python
           pin (`uv venv --python 3.11`), a lockfile sync (`uv sync --dev`),
           Node tooling (`corepack enable --install-directory ~/.local/bin &&
           pnpm install --frozen-lockfile`). The recipe runs with uv
           bootstrapped on PATH and network on; it has no sudo, HOME is the
-          agent user's (/home/codex), PATH is sudo's default plus
-          ~/.local/bin, and it must create the project's `.venv` for the
-          prompts' tool discovery (which also looks in `node_modules/.bin`
-          and ~/.local/bin). It runs under `bash --noprofile --norc -eo
-          pipefail`, like a `shell: bash` step: a failing command fails
-          provisioning (handle an expected failure with `|| true`). A recipe
-          runs whether or not the checkout has a pyproject.toml — only the
-          generic recipe needs one. It comes from the caller's workflow
-          file, so it is trusted like every other input here; keep it free
-          of anything derived from the run's event.
+          agent user's (/home/claude-agent or /home/codex), PATH is sudo's
+          default plus ~/.local/bin, and it must create the project's
+          `.venv` for the agent's tool discovery (which also looks in
+          `node_modules/.bin` and ~/.local/bin). It runs under `bash
+          --noprofile --norc -eo pipefail`, like a `shell: bash` step: a
+          failing command fails provisioning (handle an expected failure
+          with `|| true`). A recipe runs whether or not the checkout has a
+          pyproject.toml — only the generic recipe needs one. The Claude
+          job never provisions an external-mode or cross-repository fork
+          head (issue #59): those reviews run in the sandbox instead. It
+          comes from the caller's workflow file, so it is trusted like every
+          other input here; keep it free of anything derived from the run's
+          event.
         required: false
         type: string
         default: ""
