@@ -144,7 +144,15 @@ description: >-
   turbo-based `pnpm check` needs `pnpm` on PATH), where sudo's reset PATH
   had none of them. That is codex's own environment only; the job PATH is
   unchanged (executed-paths follow-up, option B; decision: Ransom,
-  2026-09-23; design/codex-engine.md → Runner-side search path).
+  2026-09-23; design/codex-engine.md → Tools in the codex sandbox). Those
+  directories are codex-writable, and codex's sandbox runs the first
+  `bwrap` on that PATH outside the command's working directory, so before
+  writing it the pass runs `pin-bwrap.sh` (decision: Ransom, 2026-09-24):
+  it installs the distribution's bubblewrap (the hosted image has none)
+  and re-creates `/usr/lib/codex-bwrap`, root-owned, holding only a `bwrap`
+  link to `/usr/bin/bwrap`, which goes first on the PATH. A `bwrap` codex
+  or its provisioning plants is then never the one that sandboxes codex's
+  commands.
 
   Runs no git command against the checkout. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
@@ -185,10 +193,12 @@ inputs:
       (colon-separated absolute directories). Non-empty, it is written into
       the re-created `config.toml` as the PATH of every command codex runs,
       ahead of the PATH sudo gives the codex user; an empty or relative
-      entry, a single quote or a control character fails the step. Empty
-      (the default, and what a skipped provisioning step passes) leaves
-      codex's commands on sudo's PATH. Ignored by `create`, which runs
-      before provisioning.
+      entry, a single quote or a control character fails the step. The
+      pinned bubblewrap's directory goes first (`pin-bwrap.sh`, which the
+      step runs before, installing `bubblewrap` with apt). Empty (the
+      default, and what a skipped provisioning step passes) leaves codex's
+      commands on sudo's PATH and installs nothing. Ignored by `create`,
+      which runs before provisioning.
     required: false
     default: ""
 
@@ -251,6 +261,7 @@ runs:
       if: inputs.mode == 'reset-home'
       env:
         HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
+        PIN_SCRIPT: ${{ github.action_path }}/pin-bwrap.sh
         SYSTEM_PATH: /usr/sbin:/usr/bin:/sbin:/bin
         BIN: ${{ inputs.bin }}
       run: |
@@ -282,7 +293,10 @@ runs:
           echo "::error::processes were still running as codex after repeated kills (a provisioning survivor?) — refusing to hand the workspace to codex-action."
           exit 1
         fi
-        # Then the home, from scratch, with the provisioned tools on the
-        # PATH of codex's commands.
+        # With bin directories for codex's command PATH, first pin the
+        # bubblewrap codex's sandbox runs (they are codex-writable, and a
+        # `bwrap` planted there would otherwise be the one it runs); then
+        # the home, from scratch, with that PATH.
+        if [ -n "$BIN" ]; then bash "$PIN_SCRIPT" codex; fi
         bash "$HOME_SCRIPT" codex "$BIN"
         echo "codex home reset: no codex processes, ~codex/.codex re-created"

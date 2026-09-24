@@ -479,6 +479,10 @@ the `bin` output into codex's `config.toml` as the PATH of every command
 codex runs, ahead of sudo's PATH. Before that codex named tools by absolute
 path, and ts-mono's turbo-based `pnpm check` failed because turbo looks
 `pnpm` up on PATH (design/codex-engine.md → Tools in the codex sandbox).
+Because those directories are agent-writable and codex's sandbox runs the
+first `bwrap` on that PATH, a root-owned directory holding only a link to
+the apt-installed `/usr/bin/bwrap` goes first (decision: Ransom,
+2026-09-24).
 The caller recipes in the table under Compatibility are unchanged by it.
 
 ### Pre-agent reclaim (step 4)

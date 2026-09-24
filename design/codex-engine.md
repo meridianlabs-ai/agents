@@ -711,6 +711,30 @@ counterpart.
   inherited, so the tools resolve by name in codex's commands and in the
   scripts they start. codex-action rejects `shell_environment_policy` in
   `codex-args`, so the file is the only route, as for the network profile.
+  **The bwrap pin** (decision: Ransom, 2026-09-24). codex's Linux sandbox
+  helper runs the first `bwrap` on the command's PATH that is not under the
+  command's working directory, and falls back to the bubblewrap bundled
+  with codex only when there is none (codex-rs/sandboxing/src/bwrap.rs
+  `find_system_bwrap_in_path`; codex-rs/linux-sandbox/README.md). The
+  hosted image ships no bubblewrap, and the new PATH leads with directories
+  codex can write: `~codex/.local/bin`, written by the provisioning's build
+  backend unsandboxed as codex, and `.venv/bin` and `node_modules/.bin`,
+  which codex's own sandboxed commands write (skipped only when the
+  command's working directory contains them). A `bwrap` planted there
+  would run every later command outside the profile sandbox. So the
+  `reset-home` mode first runs `create-codex-user/pin-bwrap.sh`: it
+  installs the `bubblewrap` package with apt (the lists are refreshed and
+  the install retried on failure; roughly 10-30 s per codex job), checks
+  that `/usr/bin/bwrap` and every directory from `/` to the pin are root's
+  alone, and re-creates `/usr/lib/codex-bwrap`, root-owned, holding only a
+  `bwrap` link to it. `codex-home.sh` puts that directory first on the
+  PATH, and refuses to write the PATH without it. codex then uses the
+  system bubblewrap (0.9 on 24.04), as it does wherever one is installed.
+  The alternatives were leaving the residual documented (containment
+  resting on the codex user alone) and per-tool wrappers in a root-owned
+  directory instead of the bin directories (only listed tools would
+  resolve). A job with no bin directories (provisioning skipped) writes no
+  PATH and installs nothing.
   The compose steps still look the list (`pytest ruff mypy pyright python3
   node pnpm npm`, in all four workflows) up in the same directories and
   name what they found in the verification instruction. The job PATH is
@@ -718,7 +742,9 @@ counterpart.
   path, above), and the recipe runs as codex under `env -i` and cannot
   reach `GITHUB_PATH`. The canary's `caller-recipes` job runs every
   discovered tool, and the ts-mono-like fixture's turbo gate, by name under
-  `codex sandbox` as codex.
+  `codex sandbox` as codex, after planting a `bwrap` in
+  `~codex/.local/bin`: codex must not run it with the pin, and does
+  without (the positive control).
 - **CI-trigger parity depends on the machine account's secrets**: codex-path
   pushes fall back to `github.token` where the app secrets are absent, and
   those pushes do not trigger CI (the Claude path pushes via the app token,

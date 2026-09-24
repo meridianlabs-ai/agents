@@ -185,6 +185,18 @@ text are checked by the tests under `tests/`.
   runs the check and the post-codex steps against a planted venv with the
   real codex user (Claude Security finding 4628448, 2026-09-22;
   design/codex-engine.md → Runner-side search path).
+- A `bwrap` the codex user plants is never the one that sandboxes codex's
+  commands. Those commands get the provisioned tools' directories on their
+  PATH (codex's `config.toml`; never the job PATH), and the directories are
+  codex-writable, while codex's Linux sandbox runs the first `bwrap` on
+  that PATH outside the command's working directory. So before writing the
+  PATH, the codex jobs install the distribution's bubblewrap and put a
+  root-owned directory holding only a link to `/usr/bin/bwrap` first on
+  it, refusing to write the PATH if the binary or any directory on the way
+  is not root's alone. The hosted canary plants a `bwrap` in
+  `~codex/.local/bin` and checks that codex's sandbox does not run it, and
+  that it does when the pin is left off (decision: Ransom, 2026-09-24;
+  design/codex-engine.md → Tools in the codex sandbox).
 - The reviewer runs only when a trusted commenter asks for it, except inside
   the `@auto` loop, where the machine account requests each round's review.
 - A CI-fix round acts on the PR its failed run is bound to, not on the
