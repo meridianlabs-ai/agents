@@ -3,13 +3,15 @@ design/architecture.md → No root for the agent uid): structural checks on
 the four reusable workflows and tests of the `drop-runner-root` composite's
 fail-closed checks.
 
-- Claude jobs (`agent`, `review`, `fix`, `fix`): the agent runs as the
-  runner, so one `drop-runner-root` step sits after every step that needs
-  root (the checkouts, the caller's `claude-setup`, the fallback
-  provisioning, the reviewer's sandbox install) and before the
-  claude-code-action step, with an `if:` that holds whenever the agent
-  step's does; nothing after it calls sudo or docker, and the Surface step
-  reports its failure.
+- Claude jobs (`agent`, `review`, `fix`, `fix`): since plan step 5 of
+  design/executed-paths-residual.md the Claude agent runs as the
+  unprivileged `claude-agent` user, which `create-codex-user` makes with no
+  sudo grant and no group beyond `runner`, and the launcher checks from that
+  user before the action step (no sudo, no Docker, Yama ptrace_scope 1 or
+  more) and again inside the agent namespace before the CLI starts. The
+  runner keeps its sudo — the post-agent reclaim needs it — so these jobs no
+  longer run the drop step (decision: Ransom, 2026-09-24, option a), exactly
+  as the codex jobs never did.
 - Codex jobs: the agent uid is `codex`, which `create-codex-user` makes
   with no sudo grant and no group beyond `runner`, and codex-action starts
   codex as that user (`safety-strategy: unprivileged-user`, `codex-user:
@@ -17,11 +19,10 @@ fail-closed checks.
   keeps its sudo there (the reclaim and codex-usage need it after codex),
   so the codex jobs do not run the drop step.
 
-`.github/workflows/root-boundary-smoke.yml` runs the composite on a hosted
-runner and checks the same properties from the real `runner` and `codex`
-users.
+The composite stays, for callers that run an agent as the runner itself.
+`.github/workflows/root-boundary-smoke.yml` runs it on a hosted runner and
+checks the same properties from the real `runner` and `codex` users.
 """
-
 import os
 import re
 import stat
@@ -40,122 +41,51 @@ from test_land_helpers import lift_run, sh  # noqa: E402
 
 CLAUDE_ACTION = "anthropics/claude-code-action@v1"
 CODEX_ACTION = "openai/codex-action@v1"
-DROP = "uses: meridianlabs-ai/agents/.github/actions/drop-runner-root@main"
 
 
 def workflow_text(name: str) -> str:
     return (WORKFLOWS / name).read_text()
 
 
-def step_if(step: str):
-    """The step's `if:` expression (single-line or a `>-` block, folded), or
-    None when it has none."""
-    lines = step.splitlines()
-    for i, line in enumerate(lines):
-        m = re.match(r"^      (?:- |  )if: (.*)$", line)
-        if not m:
-            continue
-        if m.group(1) != ">-":
-            return m.group(1).strip()
-        folded = []
-        for later in lines[i + 1:]:
-            if not later.startswith("          "):
-                break
-            folded.append(later.strip())
-        return " ".join(folded)
-    return None
-
-
-def needs_root(step: str) -> bool:
-    """A step the job runs with root: a checkout, the caller's composite, the
-    fallback provisioning, or anything whose code calls sudo."""
-    # Error texts name sudo as prose; commands only.
-    code = "\n".join(line for line in code_lines(step) if 'err="' not in line)
-    return ("uses: actions/checkout@" in code or "uses: ./.github/actions/claude-setup" in code
-            or "provision-fallback@main" in code or re.search(r"\bsudo\b", code) is not None)
-
-
 def claude_job(name: str) -> str:
     return jobs(workflow_text(name))[AGENT_JOBS[name][0]]
-
-
-def positions(job: str):
-    all_steps = steps(job)
-    drops = [i for i, s in enumerate(all_steps) if DROP in s]
-    agents = [i for i, s in enumerate(all_steps) if CLAUDE_ACTION in s]
-    assert len(drops) == 1 and len(agents) == 1, (drops, agents)
-    return all_steps, drops[0], agents[0]
 
 
 # --- Claude jobs --------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", REUSABLE)
-def test_the_claude_job_drops_root_once_with_a_fixed_id(name):
+def test_the_claude_job_runs_the_agent_as_claude_agent_and_keeps_runner_sudo(name):
     job = claude_job(name)
-    all_steps, drop, _ = positions(job)
-    assert "\n        id: noroot\n" in all_steps[drop]
-    assert "with:" not in all_steps[drop], "the composite's defaults are the boundary"
+    assert "drop-runner-root" not in job, "the runner needs its sudo after the agent (the post-agent reclaim)"
+    assert "noroot" not in job and "NOROOT" not in job
+    all_steps = steps(job)
+    agent = [i for i, s in enumerate(all_steps) if CLAUDE_ACTION in s]
+    assert len(agent) == 1
+    # The agent user exists before the launcher, whose wrapper the action
+    # spawns in place of the CLI; the reclaim, which needs the runner's
+    # sudo, comes after the action.
+    user = next(i for i, s in enumerate(all_steps) if "\n        id: agentuser\n" in s)
+    launcher = next(i for i, s in enumerate(all_steps) if "\n        id: launcher\n" in s)
+    reclaim = next(i for i, s in enumerate(all_steps) if "\n        id: agentreclaim\n" in s)
+    assert user < launcher < agent[0] < reclaim
+    assert "          user: claude-agent\n" in all_steps[user]
+    assert "claude-agent-launcher@main" in all_steps[launcher]
+    assert "          path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}\n" in all_steps[agent[0]]
 
 
-@pytest.mark.parametrize("name", REUSABLE)
-def test_the_drop_comes_after_every_step_that_needs_root(name):
-    all_steps, drop, _ = positions(claude_job(name))
-    rooted = [i for i, s in enumerate(all_steps) if needs_root(s)]
-    assert rooted and max(rooted) < drop, [all_steps[i][:70] for i in rooted if i > drop]
-    # The named ones the task lists are among them, each before the drop.
-    for needle in ("uses: actions/checkout@", "uses: ./.github/actions/claude-setup", "provision-fallback@main"):
-        at = [i for i, s in enumerate(all_steps) if needle in s]
-        assert at and max(at) < drop, (needle, at, drop)
-    if name == "claude-review.yml":
-        sandbox = [i for i, s in enumerate(all_steps) if "\n        id: sandbox\n" in s]
-        assert len(sandbox) == 1 and sandbox[0] < drop and "sudo apt-get install" in all_steps[sandbox[0]]
-
-
-@pytest.mark.parametrize("name", REUSABLE)
-def test_the_drop_comes_before_the_agent_step(name):
-    _, drop, agent = positions(claude_job(name))
-    assert drop < agent
-
-
-@pytest.mark.parametrize("name", REUSABLE)
-def test_the_drop_runs_whenever_the_agent_step_does(name):
-    """Not weaker than the agent step's `if:`: identical, or none at all when
-    the agent's own `if:` carries no status function (an `if:` without one
-    is implicitly `success() && …`, so a step with none runs on every path
-    the agent step runs on). The agent is gated on success, so a failed drop
-    skips it."""
-    all_steps, drop, agent = positions(claude_job(name))
-    ours, theirs = step_if(all_steps[drop]), step_if(all_steps[agent])
-    if ours is not None:
-        assert ours == theirs, (ours, theirs)
-    else:
-        assert theirs is None or not re.search(r"\b(always|failure|cancelled)\(\)", theirs), theirs
-    assert theirs is None or not re.search(r"\b(always|failure|cancelled)\(\)", theirs), \
-        "the agent step must stay gated on success, so a failed drop skips it"
-    # And no step between the two can run after a failed drop either.
-    for s in all_steps[drop + 1:agent]:
-        cond = step_if(s) or ""
-        assert not re.search(r"\b(always|failure|cancelled)\(\)", cond), s[:70]
-
-
-@pytest.mark.parametrize("name", REUSABLE)
-def test_nothing_after_the_drop_calls_sudo_or_docker(name):
-    all_steps, drop, _ = positions(claude_job(name))
-    for s in all_steps[drop + 1:]:
-        # Error texts name sudo and the docker socket as prose; commands only.
-        code = [line for line in code_lines(s) if 'err="' not in line]
-        hits = [line.strip() for line in code if re.search(r"\b(sudo|docker|podman)\b", line)]
-        assert hits == [], (s[:70], hits)
-
-
-@pytest.mark.parametrize("name", REUSABLE)
-def test_the_surface_step_reports_a_failed_drop(name):
-    job = claude_job(name)
-    surface = next(s for s in steps(job) if "\n        id: surface\n" in s)
-    assert "          NOROOT_OUTCOME: ${{ steps.noroot.outcome }}\n" in surface
-    assert '[ "${NOROOT_OUTCOME:-}" = "failure" ]' in surface
-    assert "removing the runner's root access" in surface
+def test_the_launcher_checks_the_agent_uid_has_no_root_before_the_action():
+    """The check the drop step's own checks used to be for the agent's uid:
+    the launcher runs the isolation check's pre-action phase as
+    `claude-agent` (no sudo, no Docker, ptrace_scope 1 or more) and fails
+    the step — so the action step, gated on success, never starts — when it
+    fails."""
+    text = (ROOT / ".github" / "actions" / "claude-agent-launcher" / "action.yml").read_text()
+    assert ('sudo -n -u "$user" -H -- env -i PATH="$SYSTEM_PATH" HOME="/home/$user" \\\n'
+            '          bash "$opt/bin/check-isolation.sh" --phase pre) || err "the pre-action isolation check failed for $user"') in text
+    check = (ROOT / ".github" / "actions" / "claude-agent-launcher" / "check-isolation.sh").read_text()
+    for probe in ("sudo -n", "docker", "ptrace_scope"):
+        assert probe in check, probe
 
 
 # --- codex jobs ---------------------------------------------------------------

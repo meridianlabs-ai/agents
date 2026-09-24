@@ -1184,17 +1184,18 @@ def job_text(path: Path, job: str) -> str:
 
 
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
-def test_only_the_claude_job_puts_the_venv_on_the_job_path(name):
-    # One job per engine (findings 4628446 and 4629153): the Claude job runs
-    # no codex, so its fallback keeps add-to-path's default ("true"); the
-    # codex job provisions as the codex user, whose `env -i` recipe cannot
-    # reach GITHUB_PATH, so nothing under the workspace goes on the job PATH
-    # there (finding 4628448).
+def test_no_agent_job_puts_the_venv_on_the_job_path(name):
+    # Both engines provision as their agent user since plan step 5 of
+    # design/executed-paths-residual.md (the Claude jobs as `claude-agent`,
+    # the codex jobs as `codex`, findings 4628446 and 4629153), under the
+    # recipe's `env -i`, which cannot reach GITHUB_PATH, so nothing under
+    # the workspace goes on the job PATH in either job (finding 4628448).
+    # The Claude agent gets the provisioned `bin` directories as its PATH
+    # prefix through the launcher instead; codex through its config.toml.
     claude = job_text(WORKFLOWS[name], CLAUDE_JOB[name])
-    step = claude[claude.index("- name: Provision project environment (fallback)"):]
-    step = step[:step.index("\n      - ", 1)]
-    assert "uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main" in step
-    assert "add-to-path" not in step and "user:" not in step
+    assert "add-to-path" not in claude
+    assert "uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main\n        with:\n          user: claude-agent\n" in claude
+    assert "          path-prefix: ${{ steps.setup.outputs.bin }}\n" in claude
     codex = job_text(WORKFLOWS[name], CODEX_JOB[name])
     assert "add-to-path" not in codex
     assert "uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main\n        with:\n          user: codex\n" in codex

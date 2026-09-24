@@ -635,9 +635,13 @@ def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_f
     # emit withhold on the Claude step's outcome, the codex job's on its
     # unresolved-merge guard.
     claude_job, codex_job = job_block(text, "fix"), job_block(text, "fix-codex")
-    assert 'if [ "${CLAUDE_OUTCOME:-}" = "failure" ]; then' in step_block(claude_job, "landing")
+    # (and, before either, on the post-agent reclaim: no git runs over a
+    # `.git` the agent user could still write).
+    assert 'elif [ "${CLAUDE_OUTCOME:-}" = "failure" ]; then' in step_block(claude_job, "landing")
+    assert 'if [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then' in step_block(claude_job, "landing")
     assert 'if [ "${CODEXGUARD_OUTCOME:-}" != "success" ]; then' in step_block(codex_job, "landing")
-    assert "read-only: ${{ steps.claude.outcome == 'failure' && 'true' || 'false' }}" in claude_job
+    assert ("read-only: ${{ (steps.claude.outcome == 'failure' || steps.agentreclaim.outcome != 'success') "
+            "&& 'true' || 'false' }}") in claude_job
     assert "read-only: ${{ steps.codexguard.outcome != 'success' && 'true' || 'false' }}" in codex_job
     assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
     assert ("      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || "

@@ -118,12 +118,16 @@ take effect on every repo's next run.
   `.git/config`, and never put a token in a URL or an `http.*.extraheader`.
   A URL credential WINS over a
   helper (git never consults one when the URL carries auth), which is why
-  the `reset-origin-url` step runs right after every claude-code-action
-  step: the action rewrites `remote.origin.url` to carry its token, and
-  until the reset every later fetch/push would use that instead of its
-  helper — a revoked token on marvin-less callers. Keep that step directly
-  after the action step, `always()`-gated, and put no git network call
-  between the two. On the codex path, the
+  the `reset-origin-url` step runs after every claude-code-action step: the
+  action rewrites `remote.origin.url` to carry its token, and until the
+  reset every later fetch/push would use that instead of its helper — a
+  revoked token on marvin-less callers. (The launcher's wrapper already
+  resets it before the Claude agent starts; the step stays as belt and
+  braces.) The post-agent reclaim comes first, then this step: keep the
+  reclaim directly after the action step, `always()`-gated on the agent
+  user's creation, the reset right after it gated on the reclaim's
+  success, and put no git call between the action and the reset. On the
+  codex path, the
   `reclaim-codex-workspace` step runs unconditionally right after codex
   (`if: always() && steps.codexuser.outcome == 'success'`): it kills any
   process still running as codex, refuses a redirected git dir
@@ -186,16 +190,33 @@ take effect on every repo's next run.
   and the land job `needs` both. `OPENAI_API_KEY` is referenced in the codex
   job's codex-action step and nowhere else — never add a reference to a
   job that runs the Claude agent: a referenced secret reaches the runner
-  whatever the step's `if:` says. In a codex job nothing from the checkout
-  runs as the runner: no `uses: ./...`, and provisioning is
-  `provision-fallback` with `user: codex` (plus the caller's `provision`,
-  else `codex_provision`, as `recipe`), placed after `Create codex user`,
-  and followed by `Reset codex home` (`create-codex-user` with `mode:
-  reset-home`: codex processes killed, `~codex/.codex` re-created) before
-  the codex-action step. Once the codex user exists the runner writes
-  nothing into the workspace until the reclaim: prompt files go to
-  `$RUNNER_TEMP`, and `.git/info/exclude` is appended by the prep step
-  before the user is created. A step that must exist on both engines
+  whatever the step's `if:` says. In an agent job of either engine nothing
+  from the checkout runs as the runner: no `uses: ./...` (a caller's
+  `claude-setup` is never run), and provisioning is `provision-fallback`
+  with the engine's agent user (plus the caller's `provision`, else
+  `codex_provision`, as `recipe`). In a codex job it is placed after
+  `Create codex user` and followed by `Reset codex home`
+  (`create-codex-user` with `mode: reset-home`: codex processes killed,
+  `~codex/.codex` re-created) before the codex-action step. In a Claude job
+  (design/executed-paths-residual.md → Shape of a Claude job) it is
+  `user: claude-agent`, placed after `Create agent user`
+  (`create-codex-user` with `user: claude-agent`; the reviewer's sandboxed
+  paths pass `grant: none` and skip provisioning), followed by the
+  pre-agent reclaim (`reclaim-codex-workspace` with `user: claude-agent`),
+  then `claude-agent-launcher`, whose `executable` output the
+  claude-code-action step names as `path_to_claude_code_executable` (with
+  `classify_inline_comments: "false"`); the post-agent reclaim is that
+  step's first successor, and every later git-running step is gated on it,
+  as on the codex path. The runner keeps its sudo in both (the reclaims
+  need it); the agent's uid never has it, and the Claude launcher checks
+  that before the action step and again inside the agent's namespace.
+  Once the agent user exists the runner writes nothing into the workspace
+  until the reclaim: prompt files go to `$RUNNER_TEMP`, a `settings` file
+  is read before the user is created, and `.git/info/exclude` is appended
+  by the codex prep step before the user is created. The agent's files
+  reach the runner only through `import-codex-final` after the reclaim (the
+  codex final message; the Claude agent's landing directory, `dir` mode). A
+  step that must exist on both engines
   is copied into both jobs (the checkout, assert, base and sync steps
   already are); the composers and Surface steps are per-engine.
   `tests/test_engine_job_isolation.py` enforces all of this.

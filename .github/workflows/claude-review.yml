@@ -713,9 +713,10 @@ jobs:
       # does no fetch, and the codex path never fetches — codex holds no
       # credentials and is told not to. (The action then
       # embeds its OWN app token in the origin URL for the agent run — its
-      # behavior, not this workflow's; on the sandboxed paths the settings
-      # overlay below masks that token for sandboxed commands, issue #70 —
-      # see design/architecture.md → untrusted checkouts.)
+      # behavior, not this workflow's; the launcher's wrapper resets that URL
+      # before the agent starts and refuses to launch while the token is
+      # still in `.git/config` — design/executed-paths-residual.md → The
+      # launcher.)
       - if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.mode != 'external'
         uses: actions/checkout@v4
         with:
@@ -875,6 +876,31 @@ jobs:
           echo "tree=$tree" >>"$GITHUB_OUTPUT"
           echo "snapshot of the stripped tree: $tree"
 
+      # ---- The agent user boundary (design/executed-paths-residual.md) -----
+      # The reviewer runs as the unprivileged `claude-agent` user behind the
+      # launcher, on every path. `Create agent user` (the codex jobs'
+      # composite with `user: claude-agent`) snapshots `.git/config` and the
+      # embedded-repository list, creates the user, checks the job PATH and,
+      # on a same-repo head, group-grants the workspace (provisioning writes
+      # `.venv` at its root). On the sandboxed paths (external mode, a fork
+      # head) it takes `grant: none`: the stripped checkout stays
+      # runner-owned and read-only to the agent's uid, so not even the
+      # agent's own Write/Edit tools, which the sandbox does not govern, can
+      # change it. After the strip (which runs git as the runner) and before
+      # the scratch copy, which that user then owns. Step name and id are
+      # load-bearing: the post-agent reclaim gates on
+      # `steps.agentuser.outcome`. The runner keeps its sudo (the reclaim
+      # after the agent needs it; decision: Ransom, 2026-09-24, option a):
+      # the agent's uid never had it, and the launcher checks that before the
+      # action step and again inside the namespace before the CLI starts.
+      - name: Create agent user
+        id: agentuser
+        if: needs.gate.outputs.ok == 'true'
+        uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
+        with:
+          user: claude-agent
+          grant: ${{ (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true') && 'none' || 'workspace' }}
+
       # The writable place for the reviewer's installs and tests (Claude
       # Security 4628445). The sandbox overlay below makes the checkout —
       # Claude Code's working directory, the tree it loads configuration
@@ -899,7 +925,9 @@ jobs:
       # and the overlay's claudeMdExcludes names it anyway. Hostile code
       # writing a CLAUDE.md into the copy therefore lands in a tree that is
       # never a configuration source. Not under $OUT_DIR: that directory is
-      # on denyWrite. Failure feeds the Surface step via SCRATCH_OUTCOME.
+      # on denyWrite. Taken after `Create agent user`, whose user then owns
+      # the copy (design/executed-paths-residual.md → Per-workflow notes).
+      # Failure feeds the Surface step via SCRATCH_OUTCOME.
       - name: Copy the checkout for sandboxed installs and tests
         id: scratch
         if: >-
@@ -912,7 +940,11 @@ jobs:
           rm -rf "$SCRATCH"
           mkdir -p "$SCRATCH"
           cp -a "$GITHUB_WORKSPACE" "$SCRATCH/src"
-          echo "copied the stripped checkout to $SCRATCH/src ($(du -sh "$SCRATCH/src" | cut -f1)) — the writable tree for the reviewer's venv, install and tests; the checkout itself is read-only to sandboxed commands."
+          # The agent's uid owns the copy: nothing runner-side reads it
+          # again (the re-plant check compares the checkout), and its `.git`
+          # then needs no safe.directory for git as that user.
+          sudo chown -R claude-agent:claude-agent "$SCRATCH"
+          echo "copied the stripped checkout to $SCRATCH/src ($(du -sh "$SCRATCH/src" | cut -f1)), owned by claude-agent — the writable tree for the reviewer's venv, install and tests; the checkout itself is read-only to the agent."
 
       # Untrusted code — external mode's contributor tree, and a fork head a
       # write-access commenter admitted (issue #59) — is executed only inside
@@ -945,86 +977,73 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # Provision the project environment so the agent's allow-listed
-      # pytest/ruff/mypy can actually run, instead of falling back to py_compile
-      # and reasoning. Convention-based opt-in: a caller repo adds a
-      # `.github/actions/claude-setup` composite action that delegates to its
-      # existing, cache-backed CI setup; the GitHub cache is the caller's, so it
-      # hits the entries normal CI populates. `./` resolves against the
-      # checked-out workspace. The hashFiles guard makes this a no-op for repos
-      # that don't define it. Fatal on failure. NEVER on an untrusted checkout
-      # — external mode's upstream head, or a fork head (issue #59): either
-      # could supply its own action, which would execute unsandboxed with the
-      # job token present — those runs provision inside the sandbox instead.
-      # NOTE: the reviewer checks out the PR head (above), so on the
-      # inspect_ai fork — whose PR branches are cut from pristine main and
-      # carry no meridian files — the action is absent and this is skipped;
-      # see design/architecture.md.
-      # Claude engine only: this job runs the caller's composite (and the
-      # fallback below) as the runner, which is exactly how the Claude
-      # reviewer itself runs on a same-repo head — unsandboxed, as the
-      # runner, over a tree whose tests it then executes — except root: this
-      # step still has the runner's sudo, which the "Drop the runner's root
-      # access" step below removes before the agent (finding 4629153,
-      # criterion 2; the residual is recorded in design/architecture.md →
-      # No root for the agent uid); and this job names no OPENAI_API_KEY (Claude Security finding
-      # 4629153: the key is the codex job's alone). The codex job provisions
-      # differently: the shared fallback recipe, run as the unprivileged
-      # codex user AFTER the codex user boundary exists, never the caller's
-      # composite as the runner (finding 4628446).
-      - name: Provision project environment
+      # Provision the project environment AS THE AGENT USER on a same-repo
+      # head, so the reviewer's allow-listed pytest/ruff/mypy can run instead
+      # of falling back to py_compile and reasoning: the shared
+      # provision-fallback composite under `env -i` as `claude-agent`, with
+      # the caller's own recipe when its stub sets one (`provision`, else
+      # the earlier `codex_provision`; both empty runs the generic
+      # dev-install on a Python project — which also covers the inspect_ai
+      # fork's PR heads, cut from pristine main). A caller's
+      # `.github/actions/claude-setup` composite is never run: a composite
+      # action can only run as the runner. Nothing goes on the job PATH; the
+      # composite's `bin` output becomes the agent's PATH prefix through the
+      # launcher. NEVER on an untrusted checkout — external mode's upstream
+      # head, or a fork head (issue #59): those runs provision inside the
+      # sandbox instead. Fatal on failure.
+      - name: Provision project environment (as the agent user)
         id: setup
-        if: >-
-          needs.gate.outputs.ok == 'true' && needs.gate.outputs.mode != 'external' &&
-          needs.gate.outputs.fork_head != 'true' &&
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
-        uses: ./.github/actions/claude-setup
-
-      # Fallback provisioning where claude-setup is absent: PR heads on the
-      # inspect_ai fork are cut from pristine main, which deliberately
-      # carries no meridian files — so reviews there (both engines) degraded
-      # to static verification even though the WORKFLOW steps have network
-      # (only the agent sandboxes don't). If the checkout looks like a
-      # Python project, build the venv the way the fork's claude-setup does
-      # (decision: Ransom, 2026-09-01). The recipe — uv version, installer
-      # retry, extras/`--group dev` detection, PATH handling, the `.venv/`
-      # exclude — lives once in the provision-fallback composite (rationale
-      # in its description), shared with the two @auto loops; this step
-      # keeps only the gate and the timeout. Never on a fork head (issue
-      # #59): `uv pip install -e` runs the checkout's build backend as
-      # `runner` with sudo, unrestricted egress and the job token present —
-      # a fork head gets provisioned by the agent inside the sandbox
-      # instead.
-      - name: Provision project environment (fallback)
-        id: setupfb
-        # Same hazard class as the sandbox-install hang above: uv bootstrap
-        # plus a full dependency resolution, no other timeout before GitHub's
-        # 6h ceiling. On expiry SETUPFB_OUTCOME=failure feeds the Surface
-        # step's ⚠️ + re-trigger message.
         timeout-minutes: 10
         if: >-
           needs.gate.outputs.ok == 'true' && needs.gate.outputs.mode != 'external' &&
           needs.gate.outputs.fork_head != 'true' &&
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
-          hashFiles('pyproject.toml') != ''
+          (hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != '')
         uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+        with:
+          user: claude-agent
+          recipe: ${{ inputs.provision || inputs.codex_provision }}
 
-      # Root ends here (Claude Security finding 4629153, criterion 2): the
-      # agent runs as the runner, so the runner's passwordless sudo, its
-      # docker socket and same-uid inspection of the runner's processes are
-      # removed after the last step that needs root and before the agent
-      # step, with the agent step's own `if:`, and the composite checks from
-      # the runner that `sudo -n true` fails. A failure skips the agent and
-      # the Surface step says why. Nothing after the agent step uses sudo or
-      # docker. design/architecture.md → No root for the agent uid.
-      - name: Drop the runner's root access before the agent
-        id: noroot
+      # The pre-agent reclaim on a same-repo head
+      # (design/executed-paths-residual.md → Pre-agent reclaim): the action's
+      # prepare runs git as the runner in the workspace, which provisioning
+      # as `claude-agent` could write — kill every `claude-agent` process,
+      # refuse a redirected git dir or a new embedded repository, take `.git`
+      # back, restore the snapshot and pin hooksPath/fsmonitor. The sandboxed
+      # paths skip it: nothing ran as the agent user and nothing was granted
+      # (the launcher's kill still runs).
+      - name: Reclaim workspace before the agent
+        id: agentprereclaim
+        if: >-
+          needs.gate.outputs.ok == 'true' && needs.gate.outputs.mode != 'external' &&
+          needs.gate.outputs.fork_head != 'true'
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+        with:
+          user: claude-agent
+
+      # The launcher (design/executed-paths-residual.md → The launcher):
+      # Claude Code root-owned at the version the action pins, the wrapper
+      # and the namespace scripts in /opt/meridian-agent/bin, the run
+      # directory the wrapper trusts (the grant mode — `none` on the
+      # sandboxed paths, so the wrapper does not re-grant and the namespace
+      # mounts the checkout read-only and the scratch copy writable — the
+      # agent's PATH with the provisioned `bin` directories first, the
+      # checkout's HEAD), the pre-action user check, a last kill, and an
+      # emptied output directory. The action step names its `executable`
+      # output.
+      - name: Prepare the agent launch
+        id: launcher
         if: needs.gate.outputs.ok == 'true'
-        uses: meridianlabs-ai/agents/.github/actions/drop-runner-root@main
+        uses: meridianlabs-ai/agents/.github/actions/claude-agent-launcher@main
+        with:
+          grant: ${{ (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true') && 'none' || 'workspace' }}
+          path-prefix: ${{ steps.setup.outputs.bin }}
 
       # The review is FILES, not posts (issue #114): the OUTPUT block appended
-      # here names the directory ($OUT_DIR, created by this step — outside
-      # the workspace, and on the sandboxed paths on the sandbox's
+      # here names the directory ($OUT_DIR: the agent's landing directory
+      # `$RUNNER_TEMP/claude-agent`, which create-codex-user makes and the
+      # launcher empties, and which the runner reads only through the import
+      # after the post-agent reclaim — outside the workspace, and on the
+      # sandboxed paths on the sandbox's
       # `filesystem.denyWrite` list, so nothing sandboxed contributor code
       # runs can write a "review" there while the agent's own Write tool,
       # which the sandbox does not govern, can; see the compose-settings
@@ -1072,7 +1091,7 @@ jobs:
           DEFAULT_PROMPT: ${{ inputs.review_prompt }}
           THIS_PR: ${{ github.event.issue.number }}
           CONTINUATION: ${{ needs.gate.outputs.continuation }}
-          OUT_DIR: ${{ runner.temp }}/review
+          OUT_DIR: ${{ runner.temp }}/claude-agent
           SCRATCH: ${{ runner.temp }}/scratch
           # The note names the scratch copy as the placeholder `$SCRATCH`:
           # an env value is never re-expanded when the shell prints it, so
@@ -1228,61 +1247,30 @@ jobs:
       # enforces that floor); the strip keeps the checkout clean for the
       # reviewer's reading, and the post-agent check catches a re-plant.
       #
-      # credentials.files (issue #70): persist-credentials:false keeps only
-      # CHECKOUT's token out of .git/config — claude-code-action's prepare step
-      # then rewrites the origin URL to embed its OWN installation token
-      # (replaceCheckoutCredentials in its src/github/operations/git-config.ts,
-      # every mode; the credential-helper alternative is tied to its
-      # allowed_non_write_users input, which would widen who may trigger
-      # runs). That token has contents:read + pull-requests:write for the
-      # agent step, and sandboxed contributor code (a build backend, a
-      # collected test) can read the file. The `mask` entry makes sandboxed
-      # commands read a sentinel copy with the token replaced; `extract`
-      # limits the replacement to capture group 1 so git still parses its
-      # config (the agent's own git diff/log run sandboxed and keep working;
-      # the reviewer never pushes on these paths); onExtractNoMatch:deny makes
-      # the file unreadable should the action ever change how it embeds the
-      # token, rather than silently exposing the real file. The sentinel must
-      # never be swapped back for the real token on a sandboxed request; what
-      # guarantees that here is that this overlay sets NO network.tlsTerminate
-      # and NO credentials.allowPlaintextInject — the proxy cannot see request
-      # contents, so it substitutes nothing (docs: "the sentinel reaches the
-      # server unchanged"; Claude Code reports the mask-without-tlsTerminate
-      # state at startup — a report, not a setup failure). Note the entry has
-      # no injectHosts, and per the docs a mask entry WITHOUT injectHosts is
-      # substituted on requests to EVERY host in network.allowedDomains — so
-      # neither tlsTerminate nor allowPlaintextInject may ever be added to
-      # this overlay, or contributor code could read the sentinel and have the
-      # proxy inject the real token into a request to a PyPI host. The
-      # caller's `inputs.settings` is the other door: a caller using its own
-      # mask entries in normal mode has tlsTerminate set, and jq's recursive
-      # merge would carry it (and allowPlaintextInject) straight through. The
-      # merge therefore DELETES both keys from the merged result, making the
-      # invariant structural rather than a comment — on these paths a caller
-      # mask entry still hides its credential from sandboxed commands, it just
-      # cannot inject it (the docs' fail-without-exposing state), which is the
-      # right trade on paths that run contributor code. `del` rather than
-      # setting a false value: the docs only show tlsTerminate as an object.
-      # (Whether an explicit empty injectHosts:[] means "no hosts" is
-      # undocumented, so it is not relied on.) ~/.config/gh and ~/.gitconfig are the other
-      # places a GitHub credential could sit on the runner (gh's own store, a
-      # credential helper) — nothing sandboxed needs them, so plain deny. The
-      # agent's gh is in excludedCommands and reads the real files. The
-      # .git/config path is spliced in ABSOLUTE ($GITHUB_WORKSPACE): the
-      # action writes this merge to ~/.claude/settings.json (user scope),
-      # where Claude Code resolves a relative sandbox path against ~/.claude,
-      # not the checkout (code.claude.com/docs/en/sandboxing → filesystem
-      # path prefixes). File `mask` mode requires Claude Code >= 2.1.221
-      # (same page → Mask credential files); the action pins the CLI it
-      # installs (2.1.266 at the time of writing), and the version-check
-      # step after the agent fails the run loudly if that ever regresses.
-      # This mask protects against sandboxed CODE reading the token; the
-      # agent's own Read tool is not sandboxed and still sees the real file
-      # (the pre-existing prompt-injection channel). Proper fix is upstream:
-      # a git-auth option independent of allowed_non_write_users is
-      # requested in anthropics/claude-code-action#1818 (filed 2026-09-09
-      # from the draft in #70). If the action gains it, this entry becomes
-      # belt-and-braces.
+      # credentials.files: until the Claude jobs moved to the agent user
+      # (design/executed-paths-residual.md → Per-workflow notes) this carried
+      # a `mask` entry for `.git/config` (issue #70) that hid the
+      # installation token claude-code-action writes into the origin URL
+      # from sandboxed commands. It is gone: its `extract` with
+      # onExtractNoMatch:deny makes a config WITHOUT a token unreadable to
+      # sandboxed commands, which would break the reviewer's own git in the
+      # checkout, and the token is no longer there — the launcher's wrapper
+      # resets the origin URL before the agent starts and refuses to launch
+      # while the App token appears in `.git/config` (or anywhere in the
+      # agent's argv, env or settings). `safe.directory` for the checkout
+      # comes from the root-owned system git config (create-codex-user),
+      # which the sandbox does not deny. ~/.config/gh and ~/.gitconfig — the
+      # agent user's, now — stay denied: nothing sandboxed needs them, and
+      # the agent's gh is in excludedCommands. The invariant the old mask
+      # needed stays structural for a caller's own entries: this overlay
+      # sets NO network.tlsTerminate and NO credentials.allowPlaintextInject,
+      # and the merge DELETES both from the caller's `inputs.settings`, so a
+      # caller's mask entry (a mask without injectHosts is substituted on
+      # requests to EVERY allowed domain) still hides its credential from
+      # sandboxed commands but can never have the proxy inject it into a
+      # request to a PyPI host — the docs' fail-without-exposing state.
+      # `del` rather than setting a false value: the docs only show
+      # tlsTerminate as an object.
       #
       # Merge shape: jq's `*` recurses into objects but replaces arrays
       # wholesale, so the two credentials arrays, `filesystem.denyWrite` and
@@ -1301,7 +1289,7 @@ jobs:
         id: reviewsettings
         env:
           SETTINGS: ${{ inputs.settings }}
-          OUT_DIR: ${{ runner.temp }}/review
+          OUT_DIR: ${{ runner.temp }}/claude-agent
           SCRATCH: ${{ runner.temp }}/scratch
           SANDBOXED: ${{ (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true') && 'true' || 'false' }}
         run: |
@@ -1320,7 +1308,7 @@ jobs:
             exit 0
           fi
           SETTINGS="$merged"
-          overlay=$(jq -cn --arg gitcfg "$GITHUB_WORKSPACE/.git/config" --arg out "$OUT_DIR" --arg ws "$GITHUB_WORKSPACE" --arg scratch "$SCRATCH" --arg tmp "$RUNNER_TEMP" '{
+          overlay=$(jq -cn --arg out "$OUT_DIR" --arg ws "$GITHUB_WORKSPACE" --arg scratch "$SCRATCH" --arg tmp "$RUNNER_TEMP" '{
             "disableAllHooks":true,
             "claudeMdExcludes":["\($ws)/**","\($tmp)/**"],
             "pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}},
@@ -1333,7 +1321,6 @@ jobs:
             "filesystem":{"denyWrite":[$out,$ws],"allowWrite":[$scratch]},
             "credentials":{
               "files":[
-                {"path":$gitcfg,"mode":"mask","extract":"x-access-token:([^@]+)@","onExtractNoMatch":"deny"},
                 {"path":"~/.config/gh","mode":"deny"},
                 {"path":"~/.gitconfig","mode":"deny"}
               ],
@@ -1374,6 +1361,16 @@ jobs:
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           prompt: ${{ steps.reviewprompt.outputs.value }}
           settings: ${{ steps.reviewsettings.outputs.value }}
+          # The launcher's wrapper, spawned in place of the CLI: it starts the
+          # real one as `claude-agent` in its own namespace
+          # (design/executed-paths-residual.md → The launcher).
+          path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}
+          # Skips the action's `Post buffered inline comments` post-step, which
+          # would post, with the App token, whatever records a local process
+          # left in /tmp/inline-comments-buffer.jsonl: the reviewer's inline
+          # findings reach the PR only through inline.json and the landing
+          # manifest (and the agent's /tmp is private anyway).
+          classify_inline_comments: "false"
           # The caller's list plus the loops' own identity (TRUSTED_LOGINS —
           # the User entry is inert, the action consults the list for
           # non-User actors only), so the land jobs' `@review` hand-back is
@@ -1395,24 +1392,43 @@ jobs:
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}
             ${{ inputs.claude_args }}
             ${{ (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true') && '--setting-sources user' || '' }}
-            --add-dir ${{ runner.temp }}/review
+            --add-dir ${{ runner.temp }}/claude-agent
 
-      # The sandbox overlay's file `mask` entry (issue #70) needs Claude Code
-      # >= 2.1.221, and `--setting-sources user` excludes a source's
-      # sandbox.filesystem entries, Edit allow rules and Read deny rules from
-      # the sandbox configuration only from 2.1.246 (code.claude.com/docs/en/
-      # sandboxing → setting sources; Claude Security 4628445) — the floor is
-      # the higher one. claude-code-action@v1 pins the CLI it installs and puts
-      # it on GITHUB_PATH from inside its own steps, so `claude` exists on the
-      # runner only AFTER the agent step — the check cannot run before it.
-      # An older CLI would not have applied the mask, so a regression fails
-      # the run loudly after the fact (::error + red job, the review already
-      # posted) instead of leaving a green run with the token readable — and
+      # FIRST step after the agent, on every path (always(): success,
+      # failure, cancelled — and a skipped agent too, since provisioning ran
+      # as the agent user on a same-repo head): the post-agent reclaim. It
+      # kills every `claude-agent` process (normally none: the namespace
+      # ended with the CLI), removes the Workload Identity ACL entries and
+      # the agent's config dir, then refuses or reclaims `.git` exactly as
+      # the codex reclaim does (on the sandboxed paths `.git` was never the
+      # agent's to write, and this is a no-op beyond the restore). The
+      # re-plant check, which runs git, and the import of the review files
+      # are gated on its success. Runs no git itself.
+      - name: Reclaim workspace from the agent
+        id: agentreclaim
+        if: always() && steps.agentuser.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+        with:
+          user: claude-agent
+
+      # `--setting-sources user` excludes a source's sandbox.filesystem
+      # entries, Edit allow rules and Read deny rules from the sandbox
+      # configuration only from Claude Code 2.1.246 (code.claude.com/docs/en/
+      # sandboxing → setting sources; Claude Security 4628445). (The overlay's
+      # `.git/config` mask, which needed 2.1.221, is gone: see the
+      # credentials.files paragraph above.) The launcher installs the CLI at
+      # the version claude-code-action@v1 pins, and the action puts the
+      # wrapper's directory on GITHUB_PATH from inside its own step, so
+      # `claude --version` (the wrapper's passthrough to the real CLI) works
+      # only AFTER the agent step — the check cannot run before it. An older
+      # CLI could have let a settings file in the checkout shape the sandbox,
+      # so a regression fails the run loudly after the fact (::error + red
+      # job, the review already posted) instead of leaving a green run — and
       # `Surface agent errors` reads this step's outcome to post a ⚠️ on the
       # thread, since a red job under an already-complete review is the kind
       # of red nobody opens. Sandboxed paths only; skipped when the agent
       # never launched.
-      - name: Check Claude Code version (sandbox file-mask and setting-source support)
+      - name: Check Claude Code version (sandbox setting-source support)
         id: cliver
         if: >-
           always() && needs.gate.outputs.ok == 'true' &&
@@ -1427,23 +1443,23 @@ jobs:
           # binary (or unparseable --version) would exit here, before the
           # diagnostics below — red but silent.
           have=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-          echo "Claude Code version: ${have:-unknown} (sandbox credentials.files mask mode needs >= 2.1.221; excluded setting sources dropping out of the sandbox configuration needs >= $need)"
+          echo "Claude Code version: ${have:-unknown} (excluded setting sources dropping out of the sandbox configuration needs >= $need)"
           if [ -z "$have" ]; then
             # always() reaches this step even when the agent step failed before
             # the action's install phase (auth/actor failure): no binary, and
-            # Claude never launched, so the mask question is moot — the job is
+            # Claude never launched, so the version question is moot — the job is
             # already red from the agent step and `Surface agent errors` posts
             # the ⚠️ for it; a second red step here would be noise. Only a
             # SUCCESSFUL agent step with no binary is a real anomaly.
             if [ "$CLAUDE_OUTCOME" != "success" ]; then
-              echo "::notice::claude is not on PATH and the agent step outcome was '$CLAUDE_OUTCOME' — Claude never launched, so the sandbox overlay's .git/config mask is moot for this run; nothing to check"
+              echo "::notice::claude is not on PATH and the agent step outcome was '$CLAUDE_OUTCOME' — Claude never launched, so the sandbox's setting-source floor is moot for this run; nothing to check"
               exit 0
             fi
-            echo "::error::claude is not on PATH after a successful agent step — cannot confirm the sandbox overlay's .git/config mask was in effect (needs Claude Code >= $need); check whether the action still installs the CLI to a GITHUB_PATH directory"
+            echo "::error::claude is not on PATH after a successful agent step — cannot confirm the exclusion of the checkout's setting sources from the sandbox configuration was in effect (needs Claude Code >= $need); check that the launcher's directory is still on the job PATH"
             exit 1
           fi
           if [ "$(printf '%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
-            echo "::error::Claude Code $have is below $need — the sandbox overlay's .git/config mask (>= 2.1.221) or the exclusion of the checkout's setting sources from the sandbox configuration (>= 2.1.246) may not have been in effect for this run; check the action's pinned CLI version"
+            echo "::error::Claude Code $have is below $need — the exclusion of the checkout's setting sources from the sandbox configuration may not have been in effect for this run; check the action's pinned CLI version"
             exit 1
           fi
 
@@ -1512,12 +1528,14 @@ jobs:
       # the codex landing steps: the checkout's config and hooks are the
       # contributor's (`GIT_DIR`, `GIT_WORK_TREE`, no global or system
       # config, hooks path and fsmonitor off). Sandboxed paths only; skipped
-      # when the agent never launched.
+      # when the agent never launched, and when the post-agent reclaim did
+      # not succeed (no git after the agent without it; the review is then
+      # withheld by the landing prep's own gate).
       - name: Check for re-planted project configuration
         id: replant
         if: >-
           always() && needs.gate.outputs.ok == 'true' &&
-          steps.claude.outcome != 'skipped' &&
+          steps.claude.outcome != 'skipped' && steps.agentreclaim.outcome == 'success' &&
           (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true')
         env:
           BASE_REF: ${{ github.event.repository.default_branch }}
@@ -1710,6 +1728,23 @@ jobs:
           fi
           echo "the checkout is the strip step's snapshot apart from the action's verified base-branch restore."
 
+      # Bring the review files across the user boundary ONCE, after the
+      # reclaim's kill: every regular, single-link, `claude-agent`-owned file
+      # directly under $RUNNER_TEMP/claude-agent with a plain name, opened
+      # O_NOFOLLOW and size-capped, is copied into a fresh runner-only
+      # $RUNNER_TEMP/review — the directory the landing prep reads, and the
+      # only one. Best-effort like the codex import: a refusal leaves no copy,
+      # and the prep then finds no summary.md (no review lands, and the land
+      # job's landed-review check says so).
+      - name: Import the review files
+        id: agentfiles
+        continue-on-error: true
+        if: always() && steps.agentreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
+        with:
+          mode: dir
+          dest: ${{ runner.temp }}/review
+
       # Prepare the Claude review for the land job (issue #114). The agent
       # holds no credential that may post as the reviewer, so it wrote its
       # review under $OUT_DIR (the compose-prompt step's OUTPUT block):
@@ -1730,10 +1765,11 @@ jobs:
       # proxy issue; no verdict, no inline comments). Codex has its own prep
       # step below; this one is Claude's. Gated on the re-plant check: a
       # failed check withholds the review (the step is skipped on same-repo
-      # heads, which is not a failure).
+      # heads, which is not a failure) and on the post-agent reclaim; it
+      # reads the review files only from the import's runner-only copy.
       - name: Prepare Claude review for landing
         id: claudepost
-        if: steps.claude.outcome == 'success' && steps.replant.outcome != 'failure'
+        if: steps.claude.outcome == 'success' && steps.agentreclaim.outcome == 'success' && steps.replant.outcome != 'failure'
         env:
           OUT_DIR: ${{ runner.temp }}/review
           DIR: ${{ runner.temp }}/landing
@@ -1902,9 +1938,11 @@ jobs:
         env:
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          AGENTUSER_OUTCOME: ${{ steps.agentuser.outcome }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
-          SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
-          NOROOT_OUTCOME: ${{ steps.noroot.outcome }}
+          AGENTPRERECLAIM_OUTCOME: ${{ steps.agentprereclaim.outcome }}
+          LAUNCHER_OUTCOME: ${{ steps.launcher.outcome }}
+          AGENTRECLAIM_OUTCOME: ${{ steps.agentreclaim.outcome }}
           SANDBOX_OUTCOME: ${{ steps.sandbox.outcome }}
           STRIP_OUTCOME: ${{ steps.strip.outcome }}
           SCRATCH_OUTCOME: ${{ steps.scratch.outcome }}
@@ -1927,20 +1965,20 @@ jobs:
           # skipped can only mean that — so test for anything but success.
           if [ "${BASE_OUTCOME:-}" != "success" ]; then
             err="reading the checkout's SHA failed before the reviewer started (the checkout itself probably failed — see the job logs); re-trigger to retry."
-          elif [ "${SETUP_OUTCOME:-}" = "failure" ]; then
-            err="environment provisioning (claude-setup) failed before the reviewer started — usually a transient dependency-download/network error; re-trigger to retry."
-          elif [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            err="fallback environment provisioning (uv dev-install) failed before the reviewer started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (check the job logs); re-trigger if it looks transient."
           elif [ "${STRIP_OUTCOME:-}" = "failure" ]; then
             err="stripping project Claude Code configuration from the untrusted checkout (external mode / fork-head PR) failed before the reviewer started — the job log names what survived; this is not transient, so check the step before re-triggering."
           elif [ "${SCRATCH_OUTCOME:-}" = "failure" ]; then
             err="copying the checkout to the scratch directory the sandboxed reviewer installs and tests in (external mode / fork-head PR) failed before the reviewer started — usually disk space (see the job log); re-trigger to retry."
           elif [ "${SANDBOX_OUTCOME:-}" = "failure" ]; then
             err="the review sandbox install (external mode / fork-head PR) failed before the reviewer started — usually a transient package-download error; re-trigger to retry."
-          elif [ "${NOROOT_OUTCOME:-}" = "failure" ]; then
-            # drop-runner-root failed: the reviewer step is SKIPPED (the
-            # boundary fails closed). Probably not transient.
-            err="removing the runner's root access (sudo, the docker socket, process inspection) failed before the reviewer started, so no review ran — the job log names the check that failed. This is probably not transient: re-triggering fails the same way until the runner image or the drop-runner-root step changes."
+          elif [ "${AGENTUSER_OUTCOME:-}" = "failure" ]; then
+            err="the agent user setup failed before the reviewer started (a job PATH entry inside the workspace or writable by the agent user — most likely a runner-image change — or adduser/usermod failing; see the job logs); no review ran."
+          elif [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+            err="environment provisioning (run as the agent user: the caller's provision recipe, or the generic uv dev-install) failed before the reviewer started — either a transient dependency-download/network error, or the project does not install on a bare runner (check the job logs); re-trigger if it looks transient."
+          elif [ "${AGENTPRERECLAIM_OUTCOME:-}" = "failure" ]; then
+            err="taking the workspace back from provisioning failed before the reviewer started — a process kept running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, provisioning left an embedded git repository in the tree, or the git config could not be restored (see the job logs); no review ran. Check the provisioning recipe before re-triggering."
+          elif [ "${LAUNCHER_OUTCOME:-}" = "failure" ]; then
+            err="preparing the reviewer's launch failed before it started — installing Claude Code at the version claude-code-action pins, the check that the agent user has no sudo, no Docker access and Yama ptrace_scope 1 or more, or a process still running as the agent user (see the job logs); no review ran. Re-trigger if it was the download, otherwise the runner image changed."
           fi
           # The agent's own error text is free-form (and unbounded — it is
           # the final message when is_error is set); cap it so the manifest's
@@ -1948,6 +1986,13 @@ jobs:
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review step failed before producing a result (see the job logs)."
+          fi
+          # A reclaim that did not succeed withholds the review (the landing
+          # prep and the re-plant check are gated on it), so it needs its own
+          # clause or the review would vanish silently. `!= success` so a
+          # cancel mid-reclaim is named too.
+          if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then
+            err="the reviewer finished but the workspace could not be reclaimed from it (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, an embedded git repository appeared in the tree, the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); the review was withheld."
           fi
           if [ -z "$err" ] && [ "${CLAUDEPOST_OUTCOME:-}" = "failure" ]; then
             err="the reviewer finished but preparing its review files for landing failed — no review or verdict reached the PR (see the job logs)."
@@ -1967,16 +2012,15 @@ jobs:
             printf '⚠️ The review was withheld: after the reviewer ran, the untrusted checkout was not what the workflow left before the run — Claude Code project configuration (a `CLAUDE.md`, `AGENTS.md`, `.claude/` or `.mcp.json`) had appeared or changed, or other files had — although the sandbox makes that tree read-only to every command the reviewer runs. Something wrote where nothing should have been able to — the job log names the paths — and the reviewer may have been steered by it, so nothing it wrote was posted. Not transient: inspect the run and the PR before re-triggering.%s\n' "$cc" >"$ERROR_FILE"
             exit 0
           fi
-          # Sandbox file-mask version check (issue #70) is a different shape
-          # of failure: the review DID post; what is in doubt is whether the
-          # .git/config token mask (and, since 4628445, the exclusion of the
-          # checkout's setting sources from the sandbox configuration) was in
-          # effect while sandboxed contributor code ran. Own message — the
+          # The sandbox version check is a different shape of failure: the
+          # review DID post; what is in doubt is whether the exclusion of the
+          # checkout's setting sources from the sandbox configuration
+          # (4628445) was in effect while sandboxed contributor code ran. Own message — the
           # generic "did not complete, re-trigger" text below would be wrong
           # on both counts (not incomplete, not transient).
           if [ -z "$err" ] && [ "${CLIVER_OUTCOME:-}" = "failure" ]; then
             echo "::error::The sandbox version check failed after the review posted (see the job log); the land job posts the note and fails the run."
-            printf '⚠️ The review posted, but the Claude Code version check guarding the sandbox failed: the installed CLI is below 2.1.246 (the token mask on `.git/config` needs 2.1.221; ignoring the checkout'"'"'s excluded setting sources when building the sandbox needs 2.1.246), or was not found after a successful agent step. The installation token claude-code-action writes into `.git/config` may have been readable by sandboxed contributor code during this run, or a settings file in the checkout may have shaped the sandbox. Not transient — check the pinned Claude Code version in the action (the job log has the detail).%s\n' "$cc" >"$ERROR_FILE"
+            printf '⚠️ The review posted, but the Claude Code version check guarding the sandbox failed: the installed CLI is below 2.1.246 (ignoring the checkout'"'"'s excluded setting sources when building the sandbox needs it), or was not found after a successful agent step. A settings file in the checkout may have shaped the sandbox during this run. Not transient — check the pinned Claude Code version in the action (the job log has the detail).%s\n' "$cc" >"$ERROR_FILE"
             exit 0
           fi
           [ -z "$err" ] && { echo "No agent error detected."; exit 0; }

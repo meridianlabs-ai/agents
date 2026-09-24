@@ -105,7 +105,7 @@ Testing a change).
   `CLAUDE.local.md` / `AGENTS.md` to `*.untrusted` and deletes `.claude` /
   `.mcp.json` at every depth and writes a raw snapshot tree of the stripped
   checkout; the scratch step copies the stripped tree with its
-  credential-free `.git`; the post-agent check compares the whole checkout
+  credential-free `.git` and hands it to `claude-agent`; the post-agent check compares the whole checkout
   with that snapshot tree against tree and passes on a clean tree and on
   exactly what claude-code-action does on PR events (the base-branch restore
   of its sensitive roots when object-identical to `origin/<base>` — PR-deleted
@@ -119,7 +119,9 @@ Testing a change).
   base ref or snapshot (fail-closed, a hostile `BASE_REF` included) — with
   the checkout's hooks, fsmonitor and external diff never run. Also the
   wiring: `--setting-sources user` on the agent step after the caller's args, the three steps gated on the sandboxed
-  paths, the landing prep gated on the check, the 2.1.246 version floor, the
+  paths, the landing prep gated on the post-agent reclaim and the check, the
+  check gated on the reclaim, the 2.1.246 version floor, the Claude prompt
+  step identical to the codex job's but for the output directory, the
   Surface step's outcomes and note, and the prompt's scratch-copy guidance.
 - `test_dev_agent_composer.py` — `claude.yml`'s `Compose landing manifest`
   step, lifted the same way: the PR open for an issue run (title, body,
@@ -379,9 +381,11 @@ Testing a change).
   reclaim, `codex-usage`, the unresolved-merge guard and `emit-landing`'s `write` step run against a
   PLANTED `.venv/bin` of `sudo`, `git`, `find`, `jq` and friends first on
   the job PATH and touch none of it; `provision-fallback` writes nothing to
-  GITHUB_PATH under `add-to-path: false`; and the wiring — only the Claude
-  jobs' fallback puts the venv on the job PATH (the default), the codex jobs
-  provision with `user: codex` and pass no `add-to-path`, their compose
+  GITHUB_PATH under `add-to-path: false`; and the wiring — no agent job
+  puts the venv on the job PATH (the Claude jobs provision with `user:
+  claude-agent` and hand the `bin` output to the launcher's `path-prefix`,
+  the codex jobs provision with `user: codex`, neither passes
+  `add-to-path`), the codex jobs' compose
   steps discover the tools from the composite's `bin` directories and never
   through `command -v`, the commit steps pin PATH, the user is created,
   checked, then granted, and `create-codex-user`'s `reset-home` mode
@@ -475,10 +479,22 @@ Testing a change).
   codex-action step, writes nothing into the workspace after the codex user
   exists (prompt files in RUNNER_TEMP, the exclude lines appended by the
   prep step), and its prompts take the tool paths from the composite's
-  `bin` directories; the Claude job keeps the runner-side `claude-setup`
-  and fallback; `provision` and `codex_provision` are declared with a type
-  and reach only the codex job. Also the composites, lifted and run
-  against stubs:
+  `bin` directories. The Claude job (plan step 5 of
+  design/executed-paths-residual.md) runs no local action and no
+  `claude-setup`, composes its settings before `Create agent user`
+  (`create-codex-user`, `user: claude-agent`), provisions as that user with
+  the same `recipe`, then runs the pre-agent reclaim and the launcher before
+  the claude-code-action step, which names the launcher's executable and
+  sets `classify_inline_comments: "false"` (every claude-code-action step
+  does); the post-agent reclaim is the first step after it, and every later
+  git step (the origin reset, the import, the Surface tree check, the
+  composers, the reviewer's re-plant check and landing prep, emit-landing's
+  read-only) is gated on it; the Surface step names each boundary step's
+  failure; the reviewer's sandboxed paths create the user and launch with
+  `grant: none`, hand it the scratch copy and drop the overlay's
+  `.git/config` mask. `provision` and `codex_provision` are declared with a
+  type and reach only the two provisioning steps. Also the composites,
+  lifted and run against stubs:
   `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
   codex -H` when `user` is set, the recipe directly otherwise, a caller
   recipe handed over as a `$RUNNER_TEMP` file and refused when it is not

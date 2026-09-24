@@ -12,6 +12,7 @@ tree. The steps' bash is lifted from the workflow and run against local
 repos.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -161,12 +162,26 @@ def test_strip_replaces_a_stale_untrusted_directory(tmp_path):
 # --- Scratch copy --------------------------------------------------------------
 
 
+def fake_sudo(tmp_path: Path) -> dict:
+    """A `sudo` that records its arguments and does nothing: the scratch step
+    hands the copy to the agent user, which does not exist here."""
+    bins = tmp_path / "bin"
+    bins.mkdir(exist_ok=True)
+    (bins / "sudo").write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$SUDO_LOG"\n')
+    (bins / "sudo").chmod(0o755)
+    return {"PATH": f"{bins}:{os.environ['PATH']}", "SUDO_LOG": str(tmp_path / "sudo.log")}
+
+
 def test_scratch_copy_is_the_stripped_tree_with_its_git_dir(tmp_path):
     ws = make_checkout(tmp_path)
     strip(ws)
     scratch = tmp_path / "scratch"
-    r = sh("bash", "-c", SCRATCH, cwd=ws, check=False, env={"SCRATCH": str(scratch), "GITHUB_WORKSPACE": str(ws)})
+    env = {"SCRATCH": str(scratch), "GITHUB_WORKSPACE": str(ws), **fake_sudo(tmp_path)}
+    r = sh("bash", "-c", SCRATCH, cwd=ws, check=False, env=env)
     assert r.returncode == 0, r.stderr + r.stdout
+    # The agent user owns the copy (design/executed-paths-residual.md →
+    # Per-workflow notes): its sandboxed commands install and test there.
+    assert (tmp_path / "sudo.log").read_text() == f"chown -R claude-agent:claude-agent {scratch}\n"
     src = scratch / "src"
     assert config_entries(src) == []
     assert (src / "CLAUDE.md.untrusted").read_text() == "head instructions\n"
@@ -178,7 +193,7 @@ def test_scratch_copy_is_the_stripped_tree_with_its_git_dir(tmp_path):
     assert "token" not in (src / ".git/config").read_text()
     # Re-runnable: a stale copy is replaced, not merged into.
     (src / "stale").write_text("x")
-    r = sh("bash", "-c", SCRATCH, cwd=ws, check=False, env={"SCRATCH": str(scratch), "GITHUB_WORKSPACE": str(ws)})
+    r = sh("bash", "-c", SCRATCH, cwd=ws, check=False, env=env)
     assert r.returncode == 0 and not (src / "stale").exists()
 
 
@@ -859,8 +874,11 @@ def test_workflow_wiring():
     for anchor in ("        id: strip\n", "        id: scratch\n", "        id: replant\n"):
         assert SANDBOXED in step_block(anchor), anchor
     assert "always()" in step_block("        id: replant\n")
-    # The landing prep is gated on the re-plant check.
-    assert "if: steps.claude.outcome == 'success' && steps.replant.outcome != 'failure'" in step_block("        id: claudepost\n")
+    # The landing prep is gated on the post-agent reclaim and the re-plant
+    # check, which is itself skipped without a successful reclaim.
+    assert ("if: steps.claude.outcome == 'success' && steps.agentreclaim.outcome == 'success' && "
+            "steps.replant.outcome != 'failure'") in step_block("        id: claudepost\n")
+    assert "steps.agentreclaim.outcome == 'success'" in step_block("        id: replant\n")
     # The version floor covers the setting-source exclusion.
     assert "need=2.1.246" in step_block("        id: cliver\n")
     # The Surface step reads both new outcomes and posts the withheld-review note.
@@ -890,4 +908,8 @@ def test_workflow_wiring():
             lines.pop()
         return "\n".join(lines)
     prompt_step = body(step_block("        id: reviewprompt\n"))
-    assert prompt_step in codex_job and prompt_step in review_job
+    # The one difference: the Claude reviewer writes into its landing
+    # directory, the directory its namespace binds (the launcher).
+    claude_out = "          OUT_DIR: ${{ runner.temp }}/claude-agent\n"
+    assert prompt_step in review_job and claude_out in prompt_step
+    assert prompt_step.replace(claude_out, "          OUT_DIR: ${{ runner.temp }}/review\n") in codex_job

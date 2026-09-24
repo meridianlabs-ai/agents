@@ -1226,165 +1226,6 @@ jobs:
           # job then refuses the run's commits.
           head-sha: ${{ needs.gate.outputs.start_sha }}
 
-      # Provision the project environment so the agent's allow-listed
-      # pytest/ruff/mypy can actually run (a bare runner has neither the deps
-      # nor the package installed). Convention-based opt-in: a caller repo adds
-      # a `.github/actions/claude-setup` composite action that delegates to its
-      # existing, cache-backed CI setup — no install command is duplicated here,
-      # and the GitHub cache is the caller's (scoped to the run's repo), so it
-      # hits the same entries normal CI populates. `./` resolves against the
-      # checked-out workspace (the caller repo), not this workflow's repo. The
-      # hashFiles guard makes this a no-op for repos that don't define it.
-      # Fatal on failure: a broken setup surfaces loudly rather than silently
-      # degrading to static-only checks. See design/architecture.md.
-      # Runs only in this job, which the gate's trigger check admits (issue
-      # #59): this executes whatever the checked-out tree supplies, so it must
-      # never run on a refused (fork-head) run — hashFiles alone would happily
-      # find a fork's action. Claude engine only: this job runs the caller's
-      # composite (and the fallback below) as the runner, which is exactly
-      # how the Claude agent itself runs — unsandboxed, as the runner, over a
-      # same-repo tree whose tests it then executes — except root: this step
-      # still has the runner's sudo, which the "Drop the runner's root
-      # access" step below removes before the agent (finding 4629153,
-      # criterion 2; the residual is recorded in design/architecture.md →
-      # No root for the agent uid); and this job names no OPENAI_API_KEY (Claude Security finding
-      # 4629153: the key is the codex job's alone, below). The codex job
-      # provisions differently: the shared fallback recipe, run as the
-      # unprivileged codex user AFTER the codex user boundary exists, never
-      # the caller's composite as the runner (finding 4628446).
-      - name: Provision project environment
-        id: setup
-        if: hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''
-        uses: ./.github/actions/claude-setup
-
-      # Fallback where claude-setup is absent — the shared provision-fallback
-      # composite the reviewer and both loops already use (the recipe, uv
-      # version, retry, extras/`--group dev` and the .git/info/exclude
-      # entries live there). The dev agent was the last path without it: on
-      # the inspect_ai fork every PR branch is cut from pristine main and
-      # carries no claude-setup, so a dev-verb run on a PR there — `@auto fix
-      # review feedback` on inspect_ai#428, 2026-09-09 — ran with no
-      # pytest/ruff/mypy at all. Claude installs its own so the gap only
-      # showed on codex, which (sandbox network still off at the time) tried
-      # an install, failed, pushed unformatted code with two mypy errors, and
-      # CI caught what the agent could not. Same trigger gate as the shim
-      # step: never on a refused run. Fatal on failure: the Claude path
-      # aborts a conflicted base merge and re-merges inside the agent, so
-      # the codex job's conflicted-round tolerance (a provisioning failure
-      # over an in-progress merge) has no counterpart here.
-      - name: Provision project environment (fallback)
-        id: setupfb
-        timeout-minutes: 10
-        if: >-
-          hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') == '' &&
-          hashFiles('pyproject.toml') != ''
-        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
-
-      # Root ends here (Claude Security finding 4629153, criterion 2): the
-      # agent runs as the runner, so the runner's passwordless sudo, its
-      # docker socket and same-uid inspection of the runner's processes are
-      # removed after the last step that needs root and before the agent
-      # step, with the agent step's own `if:`, and the composite checks from
-      # the runner that `sudo -n true` fails. A failure skips the agent and
-      # the Surface step says why. Nothing after the agent step uses sudo or
-      # docker. design/architecture.md → No root for the agent uid.
-      - name: Drop the runner's root access before the agent
-        id: noroot
-        uses: meridianlabs-ai/agents/.github/actions/drop-runner-root@main
-
-      # Compose the appended-system-prompt sources into ONE value, so we emit a
-      # single --append-system-prompt flag. Multiple flags would force a bet on
-      # undocumented CLI behavior (accumulate vs. last-one-wins), and the sources
-      # co-occur on PR follow-ups (review_etiquette and the branch-sync sources
-      # fire there, and append_system_prompt fires on every run). PR context =
-      # an issue comment on a PR, or a review/review-comment event; fresh issue
-      # runs branch off the synced base and skip all of them. Within PR context
-      # the branch-sync sources are gated on what "Sync branch with base" did:
-      # branch_sync_prompt only when it handed the merge to the agent,
-      # branch_sync_append whenever a merge happened at all (see BRANCH_SYNC_
-      # APPEND below). Joined on one line so the toJSON splice below stays a
-      # clean single-quoted arg (a newline would survive toJSON as a literal \n
-      # in the shell-parsed args).
-      #
-      # REVIEW_ETIQUETTE mirrors the @auto review-fix loop's thread-resolution
-      # rule (claude-auto-review.yml): the dev agent is regularly invoked to
-      # address PR review comments (directly via @claude, or — as after an @auto
-      # escalation — because a handoff comment re-trips the kickoff gate), and
-      # without this it fixes the code but leaves the review thread open. gh api
-      # graphql is covered by the settings allow-list (Bash(gh:*)) and runs as
-      # the action's App token (claude[bot]), as it always did on a marvin-less
-      # caller.
-      #
-      # LANDING is always-on and is where the agent learns the shape of this
-      # workflow (issue #84): it commits and stops. It holds no credential that
-      # may push or post as this workflow's identity — the land job pushes the
-      # branch's new commits as the machine account, opens the PR on an issue
-      # run (closing reference, run link, labels) and posts the comments the
-      # agent leaves in the landing manifest (`comments`, the one key it may
-      # write there), after the run ends. The old REQUEST_REVIEW paragraph (an
-      # @auto run on an existing PR posting `@review` itself) is gone: the
-      # hand-back is a field of the manifest, composed from the workflow's own
-      # "HEAD moved" test, so a push and its re-review request cannot come
-      # apart. The ENVIRONMENT part keeps the lesson from inspect_ai#195: full
-      # fix implemented and tested, then the agent ended its turn "waiting on"
-      # a verification subagent before committing — everything was lost, and
-      # the green run + tidy summary made it look done. Same lesson the
-      # reviewer prompt already carries; the deterministic backstop is now the
-      # Surface step's uncommitted-edits check, and the push itself is the
-      # workflow's.
-      - name: Compose appended system prompt
-        id: sysprompt
-        env:
-          LANDING_DIR: ${{ runner.temp }}/landing
-          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
-          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
-          # Spliced only when the runner-side sync could NOT land the merge
-          # itself — a conflict it had to abort to keep the index clean for
-          # setupBranch, or a fork head it declined (the latter unreachable
-          # here since issue #59: the trigger gate refuses fork heads before
-          # the sync step; the composite's skip is shared with the loops and
-          # kept as defense in depth). On the ordinary clean-merge path the
-          # branch is ALREADY current when the agent starts, and telling it to
-          # merge again is noise.
-          BRANCH_SYNC: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_prompt || '' }}
-          # branch_sync_append is NOT gated the same way: it must reach the
-          # agent whenever a merge happened this run, clean or delegated. The
-          # fork's append exists for a NON-conflicting mis-merge (git
-          # auto-merges CHANGELOG.md cleanly and lands the entry under the
-          # wrong heading), so on the clean path it rides behind a lead-in
-          # saying the runner already merged and the agent should review the
-          # result; on the delegated path it simply follows branch_sync_prompt.
-          AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
-          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
-          SYNC_BASE: ${{ steps.sync.outputs.base }}
-          SYNC_APPEND: ${{ inputs.branch_sync_append }}
-          REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, resolve each review thread you fully address in code so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id, then call the resolveReviewThread GraphQL mutation with that id. Reply with a brief rationale to, and leave unresolved, any comment you deliberately decline; never resolve a thread you did not actually address. In any comment you post, never write the review-comment HTML marker or the codex reviewer''s footer ''engine: codex'' verbatim: they are how the codex fix rounds locate the newest review, so a comment of yours carrying either would be mistaken for the review.' || '' }}"
-          EXTRA: ${{ inputs.append_system_prompt }}
-        run: |
-          # The landing directory exists before the agent starts, runner-owned,
-          # so the agent writes its manifest-extra.json and body files straight
-          # into it (the codex job never writes there; its summary is composed
-          # by a runner step).
-          mkdir -p "$LANDING_DIR"
-          what="issue"; [ "$IS_PR" = "true" ] && what="pull request"
-          # Single line: the value is spliced as one arg downstream (a newline
-          # would corrupt the value= output line below and survive toJSON as a
-          # literal \n).
-          landing="LANDING (mandatory): you hold no credential that may push or post as this workflow's identity, so do NOT push, do NOT open a pull request, and do NOT post comments, reviews or reactions yourself — COMMIT your work to the current branch with git and stop. The workflow lands it after your run ends: it pushes the branch's new commits as the machine account (which runs CI) and, on an issue-triggered run, opens the pull request for you with the closing reference to the issue and a link to this run (on a pull request it pushes to the PR branch); your latest commit's subject and body become the PR title and description, so write them as such. The push-then-'Create a PR' flow the action's own instructions describe does not apply here — the push and the PR are the workflow's. Do NOT create, edit or delete files that later automated runs execute or load as configuration: anything under .github/ (workflows, which the machine account has no permission to push, and composite actions), agent and git configuration at any depth (CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .mcp.json, .codex/, .agents/, .gitmodules, .husky/), and build and dependency configuration at any depth (pyproject.toml, setup.py, setup.cfg, uv.lock, uv.toml, .python-version, requirements*.txt, package.json, and the npm, pnpm and yarn lockfiles and configuration files). The landing refuses the whole bundle, so every commit of the run is lost; if the task needs such a change, stop and say so in a comment so a maintainer makes it from their machine. To leave a comment on $what #$NUM (an answer, a question for the requester, something a reviewer must know), write the body to a file under $LANDING_DIR/ (file names must match [A-Za-z0-9._-] and must not start with a dot) and append {\"number\": $NUM, \"body_file\": \"<file name relative to $LANDING_DIR>\"} to the \`comments\` array in $LANDING_DIR/manifest-extra.json — one JSON object with at most that one key and nothing else; create the file if it does not exist and rewrite it whole when you update it, so it is valid JSON when your turn ends (an unparsable file drops everything in it). The workflow posts those bodies as the machine account after the push. In commit messages and in every body you write, never write the trigger tokens bare — backtick them (\`@review\`): they render from a write-access account, where a bare token starts a workflow. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until it is committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn ends. In THIS environment nothing can wake you: background tasks do NOT re-invoke you when they finish, their completion notifications never arrive, and a turn that ends 'waiting to be woken' simply ends the run and loses everything uncommitted. So never end your turn waiting on anything — subagents, background commands, test suites: collect results in the foreground and complete the commit inside THIS run. If a final validation is long-running, commit FIRST and let the PR's own CI be the gate; an uncommitted validated change is worth nothing. Uncommitted edits to tracked files are lost with the runner and reported to the $what as an error, so commit everything you mean to keep and revert scratch edits to tracked files you do not."
-          append=""
-          if [ -n "${SYNC_APPEND:-}" ]; then
-            if [ "${AGENT_MERGE:-}" = "1" ]; then
-              append=$(tr '\n' ' ' <<<"$SYNC_APPEND")
-            elif [ -n "${MERGE_SHA:-}" ]; then
-              append="A workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts); review that merge result against the following before making other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
-            fi
-          fi
-          combined=""
-          for part in "$landing" "$BRANCH_SYNC" "$append" "$REVIEW_ETIQUETTE" "$EXTRA"; do
-            [ -n "$part" ] && combined="${combined:+$combined }$part"
-          done
-          echo "value=$combined" >> "$GITHUB_OUTPUT"
-
       # The agent's push and posting channels are closed in settings, not only
       # in the prompt: `Bash(git push:*)` is stripped from the caller's allow
       # list and put on a `deny` list together with claude-code-action's
@@ -1394,20 +1235,19 @@ jobs:
       # `*` matches anywhere in a Bash rule) — and the gh verbs that post or
       # open things (deny beats allow in Claude Code, so this holds against a
       # caller's `settings`, any claude_args override and the action's own
-      # --allowedTools). Guard rails, not a security boundary: `Bash(gh:*)`
-      # stays allowed because the PR and CI reads go through it, so `gh api
-      # -X POST/PATCH`, `gh pr edit|close|ready` or a `git -C . push` pass the
-      # listed prefixes while the action's own App token — NOT scoped to this
-      # job's read-only permissions; it carries the App's contents/PR/issues
-      # write — is in reach. What holds structurally is the split: nothing the
-      # agent can reach is marvin's identity, so a write that slipped past
-      # would be claude[bot]'s — attributable, and exactly what the dev agent
-      # held on a marvin-less caller before — never the machine account's. Tag
-      # mode installs the action's comment server (the tracking comment the
-      # agent updates with its answer; that stays) and, only with
-      # use_commit_signing, a file-ops server that commits server-side — not
-      # enabled here, so there is no API-side push to deny. Same shape as the
-      # loops' step; keep them in step.
+      # --allowedTools). Guard rails, not the boundary: the agent runs as the
+      # unprivileged `claude-agent` user behind the launcher below
+      # (design/executed-paths-residual.md → The launcher), whose wrapper
+      # refuses to start it if the action's App token appears anywhere in its
+      # argv, environment, settings or `.git/config`, drops every MCP server
+      # the action composes (the tag-mode comment server included, so the
+      # agent no longer edits its tracking comment) and resets the origin
+      # URL — so everything the agent can reach holds only the read-only job
+      # token, and a write that slipped past these rules fails for want of a
+      # credential. Composed BEFORE the agent user exists: a `settings` input
+      # that names a file is read from the checkout here, before provisioning
+      # runs as that user and could replace the file with a link to one of
+      # the runner's. Same shape as the loops' step; keep them in step.
       - name: Compose agent settings (deny pushes and posts)
         id: agentsettings
         env:
@@ -1439,6 +1279,181 @@ jobs:
             echo "SETTINGS_EOF"
           } >>"$GITHUB_OUTPUT"
 
+      # ---- The agent user boundary (design/executed-paths-residual.md) -----
+      # Nothing from the checked-out tree runs as the runner from here on
+      # (Claude Security finding 4628446): the head may be one the pipeline
+      # itself wrote from an outsider's issue text, and the Claude agent runs
+      # its tests. The codex jobs' composites with `user: claude-agent`, one
+      # body for both engines: `Create agent user` snapshots `.git/config`
+      # and the embedded-repository list, creates the user, checks the job
+      # PATH and group-grants the workspace; provisioning runs AS that user;
+      # the pre-agent reclaim kills whatever provisioning left running and
+      # takes `.git` back before the action's prepare runs git in the
+      # workspace as the runner; the launcher installs the CLI root-owned
+      # and the wrapper claude-code-action spawns in its place, which starts
+      # the CLI as `claude-agent` in its own PID and mount namespace. Step
+      # name and id are load-bearing: the post-agent reclaim gates on
+      # `steps.agentuser.outcome`. The runner keeps its sudo (the reclaim
+      # after the agent needs it; decision: Ransom, 2026-09-24, option a):
+      # the agent's uid never had it, and the launcher checks that (no sudo,
+      # no Docker, Yama ptrace_scope 1 or more) before the action step and
+      # again inside the namespace before the CLI starts.
+      - name: Create agent user
+        id: agentuser
+        uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
+        with:
+          user: claude-agent
+
+      # Provision the project environment AS THE AGENT USER, so the agent's
+      # allow-listed pytest/ruff/mypy can run (a bare runner has neither the
+      # deps nor the package installed): the shared provision-fallback
+      # composite under `env -i` as `claude-agent`, with the caller's own
+      # recipe when its stub sets one (`provision`, else the earlier
+      # `codex_provision`; both empty runs the generic dev-install on a
+      # Python project). A caller's `.github/actions/claude-setup` composite
+      # is never run: a composite action can only run as the runner. Nothing
+      # goes on the job PATH; the composite's `bin` output becomes the
+      # agent's PATH prefix through the launcher. Runs only in this job,
+      # which the gate's trigger check admits (issue #59: never a fork
+      # head). Fatal on failure: the Claude path aborts a conflicted base
+      # merge and re-merges inside the agent, so the codex job's
+      # conflicted-round tolerance has no counterpart here.
+      - name: Provision project environment (as the agent user)
+        id: setup
+        timeout-minutes: 10
+        if: hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != ''
+        uses: meridianlabs-ai/agents/.github/actions/provision-fallback@main
+        with:
+          user: claude-agent
+          recipe: ${{ inputs.provision || inputs.codex_provision }}
+
+      # The pre-agent reclaim (design/executed-paths-residual.md → Pre-agent
+      # reclaim): the action's prepare runs git as the runner in the
+      # workspace (fetch, checkout, `git config`, and on PR events the base
+      # restore), and a build backend running as `claude-agent` could have
+      # planted a hook, repointed core.fsmonitor or replaced `.git`. So the
+      # codex reclaim runs here too: kill every `claude-agent` process,
+      # refuse a redirected git dir or a new embedded repository, take
+      # `.git` back, restore the snapshot and pin hooksPath/fsmonitor. From
+      # here nothing runs as `claude-agent` outside the namespace the
+      # wrapper starts.
+      - name: Reclaim workspace before the agent
+        id: agentprereclaim
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+        with:
+          user: claude-agent
+
+      # The launcher (design/executed-paths-residual.md → The launcher):
+      # Claude Code root-owned at the version the action pins, the wrapper
+      # and the namespace scripts in /opt/meridian-agent/bin, the run
+      # directory the wrapper trusts (grant mode, the agent's PATH with the
+      # provisioned `bin` directories first, the checkout's HEAD), the
+      # pre-action user check, a last kill, and an emptied landing
+      # directory. The action step names its `executable` output.
+      - name: Prepare the agent launch
+        id: launcher
+        uses: meridianlabs-ai/agents/.github/actions/claude-agent-launcher@main
+        with:
+          path-prefix: ${{ steps.setup.outputs.bin }}
+
+      # Compose the appended-system-prompt sources into ONE value, so we emit a
+      # single --append-system-prompt flag. Multiple flags would force a bet on
+      # undocumented CLI behavior (accumulate vs. last-one-wins), and the sources
+      # co-occur on PR follow-ups (review_etiquette and the branch-sync sources
+      # fire there, and append_system_prompt fires on every run). PR context =
+      # an issue comment on a PR, or a review/review-comment event; fresh issue
+      # runs branch off the synced base and skip all of them. Within PR context
+      # the branch-sync sources are gated on what "Sync branch with base" did:
+      # branch_sync_prompt only when it handed the merge to the agent,
+      # branch_sync_append whenever a merge happened at all (see BRANCH_SYNC_
+      # APPEND below). Joined on one line so the toJSON splice below stays a
+      # clean single-quoted arg (a newline would survive toJSON as a literal \n
+      # in the shell-parsed args).
+      #
+      # REVIEW_ETIQUETTE mirrors the @auto review-fix loop's thread-resolution
+      # rule (claude-auto-review.yml): the dev agent is regularly invoked to
+      # address PR review comments (directly via @claude, or — as after an @auto
+      # escalation — because a handoff comment re-trips the kickoff gate), and
+      # without this it fixes the code but leaves the review thread open. The
+      # agent's gh holds the read-only job token (the launcher), so it lists the
+      # threads with gh api graphql and names the ones it settled in the
+      # manifest's `resolve_threads`; the land job resolves them after the push
+      # (design/executed-paths-residual.md → Per-workflow notes).
+      #
+      # LANDING is always-on and is where the agent learns the shape of this
+      # workflow (issue #84): it commits and stops. It holds no credential that
+      # may push or post as this workflow's identity — the land job pushes the
+      # branch's new commits as the machine account, opens the PR on an issue
+      # run (closing reference, run link, labels), posts the comments the
+      # agent leaves in the landing manifest (`comments`) and resolves the
+      # review threads it lists there (`resolve_threads`, the only other key it
+      # may write), after the run ends. The tracking comment is the action's,
+      # updated runner-side: the agent no longer has the comment server. The old REQUEST_REVIEW paragraph (an
+      # @auto run on an existing PR posting `@review` itself) is gone: the
+      # hand-back is a field of the manifest, composed from the workflow's own
+      # "HEAD moved" test, so a push and its re-review request cannot come
+      # apart. The ENVIRONMENT part keeps the lesson from inspect_ai#195: full
+      # fix implemented and tested, then the agent ended its turn "waiting on"
+      # a verification subagent before committing — everything was lost, and
+      # the green run + tidy summary made it look done. Same lesson the
+      # reviewer prompt already carries; the deterministic backstop is now the
+      # Surface step's uncommitted-edits check, and the push itself is the
+      # workflow's.
+      - name: Compose appended system prompt
+        id: sysprompt
+        env:
+          # The agent's landing directory (create-codex-user, emptied by the
+          # launcher); the composer reads it only through the import below.
+          LANDING_DIR: ${{ runner.temp }}/claude-agent
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
+          # Spliced only when the runner-side sync could NOT land the merge
+          # itself — a conflict it had to abort to keep the index clean for
+          # setupBranch, or a fork head it declined (the latter unreachable
+          # here since issue #59: the trigger gate refuses fork heads before
+          # the sync step; the composite's skip is shared with the loops and
+          # kept as defense in depth). On the ordinary clean-merge path the
+          # branch is ALREADY current when the agent starts, and telling it to
+          # merge again is noise.
+          BRANCH_SYNC: ${{ steps.sync.outputs.agent_merge == '1' && inputs.branch_sync_prompt || '' }}
+          # branch_sync_append is NOT gated the same way: it must reach the
+          # agent whenever a merge happened this run, clean or delegated. The
+          # fork's append exists for a NON-conflicting mis-merge (git
+          # auto-merges CHANGELOG.md cleanly and lands the entry under the
+          # wrong heading), so on the clean path it rides behind a lead-in
+          # saying the runner already merged and the agent should review the
+          # result; on the delegated path it simply follows branch_sync_prompt.
+          AGENT_MERGE: ${{ steps.sync.outputs.agent_merge }}
+          MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
+          SYNC_BASE: ${{ steps.sync.outputs.base }}
+          SYNC_APPEND: ${{ inputs.branch_sync_append }}
+          REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, have each review thread you fully address in code resolved so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id (the PRRT_… `id`), then append that id to the `resolve_threads` array in the same manifest-extra.json as your comments — your gh cannot resolve threads, and the workflow resolves exactly the ones you list after it lands your commits. Leave unresolved, and explain in a comment, any comment you deliberately decline; never list a thread you did not actually address. In any comment you write, never write the review-comment HTML marker or the codex reviewer''s footer ''engine: codex'' verbatim: they are how the codex fix rounds locate the newest review, so a comment of yours carrying either would be mistaken for the review.' || '' }}"
+          EXTRA: ${{ inputs.append_system_prompt }}
+        run: |
+          # The landing directory exists before the agent starts (runner-owned,
+          # group-writable by the agent user; create-codex-user makes it and
+          # the launcher empties it), so the agent writes its
+          # manifest-extra.json and body files straight into it; the runner
+          # reads them only through the import after the post-agent reclaim.
+          what="issue"; [ "$IS_PR" = "true" ] && what="pull request"
+          # Single line: the value is spliced as one arg downstream (a newline
+          # would corrupt the value= output line below and survive toJSON as a
+          # literal \n).
+          landing="LANDING (mandatory): you hold no credential that may push or post as this workflow's identity, so do NOT push, do NOT open a pull request, and do NOT post comments, reviews or reactions yourself — COMMIT your work to the current branch with git and stop. The workflow lands it after your run ends: it pushes the branch's new commits as the machine account (which runs CI) and, on an issue-triggered run, opens the pull request for you with the closing reference to the issue and a link to this run (on a pull request it pushes to the PR branch); your latest commit's subject and body become the PR title and description, so write them as such. The push-then-'Create a PR' flow the action's own instructions describe does not apply here — the push and the PR are the workflow's. Do NOT create, edit or delete files that later automated runs execute or load as configuration: anything under .github/ (workflows, which the machine account has no permission to push, and composite actions), agent and git configuration at any depth (CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .mcp.json, .codex/, .agents/, .gitmodules, .husky/), and build and dependency configuration at any depth (pyproject.toml, setup.py, setup.cfg, uv.lock, uv.toml, .python-version, requirements*.txt, package.json, and the npm, pnpm and yarn lockfiles and configuration files). The landing refuses the whole bundle, so every commit of the run is lost; if the task needs such a change, stop and say so in a comment so a maintainer makes it from their machine. To leave a comment on $what #$NUM (an answer, a question for the requester, something a reviewer must know), write the body to a file under $LANDING_DIR/ (file names must match [A-Za-z0-9._-] and must not start with a dot) and append {\"number\": $NUM, \"body_file\": \"<file name relative to $LANDING_DIR>\"} to the \`comments\` array in $LANDING_DIR/manifest-extra.json — one JSON object with at most two keys, \`comments\` and (on a pull request) \`resolve_threads\`, and nothing else; create the file if it does not exist and rewrite it whole when you update it, so it is valid JSON when your turn ends (an unparsable file drops everything in it). The workflow posts those bodies as the machine account after the push. Your tracking comment is updated by the workflow; do not try to edit it. In commit messages and in every body you write, never write the trigger tokens bare — backtick them (\`@review\`): they render from a write-access account, where a bare token starts a workflow. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until it is committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn ends. In THIS environment nothing can wake you: background tasks do NOT re-invoke you when they finish, their completion notifications never arrive, and a turn that ends 'waiting to be woken' simply ends the run and loses everything uncommitted. So never end your turn waiting on anything — subagents, background commands, test suites: collect results in the foreground and complete the commit inside THIS run. If a final validation is long-running, commit FIRST and let the PR's own CI be the gate; an uncommitted validated change is worth nothing. Uncommitted edits to tracked files are lost with the runner and reported to the $what as an error, so commit everything you mean to keep and revert scratch edits to tracked files you do not."
+          append=""
+          if [ -n "${SYNC_APPEND:-}" ]; then
+            if [ "${AGENT_MERGE:-}" = "1" ]; then
+              append=$(tr '\n' ' ' <<<"$SYNC_APPEND")
+            elif [ -n "${MERGE_SHA:-}" ]; then
+              append="A workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts); review that merge result against the following before making other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
+            fi
+          fi
+          combined=""
+          for part in "$landing" "$BRANCH_SYNC" "$append" "$REVIEW_ETIQUETTE" "$EXTRA"; do
+            [ -n "$part" ] && combined="${combined:+$combined }$part"
+          done
+          echo "value=$combined" >> "$GITHUB_OUTPUT"
+
       # GIT_CONFIG_* env (issue #61): with nothing persisted by checkout, the
       # action's own git needs a credential BEFORE it configures one — tag
       # mode's setupBranch runs `git fetch origin <branch>` (and `git
@@ -1454,8 +1469,10 @@ jobs:
       # action's src/github/operations/branch.ts — no push), and the action's
       # post-run step (src/github/operations/branch-cleanup.ts) only
       # auto-commits, links or deletes a branch that already exists on
-      # origin, which this one never does; the land job pushes the commits
-      # and opens the PR. The helper is scoped to this server's URL, so a
+      # origin, which this one never does — the launcher's wrapper refuses to
+      # start the agent when a branch the prepare created is already on
+      # origin (design/executed-paths-residual.md → The launcher, launch
+      # step 6); the land job pushes the commits and opens the PR. The helper is scoped to this server's URL, so a
       # `git fetch` the agent aims at any other host (its allow-list permits
       # the verb) gets no credential. additional_permissions asks the App
       # token for actions: read, as claude-auto.yml's step does: the exchange
@@ -1487,22 +1504,63 @@ jobs:
           # a human's), so the action's non-human-actor guard is a second
           # refusal behind the gate, never a gap the list has to bridge.
           settings: ${{ steps.agentsettings.outputs.value }}
+          # The launcher's wrapper, spawned in place of the CLI: it starts the
+          # real one as `claude-agent` in its own namespace
+          # (design/executed-paths-residual.md → The launcher).
+          path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}
+          # Skips the action's `Post buffered inline comments` post-step, which
+          # would post, with the App token, whatever records a local process
+          # left in /tmp/inline-comments-buffer.jsonl (the agent's /tmp is
+          # private anyway; belt and braces).
+          classify_inline_comments: "false"
           claude_args: >-
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
             ${{ inputs.claude_args }}
 
+      # FIRST step after the agent, on every path (always(): success,
+      # failure, cancelled — and a skipped agent too, since provisioning ran
+      # as the agent user): the post-agent reclaim. It kills every
+      # `claude-agent` process (normally none: the namespace ended with the
+      # CLI), removes the Workload Identity ACL entries and the agent's
+      # config dir, then refuses or reclaims `.git` exactly as the codex
+      # reclaim does. Every later step that runs git — the origin reset, the
+      # Surface step's tree check, the manifest composer and emit-landing —
+      # is gated on its success (AGENTS.md → the codex path, which this now
+      # shares). Runs no git itself.
+      - name: Reclaim workspace from the agent
+        id: agentreclaim
+        if: always() && steps.agentuser.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+        with:
+          user: claude-agent
+
       # The action leaves its App token in remote.origin.url, and git never
       # falls back to a helper when the URL carries a credential (a 401 there
-      # rejects outright). Reset the URL so the token does not sit in
-      # .git/config for the rest of the job and so any later runner-side
-      # fetch reaches its own step-scoped helper. One mechanism across the
-      # workflows. always(): a failed or cancelled agent leaves the URL
-      # rewritten too.
+      # rejects outright). The wrapper already reset it before the agent
+      # started; this stays as belt and braces for the action's own later
+      # writes, after the reclaim (git over a `.git` the agent could write is
+      # never run). One mechanism across the workflows. always(): a failed or
+      # cancelled agent leaves the URL rewritten too.
       - name: Reset origin URL after the agent
-        if: always() && steps.claude.outcome != 'skipped'
+        if: always() && steps.claude.outcome != 'skipped' && steps.agentreclaim.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
+
+      # Bring the agent's landing files across the user boundary ONCE, after
+      # the reclaim's kill: every regular, single-link, `claude-agent`-owned
+      # file directly under $RUNNER_TEMP/claude-agent with a plain name,
+      # opened O_NOFOLLOW and size-capped, is copied into a fresh runner-only
+      # $RUNNER_TEMP/landing, which is the only place the composer and
+      # emit-landing read. Best-effort like the codex import: a refusal
+      # leaves no copy, and the composer then finds no manifest-extra.json.
+      - name: Import the agent's landing files
+        id: agentfiles
+        continue-on-error: true
+        if: always() && steps.agentreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
+        with:
+          mode: dir
 
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
@@ -1549,10 +1607,12 @@ jobs:
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           SYNC_CONFLICTS: ${{ steps.sync.outputs.conflicts }}
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
-          SETUP_OUTCOME: ${{ steps.setup.outcome }}
-          SETUPFB_OUTCOME: ${{ steps.setupfb.outcome }}
-          NOROOT_OUTCOME: ${{ steps.noroot.outcome }}
           AGENTSETTINGS_OUTCOME: ${{ steps.agentsettings.outcome }}
+          AGENTUSER_OUTCOME: ${{ steps.agentuser.outcome }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          AGENTPRERECLAIM_OUTCOME: ${{ steps.agentprereclaim.outcome }}
+          LAUNCHER_OUTCOME: ${{ steps.launcher.outcome }}
+          AGENTRECLAIM_OUTCOME: ${{ steps.agentreclaim.outcome }}
           NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
           IS_PR: ${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'true' || 'false' }}
           ANCHOR_REPO: ${{ inputs.anchor_repo }}
@@ -1591,24 +1651,6 @@ jobs:
           if [ -z "$err" ] && [ "${SYNC_OUTCOME:-}" = "failure" ]; then
             err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); re-trigger to retry."
           fi
-          # Provisioning died before the agent started (observed: a transient
-          # curl failure downloading uv) — without this, the issue gets no
-          # comment at all because the agent step was skipped, not failed.
-          # (The codex job tolerates a provisioning failure on its conflicted
-          # path; this job has no such path — the Claude engine's sync aborts
-          # a conflicted merge and hands it to the agent.)
-          if [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
-            err="environment provisioning (claude-setup) failed before the agent started — usually a transient dependency-download/network error; re-trigger to retry."
-          elif [ -z "$err" ] && [ "${SETUPFB_OUTCOME:-}" = "failure" ]; then
-            err="fallback environment provisioning (uv dev-install) failed before the agent started — either a transient dependency-download/network error, or the project does not dev-install on a bare runner (that one fails identically on every trigger: check the job logs and fix it by hand); re-trigger if it looks transient."
-          fi
-          # Taking root away from the runner failed (drop-runner-root): the
-          # agent step is SKIPPED, not failed — the boundary fails closed —
-          # so without this clause nothing would say why. Probably not
-          # transient (a runner image change), so no plain re-trigger advice.
-          if [ -z "$err" ] && [ "${NOROOT_OUTCOME:-}" = "failure" ]; then
-            err="removing the runner's root access (sudo, the docker socket, process inspection) failed before the agent started, so the agent did not run — the job log names the check that failed. This is probably not transient: re-triggering fails the same way until the runner image or the drop-runner-root step changes."
-          fi
           # The settings composer failed (a caller's `settings` that is
           # neither a JSON object nor a path to a file holding one): the
           # action step is SKIPPED, not failed, so without this clause the
@@ -1618,12 +1660,41 @@ jobs:
           if [ -z "$err" ] && [ "${AGENTSETTINGS_OUTCOME:-}" = "failure" ]; then
             err="composing the agent's settings failed before the agent started — the caller's \`settings\` input is neither a JSON object nor a path to a file holding one (see the job logs). This fails identically on every trigger: fix the caller stub's settings input."
           fi
+          # The agent user boundary (create, provision as the user, the
+          # pre-agent reclaim, the launcher): each failure SKIPS the agent
+          # step, so each needs its own clause or the issue gets the eyes
+          # reaction and then silence.
+          if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "failure" ]; then
+            err="the agent user setup failed before the agent started (a job PATH entry inside the workspace or writable by the agent user — nothing in this job adds to the job PATH before it, so most likely a runner-image change — or adduser/usermod failing; see the job logs); nothing was attempted."
+          fi
+          # Provisioning died before the agent started (observed: a transient
+          # curl failure downloading uv). (The codex job tolerates a
+          # provisioning failure on its conflicted path; this job has no such
+          # path — the Claude engine's sync aborts a conflicted merge and
+          # hands it to the agent.)
+          if [ -z "$err" ] && [ "${SETUP_OUTCOME:-}" = "failure" ]; then
+            err="environment provisioning (run as the agent user: the caller's provision recipe, or the generic uv dev-install) failed before the agent started — either a transient dependency-download/network error, or the project does not install on a bare runner (that one fails identically on every trigger: check the job logs and fix it by hand); re-trigger if it looks transient."
+          fi
+          if [ -z "$err" ] && [ "${AGENTPRERECLAIM_OUTCOME:-}" = "failure" ]; then
+            err="taking the workspace back from provisioning failed before the agent started — a process kept running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, provisioning left an embedded git repository in the tree, or the git config could not be restored (see the job logs); nothing was attempted. Check the provisioning recipe before re-triggering."
+          fi
+          if [ -z "$err" ] && [ "${LAUNCHER_OUTCOME:-}" = "failure" ]; then
+            err="preparing the agent's launch failed before the agent started — installing Claude Code at the version claude-code-action pins, the check that the agent user has no sudo, no Docker access and Yama ptrace_scope 1 or more, or a process still running as the agent user (see the job logs); re-trigger if it was the download, otherwise the runner image changed."
+          fi
           # The agent's own error text is free-form (and unbounded — it is
           # the final message when is_error is set); cap it so the manifest's
           # error.message stays well under the validator's 64 KiB limit.
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the Claude Code step failed before producing a result (see the job logs)."
+          fi
+          # A reclaim that did not succeed skips every later git call (the
+          # composer runs no git and emit-landing runs read-only), so it needs
+          # its own clause or the run is a silent no-change. `!= success` so a
+          # cancel mid-reclaim is named too; the agentuser test keeps a run
+          # that never created the user (its reclaim is `skipped`) out.
+          if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then
+            err="the agent finished but the workspace could not be reclaimed from it (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, the agent left an embedded git repository in the tree (a git init or git worktree add under the checkout), the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed. Inspect the run before re-triggering."
           fi
           # Completed-but-blocked: the action reports success,
           # but the agent left edits to tracked files uncommitted — they die
@@ -1637,7 +1708,9 @@ jobs:
           # still at the start SHA, or exactly the runner's clean base merge
           # (the merge still lands, so the wording says so). With an agent
           # commit above it the commits land and the leftovers are a warning.
-          if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "success" ] && [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+          # Its git runs only over a reclaimed tree: a reclaim that did not
+          # succeed set err in the clause above.
+          if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" = "success" ] && [[ "${START_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             dirty=$(git status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null || true)
             if [ -n "$dirty" ]; then
               head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
@@ -1759,8 +1832,8 @@ jobs:
       #     run failed. (Until the dev agent owed the first review, an
       #     errored PR run owed the `@review` whatever the step's outcome.)
       #   comments — codex: the summary the step above wrote. Claude: the
-      #     agent's own `comments` from its manifest-extra.json — the ONE key
-      #     it may write; each entry pinned to THIS issue/PR (a number of the
+      #     agent's own `comments` from its manifest-extra.json (one of the
+      #     two keys it may write); each entry pinned to THIS issue/PR (a number of the
       #     agent's choosing would be a posting channel onto other threads),
       #     the body file shape-checked, present, not a symlink and capped
       #     (the validator refuses the WHOLE manifest — commits included —
@@ -1776,8 +1849,12 @@ jobs:
       #     codex summary's sed, footer rule included), so a run that
       #     answered a question or gave up leaves its answer on the thread
       #     as the machine account — the codex summary's Claude analogue.
-      #   resolve_threads — codex, PR run, real commits: the RESOLVED-THREADS
-      #     ids (`land` intersects them with the PR's own threads).
+      #   resolve_threads — PR run, real commits: the agent's own
+      #     `resolve_threads` from its manifest-extra.json (its gh holds the
+      #     read-only job token since the launcher, so it cannot resolve a
+      #     thread itself), `PRRT_` ids only — the review-fix loop's
+      #     normalization — and none for a run that changed nothing (`land`
+      #     intersects them with the PR's own threads).
       #   stage (was "Stage - Review (hand-back)") — Review: the one-shot dev
       #     agent hands back to a human when it is done, and an errored run
       #     also needs one; EXCEPT a run that handed the PR back to the loop
@@ -1805,6 +1882,9 @@ jobs:
       # guard is the enforcement point: a failed guard means conflict markers
       # survive in a tree codex may have committed over). Post-codex git, so
       # the git dir is pinned by env like the guard and the commit step.
+      # On this (Claude) path the git reads are skipped the same way unless
+      # the post-agent reclaim SUCCEEDED: nothing reads a `.git` the agent
+      # user could still write.
       - name: Compose landing manifest
         id: landing
         if: always()
@@ -1830,6 +1910,7 @@ jobs:
           CLAUDE_BRANCH: ${{ steps.claude.outputs.branch_name }}
           EXEC: ${{ steps.claude.outputs.execution_file }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          AGENTRECLAIM_OUTCOME: ${{ steps.agentreclaim.outcome }}
           PROV_NOTE: ${{ steps.provenance.outputs.note }}
           ERROR_FILE: ${{ runner.temp }}/agent-error.md
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1849,9 +1930,14 @@ jobs:
           moved=false
           head=""
           local_branch=""
-          git_ok=1
+          git_ok=""
           loop_handback=""
-          local_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+          if [ "${AGENTRECLAIM_OUTCOME:-}" = "success" ]; then
+            git_ok=1
+            local_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+          else
+            echo "landing: the workspace was not reclaimed from the agent user (reclaim outcome: ${AGENTRECLAIM_OUTCOME:-unknown}); running no git — nothing is bundled and no PR is opened."
+          fi
           # -- the branch the land job pushes to (emit-landing's `branch`)
           if [ "$IS_PR" = "true" ]; then
             branch="$HEAD_BRANCH"
@@ -1955,13 +2041,16 @@ jobs:
           fi
           # -- comments
           agent='{}'
-          if [ -f "$DIR/manifest-extra.json" ]; then
+          # Only the import's copy, which exists only after a reclaim that
+          # succeeded; checked here too, so no decision of the agent's is
+          # honoured from a workspace the runner never took back.
+          if [ "${AGENTRECLAIM_OUTCOME:-}" = "success" ] && [ -f "$DIR/manifest-extra.json" ]; then
             if ! agent=$(jq -c 'if type=="object" then . else error("not an object") end' "$DIR/manifest-extra.json" 2>&1); then
               echo "::error::landing: the agent's manifest-extra.json is not a JSON object ($agent); its comments were dropped."
               agent='{}'
             fi
           fi
-          unknown=$(jq -r '[keys[] | select(. != "comments")] | join(", ")' <<<"$agent" 2>/dev/null || true)
+          unknown=$(jq -r '[keys[] | select(. != "comments" and . != "resolve_threads")] | join(", ")' <<<"$agent" 2>/dev/null || true)
           [ -z "$unknown" ] || echo "::warning::landing: ignored keys the agent may not set in its manifest: $unknown."
           comments='[]'
           n=0
@@ -2025,6 +2114,18 @@ jobs:
               printf '%s\n' "${summary:-(the agent produced no final message)}"
             } >"$DIR/agent-summary.md"
             extra=$(jq -c --argjson num "$NUM" '.comments = [{number: $num, body_file: "agent-summary.md"}]' <<<"$extra")
+          fi
+          # -- resolve_threads: the agent's list, on a PR run that committed
+          # real changes (a run that changed nothing settled nothing).
+          ids=$(jq -c '[(.resolve_threads // [])[]? | strings | select(test("^PRRT_[A-Za-z0-9_-]+$"))] | unique' <<<"$agent" 2>/dev/null || echo '[]')
+          listed=$(jq -r '(.resolve_threads // []) | if type == "array" then length else 0 end' <<<"$agent" 2>/dev/null || echo 0)
+          [ "$listed" = "$(jq -r 'length' <<<"$ids")" ] || echo "::warning::landing: dropped resolve_threads entr(ies) from the agent's manifest that are not PRRT_ ids (or repeat one)."
+          if [ "$ids" != "[]" ]; then
+            if [ "$IS_PR" = "true" ] && [ -n "$committed" ]; then
+              extra=$(jq -c --argjson t "$ids" '.resolve_threads = $t' <<<"$extra")
+            else
+              echo "::warning::landing: the agent listed $(jq -r 'length' <<<"$ids") thread(s) to resolve, but this is not a pull-request run that committed a change; resolving none."
+            fi
           fi
           # -- stage: Review unless the run handed the PR back to the loop
           # (the auto hand-back above, which an error or refused work never

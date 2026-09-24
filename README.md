@@ -77,26 +77,27 @@ nothing; the reviewer and the `@auto` loops fail at their gates' mint
 step.
 
 **Optional — let the agents run your tests.** By default the agents review and
-build against a bare runner (no deps installed), so they verify with static
-checks only. To give them a real environment, add a
-`.github/actions/claude-setup` composite action to your repo that installs your
-project — ideally by delegating to your existing CI setup
-(`uses: ./.github/actions/<your-setup>`), so nothing is duplicated. Agent
-runs **restore** your CI's caches but never save them: every agent workflow
-declares `cache-mode: read`, so a cache action in your setup restores as usual
-and its save is skipped (or refused with a warning, on older cache actions; a
-restore-only cache step would only silence that message). Keep a trusted
-workflow, such as CI on push to the default branch, saving the entries you
-want agents to hit. If you set `cache-mode` on the job that calls an agent
-workflow, use `read` or `write`: `none` or `write-only` there makes the run
-fail validation. Both agents run it automatically when present (a failed setup
-fails the run, so keep it green). It is also the last step with root: from the
-agent step on, a Claude-engine agent has no sudo and no docker, so system
-packages, docker images, global installs into `/usr/local/bin` or anything
-else that needs root belong in `claude-setup`, and tests that need a docker
-daemon cannot run in the agent. See
-[design/architecture.md](design/architecture.md) for the mechanics and the
-inspect_ai-fork caveat.
+build against a bare runner with only a generic dev-install
+(`uv venv && uv pip install -e .[dev]`, when the checkout has a
+`pyproject.toml`). To give them your real environment, set the reusable
+workflows' `provision` input in your stubs: bash that runs in the checkout as
+the unprivileged agent user (`claude-agent` on Claude runs, `codex` on codex
+runs), with uv on `PATH`, that user's `HOME`, network, and no sudo or Docker —
+for example `uv venv --python 3.11 && uv sync --dev`, or
+`corepack enable --install-directory ~/.local/bin && pnpm install
+--frozen-lockfile` (the example stubs show the shape). Create `.venv` in the
+checkout so the agents find its tools. A `.github/actions/claude-setup`
+composite is no longer run by any agent job: a composite runs as the runner,
+and nothing from the checkout may run as the runner in an agent job
+([design/executed-paths-residual.md](design/executed-paths-residual.md)), so
+move what it did into `provision`. The agents run with no sudo and no Docker,
+so tests that need root or a Docker daemon cannot run in the agent; they run in
+your CI. Agent runs **restore** your CI's caches but never save them: every
+agent workflow declares `cache-mode: read`. If you set `cache-mode` on the job
+that calls an agent workflow, use `read` or `write`: `none` or `write-only`
+there makes the run fail validation. A failed provisioning fails the run, so
+keep the recipe green. See [design/architecture.md](design/architecture.md)
+for the mechanics and the inspect_ai-fork caveat.
 
 ## Using the dev agent
 
@@ -199,23 +200,13 @@ runs to Codex"`). Codex v1 differences: review findings arrive as one
 summary comment (no inline comments; codex fix rounds do resolve the
 Claude reviewer's inline threads they report as addressed), and
 external proxy reviews always use Claude. Codex reviews run tests to
-verify findings like the Claude reviewer. Codex runs provision the
-checkout differently from Claude runs: every codex run uses the shared uv
-dev-install recipe when the checkout has a `pyproject.toml`, executed as
-the unprivileged codex user, and never the repo's `claude-setup` action
-(which runs as the runner, ahead of the codex sandbox) — so a repo that
-pins a Python version or installs non-Python tooling in `claude-setup`
-sets the reusable workflows' `provision` input in its stub instead —
-bash run as the codex user (`uv venv --python 3.11 && uv sync --dev`, or
-`corepack enable --install-directory ~/.local/bin && pnpm install
---frozen-lockfile`; the example stubs show the shape). A stub that sets the
-earlier name, `codex_provision`, keeps working: it is used when `provision`
-is empty. Without either a non-Python repo gets no provisioning on codex
-runs (codex may install what it needs inside its sandbox, which has
-network). Claude runs keep using `claude-setup`, with the uv dev-install as
-the fallback when the checkout lacks it; when they move to an unprivileged
-agent user too, they will run the same `provision` recipe instead
-([design/executed-paths-residual.md](design/executed-paths-residual.md)).
+verify findings like the Claude reviewer. Both engines provision the
+checkout the same way: the stub's `provision` recipe, else the shared uv
+dev-install when the checkout has a `pyproject.toml`, run as the engine's
+unprivileged agent user (see "let the agents run your tests" above). A stub
+that sets the earlier name, `codex_provision`, keeps working: it is used when
+`provision` is empty. Without either a non-Python repo gets no provisioning
+(codex may install what it needs inside its sandbox, which has network).
 Details: [design/codex-engine.md](design/codex-engine.md).
 
 ## The inspect_ai fork

@@ -1520,6 +1520,26 @@ Untrusted input reaching the new code, and how each is handled:
    credential-separation.md, codex-engine.md, architecture.md, README.md
    and AGENTS.md, and extends `test_engine_job_isolation.py`. Then do the
    real-model runs.
+
+   As implemented (2026-09-24), three points the steps above leave open:
+   - **No `drop-runner-root` in the Claude jobs** (decision: Ransom,
+     2026-09-24, option a). #151 added that step while the agent was
+     `runner`; it replaces the sudoers policy with a root-only one, and the
+     post-agent reclaim needs the runner's sudo (kill, chown, the WIF ACL).
+     The agent's uid never had sudo, and the launcher checks that before the
+     action step and inside the namespace, as the codex jobs rely on their
+     user. The composite stays for callers that run an agent as the runner.
+   - **The real-model runs follow the merge** (decision: Ransom,
+     2026-09-24): every trigger in this repository resolves to the default
+     branch's stubs, which call the workflows and their composites `@main`,
+     so no run can exercise this change before it merges.
+   - Found while wiring it: the settings composers (which read a `settings`
+     file from the checkout) run before `Create agent user`; the launcher
+     re-creates the landing directory empty after its kill, so nothing
+     provisioning wrote there passes for the agent's output (a reviewer's
+     `verdict.txt`); and the reviewer imports its review files into
+     `$RUNNER_TEMP/review`, the directory its landing prep already read,
+     rather than into `$RUNNER_TEMP/landing`.
 6. **Tier-2 opt-in** (after #149 and step 5 have merged). Add `land`'s
    `allow-build-config` and the `lib.sh` split, and the reusable workflows'
    `allow_build_config` input (default `false`) that their land jobs pass

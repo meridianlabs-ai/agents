@@ -67,7 +67,7 @@ def commit(r):
 
 
 def compose(r, *, engine, agent_extra=None, claude_outcome="success", codex_commit="skipped",
-            codex_ids="", codex_summary=None, final_message="nothing to change", merge_sha=""):
+            codex_ids="", codex_summary=None, final_message="nothing to change", merge_sha="", agent_reclaim="success"):
     landing = r["tmp"] / "landing"
     landing.mkdir(exist_ok=True)
     if agent_extra is not None:
@@ -81,6 +81,7 @@ def compose(r, *, engine, agent_extra=None, claude_outcome="success", codex_comm
         "DIR": str(landing), "EXTRA": str(extra), "PR": "42", "ROUND": "3", "ENGINE": engine,
         "MENTION": "someone", "START_SHA": r["start"], "MERGE_SHA": merge_sha, "EXEC": str(exec_file),
         "CLAUDE_OUTCOME": claude_outcome if engine == "claude" else "skipped",
+        "AGENTRECLAIM_OUTCOME": agent_reclaim if engine == "claude" else "",
         "CODEXGUARD_OUTCOME": "success" if engine == "codex" else "skipped",
         "CODEXCOMMIT_OUTCOME": codex_commit, "CODEX_IDS": codex_ids, "PROV_NOTE": "",
         "ERROR_FILE": str(r["tmp"] / "agent-error.md"),
@@ -245,6 +246,17 @@ def test_a_merge_only_handback_is_honored_whatever_the_agent_step_did(repo, outc
     assert m["handback"] is True and "handoff_body_file" not in m and "stage" not in m, outcome
     assert "without committing anything (the base merge from the runner lands)" in res.stdout
     assert "none is requested" not in res.stdout
+
+
+@pytest.mark.parametrize("outcome", ["failure", "skipped", ""])
+def test_claude_runs_no_git_unless_the_post_agent_reclaim_succeeded(repo, outcome):
+    # Before the reclaim the agent user could still write `.git`: nothing
+    # lands, so nothing is owed — not the hand-back, not the resolutions.
+    commit(repo)
+    extra = json.dumps({"handback": True, "resolve_threads": ["PRRT_a"]})
+    m, res, _, _ = compose(repo, engine="claude", agent_extra=extra, agent_reclaim=outcome)
+    assert "handback" not in m and "resolve_threads" not in m
+    assert "running no git" in res.stdout
 
 
 def test_claude_mistyped_fields_are_dropped_not_fatal(repo):
