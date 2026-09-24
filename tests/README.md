@@ -424,8 +424,10 @@ Testing a change).
   removal of the WIF ACL and the agent's config dir (real xattrs on Linux).
   The namespace itself is not run by any test here or in CI: the hosted
   canary's `claude-launcher` job stops at an intentional refusal before the
-  namespace exists, and a successful launch needs a CLI stand-in that has
-  not been written yet (design/executed-paths-residual.md → Testing).
+  namespace exists. Successful-launch coverage is step 5's real-model runs,
+  and adversarial probing is left to Claude Security scans
+  (design/executed-paths-residual.md → Testing; decision: Ransom,
+  2026-09-24).
 - `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
   the same way against a stub `gh`: an issue's `auto` label is the run's
   opt-in only when the account that applied it most recently is a human

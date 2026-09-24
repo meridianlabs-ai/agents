@@ -1271,22 +1271,28 @@ Untrusted input reaching the new code, and how each is handled:
       `allow_build_config` input, whose default is `false`.
   - `test_dev_agent_composer.py` covers `resolve_threads` from the Claude
     manifest-extra.
-- **Hostile probes are not built (decision: Ransom, 2026-09-24).** The
-  SDK-window harness and the three probe-driven canary jobs below were the
-  plan until step 4. Ransom chose to assess the boundary with Claude
-  Security scans instead of a hostile-probe canary ("in reality we
-  probably won't rely on the adversarial probes and will use Claude
-  Security scans instead"). Step 4 keeps the non-adversarial part: a
-  benign CLI stand-in that reports its own environment, argv and mount
-  view, launched through the real SDK in both grant modes (completion,
-  teardown, the WIF/config grant and its reclaim), with the report
-  compared with the tokens runner-side. The next two bullets describe the
-  full original plan; their hostile probes are not built. The launch
-  chain's teardown (the CLI's exit, a KILL of `sudo`, the action process's
-  exit) was exercised by hand in a privileged container while step 4 was
-  written; that is not a substitute for the benign launch coverage.
-- **The action's post-CLI window, against the real SDK** (its
-  non-adversarial variants are kept; see above).
+- **No probe canary; launch coverage moves to step 5 (decision: Ransom,
+  2026-09-24).** The SDK-window harness and the three probe-driven canary
+  jobs below were the plan until step 4. None of them is built, and no CLI
+  stand-in is written:
+  - Adversarial probing of the boundary (the `/proc` and escape probes,
+    the fsmonitor survivors, the revoke window) is covered by Claude
+    Security scans instead ("in reality we probably won't rely on the
+    adversarial probes and will use Claude Security scans instead"; "We
+    rely on Claude Security scans for adversarial probes").
+  - Successful-launch coverage moves to step 5's real-model runs, which
+    launch the real CLI through the wrapper in both grant modes (the
+    fork-head review is the `none` mode). That covers SDK completion and
+    teardown, the WIF/config grant and the reclaim after it.
+
+  Step 4 ships the unit tests, `codex_path_smoke.sh`'s claude-agent cases,
+  and the `claude-launcher` canary job. That job runs the composite up to
+  an intentional refusal before the namespace exists. The launch chain and
+  its teardown (the CLI's exit, a KILL of `sudo`, the action process's
+  exit) were also exercised by hand in a privileged container while step 4
+  was written. The next two bullets record the original plan.
+- **The action's post-CLI window, against the real SDK** (not built; see
+  above).
   `tests/sdk_barrier/` is a small harness pinned to the SDK version the
   action's lockfile resolves (0.3.280 today). It runs **under Bun**, at
   the version the action pins (`bun-version` in its `action.yml`,
@@ -1346,7 +1352,7 @@ Untrusted input reaching the new code, and how each is handled:
 
   The round-1 and round-2 reviewer probes (2,237 ms, 2,713 ms, 3,003 ms)
   become these regression cases.
-- **Hosted canary** (the adversarial probes are not built; see above).
+- **Hosted canary** (the probe-driven jobs are not built; see above).
   `engine-isolation-canary.yml` gains a `claude-boundary`
   job, which runs the real claude-code-action at `@v1` on this repository
   (the Claude App is installed here and WIF matches `meridianlabs-ai`). It
@@ -1455,7 +1461,12 @@ Untrusted input reaching the new code, and how each is handled:
   - a review-fix and a CI-fix round on a scratch `auto` PR.
 
   Check model provenance and that settings denies are in effect (a denied
-  `git push` attempt is refused).
+  `git push` attempt is refused). These runs are also the launcher's
+  successful-launch coverage (decision: Ransom, 2026-09-24): the issue run
+  and the same-repo review launch in `workspace` mode and the fork-head
+  review in `none` mode. Each run checks that the CLI completes and its
+  namespace ends with it, and that the post-agent reclaim leaves no WIF ACL
+  and no `~claude-agent/.anthropic-config`.
 - **CI.** This repository has no CI. The canary and smoke workflows run on
   pushes touching the composites or harness, by dispatch, and weekly.
 
@@ -1477,18 +1488,14 @@ Untrusted input reaching the new code, and how each is handled:
    `claude` wrapper, `agent-ns-launch`, `agent-ns-init`, the adapted
    isolation check), the post-agent reclaim's cleanup of the WIF ACL and
    the agent's config dir, `codex_path_smoke.sh`'s claude-agent cases, the
-   wrapper and namespace unit tests, a canary job (`claude-launcher`) that
-   runs the composite on a hosted runner, and benign launch coverage: a CLI
-   stand-in that reports only its own environment, argv and mount view for
-   a runner-side by-value comparison with the tokens, launched through the
-   real SDK in both grant modes with normal completion and teardown, the
-   WIF/config grant and the reclaim after it. Run the canary green before
-   step 5. The adversarial parts of Testing (the `/proc` and escape probes,
-   the fsmonitor survivors, and the `claude-revoke-window` and
-   `claude-sandbox-review` jobs) are not part of this step: the boundary is
-   assessed with Claude Security scans instead (decision: Ransom,
-   2026-09-24; Testing). The benign launch coverage is still missing from
-   PR #165.
+   wrapper and namespace unit tests, and a canary job (`claude-launcher`)
+   that runs the composite on a hosted runner up to an intentional refusal
+   before the namespace. Run the canary green before step 5. No CLI
+   stand-in, SDK harness or probe-driven canary job is part of this step
+   (decision: Ransom, 2026-09-24; Testing). Adversarial probing is covered
+   by Claude Security scans instead. Successful-launch coverage (SDK
+   completion and teardown, the WIF/config grant and its reclaim, both
+   grant modes) moves to step 5's real-model runs.
 5. **Switch the Claude jobs.** In the four workflows, remove
    `claude-setup` and the runner fallback. Add steps 2-4, the launcher, the
    executable input, the post-agent reclaim, the moved `reset-origin-url`,
