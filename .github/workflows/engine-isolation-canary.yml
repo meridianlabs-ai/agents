@@ -400,8 +400,9 @@ jobs:
           set -uo pipefail
           mkdir -p ~/.claude
           [ -f ~/.claude/settings.json ] || echo '{}' >~/.claude/settings.json
-          out=$(CLAUDE_CODE_ACTION=1 DEFAULT_WORKFLOW_TOKEN=$JOB_TOKEN /opt/meridian-agent/bin/claude --output-format stream-json 2>&1)
-          rc=$?
+          # The step shell is `bash -e`: take the expected failure's status.
+          rc=0
+          out=$(CLAUDE_CODE_ACTION=1 DEFAULT_WORKFLOW_TOKEN=$JOB_TOKEN /opt/meridian-agent/bin/claude --output-format stream-json 2>&1) || rc=$?
           echo "$out"
           [ "$rc" -ne 0 ] || { echo "::error::the launch was not refused"; exit 1; }
           grep -q "agent-ns-launch: refusing to launch the agent: the action process [0-9]* runs .*, not bun" <<<"$out" || { echo "::error::refused, but not by the action-process check"; exit 1; }
