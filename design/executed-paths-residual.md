@@ -988,7 +988,9 @@ review-fix round on a Dependabot batch PR lands on the branch the next
 - **Revised 2026-09-24: CI and credentialed automation count** (decision:
   Ransom, 2026-09-24, applied when the step-6 companions opted in). A
   caller may pass `allow_build_config: true` or `allow-build-config:
-  "true"` only when all of the following hold:
+  "true"` only when all of the following hold. The consumer rule above
+  applies to jobs that run an agent; CI and other jobs that run none may
+  run as `runner` and fall under these instead:
   1. No workflow that runs agent-landed branch code (a same-repo
      `pull_request`, a `push` to a non-default branch, `workflow_run`, a
      schedule that checks out an agent branch) holds a secret, an App

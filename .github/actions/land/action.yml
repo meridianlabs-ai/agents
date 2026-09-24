@@ -386,20 +386,20 @@ inputs:
       `workflows` step then checks tier 1 alone — `.github/` and agent
       instructions and settings, with the symlinks and `@path` imports they
       reach — and refuses it as before. The default, "false", refuses both
-      tiers. Pass "true" only when EVERY automated job that later checks out
-      and runs code from the branches this land job pushes provisions and
-      runs its agent (the CLI and every tool call) as an unprivileged user,
-      as the reusable workflows' agent jobs do
+      tiers. Pass "true" only when EVERY automated agent job that later
+      checks out and runs code from the branches this land job pushes
+      provisions and runs its agent (the CLI and every tool call) as an
+      unprivileged user, as the reusable workflows' agent jobs do
       (design/executed-paths-residual.md → Land: tier-2 opt-in): the rule is
       per repository, since other writers push to the same branches. Claude
       Security finding 4628446's criterion 2 is then met for tier 2 by that
       isolation instead of by refusal (decision: Ransom, 2026-09-23). The
       rule covers CI too: no workflow that runs code from those branches may
       hold a secret, an App token, `id-token: write` or a non-read
-      permission, and a credentialed `workflow_dispatch` or tag-push
-      workflow must be restricted to trusted refs (decision: Ransom,
-      2026-09-24). A fixed value in the caller's workflow file, never one
-      derived from the event.
+      permission (read-only, secret-free CI is fine), and a credentialed
+      `workflow_dispatch` or tag-push workflow must be restricted to trusted
+      refs (decision: Ransom, 2026-09-24). A fixed value in the caller's
+      workflow file, never one derived from the event.
     required: false
     default: "false"
 
