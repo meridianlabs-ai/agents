@@ -61,6 +61,33 @@ if [ "$clear" -ne 1 ]; then
   echo "::error::processes were still running as $user after repeated kills — refusing to reclaim the workspace under them."
   exit 1
 fi
+# The Claude agent's launch (claude-agent-launcher's agent-ns-launch) gave
+# the agent user named-user ACL entries on the action's Workload Identity dir
+# and token file, and its own copy of the WIF profile dir in its home
+# (design/executed-paths-residual.md → After the agent). Take both back now
+# that nothing runs as the agent: the access ACL goes, and with it the group
+# bits its mask showed (the action creates both with none), and the copy —
+# which holds the credential cache the CLI wrote — is deleted (rm -rf on a
+# symlink removes the link). The action's own step end deletes the WIF dir
+# too; either may already be gone, and before the agent (the pre-agent
+# reclaim) neither exists yet.
+if [ "$user" = claude-agent ]; then
+  wif="$RUNNER_TEMP/claude-workload-identity"
+  for f in "$wif/identity-token" "$wif"; do
+    if [ -e "$f" ] && [ ! -L "$f" ]; then
+      sudo /usr/bin/python3 -I -c '
+import errno, os, sys
+try:
+    os.removexattr(sys.argv[1], "system.posix_acl_access", follow_symlinks=False)
+except OSError as e:
+    if e.errno != errno.ENODATA:
+        raise
+' "$f"
+      sudo chmod go-rwx "$f"
+    fi
+  done
+  sudo rm -rf "/home/$user/.anthropic-config"
+fi
 # Refuse BEFORE the chown: a .git that the agent turned into a symlink
 # would otherwise have its target re-owned first. -L on commondir
 # too — -e is false for a dangling symlink.

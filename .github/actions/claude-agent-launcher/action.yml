@@ -1,0 +1,184 @@
+name: claude-agent-launcher
+description: >-
+  Prepare the Claude jobs' launch of the Claude Code CLI as the unprivileged
+  `claude-agent` user (design/executed-paths-residual.md → The launcher
+  (step 5) and the wrapper). Runner-side, after `create-codex-user` with
+  `user: claude-agent`, provisioning as that user and, in `workspace` grant
+  mode, the pre-agent reclaim; the claude-code-action step then passes
+  `path_to_claude_code_executable` (this composite's `executable` output,
+  /opt/meridian-agent/bin/claude). In order:
+
+  1. The job PATH is checked for the agent user (`assert-runner-only-path`,
+     no `protect`), and every command below runs with `system-path`.
+  2. Claude Code is installed root-owned under /opt/meridian-agent/claude/,
+     at the version claude-code-action pins: the `claudeCodeVersion`
+     literal in the downloaded action's `src/entrypoints/run.ts`
+     (`<RUNNER_WORKSPACE>/../_actions/anthropics/claude-code-action/v1`),
+     read fail-closed (exactly one match, a plain x.y.z), and installed with
+     the installer the action uses, run as root with `HOME` set to that
+     directory. The runner downloads every action a job names at job start,
+     so the action's step must be in the job (a skipped one counts).
+  3. The wrapper (`claude`), the namespace script (`agent_ns.py`, as both
+     `agent-ns-launch` and `agent-ns-init`) and the isolation check go to
+     /opt/meridian-agent/bin, root-owned — the directory the action appends
+     to `GITHUB_PATH`, which `assert-runner-only-path` therefore passes.
+  4. The root-owned run directory /opt/meridian-agent/run records what the
+     wrapper and the namespace trust, never taking it from the environment
+     the SDK hands the wrapper: the grant mode, the real CLI, the agent's
+     PATH (`path-prefix` — the provisioning `bin` output — then the CLI's
+     directory and the system directories), the workspace, the runner's
+     temp and home directories, the runner's install directory (for the
+     isolation check), the wrapper's own PATH and the checkout's HEAD —
+     the symbolic ref, or `detached:<sha>` — against which the wrapper
+     recognises a branch the action's prepare created.
+  5. The pre-action user check (`check-isolation.sh --phase pre`) runs as
+     the user with plain `sudo -n -u claude-agent`: no sudo, no Docker, Yama
+     ptrace_scope 1 or more. What depends on the namespace, the action's
+     process or its WIF files is checked later, inside the namespace, right
+     before the CLI starts.
+  6. Every process running as `claude-agent` is killed, until a pass finds
+     none (the reclaim's loop). With `grant: none` no pre-agent reclaim
+     runs, so this is that kill; from here nothing runs as the agent user
+     outside the namespace the wrapper starts.
+
+  Runs no git command against the checkout except the two reads of HEAD.
+  Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/claude-agent-launcher@main); NO
+  post step.
+
+inputs:
+  grant:
+    description: >-
+      `workspace` (the default): the agent may write the checkout, and the
+      wrapper re-grants it `.git` and the workspace root, which the
+      pre-agent reclaim revoked. `none`: the reviewer's fork and external
+      heads — no re-grant, the checkout is mounted read-only in the agent's
+      namespace, the review scratch copy (`$RUNNER_TEMP/scratch`) is bound
+      writable, and the isolation check expects exactly that. Pass the value
+      `create-codex-user` got. Any other value fails the step.
+    required: false
+    default: workspace
+  path-prefix:
+    description: >-
+      Colon-separated absolute directories put first on the agent's PATH:
+      `provision-fallback`'s `bin` output. Empty for none.
+    required: false
+    default: ""
+  system-path:
+    description: >-
+      The PATH this composite's commands, and the wrapper's, run with: the
+      hosted image's root-owned system directories — NOT `/usr/local/bin`,
+      which the image ships world-writable.
+    required: false
+    default: /usr/sbin:/usr/bin:/sbin:/bin
+
+outputs:
+  executable:
+    description: The wrapper, for claude-code-action's `path_to_claude_code_executable`.
+    value: /opt/meridian-agent/bin/claude
+
+runs:
+  using: composite
+  steps:
+    - uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
+      with:
+        user: claude-agent
+        system-path: ${{ inputs.system-path }}
+
+    - shell: bash
+      env:
+        GRANT: ${{ inputs.grant }}
+        PATH_PREFIX: ${{ inputs.path-prefix }}
+        SYSTEM_PATH: ${{ inputs.system-path }}
+        SOURCE_DIR: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        export PATH="$SYSTEM_PATH"
+        opt=/opt/meridian-agent
+        user=claude-agent
+        err() { echo "::error::claude-agent-launcher: $*"; exit 1; }
+        case "$GRANT" in workspace|none) ;; *) err "grant must be workspace or none, not '$GRANT'" ;; esac
+        id "$user" >/dev/null 2>&1 || err "no $user user — create-codex-user with user: $user runs first"
+        if [ -L "$opt" ] || [ "$(stat -c '%U:%G %a' "$opt" 2>/dev/null)" != "root:root 755" ]; then
+          err "$opt is not the root-owned 0755 directory create-codex-user makes"
+        fi
+        one_line() { case "$2" in *$'\n'*|*$'\r'*) err "$1 holds a line break" ;; esac; }
+        prefix=""
+        if [ -n "$PATH_PREFIX" ]; then
+          one_line path-prefix "$PATH_PREFIX"
+          IFS=: read -r -a dirs <<<"$PATH_PREFIX"
+          for d in "${dirs[@]}"; do
+            case "$d" in /*) ;; *) err "path-prefix entry '$d' is not absolute" ;; esac
+          done
+          prefix="$PATH_PREFIX:"
+        fi
+
+        # 2. The CLI, at the action's pinned version, root-owned.
+        run_ts="${RUNNER_WORKSPACE%/*}/_actions/anthropics/claude-code-action/v1/src/entrypoints/run.ts"
+        [ -f "$run_ts" ] || err "claude-code-action@v1 is not downloaded ($run_ts is missing) — the job must name the action"
+        pattern='^[[:space:]]*const claudeCodeVersion = "([0-9]+\.[0-9]+\.[0-9]+)";[[:space:]]*$'
+        [ "$(grep -cE "$pattern" "$run_ts")" = 1 ] || err "cannot read the pinned claudeCodeVersion from $run_ts (not exactly one plain x.y.z literal)"
+        version=$(sed -nE "s/$pattern/\1/p" "$run_ts")
+        sudo rm -rf "$opt/claude"
+        sudo install -d -o root -g root -m 755 "$opt/claude"
+        installer="$RUNNER_TEMP/claude-code-install.sh"
+        ok=0
+        for attempt in 1 2 3; do
+          if curl -fsSL https://claude.ai/install.sh -o "$installer" &&
+             sudo env -i HOME="$opt/claude" PATH="$SYSTEM_PATH" bash "$installer" "$version"; then
+            ok=1; break
+          fi
+          echo "install attempt $attempt failed"
+          sleep 5
+        done
+        [ "$ok" = 1 ] || err "installing Claude Code $version failed three times"
+        sudo chown -R root:root "$opt/claude"
+        sudo chmod -R go-w "$opt/claude"
+        cli=$(readlink -f "$opt/claude/.local/bin/claude")
+        case "$cli" in "$opt/claude/"*) ;; *) err "the installed CLI resolves to $cli, outside $opt/claude" ;; esac
+        [ -f "$cli" ] && [ -x "$cli" ] || err "the installed CLI $cli is not an executable file"
+        got=$("$cli" --version 2>/dev/null || true)
+        case "$got" in *"$version"*) ;; *) err "the installed CLI reports '$got', not $version" ;; esac
+
+        # 3. The wrapper and the namespace, root-owned.
+        sudo rm -rf "$opt/bin" "$opt/run"
+        sudo install -d -o root -g root -m 755 "$opt/bin" "$opt/run"
+        sudo install -o root -g root -m 755 "$SOURCE_DIR/claude" "$opt/bin/claude"
+        sudo install -o root -g root -m 755 "$SOURCE_DIR/agent_ns.py" "$opt/bin/agent-ns-launch"
+        sudo install -o root -g root -m 755 "$SOURCE_DIR/agent_ns.py" "$opt/bin/agent-ns-init"
+        sudo install -o root -g root -m 644 "$SOURCE_DIR/check-isolation.sh" "$opt/bin/check-isolation.sh"
+
+        # 4. What the wrapper and the namespace trust.
+        record() { one_line "$1" "$2"; printf '%s\n' "$2" | sudo tee "$opt/run/$1" >/dev/null; sudo chmod 644 "$opt/run/$1"; }
+        gitr() { GIT_CONFIG_GLOBAL=/dev/null git -C "$GITHUB_WORKSPACE" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+        if head=$(gitr symbolic-ref -q HEAD); then :; else head="detached:$(gitr rev-parse --verify HEAD)"; fi
+        runner_root=""
+        for p in $(pgrep -x Runner.Worker || true); do
+          exe=$(readlink -f "/proc/$p/exe" 2>/dev/null || true)
+          if [ -n "$exe" ]; then runner_root=$(dirname "$(dirname "$exe")"); break; fi
+        done
+        record grant "$GRANT"
+        record cli "$cli"
+        record path "$prefix$opt/claude/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+        record workspace "$GITHUB_WORKSPACE"
+        record runner-temp "$RUNNER_TEMP"
+        record runner-home "$(getent passwd "$(id -un)" | cut -d: -f6)"
+        record runner-root "$runner_root"
+        record system-path "$SYSTEM_PATH"
+        record head "$head"
+
+        # 5. The pre-action user check.
+        (cd / && sudo -n -u "$user" -H -- env -i PATH="$SYSTEM_PATH" HOME="/home/$user" \
+          bash "$opt/bin/check-isolation.sh" --phase pre) || err "the pre-action isolation check failed for $user"
+
+        # 6. Nothing runs as the agent user from here on outside its namespace.
+        clear=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          rc=0
+          sudo pkill -KILL -u "$user" || rc=$?
+          if [ "$rc" -eq 1 ]; then clear=1; break; fi
+          [ "$rc" -eq 0 ] || err "pkill -u $user failed (exit $rc)"
+          sleep 0.2
+        done
+        [ "$clear" = 1 ] || err "processes were still running as $user after repeated kills"
+        echo "claude-agent launcher ready: Claude Code $version at $cli, grant mode $GRANT, HEAD $head; launch through $opt/bin/claude"
