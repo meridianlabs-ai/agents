@@ -25,7 +25,8 @@ manifest. Usage:
         [--branch-prefix "claude/issue-$EVENT_ISSUE-"] [--refuse-bundle] \
         [--allowed-issue-labels ""] [--allowed-issue-assignees ransomr] \
         [--max-issues 1] [--refuse-pr] [--allow-review] \
-        [--allowed-pr-labels '["auto","engine:codex"]']
+        [--allowed-pr-labels '["auto","engine:codex"]'] \
+        [--pr-draft true] [--pr-assignees ransomr]
 
 `--refuse-bundle` is for callers whose agent never commits (the reviewer):
 a manifest that carries commits, claims HEAD moved, or ships a
@@ -121,6 +122,19 @@ A label containing a comma, in `pr.labels` or `issues[]`, is refused under
 any policy: `land` applies labels through gh's comma-separated flags, which
 would split it into labels the list above never checked (issue #142).
 
+`--pr-draft` and `--pr-assignees` are the land job's `pr-draft` and
+`pr-assignees` inputs: whether a PR `land` opens is a draft, and whom the PR
+it opens or adopts is assigned to. They are the trusted caller's decision,
+never the agent's, so they are land inputs and not `pr` keys (KNOWN_PR has
+neither: a manifest naming `draft` or `assignees` under `pr` is refused as
+an unknown key). Nothing in the manifest is compared against them; they are
+checked here only so a malformed value refuses the landing (usage error,
+exit 2) before anything is pushed or posted, the way `--max-issues` and
+`--allowed-pr-labels` are: `--pr-draft` must be exactly `true` or `false`,
+and `--pr-assignees` empty or comma-separated GitHub logins with no spaces,
+no empty entry, no repeat and at most MAX_ASSIGNEES of them (the land step
+hands each one to `gh pr edit --add-assignee` as-is).
+
 `--allow-review` marks the reviewer's land job (claude-review.yml), the only
 caller whose manifest may carry the review fields: `review_verdict` (one of
 two fixed verdict bodies carrying the @auto loop's live markers),
@@ -175,9 +189,11 @@ REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 EVENT_NUMBER_RE = re.compile(r"^[1-9][0-9]{0,9}$")
 # A GitHub login: alphanumerics and single hyphens, no leading or trailing
 # hyphen, at most 39 characters — `issues[].assignees` go to `gh issue
-# create --assignee` / `gh issue edit --add-assignee` as-is.
+# create --assignee` / `gh issue edit --add-assignee` as-is, and the land
+# job's `pr-assignees` input to `gh pr edit --add-assignee`.
 LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$")
-MAX_ASSIGNEES = 10  # GitHub's cap per issue
+MAX_LOGIN_CHARS = 39  # GitHub's cap on a login's length
+MAX_ASSIGNEES = 10  # GitHub's cap per issue or PR
 
 # Atlas Stage options (.github/actions/set-stage/action.yml).
 STAGES = ("Contributor", "Agent", "Review", "Sign-off", "Merge")
@@ -870,6 +886,16 @@ def main(argv=None) -> int:
         help="JSON array of the labels pr.labels may carry (claude.yml passes its gate job's label read verbatim); `[]` (the default) or an empty value allows none, `*` leaves them unrestricted",
     )
     ap.add_argument(
+        "--pr-draft",
+        default="false",
+        help="the land job's `pr-draft` input (open the PR as a draft): exactly `true` or `false`; anything else is a usage error. Not compared against the manifest",
+    )
+    ap.add_argument(
+        "--pr-assignees",
+        default="",
+        help="the land job's `pr-assignees` input: empty, or comma-separated GitHub logins (no spaces, no repeats, at most 10); anything else is a usage error. Not compared against the manifest",
+    )
+    ap.add_argument(
         "--refuse-pr",
         action="store_true",
         help="refuse a manifest that carries `pr` (open/adopt/label a PR) or `handback: true` (the caller's agent may not touch pull requests — the triage workflow); a `pr.open` needs no bundle, so --refuse-bundle alone does not close it",
@@ -911,6 +937,22 @@ def main(argv=None) -> int:
         if not args.max_issues.strip().isdigit():
             ap.error(f"--max-issues must be a non-negative integer, not {args.max_issues!r}")
         max_issues = int(args.max_issues)
+
+    # The land job's own PR policy inputs, not manifest fields: checked so a
+    # malformed value refuses the landing rather than reach `gh`.
+    if args.pr_draft not in ("true", "false"):
+        ap.error(f"--pr-draft must be `true` or `false`, not {args.pr_draft!r}")
+    if args.pr_assignees != "":
+        logins = args.pr_assignees.split(",")
+        # LOGIN_RE bounds the hyphen-alphanumeric pairs, not the total, so a
+        # hyphenated name passes it at up to 77 characters: the 39-character
+        # cap is checked on its own.
+        if not all(LOGIN_RE.fullmatch(x) and len(x) <= MAX_LOGIN_CHARS for x in logins):
+            ap.error(f"--pr-assignees must be comma-separated GitHub logins with no spaces or empty entries, not {args.pr_assignees!r}")
+        if len({x.lower() for x in logins}) != len(logins):
+            ap.error(f"--pr-assignees must not repeat a login, not {args.pr_assignees!r}")
+        if len(logins) > MAX_ASSIGNEES:
+            ap.error(f"--pr-assignees lists {len(logins)} logins; the cap is {MAX_ASSIGNEES}")
 
     manifest, errors = load_manifest(Path(args.dir))
     if not errors:

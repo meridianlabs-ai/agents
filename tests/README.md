@@ -18,7 +18,9 @@ Testing a change).
   refused on every caller but the reviewer's (`allow-review`), and the
   fix-agent fields (`pr`, `replies`, `resolve_threads`, `handoff_body_file`,
   `handback`) refused under `refuse-bundle`, each against the forged manifest
-  its finding describes.
+  its finding describes; and the land job's `pr-draft` / `pr-assignees`
+  inputs, shape-checked as `--pr-draft` / `--pr-assignees` (a malformed
+  value is a usage error) and refused as `pr` manifest keys.
 - `test_import_codex_final.py` — the `import-codex-final` composite's
   script (`.github/scripts/import_codex_final.py`): a regular file owned by
   the expected user is copied byte for byte; a symlink (to a runner file, or
@@ -37,8 +39,12 @@ Testing a change).
   codex-action's `output-file`, every reader takes the imported copy, and
   the import step sits right after the reclaim (finding 4628447).
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
-  retry, open-or-adopt PR and the branch-existence probe against a stub
-  `gh`, the landing-failure hint) and
+  retry, open-or-adopt PR — a draft only on create when asked, an adopted
+  PR's draft state untouched — and the branch-existence probe against a stub
+  `gh`, the landing-failure hint), the `pr` step lifted and run against a
+  stub `gh` (`pr-draft` on create, `pr-assignees` on create and adopt, a
+  failed assignment recorded rather than failing the step, and the Report
+  step naming it and failing the run) and
   the git sequence its fetch/push steps rely on (bundle above the start SHA;
   unbundle into an empty bare repo; refuse a moved branch; push without
   `--force`), run against local repos — including `emit-landing`'s `write`

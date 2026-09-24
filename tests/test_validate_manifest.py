@@ -1530,6 +1530,80 @@ def test_cli_malformed_allowed_pr_labels_is_a_usage_error(tmp_path, capsys, valu
     assert "--allowed-pr-labels must be `*` or a JSON array of strings" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("draft,assignees", [
+    (None, None),                   # the flags' defaults: "false" and empty, as the land inputs'
+    ("false", ""),
+    ("true", "ransomr"),
+    ("true", "ransomr,meridian-marvin"),
+    ("false", ",".join(f"u{i}" for i in range(10))),
+    ("true", "a" * 39),
+    ("true", "a" + "-b" * 19),      # 39 characters, hyphenated
+])
+def test_cli_pr_draft_and_assignees_accept_well_formed_values(tmp_path, draft, assignees):
+    # The land job's `pr-draft` / `pr-assignees` inputs: its own PR policy,
+    # passed through for the shape check only, never compared against the
+    # manifest.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    extra = [*([] if draft is None else ["--pr-draft", draft]),
+             *([] if assignees is None else ["--pr-assignees", assignees])]
+    assert cli(tmp_path, *extra) == 0
+
+
+@pytest.mark.parametrize("value", ["", "True", "yes", "1", "true ", "true\n"])
+def test_cli_malformed_pr_draft_is_a_usage_error(tmp_path, capsys, value):
+    # Exactly "true" or "false": argparse exits 2, which the land job's
+    # validate step treats as a refused manifest (fail closed).
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    with pytest.raises(SystemExit) as exc:
+        cli(tmp_path, "--pr-draft", value)
+    assert exc.value.code == 2
+    assert "--pr-draft must be `true` or `false`" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value,message", [
+    ("ransomr ", "must be comma-separated GitHub logins"),
+    ("ransomr, other", "must be comma-separated GitHub logins"),
+    ("ransomr,,other", "must be comma-separated GitHub logins"),
+    ("ransomr,", "must be comma-separated GitHub logins"),
+    (",ransomr", "must be comma-separated GitHub logins"),
+    ("@me", "must be comma-separated GitHub logins"),
+    # A leading hyphen reads as an option to argparse: refused all the same.
+    ("-ransomr", None),
+    ("ransom--r", "must be comma-separated GitHub logins"),
+    ("ransomr;other", "must be comma-separated GitHub logins"),
+    ("ransomr\nother", "must be comma-separated GitHub logins"),
+    ("a" * 40, "must be comma-separated GitHub logins"),
+    # Over 39 characters with hyphens: LOGIN_RE alone would pass these.
+    ("a" + "-b" * 20, "must be comma-separated GitHub logins"),
+    ("ransomr," + "a" + "-b" * 38, "must be comma-separated GitHub logins"),
+    ("ransomr,RansomR", "must not repeat a login"),
+    (",".join(f"u{i}" for i in range(11)), "lists 11 logins; the cap is 10"),
+])
+def test_cli_malformed_pr_assignees_is_a_usage_error(tmp_path, capsys, value, message):
+    # Each entry goes to `gh pr edit --add-assignee` as-is, so anything but
+    # bare logins (a space, an empty entry, `@me`, a newline) refuses the
+    # landing before anything is pushed or posted.
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    with pytest.raises(SystemExit) as exc:
+        cli(tmp_path, "--pr-assignees", value)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert (f"--pr-assignees {message}" if message else "argument --pr-assignees: expected one argument") in err
+
+
+@pytest.mark.parametrize("key,value", [("draft", True), ("assignees", ["ransomr"])])
+def test_pr_draft_and_assignees_are_not_manifest_keys(tmp_path, capsys, key, value):
+    # Draft status and assignees are the trusted caller's decision (land
+    # inputs); the agent's manifest may not carry them, whatever the land
+    # job's own inputs say.
+    assert "draft" not in vm.KNOWN_PR and "assignees" not in vm.KNOWN_PR
+    m = base_manifest(tmp_path)
+    m["pr"][key] = value
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path, "--pr-draft", "true", "--pr-assignees", "ransomr") == 1
+    assert f"pr: unknown key {key!r}" in capsys.readouterr().out
+
+
 def test_cli_event_pr_mismatch(tmp_path, capsys):
     (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
     assert cli(tmp_path, event_pr="457") == 1

@@ -215,7 +215,8 @@ def test_retry_read_prints_only_the_successful_attempts_stdout(tmp_path):
 # does not request the ownership fields, since the helper's filter is only
 # as good as what it asked for. `pr create` performs the write, and when
 # LOSE_FIRST is set its FIRST call exits 1 after writing (a timeout / 5xx
-# after the server accepted the PR). Calls are logged to $STATE/calls.
+# after the server accepted the PR). Calls are logged to $STATE/calls, and
+# each `pr create`'s full argument list to $STATE/create-args.
 # `sleep` is neutralised so the retry backoff does not slow the suite.
 GH_STUB = r"""
 sleep() { :; }
@@ -239,6 +240,7 @@ gh() {
       fi
       echo "]" ;;
     "pr create")
+      echo "$*" >>"$STATE/create-args"
       [ -f "$STATE/pr" ] || echo 42 >"$STATE/pr"
       if [ -n "${LOSE_FIRST:-}" ] && [ ! -f "$STATE/lost" ]; then touch "$STATE/lost"; echo "gh: timeout" >&2; return 1; fi
       echo "https://x/pull/$(cat "$STATE/pr")" ;;
@@ -248,7 +250,7 @@ gh() {
 """
 
 
-def open_or_adopt(tmp_path, *, lose_first=False, existing=None, fork=None):
+def open_or_adopt(tmp_path, *, lose_first=False, existing=None, fork=None, draft=None):
     state = tmp_path / "state"
     state.mkdir()
     if existing is not None:
@@ -260,7 +262,7 @@ def open_or_adopt(tmp_path, *, lose_first=False, existing=None, fork=None):
     env = {"STATE": str(state), "LOSE_FIRST": "1" if lose_first else ""}
     r = sh(
         "bash", "-c",
-        f". '{LIB}'\n{GH_STUB}\nresult=$(retry 3 what open_or_adopt_pr o/r feat main T '{body}') || exit 9\n"
+        f". '{LIB}'\n{GH_STUB}\nresult=$(retry 3 what open_or_adopt_pr o/r feat main T '{body}'{'' if draft is None else ' ' + draft}) || exit 9\n"
         "read -r how number url <<<\"$result\"; echo \"$how|$number|$url\"",
         check=False, env=env,
     )
@@ -268,11 +270,46 @@ def open_or_adopt(tmp_path, *, lose_first=False, existing=None, fork=None):
     return r, calls
 
 
+def create_args(tmp_path) -> list:
+    f = tmp_path / "state" / "create-args"
+    return f.read_text().splitlines() if f.exists() else []
+
+
 def test_open_or_adopt_pr_creates_when_none_exists(tmp_path):
     r, calls = open_or_adopt(tmp_path)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "opened|42|https://x/pull/42"
     assert calls == ["pr list", "pr create"]
+    # No DRAFT argument (every caller before `pr-draft`): a ready PR.
+    assert len(create_args(tmp_path)) == 1 and "--draft" not in create_args(tmp_path)[0].split()
+
+
+@pytest.mark.parametrize("draft,expected", [("true", True), ("false", False), ("''", False)])
+def test_open_or_adopt_pr_creates_a_draft_only_when_asked(tmp_path, draft, expected):
+    r, calls = open_or_adopt(tmp_path, draft=draft)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "opened|42|https://x/pull/42"
+    [args] = create_args(tmp_path)
+    assert ("--draft" in args.split()) is expected, args
+    assert args.startswith("pr create --repo o/r --head feat --base main --title T --body-file ")
+
+
+def test_open_or_adopt_pr_never_changes_an_adopted_prs_draft_state(tmp_path):
+    # A maintainer may already have marked the adopted PR ready: under
+    # `pr-draft` the helper still only lists and adopts — no create, and the
+    # stub refuses any other call (`pr ready`, `pr edit`) with rc 2.
+    r, calls = open_or_adopt(tmp_path, existing=7, draft="true")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "adopted|7|https://x/pull/7"
+    assert calls == ["pr list"]
+
+
+def test_open_or_adopt_pr_adopts_a_lost_draft_create_without_recreating_it(tmp_path):
+    # The draft create's response was lost; the retry adopts what it made.
+    r, calls = open_or_adopt(tmp_path, lose_first=True, draft="true")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "adopted|42|https://x/pull/42"
+    assert calls.count("pr create") == 1 and "--draft" in create_args(tmp_path)[0].split()
 
 
 def test_open_or_adopt_pr_adopts_an_agent_opened_pr(tmp_path):
@@ -1087,6 +1124,163 @@ def test_post_review_comment_file_retry_policy(tmp_path, scenario, rc, attempts)
     calls = (state / "calls").read_text().splitlines()
     assert len(calls) == attempts
     assert calls[0] == f"api repos/o/r/pulls/5/comments -F body=@{body} -f commit_id={'c' * 40} -f path=src/a b.py -F line=7 -f side=LEFT --silent"
+
+
+# --- the PR step: pr-draft and pr-assignees ---------------------------------
+#
+# The `pr` step's bash, lifted and run with `gh` stubbed: the caller's
+# `pr-draft` reaches the create only, its `pr-assignees` are added on create
+# and on adopt, and a failed assignment is recorded in the `failed` output
+# rather than failing the step (the hand-back, hand-off and stage move gate
+# on it). $SCENARIO `assign-fails` fails every `pr edit --add-assignee`.
+PR_STEP_STUB = r"""
+sleep() { :; }
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$*" in
+    "api repos/o/r/branches/"*) return 0 ;;
+    "pr list "*)
+      if [ -f "$STATE/pr" ]; then
+        n=$(cat "$STATE/pr")
+        printf '[{"number":%s,"url":"https://x/pull/%s","isCrossRepository":false,"headRepositoryOwner":{"login":"o"},"headRefName":"feat"}]\n' "$n" "$n"
+      else
+        echo "[]"
+      fi ;;
+    "pr create "*) echo 42 >"$STATE/pr"; echo "https://x/pull/42" ;;
+    "pr edit "*"--add-assignee"*) [ "$SCENARIO" != assign-fails ] ;;
+    "pr edit "*"--add-label"*) return 0 ;;
+    "api repos/o/r/issues/"*"/comments "*) return 0 ;;
+    *) echo "unexpected gh $*" >&2; return 2 ;;
+  esac
+}
+"""
+
+
+def run_pr_step(tmp_path, *, draft="false", assignees="", existing=None, pr_number="", scenario=""):
+    state = tmp_path / "state"
+    state.mkdir()
+    if existing is not None:
+        (state / "pr").write_text(str(existing))
+    landing = tmp_path / "landing"
+    landing.mkdir()
+    (landing / "body.md").write_text("Fixes #9\n")
+    manifest = {"branch": "feat", "pr": {"open": True, "title": "T", "body_file": "body.md", "labels": ["auto"], "issue": 9}}
+    (landing / "manifest.json").write_text(json.dumps(manifest))
+    out = tmp_path / "pr-out"
+    out.write_text("")
+    env = {
+        "STATE": str(state), "SCENARIO": scenario, "GH_TOKEN": "t", "REPO": "o/r", "DIR": str(landing),
+        "LIB": str(LIB), "BRANCH": "feat", "PR_NUMBER": pr_number, "PR_OPEN": "true", "PUSHED": "1",
+        "DEFAULT_BRANCH": "main", "PR_DRAFT": draft, "PR_ASSIGNEES": assignees,
+        "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out),
+    }
+    r = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", PR_STEP_STUB + step_script("pr"),
+           check=False, env=env)
+    calls = (state / "calls").read_text().splitlines() if (state / "calls").exists() else []
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    return r, calls, outputs
+
+
+def test_pr_step_defaults_open_a_ready_unassigned_pr(tmp_path):
+    # The inputs' defaults: every existing caller's PR opens as before.
+    r, calls, o = run_pr_step(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    [create] = [c for c in calls if c.startswith("pr create ")]
+    assert "--draft" not in create.split()
+    assert not any("--add-assignee" in c for c in calls)
+    assert o == {"number": "42", "failed": ""}
+
+
+def test_pr_step_opens_a_draft_and_assigns_it(tmp_path):
+    r, calls, o = run_pr_step(tmp_path, draft="true", assignees="ransomr,meridian-marvin")
+    assert r.returncode == 0, r.stdout + r.stderr
+    [create] = [c for c in calls if c.startswith("pr create ")]
+    assert "--draft" in create.split()
+    assert "pr edit 42 --repo o/r --add-assignee ransomr --add-assignee meridian-marvin" in calls
+    assert "land: assigned #42 to ransomr meridian-marvin." in r.stdout
+    # The labels and the issue link still follow, as before.
+    assert "pr edit 42 --repo o/r --add-label auto" in calls
+    assert any(c.startswith("api repos/o/r/issues/9/comments ") for c in calls)
+    assert o == {"number": "42", "failed": ""}
+
+
+def test_pr_step_assigns_an_adopted_pr_and_leaves_its_draft_state(tmp_path):
+    # Adopt: assignees added (idempotent on GitHub), no create, and nothing
+    # that would flip the draft state either way (`pr ready`, `--draft`).
+    r, calls, o = run_pr_step(tmp_path, draft="true", assignees="ransomr", existing=7)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not any(c.startswith("pr create ") or c.startswith("pr ready") for c in calls)
+    assert not any("draft" in c for c in calls), calls
+    assert "pr edit 7 --repo o/r --add-assignee ransomr" in calls
+    # An adopted PR gets no "Opened a pull request" link, as before.
+    assert not any(c.startswith("api repos/o/r/issues/9/comments ") for c in calls)
+    assert o == {"number": "7", "failed": ""}
+
+
+def test_pr_step_records_a_failed_assignment_without_failing(tmp_path):
+    # The PR exists: the step succeeds so the hand-back, hand-off and stage
+    # move still run, and the failure reaches Report through `failed`.
+    r, calls, o = run_pr_step(tmp_path, draft="true", assignees="ransomr", scenario="assign-fails")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls.count("pr edit 42 --repo o/r --add-assignee ransomr") == 3     # retried
+    assert "::error::land: assign of #42 to ransomr failed" in r.stdout
+    assert o == {"number": "42", "failed": "assign of #42 to ransomr failed"}
+    assert "pr edit 42 --repo o/r --add-label auto" in calls
+
+
+def test_pr_step_leaves_a_manifest_named_pr_alone(tmp_path):
+    # A PR run's manifest names its PR: nothing is opened, adopted or assigned.
+    r, calls, o = run_pr_step(tmp_path, draft="true", assignees="ransomr", pr_number="5")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls == []
+    assert o == {"number": "5", "failed": ""}
+
+
+def test_land_wires_the_pr_policy_inputs():
+    # Both inputs reach the validator (the shape check) and the PR step,
+    # quoted through env; the defaults leave every existing caller as it was.
+    text = LAND.read_text()
+    draft = text[text.index("  pr-draft:\n"):text.index("  pr-assignees:\n")]
+    assert draft.rstrip().endswith('default: "false"')
+    assignees = text[text.index("  pr-assignees:\n"):text.index("  start-sha:\n")]
+    assert assignees.rstrip().endswith('default: ""')
+    validate = step_block(text, "validate", indent=4)
+    pr = step_block(text, "pr", indent=4)
+    for block in (validate, pr):
+        assert "PR_DRAFT: ${{ inputs.pr-draft }}" in block
+        assert "PR_ASSIGNEES: ${{ inputs.pr-assignees }}" in block
+    assert '--pr-draft "$PR_DRAFT" --pr-assignees "$PR_ASSIGNEES"' in validate
+    report = step_block(text, "report", indent=4)
+    assert "PR_STEP_FAILED: ${{ steps.pr.outputs.failed }}" in report
+
+
+def test_report_names_a_failed_assignment_and_fails_the_run(tmp_path):
+    # The Report step, lifted: a `failed` from the PR step is named on the
+    # PR, like the Post step's lost comments, and fails the run at the end.
+    state = tmp_path / "state"
+    state.mkdir()
+    stub = r"""
+sleep() { :; }
+gh() { echo "$*" >>"$STATE/calls"; for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >>"$STATE/body" ;; esac; done; }
+"""
+    outcomes = " ".join(f"{k}=success" for k in ("download", "validate", "plan", "fetch", "workflows", "push", "pr", "post"))
+    env = {
+        "STATE": str(state), "GH_TOKEN": "t", "REPO": "o/r", "DIR": str(tmp_path), "LIB": str(LIB),
+        "VALIDATED": "success", "HAS_ERROR": "false", "FAIL_RUN": "false", "PR_NUMBER": "42", "ISSUE_NUMBER": "",
+        "EVENT_PR_NUMBER": "", "EVENT_ISSUE_NUMBER": "9", "PUSHED": "1", "WORKFLOW_FILES": "", "ALLOW_BUILD_CONFIG": "",
+        "POST_FAILED": "", "PR_STEP_FAILED": "assign of #42 to ransomr failed", "PR_FAILED": "",
+        "HANDBACK_PLANNED": "false", "HANDBACK_DROPPED": "false", "HANDOFF_PLANNED": "false", "STAGE_PLANNED": "",
+        "VERDICT_PLANNED": "", "VERDICT_OUTCOME": "skipped", "RUN_URL": "https://x/run", "OUTCOMES": outcomes,
+        "RUNNER_TEMP": str(tmp_path),
+    }
+    r = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", stub + step_script("report"),
+           check=False, env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "::error::land: step(s) failed: pr (assign of #42 to ransomr failed)" in r.stdout
+    body = (state / "body").read_text()
+    assert body.startswith("⚠️ **Landing failed** at step(s): pr (assign of #42 to ransomr failed)")
+    assert "The agent's commits were pushed; only what follows the push is affected." in body
+    assert (state / "calls").read_text().startswith("api repos/o/r/issues/42/comments ")
 
 
 # --- the plan step's no-change hand-back rule (Claude Security 4628734) ------
