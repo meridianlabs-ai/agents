@@ -40,6 +40,13 @@ description: >-
      none (the reclaim's loop). With `grant: none` no pre-agent reclaim
      runs, so this is that kill; from here nothing runs as the agent user
      outside the namespace the wrapper starts.
+  7. The agent's landing directory (`$RUNNER_TEMP/claude-agent`) is
+     re-created empty, `runner:claude-agent` 2775 as `create-codex-user`
+     made it: provisioning ran as the agent user with write access to it,
+     and a file it left there — a reviewer's `verdict.txt`, a
+     `manifest-extra.json` — would otherwise reach the runner-side import
+     after the agent as the agent's own output. After the kill, so nothing
+     can write it again before the agent starts.
 
   Runs no git command against the checkout except the two reads of HEAD.
   Referenced fully-qualified
@@ -181,4 +188,9 @@ runs:
           sleep 0.2
         done
         [ "$clear" = 1 ] || err "processes were still running as $user after repeated kills"
+
+        # 7. The landing directory, empty: nothing provisioning wrote there
+        #    may pass for the agent's output.
+        sudo rm -rf "$RUNNER_TEMP/$user"
+        sudo install -d -o runner -g "$user" -m 2775 "$RUNNER_TEMP/$user"
         echo "claude-agent launcher ready: Claude Code $version at $cli, grant mode $GRANT, HEAD $head; launch through $opt/bin/claude"

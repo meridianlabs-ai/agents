@@ -67,7 +67,7 @@ def commit(r):
 
 
 def compose(r, *, engine, agent_extra=None, claude_outcome="success", codex_commit="skipped",
-            codex_ids="", codex_summary=None, final_message="nothing to change", merge_sha=""):
+            codex_ids="", codex_summary=None, final_message="nothing to change", merge_sha="", agent_reclaim="success"):
     landing = r["tmp"] / "landing"
     landing.mkdir(exist_ok=True)
     if agent_extra is not None:
@@ -81,6 +81,7 @@ def compose(r, *, engine, agent_extra=None, claude_outcome="success", codex_comm
         "DIR": str(landing), "EXTRA": str(extra), "PR": "42", "ROUND": "3", "ENGINE": engine,
         "MENTION": "someone", "START_SHA": r["start"], "MERGE_SHA": merge_sha, "EXEC": str(exec_file),
         "CLAUDE_OUTCOME": claude_outcome if engine == "claude" else "skipped",
+        "AGENTRECLAIM_OUTCOME": agent_reclaim if engine == "claude" else "",
         "CODEXGUARD_OUTCOME": "success" if engine == "codex" else "skipped",
         "CODEXCOMMIT_OUTCOME": codex_commit, "CODEX_IDS": codex_ids, "PROV_NOTE": "",
         "ERROR_FILE": str(r["tmp"] / "agent-error.md"),
@@ -201,19 +202,29 @@ def test_claude_failed_run_without_commit_lands_nothing_and_decides_nothing(repo
     assert m == {}
 
 
-@pytest.mark.parametrize("outcome", ["failure", "skipped", "cancelled", ""])
+@pytest.mark.parametrize("outcome", ["failure", "cancelled"])
 def test_a_no_change_handback_needs_a_successful_agent_step(repo, outcome):
     # Claude Security 4628734: the steered agent writes `handback: true`,
-    # commits nothing and kills its own step (or the PR's provisioning step
-    # writes the file and fails, so the agent step is skipped). HEAD never
-    # moved and the step did not complete, so no re-review is owed — the
-    # manifest carries neither hand-back, and the land job drops such a
-    # hand-back again from the trusted side. Replies still post.
+    # commits nothing and kills its own step. HEAD never moved and the step
+    # did not complete, so no re-review is owed — the manifest carries
+    # neither hand-back, and the land job drops such a hand-back again from
+    # the trusted side. Replies still post.
     m, res, _, _ = compose(repo, engine="claude", claude_outcome=outcome, agent_extra=json.dumps({
         "handback": True, "replies": [{"review_comment_id": 7, "body_file": "r.md"}]}))
     assert "handback" not in m and "handoff_body_file" not in m and "stage" not in m, outcome
     assert m["replies"] == [{"review_comment_id": 7, "body_file": "r.md"}]
     assert "the agent step did not succeed" in res.stdout and "none is requested" in res.stdout
+
+
+@pytest.mark.parametrize("outcome", ["skipped", ""])
+def test_a_manifest_from_a_step_that_never_ran_asks_for_nothing(repo, outcome):
+    # The PR's provisioning step writes the file and fails, so the agent step
+    # is skipped: the file is not the agent's, and nothing in it — hand-back
+    # or replies — is honoured (review round 1 of #167; the workflow does not
+    # even import it then).
+    m, _, _, _ = compose(repo, engine="claude", claude_outcome=outcome, agent_extra=json.dumps({
+        "handback": True, "replies": [{"review_comment_id": 7, "body_file": "r.md"}]}))
+    assert m == {}, outcome
 
 
 def test_a_no_change_handback_is_honored_after_a_successful_step_and_a_committed_one_whatever_the_outcome(repo):
@@ -229,11 +240,12 @@ def test_a_no_change_handback_is_honored_after_a_successful_step_and_a_committed
     assert m["handback"] is True
 
 
-@pytest.mark.parametrize("outcome", ["success", "failure", "skipped"])
+@pytest.mark.parametrize("outcome", ["success", "failure"])
 def test_a_merge_only_handback_is_honored_whatever_the_agent_step_did(repo, outcome):
     # Review round 1 (B2): HEAD moved to exactly the runner's clean base
-    # merge and the agent set `handback: true` (or the file predates a step
-    # that failed or was skipped). emit-landing bundles that merge from the
+    # merge and the agent set `handback: true` (in a step that then
+    # succeeded or failed; a step that was skipped wrote no manifest of its
+    # own — test_a_manifest_from_a_step_that_never_ran_asks_for_nothing). emit-landing bundles that merge from the
     # same "HEAD moved" test, the land job pushes it and CI re-runs — a CI
     # run requests no review, so the hand-back must ride the bundle or the
     # loop stops on a pushed merge. Keyed on `moved`, never on an agent
@@ -245,6 +257,32 @@ def test_a_merge_only_handback_is_honored_whatever_the_agent_step_did(repo, outc
     assert m["handback"] is True and "handoff_body_file" not in m and "stage" not in m, outcome
     assert "without committing anything (the base merge from the runner lands)" in res.stdout
     assert "none is requested" not in res.stdout
+
+
+@pytest.mark.parametrize("outcome", ["failure", "skipped", ""])
+def test_claude_runs_no_git_unless_the_post_agent_reclaim_succeeded(repo, outcome):
+    # Before the reclaim the agent user could still write `.git`: nothing
+    # lands, so nothing is owed — not the hand-back, not the resolutions.
+    commit(repo)
+    extra = json.dumps({"handback": True, "resolve_threads": ["PRRT_a"]})
+    m, res, _, _ = compose(repo, engine="claude", agent_extra=extra, agent_reclaim=outcome)
+    assert "handback" not in m and "resolve_threads" not in m
+    assert "running no git" in res.stdout
+
+
+def test_claude_honours_no_manifest_the_agent_never_wrote(repo):
+    # Review round 1: a manifest provisioning left in the landing directory
+    # before it failed (the agent step skipped, the reclaim succeeded) asks
+    # for nothing; a launched agent's manifest is honoured even when its
+    # step then failed.
+    (repo["tmp"] / "landing").mkdir(exist_ok=True)
+    (repo["tmp"] / "landing" / "planted.md").write_text("left by provisioning\n")
+    extra = json.dumps({"handoff_body_file": "planted.md",
+                        "replies": [{"review_comment_id": 99, "body_file": "planted.md"}]})
+    m, _, _, _ = compose(repo, engine="claude", claude_outcome="skipped", agent_extra=extra)
+    assert "handoff_body_file" not in m and "replies" not in m and "stage" not in m
+    m, _, _, _ = compose(repo, engine="claude", claude_outcome="failure", agent_extra=extra)
+    assert m["handoff_body_file"] == "planted.md" and m["replies"] == [{"review_comment_id": 99, "body_file": "planted.md"}]
 
 
 def test_claude_mistyped_fields_are_dropped_not_fatal(repo):

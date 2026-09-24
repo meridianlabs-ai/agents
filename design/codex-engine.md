@@ -456,12 +456,13 @@ three layers:
   `GITHUB_PATH` at all (the venv is still created at `.venv`, and codex's
   own commands get the composite's `bin` directories on their PATH from
   codex's `config.toml`, never from the job PATH: → Tools in the codex
-  sandbox, below), and they never run a caller's `claude-setup`. `provision-fallback` also takes
-  `add-to-path` (default `true`, ignored under `user`): the Claude jobs
-  keep the default, and a caller's `claude-setup` may keep putting its venv
-  on the job PATH there — Claude runs as `runner` with the job PATH, so a
-  shadow there gives it nothing it does not already have, and no codex user
-  exists in that job. (Before the split, #131 had the workflows pass
+  sandbox, below), and they never run a caller's `claude-setup`. Since plan
+  step 5 of design/executed-paths-residual.md the Claude jobs do the same
+  with `user: claude-agent` (the agent's PATH prefix comes from the
+  launcher, not the job PATH), so no agent job puts anything under the
+  workspace on the job PATH and `add-to-path` (default `true`, ignored
+  under `user`) matters only to a caller running the composite as the
+  runner itself. (Before the split, #131 had the workflows pass
   `add-to-path: false` when the gate's engine was codex, and a caller's
   `claude-setup` that put `$GITHUB_WORKSPACE/.venv/bin` on `GITHUB_PATH` —
   inspect_flow's and inspect_harbor's did on 2026-09-22 — failed the next
@@ -1009,10 +1010,13 @@ pnpm) gets no provisioning on codex runs at all until then; codex's prompt
 says so and tells it that it may install what verification needs inside
 its sandbox, which has network. No caller is in a hurry: `engine:codex`
 exists as a label on the inspect_ai fork and inspect_flow only (one item
-each on 2026-09-22). The Claude jobs still run the caller's `claude-setup`
-as the runner, which
-is exactly how the Claude agent itself runs there (SECURITY.md → By
-design). The loops' prep steps split in two around the new order — the
+each on 2026-09-22). The Claude jobs kept running the caller's
+`claude-setup` as the runner until plan step 5 of
+design/executed-paths-residual.md (2026-09-24), which moved them onto this
+boundary too — the same composites with `user: claude-agent`, the caller's
+`provision` recipe, a pre-agent reclaim before claude-code-action's
+prepare, and the Claude CLI launched as that user in its own namespace; the
+boundary is now one body shared by both engines. The loops' prep steps split in two around the new order — the
 identity and landing-directory part before the codex user exists (the
 `.git/config` it writes is what `create-codex-user` snapshots), the
 prompt composition after provisioning — so their Surface steps name a

@@ -79,7 +79,7 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
             claude_outcome="success", codex_commit="skipped", codex_guard=None, codex_ids="",
             codex_summary=None, final_message="Here is the answer.", error=None, req_review="false",
             base="", pr_labels=None, claude_branch=ISSUE_BRANCH, head_branch=PR_BRANCH,
-            merge_sha="", prov_note="", checkout_sha=None, sync_branch=None):
+            merge_sha="", prov_note="", checkout_sha=None, sync_branch=None, agent_reclaim="success"):
     # PR_LABELS as the gate composes it: `auto` exactly when the run is
     # autonomous (an @auto trigger or an `auto`-labelled item), unless a test
     # says otherwise.
@@ -117,6 +117,7 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
         "CODEX_BRANCH": CODEX_BRANCH if (engine == "codex" and not is_pr) else "",
         "EXEC": str(exec_file),
         "CLAUDE_OUTCOME": claude_outcome if engine == "claude" else "skipped",
+        "AGENTRECLAIM_OUTCOME": agent_reclaim if engine == "claude" else "",
         "CODEXGUARD_OUTCOME": codex_guard, "CODEXCOMMIT_OUTCOME": codex_commit, "CODEX_IDS": codex_ids,
         "PROV_NOTE": prov_note, "ERROR_FILE": str(error_file),
         "RUN_URL": "https://github.com/meridianlabs-ai/agents/actions/runs/123",
@@ -585,6 +586,62 @@ def test_agent_manifest_that_is_not_json_is_dropped_not_fatal(repo):
     m, res, _, _ = compose(repo, is_pr=False, agent_extra="{not json")
     assert "comments" not in m and m["pr"]["open"] is True
     assert "manifest-extra.json is not a JSON object" in res.stdout
+
+
+def test_agent_resolve_threads_land_on_a_pr_run_that_committed(repo):
+    # The agent's gh holds the read-only job token since the launcher, so
+    # it names the threads it settled in its manifest (design/
+    # executed-paths-residual.md → Per-workflow notes): PRRT_ ids only,
+    # de-duplicated, and only for a PR run with real commits.
+    on(repo, PR_BRANCH)
+    commit(repo)
+    extra = json.dumps({"resolve_threads": ["PRRT_b", "PRRT_a", "PRRT_a", "not-a-thread", 7]})
+    m, res, _, _ = compose(repo, is_pr=True, agent_extra=extra)
+    assert m["resolve_threads"] == ["PRRT_a", "PRRT_b"]
+    assert "not PRRT_ ids" in res.stdout
+    assert "ignored keys" not in res.stdout
+
+
+@pytest.mark.parametrize("is_pr, commits", [(True, False), (False, True)])
+def test_agent_resolve_threads_are_dropped_without_a_committed_pr_run(repo, is_pr, commits):
+    on(repo, PR_BRANCH if is_pr else ISSUE_BRANCH)
+    if commits:
+        commit(repo)
+    m, res, _, _ = compose(repo, is_pr=is_pr, agent_extra=json.dumps({"resolve_threads": ["PRRT_a"]}))
+    assert "resolve_threads" not in m
+    assert "resolving none" in res.stdout
+
+
+@pytest.mark.parametrize("outcome", ["failure", "skipped", "cancelled", ""])
+def test_no_git_runs_unless_the_post_agent_reclaim_succeeded(repo, outcome):
+    # A `.git` the agent user could still write is never read: no bundle,
+    # no PR, no hand-back, whatever the agent committed.
+    on(repo, ISSUE_BRANCH)
+    commit(repo)
+    m, res, _, out = compose(repo, is_pr=False, agent_reclaim=outcome)
+    assert out["read_only"] == "true"
+    assert "pr" not in m and "handback" not in m
+    assert "running no git" in res.stdout
+    on(repo, PR_BRANCH)
+    m, _, _, out = compose(repo, is_pr=True, auto="true", agent_reclaim=outcome,
+                           agent_extra=json.dumps({"resolve_threads": ["PRRT_a"]}))
+    assert out["read_only"] == "true" and "handback" not in m and "resolve_threads" not in m
+
+
+def test_files_provisioning_left_are_not_the_agents_when_it_never_ran(repo):
+    # Review round 1: provisioning runs as the agent user and can write
+    # the landing directory, then fail; the agent step is skipped, the
+    # reclaim still succeeds. Nothing in the directory is the agent's.
+    on(repo, PR_BRANCH)
+    extra = json.dumps({"comments": [{"number": 34, "body_file": "planted.md"}], "resolve_threads": ["PRRT_a"]})
+    (repo["tmp"] / "landing").mkdir(exist_ok=True)
+    (repo["tmp"] / "landing" / "planted.md").write_text("left by provisioning\n")
+    m, _, _, _ = compose(repo, is_pr=True, claude_outcome="skipped", agent_extra=extra,
+                         error="⚠️ provisioning failed")
+    assert "comments" not in m and "resolve_threads" not in m
+    # A launched agent that failed keeps its own comment.
+    m, _, _, _ = compose(repo, is_pr=True, claude_outcome="failure", agent_extra=extra, error="⚠️ it failed")
+    assert m["comments"] == [{"number": 34, "body_file": "planted.md"}]
 
 
 # --- errors and codex -----------------------------------------------------------

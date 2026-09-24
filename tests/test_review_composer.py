@@ -156,7 +156,12 @@ def test_sandboxed_settings_deny_subprocess_writes_to_the_review_dir(tmp_path):
     assert s["sandbox"]["filesystem"]["allowWrite"] == [SCRATCH]
     assert s["sandbox"]["enabled"] is True and s["sandbox"]["allowUnsandboxedCommands"] is False
     assert s["sandbox"]["excludedCommands"] == ["gh *"]
-    assert s["sandbox"]["credentials"]["files"][0] == {"path": "~/.npmrc", "mode": "deny"}
+    # The caller's entry first; no `.git/config` mask any more (the
+    # launcher's wrapper resets the origin URL and refuses a launch with the
+    # App token there), the gh and gitconfig denies stay.
+    assert s["sandbox"]["credentials"]["files"] == [{"path": "~/.npmrc", "mode": "deny"},
+                                                     {"path": "~/.config/gh", "mode": "deny"},
+                                                     {"path": "~/.gitconfig", "mode": "deny"}]
     assert "tlsTerminate" not in s["sandbox"]["network"]
     assert f"Edit(//{OUT_DIR.lstrip('/')}/**)" in s["permissions"]["allow"]
     # The load side: no CLAUDE.md under the checkout or the runner temp is

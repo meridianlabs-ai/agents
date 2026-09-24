@@ -70,10 +70,13 @@ differ; the exceptions are listed there, not assumed away here.
 - **I4. Untrusted code never runs before authorization or outside a sandbox.**
   Who may trigger a run is decided by a deterministic step, by login or by a
   permission lookup that fails closed, before any PR head is checked out and
-  before any local action runs. In a codex job no code from the checkout
-  runs as the runner at all: the caller's `claude-setup` action is never
-  run there and the provisioning recipe runs as the `codex` user, after
-  that user exists (findings 4628446 and 4629153, 2026-09-22; section 3.1).
+  before any local action runs. In an agent job of either engine no code
+  from the checkout runs as the runner at all: the caller's `claude-setup`
+  action is never run, and the provisioning recipe and the agent run as
+  the engine's unprivileged user (`codex`, or `claude-agent` on the Claude
+  jobs), after that user exists (findings 4628446 and 4629153, 2026-09-22
+  for codex; design/executed-paths-residual.md plan step 5, 2026-09-24,
+  for Claude; section 3.1).
   Code from a fork head or an external checkout
   runs only inside the reviewer's OS-level sandbox, and project configuration
   from that tree (`.claude/`, `.mcp.json`, `CLAUDE.md`) is removed before the
@@ -85,8 +88,10 @@ differ; the exceptions are listed there, not assumed away here.
   environment, keyed to `github.server_url` so no other host is ever
   answered. The one credential that does sit in the workspace for a bounded
   time is the Claude action's own token, which the action writes into
-  `remote.origin.url` for the duration of its step and the `reset-origin-url`
-  composite removes right after (section 3.5). The Atlas sync's checkout of
+  `remote.origin.url` during its step: the launcher's wrapper removes it
+  before the Claude agent starts (and refuses to launch while it is still
+  there), and the `reset-origin-url` composite repeats the reset after the
+  post-agent reclaim (section 3.5). The Atlas sync's checkout of
   this repository, in a trusted job that runs no agent, uses checkout's
   defaults and so persists the job token.
 - **I6. No transcript is uploaded.** The enforced policy is that no agent
@@ -115,12 +120,16 @@ gate   (trusted)    trigger check by login or permission lookup; the pre-agent
                     label, loop counters); mints its own token; checks out
                     no PR code; resolves the engine.
   -> agent/fix/review (untrusted, Claude engine; if: engine != 'codex')
-                    checkout with persist-credentials: false; provisioning
-                    as the runner (the caller's claude-setup or the fallback
-                    recipe); the agent; commits locally and never pushes;
-                    the read-only job token, plus the Claude action's own
-                    token while its step runs; names no other secret;
-                    emit-landing runs last, if: always(), with no token.
+                    checkout with persist-credentials: false; the agent user
+                    boundary (claude-agent); provisioning AS that user (the
+                    caller's `provision` or the fallback recipe, never the
+                    caller's action); the pre-agent reclaim; the launcher;
+                    the agent as claude-agent in its own namespace; the
+                    post-agent reclaim; commits locally and never pushes;
+                    the agent holds the read-only job token (the Claude
+                    action's own token stays in the action's runner-side
+                    process); names no other secret; emit-landing runs
+                    last, if: always(), with no token.
   -> agent-codex/fix-codex/review-codex (untrusted, codex; if: engine == 'codex')
                     the same checkout and sync; the codex user boundary;
                     provisioning AS the codex user (the fallback recipe or
@@ -437,51 +446,41 @@ human step.
   after that `http.<server>/.extraheader` is empty
   (`assert-no-persisted-credential`). The `sync-branch` base merge fetches
   with it through a step-scoped helper and never pushes.
-- **The Claude GitHub App's own installation token.** No workflow passes a
-  `github_token` to `claude-code-action`, so the action exchanges the job's
-  OIDC token for its own installation token of the Claude app, requesting
-  contents, pull requests and issues write on the caller repository (its
+- **The Claude GitHub App's own installation token — in the job, not in
+  the agent's reach.** No workflow passes a `github_token` to
+  `claude-code-action`, so the action exchanges the job's OIDC token for its
+  own installation token of the Claude app, requesting contents, pull
+  requests and issues write on the caller repository (its
   `src/github/token.ts`), and revokes it when the step ends. The job's
-  `permissions:` block does not scope this token: it can push and post
-  whatever the job token may not. The action rewrites `remote.origin.url`
-  to carry it for the step's duration; the `reset-origin-url` composite puts
-  the credential-free URL back immediately after the step, so it sits in
-  `.git/config` no longer than the agent runs, and during that time the
-  agent's own `Read` tool sees it (the sandbox mask of section 7 covers
-  sandboxed commands, and same-repo runs have no sandbox at all). The
-  composed settings deny the agent's push and posting commands:
-  `Bash(git push:*)` and the action's `scripts/git-push.sh` wrapper, the
-  `gh` comment, review, create and merge verbs and the reviewer's
-  inline-comment tool are denied at runtime whatever the caller's `settings`
-  say. Those denies are guard rails, not a complete prohibition on direct
-  writes: `Bash(gh:*)` stays allowed (the log and PR reads need it), `gh
-  api` is not denied, `gh` runs outside the sandbox on the sandboxed paths,
-  and the token behind it can write, repository refs included. The
-  load-bearing property is that nothing the agent can reach is the machine
-  account, so a write that slipped past would be `claude[bot]`'s and
-  attributable as such. That identity is not inert to the loops. The
-  review-fix workflow still accepts it as a verdict author: `reviewer_login`
+  `permissions:` block does not scope this token. Since plan step 5 of
+  [executed-paths-residual.md](executed-paths-residual.md) it lives only in
+  the action's runner-side process and files: the agent runs as
+  `claude-agent`, started by the launcher's wrapper, which drops every MCP
+  server that carries the token, rebuilds the agent's environment from a
+  fixed allow-list with the read-only job token as `GH_TOKEN`, resets the
+  origin URL the action rewrote, and refuses to launch if the token's value
+  appears anywhere in the agent's argv, environment, settings or
+  `.git/config`; the agent's PID and mount namespace hides the action's
+  process, the step scripts that embed the token and the runner's files.
+  So the agent no longer holds a `claude[bot]` write channel: the composed
+  settings still deny its push and posting commands (`Bash(git push:*)`,
+  the action's `scripts/git-push.sh` wrapper, the `gh` comment, review,
+  create and merge verbs, the reviewer's inline-comment tool) as guard
+  rails, and what slipped past them would fail for want of a credential.
+  Thread resolutions, replies and comments go through the landing
+  manifest. `claude[bot]` stays an identity the loops believe: the
+  review-fix workflow accepts it as a verdict author (`reviewer_login`
   defaults to `claude[bot]`, `REVIEWER_LOGINS` names it next to the machine
-  account's two logins, and the fix action's `allowed_bots` includes it, so
-  a marked verdict comment posted directly with this token can drive a fix
-  round or a convergence on an otherwise eligible same-repo `auto` PR
-  without going through a landing. Re-review requests follow the configured
-  allow-lists: `review_allowed_bots` defaults to `claude[bot]` in the
-  review-fix gate, and the reviewer itself admits a bot's `@review` when the
-  caller's `allowed_bots` names it, as the inspect_ai fork's stub does. The
-  identity used to start a CI-fix round indirectly: a branch update on an
-  open same-repo `auto` PR whose CI then fails reaches `claude-auto.yml`
-  through `workflow_run`, and until 2026-09-22 the gate checked the PR and
-  the label, not who pushed, while the codex step named `claude` in
-  `allow-bot-users` for that case. The gate's bind step now refuses a run
-  whose actor is any bot but the machine account, on both engines, before
-  any write (finding 4628657; decision: Ransom, 2026-09-22, the Claude App is
-  not a run actor), so a Claude-App push ends the automatic loop
-  for that branch until the machine account or a write-access human pushes;
-  the codex step's `claude` entry is unreachable for the run actor and is
-  kept only for the step's own workflow-actor check. The dev agent and the
-  CI-fix loop ask that token for `actions: read` in addition
-  (`additional_permissions`) so `gh run view --log-failed` works.
+  account's two logins), and re-review requests follow the configured
+  allow-lists (`review_allowed_bots` defaults to `claude[bot]`; the reviewer
+  admits a bot's `@review` when the caller's `allowed_bots` names it). Its
+  comments now come from the action's own runner-side code (the dev
+  agent's tracking comment) or from a direct caller's agent job that still
+  runs the action as the runner. The CI-fix gate refuses a run whose actor
+  is any bot but the machine account, on both engines (finding 4628657;
+  decision: Ransom, 2026-09-22). The dev agent and the CI-fix loop ask the
+  token for `actions: read` in addition (`additional_permissions`); the
+  agent reads CI logs with the job token, which has it.
 - **The model credential.** Claude authenticates through Workload Identity
   Federation: the job's OIDC token is exchanged for a short-lived Anthropic
   credential under a rule that matches `repository_owner ==
@@ -489,7 +488,12 @@ human step.
   exchange, so `OPENAI_API_KEY` is the one secret an agent job names — the
   codex job, at its codex-action step, and no other job (section 3.1): the
   Claude job's YAML references it nowhere, so a Claude-engine run's job
-  message never carries it. Codex itself runs as an unprivileged `codex`
+  message never carries it. The Claude CLI performs the Workload Identity
+  exchange itself, so `claude-agent` reads the audience-bound OIDC JWT
+  (through a named-user ACL on the action's identity-token file) and caches
+  the Anthropic token it yields in its own config dir; the post-agent
+  reclaim removes both. That is the declared model-credential exception
+  (decision: Ransom, 2026-09-23). Codex itself runs as an unprivileged `codex`
   user with no GitHub credential at all, and since 2026-09-22 so does the
   provisioning of its checkout: the codex jobs run the shared fallback
   recipe under `sudo -u codex -H` after `create-codex-user`, never the
@@ -499,8 +503,10 @@ human step.
 - **The Actions runtime token, cache-read-only.** The runner gives every
   node action of the job the runtime token (the same value as the OIDC
   request token), and code running as `runner` can recover it from the job's
-  later steps or the worker whatever reaches the agent's own environment; on
-  the Claude engine the agent is that user. Every reusable workflow declares
+  later steps or the worker whatever reaches the agent's own environment.
+  Neither engine's agent is that user any more (the Claude agent since plan
+  step 5 of executed-paths-residual.md), and the Claude launcher leaves
+  `ACTIONS_*` out of the agent's environment. Every reusable workflow declares
   top-level `cache-mode: read`, which GitHub enforces on that token, so it
   restores the caller's caches and saves none, in any scope (Claude Security
   4629157, 2026-09-23; [agent-cache-scope.md](agent-cache-scope.md)). It
@@ -860,23 +866,21 @@ results against the invariant each one tests.
 
 ## 7. Costs and residual risks
 
-- **The Claude action's installation token in the review sandbox.**
-  `persist-credentials: false` keeps checkout's token out of `.git/config`;
-  the action's prepare step then writes its own installation token into the
-  origin URL for the duration of the agent step, and sandboxed contributor
-  code (a build backend, a collected test) can read that file. On the
-  sandboxed paths the settings overlay masks `.git/config` for sandboxed
-  commands (`credentials.files` in `mask` mode with an `extract` regex on
-  the token and `onExtractNoMatch: deny`; Claude Code 2.1.221 or later,
-  checked after the step), denies `~/.config/gh` and `~/.gitconfig`, and
-  deletes `network.tlsTerminate` and `credentials.allowPlaintextInject` from
-  the merged settings so the proxy can never inject the real token into a
-  request to a PyPI host. The mask defends against contributor code, not a
-  prompt-injected agent: the agent's own `Read` tool is not sandboxed and
-  sees the real file, and its `gh` runs outside the sandbox with that token.
-  The proper fix is an action-side git-auth option independent of
-  `allowed_non_write_users`, requested as
-  [anthropics/claude-code-action#1818](https://github.com/anthropics/claude-code-action/issues/1818).
+- **The Claude action's installation token in the review sandbox** (until
+  2026-09-24). The action's prepare step writes its installation token into
+  the origin URL for the duration of the agent step, and sandboxed
+  contributor code could read that file; the overlay masked `.git/config`
+  for sandboxed commands (issue #70). Since plan step 5 of
+  [executed-paths-residual.md](executed-paths-residual.md) the launcher's
+  wrapper resets the URL before the agent starts and refuses to launch
+  while the token is there, the checkout is mounted read-only in the
+  agent's namespace on these paths, and the mask is gone (its
+  `onExtractNoMatch: deny` would make the token-free config unreadable to
+  the reviewer's sandboxed git). The overlay still denies `~/.config/gh`
+  and `~/.gitconfig` and deletes `network.tlsTerminate` and
+  `credentials.allowPlaintextInject` from the merged settings, so a
+  caller's own mask entries can never have the proxy inject their
+  credential into a request to a PyPI host.
 - **The dev agent's job-token degradation.** A caller without the app
   secrets still runs `claude.yml`: the land job pushes and opens the PR as
   `github-actions[bot]`, which triggers no CI and no review, and fails where
@@ -905,11 +909,9 @@ results against the invariant each one tests.
   machine-account push and never a machine-account write outside it; a
   human reads every review, and the loops believe a verdict only from the
   reviewer identity. Outside the landing, the Claude action's own
-  installation token stays write-capable on the caller repository for the
-  duration of the review step, and `gh api` through it is not denied
-  (section 3.5): the configured command denies are guard rails rather than
-  a complete prohibition on direct writes, and a write made that way is
-  `claude[bot]`'s, not the machine account's.
+  installation token is out of the reviewer's reach since plan step 5 of
+  executed-paths-residual.md (section 3.5): its `gh` holds the read-only
+  job token.
 - **One push per run, at the end.** Interactive users who relied on the dev
   agent pushing mid-run to watch CI lose that; iterating on CI is the `@auto`
   loop's job (accepted: Ransom, 2026-09-11, with the dev-agent conversion).
@@ -941,10 +943,11 @@ results against the invariant each one tests.
   `.github/`, agent instructions and settings, and build and dependency
   configuration at any depth. Accepted gap (decision: Ransom, 2026-09-23):
   an ordinary file that unchanged configuration executes still lands, and
-  the next Claude-engine run executes it as `runner` during provisioning
-  or at agent start; closing that is the design follow-up SECURITY.md →
-  Guarantees names (approval gating, dependency following, or an
-  unprivileged Claude user). Price: a task that needs a dependency bump, a
+  the next run of the reusable workflows executes it during provisioning,
+  at agent start or in the agent's tests — as `codex` or, since plan step 5
+  of executed-paths-residual.md, as `claude-agent`, never as `runner`
+  (SECURITY.md → Guarantees); relaxing the build and dependency group for
+  callers that opt in is that design's plan step 6. Price: a task that needs a dependency bump, a
   `CLAUDE.md`/`AGENTS.md` edit or a composite-action change — most of this
   repo's own code is under `.github/` — is done from a maintainer's
   machine; so is a base-merge conflict the agent resolves in one of these
@@ -981,34 +984,25 @@ results against the invariant each one tests.
   activity; a quiet stretch in this repository can therefore stop the
   weekly run, and re-enabling it (`gh workflow enable
   engine-isolation-canary.yml`) is manual.
-- **The Claude job still executes the checkout as the runner.** Its
-  provisioning (the caller's `claude-setup`, the fallback dev-install) and
-  the agent's own test runs execute the tree's code unsandboxed, as the
-  runner, with the OIDC request token and the Claude action's installation
-  token in reach, and the provisioning with sudo as well: since 2026-09-23
-  the `drop-runner-root` step takes the runner's sudo, docker socket and
-  same-uid process inspection away between provisioning and the agent
-  (finding 4629153, criterion 2; architecture.md → No root for the agent
-  uid), so the agent and its test runs no longer have root, but a build
-  hook that ran during provisioning did — the concession SECURITY.md makes for
-  same-repo heads, now stated for heads the pipeline itself authored as
-  well: an outsider's issue text steers the first run's agent, and a second
-  automated run on the branch it produced executes that branch's build
-  hooks before the agent. What the split removes from that job is the
-  OpenAI key; what remains is what a prompt-injected Claude agent already
-  holds there, plus root while provisioning runs. Since 2026-09-23 the land
-  job refuses agent bundles
-  that touch paths a later job executes or loads as configuration
-  (`.github/`, build and dependency configuration, agent instructions and
-  settings; finding 4628446, criterion 2 — section 3.4), so an agent can no
-  longer add or change those entry points for the next run. It can still
-  change an ordinary file that unchanged configuration executes (a script
-  the `claude-setup` composite or a settings hook runs, a module the build
-  backend imports), which the next Claude-engine run executes as `runner`
-  before the agent, with root while provisioning runs — an accepted gap
-  (decision: Ransom, 2026-09-23; see
-  SECURITY.md → Guarantees for the design follow-up that would close it);
-  a maintainer's own push to the branch still can do either, as before.
+- **The Claude job executes the checkout as `claude-agent`** (since
+  2026-09-24, plan step 5 of
+  [executed-paths-residual.md](executed-paths-residual.md); until then its
+  provisioning, the caller's `claude-setup` or the fallback dev-install,
+  and the agent's own test runs executed the tree as the runner, with the
+  OIDC request token and the Claude action's installation token in reach).
+  Provisioning runs as that user under `env -i`, the pre-agent reclaim
+  kills what it left and takes `.git` back before the action's prepare runs
+  git, and the agent's tests run as that user inside its namespace, so a
+  build hook in a head the pipeline itself authored meets the same
+  boundary as codex: no sudo, no GitHub write token, no OIDC request token,
+  no view of the runner's processes. What stays: the model credential (the
+  declared exception), the read-only job token, anything the agent user can
+  reach (the tree it commits, its landing files, the network), and a direct
+  caller's own agent job that runs the action as the runner until it adopts
+  the launcher. Adversarial probing of the namespace is left to Claude
+  Security scans (decision: Ransom, 2026-09-24); the successful-launch path
+  is covered by the real-model runs that follow the merge (design →
+  Testing).
 - **A caller's own cache writers.** A caller that sets `cache-mode: write`
   on the job calling an agent workflow cannot widen what the reusable
   workflow declares (the called workflow's `read` holds), but its own

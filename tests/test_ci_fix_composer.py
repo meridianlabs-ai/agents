@@ -61,7 +61,7 @@ def commit(r):
 
 
 def compose(r, *, engine="claude", claude_outcome="success", merge_sha="", final_message="Nothing to fix.",
-            error=None, codexguard_outcome=None):
+            error=None, codexguard_outcome=None, agent_reclaim="success"):
     landing = r["tmp"] / "landing"
     landing.mkdir(exist_ok=True)
     # The execution file is always present and well-formed here: it is a
@@ -79,6 +79,7 @@ def compose(r, *, engine="claude", claude_outcome="success", merge_sha="", final
         "DIR": str(landing), "EXTRA": str(extra), "PR": "42", "ATTEMPT": "2", "ENGINE": engine,
         "START_SHA": r["start"], "MERGE_SHA": merge_sha, "EXEC": str(exec_file),
         "CLAUDE_OUTCOME": claude_outcome if engine == "claude" else "skipped",
+        "AGENTRECLAIM_OUTCOME": agent_reclaim if engine == "claude" else "",
         "CODEXGUARD_OUTCOME": codexguard_outcome,
         "CODEXCOMMIT_OUTCOME": "skipped", "PROV_NOTE": "", "ERROR_FILE": str(error_file),
         "GIT_DIR": str(r["work"] / ".git"), "GIT_COMMON_DIR": str(r["work"] / ".git"),
@@ -132,6 +133,15 @@ def test_a_failed_claude_step_lands_nothing_whatever_the_execution_file_says(rep
         assert "handback" not in m and "comments" not in m and "stage" not in m, merge_sha
         assert m["error"]["fail_run"] is True
         assert not (landing / "agent-summary.md").exists()
+
+
+@pytest.mark.parametrize("outcome", ["failure", "skipped", ""])
+def test_a_claude_round_whose_reclaim_did_not_succeed_lands_nothing(repo, outcome):
+    # The Surface step reports the failed reclaim, so no final message is
+    # relayed over its error either.
+    commit(repo)
+    m, _ = compose(repo, agent_reclaim=outcome, error="⚠️ the workspace could not be reclaimed")
+    assert "handback" not in m and "comments" not in m and m["error"]["fail_run"] is True
 
 
 def test_a_codex_round_whose_guard_did_not_succeed_lands_nothing(repo):

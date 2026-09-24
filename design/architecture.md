@@ -210,7 +210,7 @@ changes who pushes. Per step:
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
 | the claude-code-action step | no `github_token` in any of the four workflows (since #81 / #82 / #83 / #84): the action's own App token, and a job-token credential helper for its fetches — load-bearing in `claude.yml`, see below |
 | the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted (`\|\| github.token` in `claude.yml` only, the marvin-less degradation; the reviewer's was retired by #114, and the `MARVIN_TOKEN` PAT fallback by the Phase 2 retirement, 2026-09-18) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
-| `reset-origin-url` (right after the action step, all three) | none — local `git remote set-url`, no network |
+| `reset-origin-url` (after the action step and the post-agent reclaim, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
 claude-code-action's prepare step (`configureGitAuth`, agent mode included —
@@ -256,7 +256,14 @@ action — but the reset stays for the same reason), and the action's token no
 longer sits in `.git/config` for the remainder of the job — the residual
 risk this section carried since #61 (the reviewer's own run, where the
 sandbox lets contributor code read `.git/config` *during* the action step,
-is a different window: see Untrusted checkouts).
+is a different window: see Untrusted checkouts). Since plan step 5 of
+[executed-paths-residual.md](executed-paths-residual.md) the Claude agent
+runs as `claude-agent`, and the launcher's wrapper resets the URL before
+the agent starts (and refuses to launch while the App token is still in
+`.git/config`), so the agent never sees the token there; the post-agent
+reclaim now runs first after the action, and the reset follows it, gated on
+the reclaim's success, as belt and braces for anything the action writes
+afterwards.
 
 One thing this does not change: on the codex path no runner-side git command
 trusts anything under `.git` until the `reclaim-codex-workspace` step has
@@ -515,11 +522,13 @@ the model for the review-fix loop and the dev agent:
   branch, nothing more". Those are guard rails, not the security boundary:
   `Bash(gh:*)` stays allowed (the log and PR reads need it), so `gh api -X
   POST …/comments`, `gh api -X PATCH …/git/refs/…`, `gh pr edit|close|ready`
-  and `git -C . push` all pass the listed prefixes with a write-capable
-  token in reach. The load-bearing property is the split's invariant:
-  nothing the agent can reach is marvin's identity, so a write that slipped
-  past would be claude[bot]'s — attributable, and no more than the dev agent
-  already holds on a marvin-less `claude.yml` caller — never the loop's.
+  and `git -C . push` all pass the listed prefixes. The load-bearing
+  property is the split's invariant: nothing the agent can reach is
+  marvin's identity. Since plan step 5 of executed-paths-residual.md no
+  write-capable token is in its reach at all — it runs as `claude-agent`
+  behind the launcher, with the read-only job token as its `GH_TOKEN` — so
+  a write that slipped past the denies now fails outright (before, it
+  would have been claude[bot]'s).
   Agent mode installs no MCP server without explicit tool grants, so there
   is no API-side commit or comment tool to deny.
 - **The hand-back is a manifest field, not a backstop.** `handback: true`
@@ -1079,32 +1088,20 @@ runner's own process holds the job: `Runner.Worker` keeps every secret of
 the job message in its memory, and root (or the same uid, where the kernel
 allows it) can open its `/proc/<pid>/mem`.
 
-- **Claude jobs** (`agent`, `review`, `fix` in the two loops): the agent is
-  `runner` itself. The `drop-runner-root` composite runs after the last step
-  that needs root (the checkouts, the caller's `claude-setup`, the fallback
-  provisioning, the reviewer's "Install review sandbox") and before
-  `claude-code-action`, with the agent step's own `if:`. While sudo still
-  works it sets `kernel.yama.ptrace_scope` to 2 (attach-mode access to
-  another process — `mem`, `ptrace`, `process_vm_readv` — then needs
-  CAP_SYS_PTRACE; 1 would still honour a `PR_SET_PTRACER` exception a
-  process grants itself, 3 cannot be lowered again), takes the runner out
-  of the `docker` group and makes every docker socket under `/run`
-  `root:root` 0600 (the group edit alone does nothing for this job: every
-  later step is a child of `Runner.Worker` and keeps the groups it started
-  with), makes `/usr/local/sbin` and `/usr/local/bin` — root's and
-  systemd's default search path ahead of `/usr/bin`, shipped mode 777 on
-  the hosted image — `root:root` with nothing inside writable by group or
-  other (review round 1 of #151; decision: Ransom, 2026-09-23), and finally
-  replaces `/etc/sudoers` with a `visudo`-checked policy
-  that grants root alone, which removes every grant wherever the image or a
-  caller put it. It then fails the step unless, from the runner, `sudo -n
-  true` and `sudo -n -l` both fail, the scope reads back 2 or more, no docker
-  socket is writable, nothing but a symlink in those two directories is
-  writable, `Runner.Worker`'s `mem` does not open, and the job's
-  processes hold neither `disk` nor `lxd`. A failed drop skips the agent
-  (fail closed) and the Surface step says why. Nothing after the agent step
-  in these jobs uses sudo or docker; claude-code-action@v1 itself calls sudo
-  only when `allowed_non_write_users` is set, which no workflow here does.
+- **Claude jobs** (`agent`, `review`, `fix` in the two loops): since plan
+  step 5 of design/executed-paths-residual.md the agent is the
+  unprivileged `claude-agent` user, created by `create-codex-user` (`user:
+  claude-agent`) with no sudoers entry and no group but its own and
+  `runner`'s, and started by the launcher's wrapper in its own PID and
+  mount namespace with every capability dropped. `claude-agent-launcher`
+  checks it as that user before the action step (no sudo, no Docker, Yama
+  `ptrace_scope` 1 or more), and the namespace's isolation check repeats
+  that right before the CLI starts, together with no readable environment
+  or memory of another process and no runner command file or credential.
+  The runner keeps its sudo: the post-agent reclaim needs it (kill, chown,
+  the Workload Identity ACL), so the jobs no longer run `drop-runner-root`
+  (decision: Ransom, 2026-09-24, option a — the drop existed because the
+  agent was `runner`).
 - **Codex jobs**: the agent is the `codex` user, created by
   `create-codex-user` with no sudoers entry and no group but its own and
   `runner`'s, and started by codex-action's `unprivileged-user` strategy
@@ -1112,50 +1109,56 @@ allows it) can open its `/proc/<pid>/mem`.
   need it after codex — so the codex jobs do not run the drop; the runner's
   sudo is protected there by the reclaim and the runner-side PATH boundary
   (design/codex-engine.md → Hook-safe landing, → Runner-side search path),
-  and ptrace across uids needs CAP_SYS_PTRACE at every Yama scope.
+  and ptrace across uids needs CAP_SYS_PTRACE at every Yama scope. The
+  Claude jobs share both.
 
-`tests/test_agent_root_boundary.py` checks the placement, the `if:`, that no
-step after the drop calls sudo or docker, the codex user's launch and grants,
-and the composite's fail-closed checks with stubs;
+The `drop-runner-root` composite stays for a caller that runs an agent as
+the runner itself (a direct caller's own agent job): while sudo still works
+it sets `kernel.yama.ptrace_scope` to 2 (attach-mode access to another
+process then needs CAP_SYS_PTRACE; 1 would still honour a `PR_SET_PTRACER`
+exception a process grants itself, 3 cannot be lowered again), takes the
+runner out of the `docker` group and makes every docker socket under `/run`
+`root:root` 0600, makes `/usr/local/sbin` and `/usr/local/bin` `root:root`
+with nothing inside writable by group or other (review round 1 of #151;
+decision: Ransom, 2026-09-23), and replaces `/etc/sudoers` with a
+`visudo`-checked policy that grants root alone, then fails the step unless,
+from the runner, `sudo -n true` and `sudo -n -l` both fail, the scope reads
+back 2 or more, no docker socket is writable, nothing but a symlink in those
+two directories is writable, `Runner.Worker`'s `mem` does not open, and the
+job's processes hold neither `disk` nor `lxd`.
+
+`tests/test_agent_root_boundary.py` checks that no agent job runs the drop,
+that the Claude agent is started through the launcher after its user exists
+and that the launcher runs the pre-action check, the codex user's launch and
+grants, and the composite's fail-closed checks with stubs;
 `.github/workflows/root-boundary-smoke.yml` runs the composite and the probes
-on a hosted runner as `runner` and as `codex`, and shows the reviewer's
-bubblewrap sandbox still starting after the drop.
+on a hosted runner as `runner` and as `codex`.
 
-What callers lose: Claude-engine agents have no sudo and no docker for the
-agent step and everything after it, and cannot attach a debugger (`gdb`,
-`strace`, `py-spy`) to their own processes. Nor can they install into
-`/usr/local/bin` or `/usr/local/sbin` (`npm install -g`, a copied binary):
-installs go to `~/.local/bin`, a venv or `node_modules`. A caller whose agent
-ran docker-based tests, whose agent installed tools globally, or whose setup
-needed root after provisioning, moves that work into `claude-setup`, which
-runs before the drop.
+What callers lose: agents of both engines have no sudo and no docker, and
+cannot attach a debugger (`gdb`, `strace`, `py-spy`) to processes of another
+user. Nor can they install into `/usr/local/bin` or `/usr/local/sbin`
+(`npm install -g`, a copied binary): installs go to `~/.local/bin`, a venv
+or `node_modules`. Tests that need root or a Docker daemon run in the
+caller's CI instead (decision: Ransom, 2026-09-23). No agent job runs a
+caller's `claude-setup` any more; provisioning is the stub's `provision`
+recipe, run as the agent user (Provisioning, below).
 
 What stays open:
 
-- **Provisioning still runs the tree with root.** The caller's
-  `claude-setup` and the fallback dev-install execute the checkout's build
-  code as the runner with sudo, before the drop, and on a branch the
-  pipeline itself produced that code may come from an earlier agent run
-  (design/credential-separation.md → section 7). A root foothold planted
-  there (a setuid file, a root process) is not something the drop looks
-  for. The fallback recipe needs no root (uv installs to `~/.local/bin`, the
-  venv is in the workspace), so running the drop before it would close this
-  for repositories without `claude-setup`; the drop sits after all
-  provisioning because that is where the task placed it.
-- **Other root-owned world-writable directories.** The drop protects the
-  two on root's default search path. The hosted image also ships the `/opt`
-  tree mode 777 (actions/runner-images, `configure-environment.sh`;
-  confirmed by the smoke run of 2026-09-23), and symlinks inside
-  `/usr/local/bin` are left as they are, so one that points into `/opt`
-  still reaches a runner-writable file. That matters only where a root
-  process executes from such a place during the job. No hosted test runs a
-  real root service against the protected directories: by decision
-  (Ransom, 2026-09-23), that coverage stays unverified.
-- **Read-mode inspection.** Yama restricts attach-mode access only: the
-  runner can still read `Runner.Worker`'s `/proc/<pid>/environ`, `cmdline`
-  and `status` (the service environment, not the job's secrets).
-- **The codex path** keeps relying on the runner's sudo after codex, behind
-  the reclaim and the PATH boundary.
+- **The runner keeps root.** Trusted runner-side code (the action's own
+  process, the workflow's steps) runs with sudo while the agent runs; the
+  agent reaches none of it (its uid, its namespace), and nothing from the
+  checkout runs as the runner.
+- **Other root-owned world-writable directories.** The hosted image ships
+  the `/opt` tree mode 777 (actions/runner-images,
+  `configure-environment.sh`) and `/usr/local/bin` likewise; the agent
+  users' PATH checks make every such hop on the job PATH runner-only before
+  the agent user can write it (`assert-runner-only-path`), but directories
+  off the PATH stay as they are. That matters only where a root process
+  executes from such a place during the job.
+- **Read-mode inspection.** Yama restricts attach-mode access only; the
+  agent's namespace is what hides the host's processes from the Claude
+  agent, and codex relies on the uid boundary (`hidepid` is not set).
 
 ### Why settings.json over `--allowedTools`
 
@@ -1217,7 +1220,23 @@ network, that exposed it — every codex fix round on inspect_flow#824 ran in a
 bare checkout, pushed changes verified only by tests that import nothing, and
 finally declined to fix at all (see design/codex-engine.md).
 
-The mechanism is a **convention, not a duplicated command**. A caller repo opts
+**The agent user provisions (since 2026-09-24).** Plan step 5 of
+[executed-paths-residual.md](executed-paths-residual.md) retired the
+`claude-setup` convention described next on the Claude jobs too, as the codex
+jobs had on 2026-09-22: no agent job runs `./.github/actions/claude-setup`,
+because a composite action can only run as the runner and nothing from the
+checkout may run as the runner in an agent job. Every agent job provisions
+with the `provision-fallback` composite run as the engine's unprivileged
+agent user (`claude-agent` or `codex`) under `env -i`: the caller stub's
+`provision` recipe (else the earlier `codex_provision`), or the generic
+dev-install on a Python project. Nothing goes on the job PATH; the
+composite's `bin` output becomes the agent's PATH (the Claude launcher's
+`path-prefix`, codex's `config.toml`). Callers move what their `claude-setup`
+did into `provision`; executed-paths-residual.md → Compatibility lists each
+caller's recipe and what it loses (the setup action's GitHub cache, Docker).
+The rest of this section is the convention's history.
+
+The mechanism was a **convention, not a duplicated command**. A caller repo opts
 in by adding a `.github/actions/claude-setup` composite action; the workflows
 run it via `uses: ./.github/actions/claude-setup`, guarded by
 `hashFiles(...) != ''` so repos that don't define it are unaffected. Three
@@ -1598,7 +1617,17 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   sandbox). Since #61 the dev agent and both loops run
   the same way, with their runner-side git calls authenticating per step —
   see No persisted git credentials above.
-- **Credential file masks** (`sandbox.credentials.files`, issue #70):
+- **Credential file masks** (`sandbox.credentials.files`, issue #70).
+  **The `.git/config` mask is retired** (plan step 5 of
+  [executed-paths-residual.md](executed-paths-residual.md), 2026-09-24): the
+  launcher's wrapper resets the origin URL before the agent starts and
+  refuses to launch while the App token is in `.git/config`, and the mask's
+  `onExtractNoMatch: deny` would make a token-free config unreadable to the
+  reviewer's sandboxed git. The `~/.config/gh` and `~/.gitconfig` denies
+  (the agent user's home now), the deletion of `network.tlsTerminate` and
+  `credentials.allowPlaintextInject`, the caller-entry splice and the
+  post-agent version check (now for the 2.1.246 setting-source floor alone)
+  stay. The rest of this bullet is the mask's history.
   `persist-credentials: false` keeps checkout's token out of `.git/config`,
   but a different token lands there anyway. claude-code-action's own prepare
   step rewrites the origin URL to embed the **app installation token**
@@ -1662,15 +1691,12 @@ external mode and fork heads only — normal same-repo reviews are untouched):
 
 Residual risks, accepted deliberately: this defends against malicious
 contributor *code*, not a prompt-injected *agent* — the agent itself still
-holds credentials and an unsandboxed `gh`, and its `Read` tool is not
-sandboxed either (it sees the real `.git/config`, mask or no mask) — a
-channel that existed in static-review mode too (it reads untrusted text
-either way). The PyPI egress needed for `pip install` is a (narrow)
-exfiltration path for code running during the install itself. And the
-`.git/config` mask depends on the exact URL shape the action writes: a
-change there fails closed (`onExtractNoMatch: deny`, the file becomes
-unreadable and sandboxed git stops working — visible, not silent), but only
-an upstream option removes the token from the workspace altogether.
+holds the model credential, the read-only job token and an unsandboxed
+`gh`, and its `Read` tool is not sandboxed either — a channel that existed
+in static-review mode too (it reads untrusted text either way). Since plan
+step 5 the agent is `claude-agent` in its own namespace, with the checkout
+read-only to it on these paths, and the App token out of its reach. The PyPI egress needed for `pip install` is a (narrow)
+exfiltration path for code running during the install itself.
 
 ### Branch sync before work
 

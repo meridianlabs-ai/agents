@@ -29,8 +29,21 @@ job is dispatched, and a skipped job gets no job message at all.
   (the prompt file lives in RUNNER_TEMP, the exclude lines are appended
   before the user is created); the caller's own recipe (`provision`, or
   the earlier `codex_provision` when `provision` is empty) reaches the
-  provisioning step as the composite's `recipe`, and neither input reaches
-  the Claude job yet (design/executed-paths-residual.md, plan step 1).
+  provisioning step as the composite's `recipe`.
+- 4628446 on the Claude jobs (design/executed-paths-residual.md, plan step
+  5): the same boundary with the agent user `claude-agent` — no local
+  action and no `claude-setup`; the settings composer (which may read a
+  `settings` file from the checkout) runs before the user exists; then
+  `Create agent user`, provisioning as that user with the same `recipe`,
+  the pre-agent reclaim, the launcher, and the claude-code-action step
+  with the launcher's `path_to_claude_code_executable` and
+  `classify_inline_comments: "false"`; the post-agent reclaim is the first
+  step after it, on every path once the user exists, and every later step
+  that runs git (the origin reset, the Surface tree check, the composers,
+  the reviewer's re-plant check and landing prep, emit-landing) is gated on
+  it. The reviewer's sandboxed paths create the user with `grant: none`,
+  hand the scratch copy to it, skip the pre-agent reclaim and launch with
+  `grant: none`, and the sandbox overlay no longer masks `.git/config`.
 - The `provision-fallback` composite runs its recipe under `sudo -u <user>
   -H` from a copy in `$RUNNER_TEMP` when `user` is set, directly as the
   runner otherwise; a caller recipe replaces the default install after the
@@ -89,8 +102,13 @@ def step_with(job: str, needle: str) -> str:
 def test_the_claude_job_names_no_openai_key_and_runs_no_codex(name):
     claude_job = jobs(workflow_text(name))[AGENT_JOBS[name][0]]
     assert not [line for line in code_lines(claude_job) if KEY in line]
-    assert CODEX_ACTION not in claude_job and "create-codex-user" not in claude_job
+    code = "\n".join(code_lines(claude_job))
+    assert CODEX_ACTION not in code and "codex-usage" not in code and "mode: reset-home" not in code
     assert CLAUDE_ACTION in claude_job
+    # The codex composites run here for the Claude agent's own user only.
+    for s in steps(claude_job):
+        if any(c in "\n".join(code_lines(s)) for c in ("create-codex-user@main", "reclaim-codex-workspace@main", "provision-fallback@main")):
+            assert "          user: claude-agent\n" in s, s[:80]
 
 
 @pytest.mark.parametrize("name", REUSABLE)
@@ -232,7 +250,7 @@ def test_the_runner_writes_nothing_into_the_workspace_after_the_codex_user_exist
 
 @pytest.mark.parametrize("name", REUSABLE)
 @pytest.mark.parametrize("input_name", ["provision", "codex_provision"])
-def test_the_caller_recipe_input_is_declared_and_reaches_only_the_codex_job(name, input_name):
+def test_the_caller_recipe_input_is_declared_and_reaches_only_the_provisioning_steps(name, input_name):
     text = workflow_text(name)
     decl = text[text.index(f"      {input_name}:\n"):]
     decl = decl[:re.search(r"\n      [a-z_]+:\n", decl).start()]
@@ -240,22 +258,197 @@ def test_the_caller_recipe_input_is_declared_and_reaches_only_the_codex_job(name
     ref = re.compile(rf"\binputs\.{input_name}\b")
     for job, block in jobs(text).items():
         uses = [l.strip() for l in code_lines(block) if ref.search(l)]
-        if job == AGENT_JOBS[name][1]:
-            # The provisioning step's gate and its `recipe` input, nothing else.
-            assert len(uses) == 2 and uses[1] == "recipe: ${{ inputs.provision || inputs.codex_provision }}", uses
-            assert uses[0].startswith("if: ") and f"inputs.{input_name} != ''" in uses[0], uses
+        if job in AGENT_JOBS[name]:
+            # Each engine's provisioning step: its gate and its `recipe`
+            # input, nothing else (the reviewer's Claude gate is a `>-` block
+            # whose recipe clause sits on its own line).
+            assert len(uses) == 2 and uses[1] == "recipe: ${{ inputs.provision || inputs.codex_provision }}", (job, uses)
+            assert f"inputs.{input_name} != ''" in uses[0], (job, uses)
         else:
-            # No other job: the Claude job keeps claude-setup until plan step 5.
             assert uses == [], job
 
 
+CLAUDE_RECIPE_SET = "hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != ''"
+SANDBOXED = "(needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true')"
+
+
+def step_id(block: str) -> str:
+    m = re.search(r"^        id: (\S+)$", block, re.M)
+    return m.group(1) if m else ""
+
+
+def step_if(block: str) -> str:
+    """The step's `if:` (a `>-` block folded onto one line), or ""."""
+    code = code_lines(block)
+    for i, line in enumerate(code):
+        m = re.match(r"^      (?:- |  )if: (.*)$", line)
+        if not m:
+            continue
+        if m.group(1) != ">-":
+            return m.group(1).strip()
+        folded = []
+        for later in code[i + 1:]:
+            if not later.startswith("          "):
+                break
+            folded.append(later.strip())
+        return " ".join(folded)
+    return ""
+
+
+def claude_steps(name: str) -> list:
+    return steps(jobs(workflow_text(name))[AGENT_JOBS[name][0]])
+
+
 @pytest.mark.parametrize("name", REUSABLE)
-def test_the_claude_job_keeps_the_runner_side_provisioning(name):
+def test_the_claude_job_runs_nothing_from_the_checkout_as_the_runner(name):
     claude_job = jobs(workflow_text(name))[AGENT_JOBS[name][0]]
-    shim = step_with(claude_job, "uses: ./.github/actions/claude-setup")
-    assert "hashFiles('.github/actions/claude-setup/action.yml', '.github/actions/claude-setup/action.yaml') != ''" in shim
-    fallback = step_with(claude_job, "provision-fallback@main")
-    assert "user:" not in fallback and "hashFiles('pyproject.toml') != ''" in fallback
+    assert "uses: ./" not in claude_job, "a local action runs the checkout's code as the runner"
+    assert "claude-setup" not in "\n".join(code_lines(claude_job))
+    assert "drop-runner-root" not in claude_job
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_claude_job_provisions_as_the_agent_user_behind_the_boundary(name):
+    all_steps = claude_steps(name)
+    ids = [step_id(s) for s in all_steps]
+    at = {i: ids.index(i) for i in ("agentuser", "setup", "agentprereclaim", "launcher", "claude", "agentreclaim")}
+    assert at["agentuser"] < at["setup"] < at["agentprereclaim"] < at["launcher"] < at["claude"] < at["agentreclaim"]
+    user, setup, launcher = all_steps[at["agentuser"]], all_steps[at["setup"]], all_steps[at["launcher"]]
+    assert "uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main" in user
+    assert "        with:\n          user: claude-agent\n" in user and "mode:" not in user
+    assert "provision-fallback@main\n        with:\n          user: claude-agent\n" in setup
+    assert "          recipe: ${{ inputs.provision || inputs.codex_provision }}\n" in setup
+    assert "reclaim-codex-workspace@main\n        with:\n          user: claude-agent\n" in all_steps[at["agentprereclaim"]]
+    assert "claude-agent-launcher@main" in launcher
+    assert "          path-prefix: ${{ steps.setup.outputs.bin }}\n" in launcher
+    if name == "claude-review.yml":
+        assert step_if(setup) == ("needs.gate.outputs.ok == 'true' && needs.gate.outputs.mode != 'external' && "
+                                  f"needs.gate.outputs.fork_head != 'true' && ({CLAUDE_RECIPE_SET})")
+    else:
+        assert step_if(setup) == CLAUDE_RECIPE_SET
+        assert step_if(all_steps[at["agentprereclaim"]]) == ""
+        # A `settings` input naming a file is read from the checkout before
+        # the agent user exists (provisioning could replace it with a link).
+        settings = next(i for i, s in enumerate(all_steps) if step_id(s) in ("agentsettings", "fixsettings"))
+        assert settings < at["agentuser"]
+    # Nothing between the boundary and the action is an action from the
+    # checkout.
+    for s in all_steps[at["agentuser"] + 1: at["claude"]]:
+        used = [l.strip() for l in code_lines(s) if l.strip().startswith("uses: ")]
+        assert all(u.startswith("uses: meridianlabs-ai/agents/.github/actions/") for u in used), (s[:80], used)
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_runner_writes_nothing_into_the_workspace_between_the_boundary_and_the_action(name):
+    """After `Create agent user` a process running as `claude-agent` may have
+    planted symlinks in the group-writable workspace: the runner-side steps
+    before the action write only to RUNNER_TEMP and step outputs (the
+    reviewer's scratch copy reads the checkout and writes RUNNER_TEMP)."""
+    all_steps = claude_steps(name)
+    ids = [step_id(s) for s in all_steps]
+    for s in all_steps[ids.index("agentuser") + 1: ids.index("claude")]:
+        code = "\n".join(code_lines(s))
+        assert not re.search(r'>>?\s*"?\.(git|claude|venv|mcp)', code), s[:60]
+        assert not re.search(r'>>?\s*"?\$GITHUB_WORKSPACE', code), s[:60]
+        assert "mkdir -p \"$LANDING_DIR\"" not in code, s[:60]
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_every_claude_action_step_runs_the_wrapper_without_the_buffered_post(name):
+    for job, block in jobs(workflow_text(name)).items():
+        for s in steps(block):
+            if CLAUDE_ACTION not in s:
+                continue
+            assert '          classify_inline_comments: "false"\n' in s, job
+            assert "          path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}\n" in s, job
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_post_agent_reclaim_is_first_after_the_action_and_gates_every_later_git_step(name):
+    all_steps = claude_steps(name)
+    ids = [step_id(s) for s in all_steps]
+    action = ids.index("claude")
+    reclaim = all_steps[action + 1]
+    assert step_id(reclaim) == "agentreclaim"
+    assert step_if(reclaim) == "always() && steps.agentuser.outcome == 'success'"
+    assert "reclaim-codex-workspace@main\n        with:\n          user: claude-agent\n" in reclaim
+    gate = "steps.agentreclaim.outcome == 'success'"
+    later = all_steps[action + 2:]
+    seen = set()
+    for s in later:
+        code = "\n".join(code_lines(s))
+        if "reset-origin-url@main" in code:
+            assert gate in step_if(s), s[:60]
+            seen.add("reset")
+        if "import-codex-final@main" in code:
+            # ...and only for an agent that was launched: a provisioning or
+            # launcher failure skips the agent, and what provisioning left in
+            # the landing directory is not its output (review round 1).
+            assert step_if(s) == (f"always() && {gate} && steps.launcher.outcome == 'success' && "
+                                  "steps.claude.outcome != 'skipped'"), s[:60]
+            assert "          mode: dir\n" in s, s[:60]
+            seen.add("import")
+        if step_id(s) in ("replant", "claudepost"):
+            assert gate in step_if(s), step_id(s)
+        if step_id(s) == "surface" and re.search(r"\bgit (status|rev-parse)", code):
+            assert "          AGENTRECLAIM_OUTCOME: ${{ steps.agentreclaim.outcome }}\n" in s
+            assert '[ "${AGENTRECLAIM_OUTCOME:-}" = "success" ]' in code
+            seen.add("surface")
+        if step_id(s) == "landing" and re.search(r"\bgit ", code):
+            assert "          AGENTRECLAIM_OUTCOME: ${{ steps.agentreclaim.outcome }}\n" in s
+            assert '"${AGENTRECLAIM_OUTCOME:-}" != "success"' in code or '"${AGENTRECLAIM_OUTCOME:-}" = "success"' in code
+            seen.add("landing")
+    expected = {"claude.yml": {"reset", "import", "surface", "landing"}, "claude-auto.yml": {"reset", "surface", "landing"},
+                "claude-auto-review.yml": {"reset", "import", "surface", "landing"}, "claude-review.yml": {"import"}}
+    assert seen == expected[name], seen
+    emit = next(s for s in later if "emit-landing@main" in s)
+    read_only = next(l.strip() for l in code_lines(emit) if l.strip().startswith("read-only:"))
+    assert read_only == {
+        "claude.yml": "read-only: ${{ steps.landing.outputs.read_only != 'false' && 'true' || 'false' }}",
+        "claude-review.yml": 'read-only: "true"',
+        "claude-auto.yml": "read-only: ${{ (steps.claude.outcome == 'failure' || steps.agentreclaim.outcome != 'success') && 'true' || 'false' }}",
+        "claude-auto-review.yml": "read-only: ${{ steps.agentreclaim.outcome != 'success' && 'true' || 'false' }}",
+    }[name], read_only
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_surface_step_reports_each_boundary_step(name):
+    surface = next(s for s in claude_steps(name) if step_id(s) == "surface")
+    for sid, var in (("agentuser", "AGENTUSER"), ("setup", "SETUP"), ("agentprereclaim", "AGENTPRERECLAIM"),
+                     ("launcher", "LAUNCHER"), ("agentreclaim", "AGENTRECLAIM")):
+        assert f"          {var}_OUTCOME: ${{{{ steps.{sid}.outcome }}}}\n" in surface, sid
+    code = "\n".join(code_lines(surface))
+    for var in ("AGENTUSER", "SETUP", "AGENTPRERECLAIM", "LAUNCHER"):
+        assert f'[ "${{{var}_OUTCOME:-}}" = "failure" ]' in code, var
+    assert '[ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]' in code
+    assert "SETUPFB" not in code and "NOROOT" not in code
+
+
+def test_the_reviewer_launches_the_sandboxed_paths_with_no_grant():
+    all_steps = claude_steps("claude-review.yml")
+    ids = [step_id(s) for s in all_steps]
+    grant = f"${{{{ {SANDBOXED} && 'none' || 'workspace' }}}}"
+    user, launcher = all_steps[ids.index("agentuser")], all_steps[ids.index("launcher")]
+    assert f"          grant: {grant}\n" in user and f"          grant: {grant}\n" in launcher
+    # After the strip, before the scratch copy, which the agent user owns.
+    assert ids.index("strip") < ids.index("agentuser") < ids.index("scratch") < ids.index("sandbox") < ids.index("launcher")
+    assert 'sudo chown -R claude-agent:claude-agent "$SCRATCH"' in all_steps[ids.index("scratch")]
+    # No pre-agent reclaim on the sandboxed paths: nothing ran as the user.
+    pre = step_if(all_steps[ids.index("agentprereclaim")])
+    assert "needs.gate.outputs.mode != 'external'" in pre and "needs.gate.outputs.fork_head != 'true'" in pre
+    # The agent writes its review into the directory its namespace binds.
+    for i in ("reviewprompt", "reviewsettings"):
+        assert "          OUT_DIR: ${{ runner.temp }}/claude-agent\n" in all_steps[ids.index(i)], i
+    assert "--add-dir ${{ runner.temp }}/claude-agent\n" in all_steps[ids.index("claude")]
+    # The landing prep reads the import's runner-only copy.
+    importer = next(s for s in all_steps if step_id(s) == "agentfiles")
+    assert "          dest: ${{ runner.temp }}/review\n" in importer
+    assert "          OUT_DIR: ${{ runner.temp }}/review\n" in all_steps[ids.index("claudepost")]
+    # The overlay's `.git/config` mask is gone (the wrapper refuses a launch
+    # with the App token there); the gh and gitconfig denies stay.
+    settings = "\n".join(code_lines(all_steps[ids.index("reviewsettings")]))
+    assert '"mode":"mask"' not in settings and "gitcfg" not in settings
+    assert '{"path":"~/.config/gh","mode":"deny"}' in settings and '{"path":"~/.gitconfig","mode":"deny"}' in settings
 
 
 # --- the composite -------------------------------------------------------------

@@ -584,8 +584,14 @@ def test_the_composite_installs_root_owned_and_records_what_the_wrapper_trusts()
     wrapper_reads = set(re.findall(r"read_run ([a-z-]+)\)", WRAPPER.read_text()))
     ns_reads = set(re.findall(r'read_run\(root, "([a-z-]+)"\)', AGENT_NS.read_text()))
     assert wrapper_reads | ns_reads <= recorded, (wrapper_reads | ns_reads) - recorded
-    # The pre-action check runs as the user, and the kill comes last.
+    # The pre-action check runs as the user, then the kill; last, the
+    # landing directory is re-created empty after the kill, so nothing
+    # provisioning wrote there (a reviewer's verdict.txt) passes for the
+    # agent's output.
     assert body.index("--phase pre") < body.index('sudo pkill -KILL -u "$user"')
+    reset = body.index('sudo rm -rf "$RUNNER_TEMP/$user"\n')
+    assert body.index('sudo pkill -KILL -u "$user"') < reset
+    assert body.index('sudo install -d -o runner -g "$user" -m 2775 "$RUNNER_TEMP/$user"', reset) > reset
 
 
 @pytest.mark.parametrize("text,version", [

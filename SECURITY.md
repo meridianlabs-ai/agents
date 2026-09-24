@@ -48,8 +48,9 @@ text are checked by the tests under `tests/`.
 
 - A job that runs an agent holds no credential of the machine account and no
   token minted from it; its own job token is read-only. The Claude action's
-  own token, present while that step runs, is the exception described under
-  "By design" below.
+  own token, present in the action's runner-side process while that step
+  runs and never within the agent's reach, is described under "By design"
+  below.
 - No job of the agent workflows can save to the GitHub Actions cache: every
   reusable workflow declares `cache-mode: read`, which the platform enforces
   on the job's token, so nothing an agent does or a caller's setup nests can
@@ -72,36 +73,52 @@ text are checked by the tests under `tests/`.
   agent workflows' own gate/agent/land shape, finds neither the App
   secrets the gate and land jobs reference nor the OpenAI key in the
   Claude agent job's runner memory.
-- In a codex job nothing from the checked-out tree executes as the runner:
-  the caller's `claude-setup` action is not run there, and the shared
-  provisioning recipe (uv and a dev-install of the checkout, the tree's own
-  build backend, or the caller stub's `provision` recipe) runs as the
-  unprivileged `codex` user after that user exists and before the
-  codex-action step, so a head the pipeline itself produced from an
-  outsider's issue text meets the same boundary as codex itself: no sudo,
-  no GitHub token, no OIDC request token, no view of the runner's
-  processes (finding 4628446). Between that provisioning and the
-  codex-action step every process running as codex is killed and the codex
-  home is re-created, and the runner writes nothing into the workspace in
-  that interval, so nothing provisioning left behind reaches the action's
-  runner-side reads. A hosted canary exercises both this boundary and the
-  secret delivery against a hostile checkout and synthetic secrets
-  (design/credential-separation.md → section 6).
+- In an agent job of either engine nothing from the checked-out tree
+  executes as the runner: a caller's `claude-setup` action is not run, and
+  the shared provisioning recipe (uv and a dev-install of the checkout, the
+  tree's own build backend, or the caller stub's `provision` recipe) runs as
+  the engine's unprivileged agent user — `codex`, or `claude-agent` on the
+  Claude jobs — after that user exists and before the agent step, so a head
+  the pipeline itself produced from an outsider's issue text meets the same
+  boundary as the agent itself: no sudo, no GitHub write token, no OIDC
+  request token, no view of the runner's processes (finding 4628446,
+  criterion 1; on the Claude jobs since design/executed-paths-residual.md,
+  plan step 5). Between that provisioning and the agent step every process
+  running as the agent user is killed; on codex jobs the codex home is
+  re-created, on Claude jobs `.git` is reclaimed before the action's
+  prepare runs git in the workspace. The runner writes nothing into the
+  workspace in that interval, so nothing provisioning left behind reaches
+  the action's runner-side reads. The Claude CLI itself runs as
+  `claude-agent` in its own PID and mount namespace, started by a
+  root-owned wrapper that refuses to launch it if the action's App token
+  appears anywhere in its argv, environment, settings or `.git/config`,
+  that drops every App-token MCP server, and that gives it the read-only
+  job token as its only GitHub credential; inside, it sees no host process
+  and nothing under the runner's home but the workspace, its landing
+  directory, the review scratch copy and the Workload Identity directory.
+  After the agent, a reclaim kills whatever is left, removes its Workload
+  Identity access and credential cache, and takes `.git` back before any
+  runner-side git; the agent's landing files reach the runner only through
+  an owner-checked, `O_NOFOLLOW`, size-capped copy. A hosted canary
+  exercises the codex boundary and the secret delivery against a hostile
+  checkout and synthetic secrets (design/credential-separation.md → section
+  6), and the Claude launcher up to its launch; adversarial probing of the
+  Claude agent's namespace is left to Claude Security scans (decision:
+  Ransom, 2026-09-24).
 - The uid an agent runs as has no passwordless sudo and no other route to
-  root when the agent step starts, on both engines. In a Claude job the
-  agent is the runner, so a `drop-runner-root` step between the last step
-  that needs root (checkouts, provisioning, the reviewer's sandbox install)
-  and the agent step raises `kernel.yama.ptrace_scope` to 2, makes the
-  docker socket root-only, makes root's default search path (`/usr/local/sbin`,
-  `/usr/local/bin`) root's alone, replaces the sudoers policy with one that grants
-  root alone, and fails the job — before the agent runs — unless `sudo -n
-  true` and `sudo -n -l` then fail from the runner and `Runner.Worker`'s
-  process memory does not open. In a codex job the agent is the `codex`
-  user, which never had sudo and cannot inspect the runner's processes; the
-  runner keeps its sudo there for the reclaim. A hosted smoke workflow
-  checks both from the real users (Claude Security finding 4629153,
-  criterion 2; design/architecture.md → No root for the agent uid, which
-  also lists what stays open: provisioning itself still runs with root).
+  root when the agent step starts, on both engines: the agent is the
+  `codex` or `claude-agent` user, which never has sudo and is in no group
+  but its own and `runner`'s. On the Claude jobs the launcher checks it
+  from that user — no sudo, no Docker, Yama `ptrace_scope` 1 or more —
+  before the action step, and again inside the agent's namespace right
+  before the CLI starts, together with no readable process memory or
+  environment of another user and no runner command file, and fails the
+  job otherwise. The runner keeps its sudo in both engines' jobs: the
+  reclaims after the agent need it (decision: Ransom, 2026-09-24, option
+  a, which retired the Claude jobs' `drop-runner-root` step; the composite
+  stays for a caller that runs an agent as the runner, and a hosted smoke
+  workflow checks it). Claude Security finding 4629153, criterion 2;
+  design/architecture.md → No root for the agent uid.
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -184,7 +201,12 @@ text are checked by the tests under `tests/`.
   the per-step `GITHUB_PATH` file is runner-only. A hosted smoke workflow
   runs the check and the post-codex steps against a planted venv with the
   real codex user (Claude Security finding 4628448, 2026-09-22;
-  design/codex-engine.md → Runner-side search path).
+  design/codex-engine.md → Runner-side search path). The Claude jobs run
+  the same checks for the `claude-agent` user (in `create-codex-user`, the
+  launcher and both reclaims); the one directory the claude-code-action
+  step adds to the job PATH is the launcher's root-owned
+  `/opt/meridian-agent/bin`, and the smoke workflow runs its cases for that
+  user too.
 - A `bwrap` the codex user plants is never the one that sandboxes codex's
   commands. Those commands get the provisioned tools' directories on their
   PATH (codex's `config.toml`; never the job PATH), and the directories are
@@ -244,26 +266,25 @@ text are checked by the tests under `tests/`.
   while the action step runs: no workflow passes a token to the action, so it
   mints its own, with contents, pull requests and issues write on the caller
   repository whatever the job's own permissions say, and revokes it when the
-  step ends. It sits in `.git/config` for that step. On sandboxed reviews it
-  is masked there for sandboxed commands, not for the agent's own file
-  reads; same-repo reviews run without the sandbox. Everywhere the agent's
-  push and posting verbs are denied by settings, but `gh api` is not, so
-  those denies are guard rails rather than a complete prohibition on direct
-  writes. A write that slipped past would be attributed to `claude[bot]`,
-  which the review-fix workflow still accepts as a verdict author: a marked
-  verdict comment posted with this token can drive that loop on an otherwise
-  eligible `auto` PR. Re-review requests follow the configured allow-lists
+  step ends. It is the action's token, used by the action's own runner-side
+  code only (its tracking comment on `claude.yml`, the revocation): the
+  agent runs as `claude-agent` behind the launcher, which keeps the token
+  out of its argv, environment, settings, MCP servers and `.git/config`, and
+  the agent's namespace hides the action's process, the step scripts and
+  the runner's files. So the `claude[bot]` write channel the agent used to
+  hold is closed: the agent's `gh` holds the read-only job token, its
+  replies, thread resolutions and comments go through the landing manifest,
+  and the settings denies on push and posting verbs are guard rails behind
+  that. `claude[bot]` stays a verdict author the review-fix workflow
+  accepts, and its re-review requests follow the configured allow-lists
   (`review_allowed_bots` defaults to `claude[bot]` in the review-fix gate;
-  the reviewer admits that bot when the caller's `allowed_bots` includes it,
-  as in the inspect_ai fork). It no longer reaches the CI-fix loop
-  indirectly: a CI run started by a push from `claude[bot]` — or any bot
+  the reviewer admits that bot when the caller's `allowed_bots` includes
+  it, as in the inspect_ai fork): such comments now come from the action's
+  own code, or from a direct caller's agent job that still runs the action
+  as the runner. A CI run started by a push from `claude[bot]` — or any bot
   other than the machine account — is refused by the CI-fix gate's actor
-  check before any write, on both engines (the Codex step's own allow-list
-  admitted `claude` until 2026-09-22; the gate now decides first). A push the
-  Claude App made itself therefore ends the automatic loop for that branch
-  until the machine account or a write-access human pushes (decision:
-  Ransom, 2026-09-22; design/auto-agent.md → Binding the failed run to its
-  PR → Decisions).
+  check before any write, on both engines (decision: Ransom, 2026-09-22;
+  design/auto-agent.md → Binding the failed run to its PR → Decisions).
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.
@@ -281,7 +302,7 @@ text are checked by the tests under `tests/`.
   automated job on the branch executes or loads — not everything those
   run (see the accepted gap below) — since the machine account's push would
   otherwise move agent-written files into the same-repo tree the next run
-  provisions from as `runner` or reads as instructions
+  provisions from or reads as instructions
   (Claude Security finding 4628446, criterion 2, 2026-09-23): anything
   under `.github/` (the composite actions a workflow runs with `uses:
   ./…`, the callers' `claude-setup` among them); agent instructions and
@@ -300,21 +321,24 @@ text are checked by the tests under `tests/`.
   executes still lands: a script a `claude-setup` step, a settings hook or
   an MCP server command runs, a build backend on `backend-path`, a module
   a `setup.py` or build hook imports, any file a caller's recipe reads.
-  The next automated run executes it during provisioning or at agent start
-  — as the codex user on codex jobs (finding 4628446, criterion 1), as
-  `runner` on Claude jobs, where the Claude agent itself already runs the
-  tree's code (tests, `conftest.py`) as `runner`. Closing it is a separate
-  design follow-up (Ransom, 2026-09-23) comparing approval gating (a head
-  the machine account pushed gets fork-head treatment in every later
-  automated job until a write-access human approves that exact head),
-  heuristic dependency following at landing, and running the Claude engine
-  as an unprivileged user that also provisions, as codex does.
+  The next automated run of the reusable workflows executes it during
+  provisioning, at agent start or in the agent's own test runs only as an
+  unprivileged agent user — `codex` on codex jobs, `claude-agent` on Claude
+  jobs since design/executed-paths-residual.md plan step 5 — which holds no
+  GitHub write credential, no sudo and no view of the runner's processes
+  (finding 4628446, criterion 1, the design's option D). What stays: the
+  agent user reads the model credential (the declared exception, decision:
+  Ransom, 2026-09-23), and a direct caller's own agent job that runs the
+  action as the runner (inspect_flow's two, ts-mono's `dependabot-fix`)
+  executes it as `runner` until it adopts the launcher. Relaxing the build
+  and dependency group of this list for callers that opt in is the
+  design's plan step 6; until then the list stays whole.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The
-  Claude action's own installation token in the review job remains
-  write-capable, and the command denies on it are guard rails rather than a
-  complete prohibition on direct writes. Its normal output is the review
+  Claude action's own installation token in the review job stays out of its
+  reach (the launcher, above), so it cannot post as `claude[bot]` either;
+  the command denies are guard rails behind that. Its normal output is the review
   files in its landing
   directory, posted as the review after trigger tokens and loop markers are
   removed, with a verdict that is one of two fixed bodies. Its landing
@@ -334,12 +358,15 @@ text are checked by the tests under `tests/`.
   are the known exceptions. Never reference `OPENAI_API_KEY` in a job that
   runs the Claude agent — a referenced secret reaches the job's runner
   whatever the referencing step's `if:` says — and never run code from the
-  checkout as the runner in a codex job: those jobs provision with
-  `provision-fallback` `user: codex` after `create-codex-user`, and no
-  `./`-local action.
-- In a job that runs the Claude agent, every step that needs root goes
-  before the `drop-runner-root` step, and nothing after it uses sudo or
-  docker; the drop keeps the agent step's `if:`.
+  checkout as the runner in an agent job: those jobs provision with
+  `provision-fallback` and the engine's agent user (`codex`, or
+  `claude-agent`) after `create-codex-user`, and no `./`-local action.
+- In a job that runs the Claude agent, the agent runs as `claude-agent`
+  through `claude-agent-launcher` (the action step's
+  `path_to_claude_code_executable`, with `classify_inline_comments:
+  "false"`); the post-agent reclaim is the first step after the action,
+  and every later step that runs git is gated on its success
+  (design/executed-paths-residual.md).
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
   The skills under `skills/` that a maintainer's local agent runs with their
