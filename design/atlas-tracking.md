@@ -252,8 +252,7 @@ concept — we don't control upstream's merge timing.
 > on the Contributor → Review flip. Automated external reviews moved to a
 > local Orca workflow: `orca-pr-sync` mirrors every PR Ransom authors, is
 > assigned, or reviews into an Orca workspace with a board column derived
-> from PR facts, and a local review skill runs the review there (designs:
-> demerzel `context/orca-pr-sync-design.md`, `context/review-pr-design.md`).
+> from PR facts, and a local review skill runs the review there.
 > **Existing proxies are still synced**: anything with an `Upstream PR`
 > field keeps the lifecycle below (Contributor → Review on contributor
 > activity, Merge on approval, close on upstream merge/close). A new proxy,
