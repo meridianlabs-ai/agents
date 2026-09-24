@@ -46,15 +46,41 @@ def bash_lib(snippet: str, cwd=None) -> subprocess.CompletedProcess:
 # clause: the land composite's `workflows` step refuses a bundle touching
 # .github/ or another path later automated runs execute or load as
 # configuration (Claude Security 4628446, criterion 2), and the agent must
-# hear that before spending its run.
-WORKFLOW_FILES_RULE = (
-    "Do NOT create, edit or delete files that later automated runs execute or load as configuration: anything under .github/ "
-    "(workflows, which the machine account has no permission to push, and composite actions), agent and git configuration at any depth "
-    "(CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .mcp.json, .codex/, .agents/, .gitmodules, .husky/), and build and dependency "
-    "configuration at any depth (pyproject.toml, setup.py, setup.cfg, uv.lock, uv.toml, .python-version, requirements*.txt, package.json, "
-    "and the npm, pnpm and yarn lockfiles and configuration files). The landing refuses the whole bundle, so every commit of the run is lost; "
-    "if the task needs such a change, stop and say so"
+# hear that before spending its run. The list of refused kinds is the
+# prompt step's PROTECTED_FILES env: the build and dependency group (tier 2)
+# is named only when the caller has not opted in (`allow_build_config`).
+PROTECTED_FILES_REFUSED = (
+    "anything under .github/ (workflows, which the machine account has no permission to push, and composite actions), "
+    "agent and git configuration at any depth (CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .mcp.json, .codex/, "
+    ".agents/, .gitmodules, .husky/), and build and dependency configuration at any depth (pyproject.toml, setup.py, "
+    "setup.cfg, uv.lock, uv.toml, .python-version, requirements*.txt, package.json, and the npm, pnpm and yarn lockfiles "
+    "and configuration files)"
 )
+PROTECTED_FILES_ALLOWED = (
+    "anything under .github/ (workflows, which the machine account has no permission to push, and composite actions) "
+    "and agent and git configuration at any depth (CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .mcp.json, .codex/, "
+    ".agents/, .gitmodules, .husky/)"
+)
+PROTECTED_FILES_ENV = (
+    f"PROTECTED_FILES: ${{{{ inputs.allow_build_config && '{PROTECTED_FILES_ALLOWED}' || '{PROTECTED_FILES_REFUSED}' }}}}"
+)
+WORKFLOW_FILES_RULE_TEMPLATE = (
+    "Do NOT create, edit or delete files that later automated runs execute or load as configuration: $PROTECTED_FILES. "
+    "The landing refuses the whole bundle, so every commit of the run is lost; if the task needs such a change, stop and say so"
+)
+# The rule as the agent reads it without the opt-in, and with it.
+WORKFLOW_FILES_RULE = WORKFLOW_FILES_RULE_TEMPLATE.replace("$PROTECTED_FILES", PROTECTED_FILES_REFUSED)
+WORKFLOW_FILES_RULE_ALLOWED = WORKFLOW_FILES_RULE_TEMPLATE.replace("$PROTECTED_FILES", PROTECTED_FILES_ALLOWED)
+
+
+def assert_prompt_rule(block: str, tail: str) -> None:
+    """BLOCK (a prompt-composing step) tells the agent the refused files,
+    ending with TAIL, and takes the list from the caller's opt-in: the step
+    env picks the list by `inputs.allow_build_config` and the prompt text
+    expands it (the `&& 'a' || 'b'` idiom is safe: both strings are
+    non-empty)."""
+    assert "          " + PROTECTED_FILES_ENV + "\n" in block
+    assert WORKFLOW_FILES_RULE_TEMPLATE + tail in block
 
 
 def step_block(text: str, step_id: str, indent: int = 6) -> str:
@@ -97,6 +123,21 @@ def lift_run(text: str, anchor: str) -> str:
         else:
             break
     return "\n".join(body) + "\n"
+
+
+def claude_prompt(text: str, step_id: str, tmp_path, *, allow: bool) -> str:
+    """The prompt a Claude-engine prompt step (STEP_ID in workflow TEXT)
+    composes, run as GitHub runs it with PROTECTED_FILES as its env
+    expression resolves with the opt-in on (ALLOW) or off, and every other
+    env var unset."""
+    out = tmp_path / f"{step_id}-{allow}.out"
+    out.write_text("")
+    env = {"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(out),
+           "PROTECTED_FILES": PROTECTED_FILES_ALLOWED if allow else PROTECTED_FILES_REFUSED}
+    res = sh("bash", "-eo", "pipefail", "-c", lift_run(text, f"        id: {step_id}"), check=False, env=env)
+    assert res.returncode == 0, res.stderr
+    (value,) = [line[len("value="):] for line in out.read_text().splitlines() if line.startswith("value=")]
+    return value
 
 
 # --- lib.sh -----------------------------------------------------------------
@@ -1202,6 +1243,14 @@ WORKFLOWS_HINT = (
     "The commits were **not** pushed and are lost with the runner: there is no branch to look for."
 )
 
+# The same, when the caller opted in to tier 2 (`allow-build-config`): the
+# build and dependency group was not checked, so it is not named.
+WORKFLOWS_HINT_ALLOWED = WORKFLOWS_HINT.replace(
+    "anything else under `.github/`, agent instructions and settings (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.mcp.json`, …), "
+    "or build and dependency configuration (`pyproject.toml`, lockfiles, `package.json`, …). ",
+    "anything else under `.github/`, or agent instructions and settings (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.mcp.json`, …). ")
+assert WORKFLOWS_HINT_ALLOWED != WORKFLOWS_HINT
+
 # The step's refusal line, for FILES (the rendered `files` output).
 REFUSAL = (
     "::error::land: the agent's commits change files later automated runs execute or load as configuration ({files}) — "
@@ -1209,6 +1258,10 @@ REFUSAL = (
     "agent instructions and settings, or build and dependency configuration; refusing the bundle — such changes are made "
     "from a maintainer's machine, where a human reads them before automation runs them."
 )
+REFUSAL_ALLOWED = REFUSAL.replace(
+    "anything else under .github/, agent instructions and settings, or build and dependency configuration;",
+    "anything else under .github/, or agent instructions and settings;")
+assert REFUSAL_ALLOWED != REFUSAL
 
 
 @pytest.mark.parametrize(
@@ -1226,6 +1279,12 @@ def test_landing_failure_hint_names_the_refused_workflow_files(files, rendered):
     r = bash_lib(f"landing_failure_hint 'workflows' '' '' '{files}'")
     assert r.returncode == 0, r.stderr
     assert r.stdout == WORKFLOWS_HINT.format(files=rendered)
+    assert "@" not in r.stdout
+    # With the caller's tier-2 opt-in the refused kinds leave out the build
+    # and dependency group, which the step did not check.
+    r = bash_lib(f"landing_failure_hint 'workflows' '' '' '{files}' 1")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == WORKFLOWS_HINT_ALLOWED.format(files=rendered)
     assert "@" not in r.stdout
 
 
@@ -1317,7 +1376,14 @@ def test_workflows_step_gates_the_push_and_reaches_the_report():
     report = step_block(text, "report", indent=4)
     assert "workflows=${{ steps.workflows.outcome }}" in report
     assert "WORKFLOW_FILES: ${{ steps.workflows.outputs.files }}" in report
-    assert 'landing_failure_hint "$failed" "$PUSHED" "$withheld" "$WORKFLOW_FILES"' in report
+    assert 'landing_failure_hint "$failed" "$PUSHED" "$withheld" "$WORKFLOW_FILES" "$ALLOW_BUILD_CONFIG"' in report
+    # The tier-2 opt-in: off unless the caller passes exactly "true", and the
+    # step and Report read the same rendering of it.
+    opt_in = "ALLOW_BUILD_CONFIG: ${{ inputs.allow-build-config == 'true' && '1' || '' }}"
+    assert opt_in in block and opt_in in report
+    decl = text[text.index("  allow-build-config:\n"):]
+    decl = decl[:decl.index("\n\noutputs:")]
+    assert decl.endswith('    required: false\n    default: "false"')
 
 
 def test_stage_and_handoff_steps_run_after_a_failed_hand_back():
@@ -1461,7 +1527,7 @@ def commit_path(r, path, text="x\n"):
     r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
 
 
-def run_workflows_step(r, repo, stub="", base=None, remote=None):
+def run_workflows_step(r, repo, stub="", base=None, remote=None, allow_build_config=False):
     """The land composite's `workflows` step, lifted and run in the bare repo
     `land_fetch` filled, as GitHub runs it (`bash -eo pipefail`); STUB is
     shell prepended to it (a failing `git`, say). BASE is the fetch step's
@@ -1470,12 +1536,14 @@ def run_workflows_step(r, repo, stub="", base=None, remote=None):
     when the push creates the branch. START_SHA is set to the manifest's
     start, which the step must NOT consult (Claude Security 4628444: the
     agent job chooses it): the tests that shift it prove the listing does
-    not move with it."""
+    not move with it. ALLOW_BUILD_CONFIG is the caller's `allow-build-config`
+    input, as the step's env renders it."""
     out = r["tmp"] / "workflows-out.txt"
     out.write_text("")
     env = {"WORK": str(repo), "START_SHA": r["start"], "HEAD_SHA": r["head"], "GITHUB_OUTPUT": str(out),
            "RUNNER_TEMP": str(r["tmp"]), "BASE_SHA": base_sha(repo) if base is None else base,
-           "REMOTE_SHA": remote_tip(r) if remote is None else remote, "LIB": str(LIB)}
+           "REMOTE_SHA": remote_tip(r) if remote is None else remote, "LIB": str(LIB),
+           "ALLOW_BUILD_CONFIG": "1" if allow_build_config else ""}
     res = sh("bash", "-eo", "pipefail", "-c", stub + step_script("workflows"), check=False, env=env)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     return res, outputs
@@ -1520,8 +1588,9 @@ def test_bundle_deleting_a_workflow_file_is_refused(repos):
 
 # Every path a later automated job on the branch executes or loads as
 # configuration (Claude Security 4628446, criterion 2): the step's
-# `protected` list, one representative per entry, root and nested.
-EXECUTED_PATHS = [
+# `protected` list, one representative per entry, root and nested. Tier 1
+# (lib.sh's TIER1_PATHSPECS) is refused whatever the caller passes.
+TIER1_EXECUTED_PATHS = [
     # .github/ whole: composite actions (claude-setup runs as `runner` before
     # any sandbox), scripts, and whatever else workflows read from there.
     ".github/actions/claude-setup/action.yaml", ".github/actions/other/run.sh", ".github/scripts/x.sh",
@@ -1531,12 +1600,16 @@ EXECUTED_PATHS = [
     ".claude", ".claude/settings.json", ".claude/skills/x/SKILL.md", "pkg/.claude/hooks/h.sh",
     ".mcp.json", "sub/.mcp.json", ".claude.json", ".codex/config.toml", ".agents/skills/x/SKILL.md",
     ".gitmodules", ".ripgreprc", ".husky/pre-commit",
-    # Build and dependency configuration, at every depth.
+]
+# Tier 2 (lib.sh's TIER2_PATHSPECS): build and dependency configuration, at
+# every depth. Refused unless the caller passes `allow-build-config`.
+TIER2_EXECUTED_PATHS = [
     "pyproject.toml", "packages/a/pyproject.toml", "setup.py", "setup.cfg", "uv.lock", "uv.toml", ".python-version",
     "requirements.txt", "requirements-dev.txt", "packages/a/package.json", "package.json", "package-lock.json",
     "npm-shrinkwrap.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".pnpmfile.cjs", "yarn.lock", ".yarnrc",
     ".yarnrc.yml", ".yarn/plugins/p.cjs", ".npmrc",
 ]
+EXECUTED_PATHS = TIER1_EXECUTED_PATHS + TIER2_EXECUTED_PATHS
 
 
 def test_hostile_claude_setup_action_is_refused_at_landing_with_a_report(repos):
@@ -1627,6 +1700,105 @@ def test_agent_edit_of_a_merged_in_executed_path_is_refused(repos):
     res, outputs = run_workflows_step(r, repo)
     assert res.returncode != 0
     assert outputs["files"] == "`pyproject.toml`"
+
+
+@pytest.mark.parametrize("path", TIER2_EXECUTED_PATHS)
+def test_build_config_lands_under_the_tier_2_opt_in(repos, path):
+    # design/executed-paths-residual.md → Land: tier-2 opt-in: a caller whose
+    # every consumer of its branches provisions and runs the agent as an
+    # unprivileged user lets build and dependency files land.
+    r = repos
+    commit_path(r, path)
+    commit_path(r, "src/agent.py")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, allow_build_config=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+    assert "no workflow or other executed files" in res.stdout
+
+
+@pytest.mark.parametrize("path", TIER1_EXECUTED_PATHS)
+def test_tier_1_stays_refused_under_the_tier_2_opt_in(repos, path):
+    r = repos
+    commit_path(r, path)
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, allow_build_config=True)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == f"`{path}`"
+    assert REFUSAL_ALLOWED.format(files=f"`{path}`") in res.stdout
+    assert remote_tip(r) == r["start"]
+
+
+def test_tier_2_opt_in_names_only_the_tier_1_files_of_a_mixed_bundle(repos):
+    r = repos
+    commit_path(r, "pyproject.toml", "[project]\nname = 'x'\n")
+    commit_path(r, "uv.lock", "version = 1\n")
+    commit_path(r, ".claude/settings.json", "{}\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, allow_build_config=True)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`.claude/settings.json`"
+    hint = bash_lib(f"landing_failure_hint 'workflows' '' '' '{outputs['files']}' 1")
+    assert hint.returncode == 0, hint.stderr
+    assert hint.stdout == WORKFLOWS_HINT_ALLOWED.format(files="`.claude/settings.json`")
+    # Without the opt-in all three are the agent's refused changes.
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`.claude/settings.json`, `pyproject.toml`, `uv.lock`"
+
+
+@pytest.mark.parametrize("how", ["link", "import"])
+def test_build_config_a_tier_1_entry_reaches_stays_refused_under_the_opt_in(repos, how):
+    # Tier 1's reach is computed from tier 1 alone, but whatever it reaches is
+    # refused whatever tier the file belongs to: a settings file linked to a
+    # pyproject.toml, or a CLAUDE.md importing one, makes it loaded
+    # configuration.
+    r = repos
+    commit_path(r, "pyproject.toml", "[project]\nname = 'x'\n")
+    if how == "link":
+        commit_link(r, ".claude/settings.json", "../pyproject.toml")
+    else:
+        commit_path(r, "CLAUDE.md", "See @pyproject.toml\n")
+    on_base(r)
+    commit_path(r, "pyproject.toml", "[project]\nname = 'hostile'\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, allow_build_config=True)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`pyproject.toml`"
+
+
+def test_tier_2_link_target_lands_under_the_opt_in(repos):
+    # The other direction: a link AT a tier-2 path is followed only while
+    # tier 2 is checked. Under the opt-in its target is an ordinary file.
+    r = repos
+    commit_path(r, "build/cfg.toml", "[project]\nname = 'x'\n")
+    commit_link(r, "pyproject.toml", "build/cfg.toml")
+    on_base(r)
+    commit_path(r, "build/cfg.toml", "[project]\nname = 'y'\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`build/cfg.toml`"
+    res, outputs = run_workflows_step(r, repo, allow_build_config=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+
+
+def test_the_tiers_split_the_protected_list():
+    # The two lists together are the whole list the step refuses by default,
+    # with no entry in both.
+    r = bash_lib('printf "%s\\n" "${TIER1_PATHSPECS[@]}"; echo --; printf "%s\\n" "${TIER2_PATHSPECS[@]}"')
+    assert r.returncode == 0, r.stderr
+    tier1, tier2 = (part.split() for part in r.stdout.split("--\n"))
+    assert tier1[0] == ".github" and ":(glob)**/CLAUDE.md" in tier1
+    assert ":(glob)**/pyproject.toml" in tier2 and ":(glob)**/.npmrc" in tier2
+    assert not set(tier1) & set(tier2)
+    assert not [x for x in tier1 if any(k in x for k in ("pyproject", "lock", "package", "requirements", "npm", "yarn", "pnpm"))]
 
 
 def commit_link(r, path, target):

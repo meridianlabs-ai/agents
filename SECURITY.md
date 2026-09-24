@@ -330,9 +330,30 @@ text are checked by the tests under `tests/`.
   agent user reads the model credential (the declared exception, decision:
   Ransom, 2026-09-23), and a direct caller's own agent job that runs the
   action as the runner (inspect_flow's two, ts-mono's `dependabot-fix`)
-  executes it as `runner` until it adopts the launcher. Relaxing the build
-  and dependency group of this list for callers that opt in is the
-  design's plan step 6; until then the list stays whole.
+  executes it as `runner` until it adopts the launcher.
+- **Build and dependency configuration: refused unless the caller opts in**
+  (design/executed-paths-residual.md → Land: tier-2 opt-in, plan step 6).
+  The `land` composite splits the list above in two. Tier 1 (`.github/`,
+  agent instructions and settings, and every path their symlinks and
+  `@path` imports reach) is always refused. Tier 2 (the build and
+  dependency group) is refused by default and lands when the caller passes
+  `allow-build-config: "true"`; the reusable workflows pass it from their
+  `allow_build_config` input (default false), and the agent's prompt stops
+  naming those files as refused. A repository may opt in only when every
+  automated job that later checks out and runs code from its agent-landed
+  branches provisions and runs its agent — the CLI and every tool call —
+  as an unprivileged user, as the reusable workflows' agent jobs do; the
+  rule is per repository, since several writers push to the same branches
+  (ts-mono's `dependabot-fix` continuation, which still runs its agent as
+  `runner` on an earlier agent branch, keeps ts-mono off until it is
+  migrated). **For tier 2 this is how criterion 2 of finding 4628446 is
+  met** (decision: Ransom, 2026-09-23, accepting the revised criterion):
+  such files land without a human's approval, but every automated job
+  that executes them does so only as an unprivileged user holding the
+  read-only job token (and the model credential, the declared exception
+  above), which is criterion 1's remedy. Tier 1 meets criterion 2
+  literally, by refusal. Callers' own CI on agent PRs is outside this
+  rule, as for every same-repo branch.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The

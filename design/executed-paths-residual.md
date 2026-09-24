@@ -1551,6 +1551,32 @@ Untrusted input reaching the new code, and how each is handled:
    inspect_scout, actions, and this repository's dogfood stubs. Each PR
    first confirms that no other automation in that repository runs
    agent-landed branches as `runner`.
+
+   As implemented (2026-09-24):
+   - **The reviewer takes no input.** `claude-review.yml`'s land job
+     passes `refuse-bundle: "true"`, so no bundle reaches the `workflows`
+     step and the opt-in would mean nothing there. `claude.yml`,
+     `claude-auto.yml` and `claude-auto-review.yml` declare
+     `allow_build_config`.
+   - **The agents' prompts follow the input.** Each engine's prompt step in
+     those three workflows names the build and dependency files as refused
+     only when the input is off (its `PROTECTED_FILES` env), so an opted-in
+     agent is not told to stop at a dependency bump.
+   - **Reach.** Under the opt-in the symlink and `@path` reach is computed
+     from tier 1 alone. A tier-2 file that a tier-1 entry reaches (a
+     `.claude/settings.json` linked to `pyproject.toml`, a `CLAUDE.md`
+     importing it) stays refused; a link at a tier-2 path is no longer
+     followed.
+   - **This repository's dogfood stubs do not opt in here**: they are on the
+     companion list above. The check that PR must make found push-triggered
+     workflows that run the pushed branch's code as `runner`, besides CI
+     (`tests.yml`): `engine-isolation-canary.yml` on changes under
+     `tests/fixtures/` (its caller fixtures are tier-2 files; it provisions
+     them as `codex`, but runs each fixture's `check.sh` as the runner),
+     `codex-path-smoke.yml` and `root-boundary-smoke.yml` (their scripts,
+     with sudo). They hold the read-only job token and synthetic sentinel
+     secrets only. Whether they count as CI under this rule is that PR's
+     decision.
 7. **ts-mono** (companion, any time after step 5): `dependabot-fix.yml`'s
    continuation provisions and runs its agent as an agent user with both
    reclaims. Only then does a ts-mono PR opt in, in its stubs and in

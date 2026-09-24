@@ -49,6 +49,15 @@ Testing a change).
   old base commit still names the file; Claude Security 4628444) — with a
   new branch cut from a configured non-default base (the fork's `main`
   under a `meridian` default) run through the lifted `fetch` step too.
+  The same guard under the caller's tier-2 opt-in
+  (`allow-build-config`): build and dependency files land, `.github/`,
+  agent instructions and settings stay refused and so does a build file
+  they link to or import, a link at a build file is no longer followed,
+  and the refusal line and the Report hint leave out the build group; the
+  two lists split lib.sh's whole list. The composer tests
+  (`test_dev_agent_composer.py`, `test_ci_fix_composer.py`,
+  `test_review_fix_composer.py`) run each Claude prompt step both ways:
+  the build files are named as refused only without the opt-in.
 - `test_trusted_start.py` — the run's trusted start (Claude Security finding
   4628444, criterion 2): the validator refuses a bundle whose `start_sha` is
   not the land job's `start-sha`, or any bundle when that input is empty,
@@ -494,7 +503,13 @@ Testing a change).
   failure; the reviewer's sandboxed paths create the user and launch with
   `grant: none`, hand it the scratch copy and drop the overlay's
   `.git/config` mask. `provision` and `codex_provision` are declared with a
-  type and reach only the two provisioning steps. Also the composites,
+  type and reach only the two provisioning steps. The tier-2 opt-in
+  (Land: tier-2 opt-in): `claude.yml`, `claude-auto.yml` and
+  `claude-auto-review.yml` declare `allow_build_config` as a boolean,
+  default false, read only by the land step (as `allow-build-config`) and
+  by each agent job's prompt env; the reviewer, whose land refuses any
+  bundle, declares none; the example stubs show it commented out in every
+  job that calls a pushing workflow. Also the composites,
   lifted and run against stubs:
   `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
   codex -H` when `user` is set, the recipe directly otherwise, a caller

@@ -268,6 +268,56 @@ def test_the_caller_recipe_input_is_declared_and_reaches_only_the_provisioning_s
             assert uses == [], job
 
 
+PUSHING = [name for name in REUSABLE if name != "claude-review.yml"]
+LAND_ACTION = "meridianlabs-ai/agents/.github/actions/land@main"
+
+
+@pytest.mark.parametrize("name", PUSHING)
+def test_the_build_config_opt_in_is_off_by_default_and_reaches_only_the_land_step_and_the_prompts(name):
+    # design/executed-paths-residual.md → Land: tier-2 opt-in: the caller's
+    # `allow_build_config` (default false) is what the land job passes as
+    # `allow-build-config`, and the only other reader is each engine's
+    # prompt step, which names the build files as refused unless it is on.
+    text = workflow_text(name)
+    decl = text[text.index("      allow_build_config:\n"):]
+    decl = decl[:re.search(r"\n      [a-z_]+:\n", decl).start()]
+    assert "        required: false\n" in decl and "        type: boolean\n" in decl and decl.endswith("        default: false")
+    ref = re.compile(r"\binputs\.allow_build_config\b")
+    for job, block in jobs(text).items():
+        uses = [l.strip() for l in code_lines(block) if ref.search(l)]
+        if job == "land":
+            assert uses == ["allow-build-config: ${{ inputs.allow_build_config && 'true' || 'false' }}"], uses
+            land = [s for s in steps(block) if LAND_ACTION in s]
+            assert len(land) == 1 and uses[0] in land[0]
+        elif job in AGENT_JOBS[name]:
+            assert len(uses) == 1 and uses[0].startswith("PROTECTED_FILES: ${{ inputs.allow_build_config && '"), (job, uses)
+        else:
+            assert uses == [], job
+    assert text.count("allow-build-config:") == 1
+
+
+def test_the_reviewer_lands_no_bundle_and_takes_no_build_config_opt_in():
+    # The reviewer's land job refuses any bundle, so the `workflows` step
+    # never runs there and the opt-in would mean nothing: no input, and the
+    # land call passes none.
+    text = workflow_text("claude-review.yml")
+    assert "allow_build_config" not in text and "allow-build-config" not in text
+    land = [s for s in steps(jobs(text)["land"]) if LAND_ACTION in s]
+    assert len(land) == 1 and 'refuse-bundle: "true"' in land[0]
+
+
+@pytest.mark.parametrize("stub", ["claude-stub.yml", "claude-auto-stub.yml"])
+def test_the_example_stubs_document_the_build_config_opt_in_and_leave_it_off(stub):
+    # A copied stub keeps the default: the opt-in is a per-repository
+    # decision (Land: tier-2 opt-in), shown commented in every job that calls
+    # a workflow that pushes.
+    text = (ROOT / "examples" / stub).read_text()
+    assert not [l for l in code_lines(text) if "allow_build_config" in l]
+    calls = [l for l in text.splitlines() if l.startswith("    uses: meridianlabs-ai/agents/.github/workflows/")]
+    assert calls and all("claude-review.yml" not in l for l in calls)
+    assert text.count("      # allow_build_config: true\n") == len(calls)
+
+
 CLAUDE_RECIPE_SET = "hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != ''"
 SANDBOXED = "(needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true')"
 

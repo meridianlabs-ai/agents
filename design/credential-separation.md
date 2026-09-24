@@ -946,8 +946,10 @@ results against the invariant each one tests.
   the next run of the reusable workflows executes it during provisioning,
   at agent start or in the agent's tests — as `codex` or, since plan step 5
   of executed-paths-residual.md, as `claude-agent`, never as `runner`
-  (SECURITY.md → Guarantees); relaxing the build and dependency group for
-  callers that opt in is that design's plan step 6. Price: a task that needs a dependency bump, a
+  (SECURITY.md → Guarantees). Since that design's plan step 6 a caller
+  that opts in (`allow_build_config`, passed to land as
+  `allow-build-config`) lets the build and dependency group land; the
+  rest stays refused. Price: a task that needs a dependency bump (without the opt-in), a
   `CLAUDE.md`/`AGENTS.md` edit or a composite-action change — most of this
   repo's own code is under `.github/` — is done from a maintainer's
   machine; so is a base-merge conflict the agent resolves in one of these

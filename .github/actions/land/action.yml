@@ -10,7 +10,8 @@ description: >-
   branch that moved during the run, and never a bundle that changes files
   under .github/workflows/, which the machine account may not push, or
   another entry point or configuration file a later automated job executes
-  or loads), open
+  or loads, build and dependency configuration included unless the caller
+  passes `allow-build-config`), open
   or adopt the PR, post the
   de-fanged comments, inline review comments and review replies, resolve
   review threads that belong to that PR, file follow-up issues in
@@ -345,6 +346,28 @@ inputs:
       validator: the manifest's error and comments still land.
     required: false
     default: "true"
+  allow-build-config:
+    description: >-
+      "true" lets a bundle change build and dependency configuration (tier 2
+      of lib.sh's protected paths: `pyproject.toml`, `setup.py`,
+      `setup.cfg`, `uv.lock`, `uv.toml`, `.python-version`,
+      `requirements*.txt`, `package.json`, the npm, pnpm and yarn lockfiles
+      and configuration files, `.npmrc`, `.yarn/`, at any depth): the
+      `workflows` step then checks tier 1 alone — `.github/` and agent
+      instructions and settings, with the symlinks and `@path` imports they
+      reach — and refuses it as before. The default, "false", refuses both
+      tiers. Pass "true" only when EVERY automated job that later checks out
+      and runs code from the branches this land job pushes provisions and
+      runs its agent (the CLI and every tool call) as an unprivileged user,
+      as the reusable workflows' agent jobs do
+      (design/executed-paths-residual.md → Land: tier-2 opt-in): the rule is
+      per repository, since other writers push to the same branches. Claude
+      Security finding 4628446's criterion 2 is then met for tier 2 by that
+      isolation instead of by refusal (decision: Ransom, 2026-09-23). A
+      fixed value in the caller's workflow file, never one derived from the
+      event.
+    required: false
+    default: "false"
 
 outputs:
   pushed:
@@ -599,7 +622,8 @@ runs:
     # Report says so in one line. The same holds, since Claude Security
     # finding 4628446 (criterion 2, 2026-09-23), for the entry points and
     # configuration files a later automated job on the branch EXECUTES or
-    # LOADS (lib.sh's PROTECTED_PATHSPECS and what they reach; not the
+    # LOADS (lib.sh's TIER1_PATHSPECS and, unless the caller passed
+    # `allow-build-config`, TIER2_PATHSPECS, and what they reach; not the
     # ordinary files those run — an accepted gap stated there and in
     # SECURITY.md): the machine account's push would move
     # agent-written files into the same-repo tree the next run — the
@@ -657,6 +681,7 @@ runs:
         REMOTE_SHA: ${{ steps.fetch.outputs.remote_sha }}
         BASE_SHA: ${{ steps.fetch.outputs.base_sha }}
         LIB: ${{ github.action_path }}/lib.sh
+        ALLOW_BUILD_CONFIG: ${{ inputs.allow-build-config == 'true' && '1' || '' }}
         GIT_CONFIG_GLOBAL: /dev/null
       run: |
         set -euo pipefail
@@ -675,17 +700,22 @@ runs:
           exit 1
         fi
         # The paths later automated jobs on the branch execute or load as
-        # configuration: lib.sh's PROTECTED_PATHSPECS (the list, and why
-        # each entry is on it, are there) plus what the protected entries
+        # configuration: lib.sh's TIER1_PATHSPECS and, unless the caller
+        # passed `allow-build-config`, TIER2_PATHSPECS (the lists, and why
+        # each entry is on them, are there) plus what the checked entries
         # REACH, at the baseline and at head_sha — symlink targets (this
         # repo's own `.claude/skills -> ../skills`) and CLAUDE.md `@path`
         # imports (protected_reach) — so editing a link's target or an
         # imported file changes loaded configuration no less than editing
-        # the protected path itself. A failed walk refuses unchecked.
+        # the protected path itself. A failed walk refuses unchecked. Under
+        # the opt-in a tier-2 file that a tier-1 entry reaches (a link or an
+        # import into it) is still refused.
         . "$LIB"
+        specs=("${TIER1_PATHSPECS[@]}")
+        [ -n "$ALLOW_BUILD_CONFIG" ] || specs+=("${TIER2_PATHSPECS[@]}")
         reach=()
         for rev in "$from" "$HEAD_SHA"; do
-          if ! protected_reach "$rev" "${PROTECTED_PATHSPECS[@]}" >"$RUNNER_TEMP/protected-reach"; then
+          if ! protected_reach "$rev" "${specs[@]}" >"$RUNNER_TEMP/protected-reach"; then
             echo "::error::land: could not follow the symlinks and imports of the protected paths at $rev (see above); refusing the bundle unchecked."
             exit 1
           fi
@@ -697,7 +727,7 @@ runs:
         # substitution's exit status is invisible to set -e, and a failed
         # diff must not read as "no protected files". (A file, not a
         # variable: the NUL separators a shell variable cannot hold.)
-        if ! git diff -z --name-only --no-renames "$from" "$HEAD_SHA" -- "${PROTECTED_PATHSPECS[@]}" ${reach[@]+"${reach[@]}"} >"$RUNNER_TEMP/workflow-paths"; then
+        if ! git diff -z --name-only --no-renames "$from" "$HEAD_SHA" -- "${specs[@]}" ${reach[@]+"${reach[@]}"} >"$RUNNER_TEMP/workflow-paths"; then
           echo "::error::land: could not list the paths the bundle changes (git diff failed, see above); refusing the bundle unchecked."
           exit 1
         fi
@@ -750,7 +780,9 @@ runs:
           files="${files%, }"
           [ "${#agent[@]}" -le 20 ] || files="$files and $(( ${#agent[@]} - 20 )) more"
           echo "files=$files" >>"$GITHUB_OUTPUT"
-          echo "::error::land: the agent's commits change files later automated runs execute or load as configuration ($files) — workflows, which the machine account may not push (it has no Workflows permission), anything else under .github/, agent instructions and settings, or build and dependency configuration; refusing the bundle — such changes are made from a maintainer's machine, where a human reads them before automation runs them."
+          kinds="anything else under .github/, agent instructions and settings, or build and dependency configuration"
+          [ -z "$ALLOW_BUILD_CONFIG" ] || kinds="anything else under .github/, or agent instructions and settings"
+          echo "::error::land: the agent's commits change files later automated runs execute or load as configuration ($files) — workflows, which the machine account may not push (it has no Workflows permission), $kinds; refusing the bundle — such changes are made from a maintainer's machine, where a human reads them before automation runs them."
           exit 1
         fi
         echo "land: ${#paths[@]} workflow or other executed file(s) between $what and $HEAD_SHA changed only by the base merge (matching origin's base at ${BASE_SHA}); not the agent's."
@@ -1357,6 +1389,9 @@ runs:
         # The workflow and other executed files a refused bundle changes
         # (agent-chosen paths; the hint de-fangs them).
         WORKFLOW_FILES: ${{ steps.workflows.outputs.files }}
+        # Whether the `workflows` step left the build and dependency group
+        # (tier 2) unchecked: the hint then does not name it.
+        ALLOW_BUILD_CONFIG: ${{ inputs.allow-build-config == 'true' && '1' || '' }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
         # The PR step runs only after the push succeeded or was not needed,
         # and its failure skips every step that follows — so it is exactly
@@ -1417,7 +1452,7 @@ runs:
         # The landing-failure note is our own text (lib.sh), so it needs no
         # de-fang — and it names no trigger token either.
         if [ -n "$failed" ]; then
-          hint=$(landing_failure_hint "$failed" "$PUSHED" "$withheld" "$WORKFLOW_FILES")
+          hint=$(landing_failure_hint "$failed" "$PUSHED" "$withheld" "$WORKFLOW_FILES" "$ALLOW_BUILD_CONFIG")
           {
             printf '⚠️ **Landing failed** at step(s): %s' "$failed"
             [ -z "$withheld" ] || printf ' (never ran: %s)' "$withheld"

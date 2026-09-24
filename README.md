@@ -99,6 +99,19 @@ there makes the run fail validation. A failed provisioning fails the run, so
 keep the recipe green. See [design/architecture.md](design/architecture.md)
 for the mechanics and the inspect_ai-fork caveat.
 
+**Optional — let the agents change dependencies.** By default the land job
+refuses agent commits that change build and dependency configuration
+(`pyproject.toml`, `setup.py`, `uv.lock`, `requirements*.txt`, `package.json`,
+the npm, pnpm and yarn lockfiles, …), so a dependency bump is made from a
+maintainer's machine. Set `allow_build_config: true` in your dev-agent and
+`@auto` stubs to let such commits land (the example stubs show where). Do so
+only when nothing else in your repository checks out an agent's branch and
+runs its code as the runner — a scheduled agent job that continues an earlier
+agent branch, for example; see
+[design/executed-paths-residual.md](design/executed-paths-residual.md) → Land:
+tier-2 opt-in. `.github/` and agent instructions and settings (`CLAUDE.md`,
+`AGENTS.md`, `.claude/`, …) stay refused either way.
+
 ## Using the dev agent
 
 Trigger it by:
