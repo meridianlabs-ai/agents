@@ -28,8 +28,17 @@ relay ("only the blocking one", "soften the tone", "also ask about X").
    - courteous, concrete, actionable; no internal jargon;
    - NEVER mention the proxy issue, marvin, or Meridian tracking internals —
      but the AI origin IS disclosed, via the standard footer in step 4;
-   - keep blocking/non-blocking framing ("needs fixing before merge" vs
-     "optional/nit").
+   - label every finding with one of two severities, and keep the label
+     through the rewrite (decision: Ransom, 2026-09-24; his two-level
+     standard from 2026-09-11):
+     - **Blocking**: needs fixing before merge;
+     - **Optional**: take it or leave it, and say so in those words.
+
+     No third level: never write "nit", "should fix", "minor" or similar
+     as a severity. A finding the review tags non-blocking, nit or minor is
+     relayed as Optional;
+   - a finding the review lists under "Not this PR" is not relayed as a
+     request on the contributor's PR: it is out of scope for their change.
 
 3. **Map to diff lines.** For each finding with a file:line, check the line is
    part of the PR diff (`gh pr diff <M> --repo <upstream>`; inline comments
