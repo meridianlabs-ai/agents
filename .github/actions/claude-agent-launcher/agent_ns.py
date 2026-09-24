@@ -72,6 +72,9 @@ CHECK_TIMEOUT_S = 120
 POLL_S = 0.1
 
 
+libc = ctypes.CDLL(None, use_errno=True)
+
+
 class Refused(Exception):
     """A launch precondition failed; the message says which."""
 
@@ -352,6 +355,16 @@ def regrant_workspace(workspace):
 # --- agent-ns-launch ----------------------------------------------------------
 
 
+PR_SET_PDEATHSIG = 1
+
+
+def arm_parent_death_signal():
+    """SIGKILL this process when its parent (sudo) dies."""
+    if libc.prctl(PR_SET_PDEATHSIG, ctypes.c_ulong(signal.SIGKILL), 0, 0, 0) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, f"prctl(PR_SET_PDEATHSIG): {os.strerror(e)}")
+
+
 def launch(argv):
     if len(argv) != 2:
         raise Refused("usage: agent-ns-launch <handoff> <action pid>")
@@ -364,7 +377,16 @@ def launch(argv):
     invoker_uid = int(os.environ.get("SUDO_UID", "-1"))
     if invoker_uid <= 0:
         raise Refused("no invoking user (SUDO_UID)")
-    start = check_action_process(action_pid, invoker_uid, os.getppid())
+    # Die with `sudo` (the SDK-owned pid) from here on, not only once the
+    # exec below arms setpriv's --pdeathsig: the preparation takes a while,
+    # and a sudo killed in that window must not leave this process running
+    # it, reparented. Checked again after arming, so a sudo that died before
+    # the prctl is caught too.
+    sudo_pid = os.getppid()
+    arm_parent_death_signal()
+    if os.getppid() != sudo_pid:
+        raise Refused("sudo exited before the launch was armed")
+    start = check_action_process(action_pid, invoker_uid, sudo_pid)
     pidfd = os.pidfd_open(action_pid)
     if proc_stat(action_pid)[2] != start:
         raise Refused("the action process changed while its pidfd was opened")
@@ -403,7 +425,6 @@ def launch(argv):
 # --- agent-ns-init ------------------------------------------------------------
 
 
-libc = ctypes.CDLL(None, use_errno=True)
 MS_RDONLY, MS_NOSUID, MS_NODEV, MS_REMOUNT, MS_BIND = 1, 2, 4, 32, 4096
 MNT_DETACH = 2
 

@@ -685,3 +685,13 @@ def test_the_path_smoke_runs_for_both_agent_users():
     assert "user: [codex, claude-agent]" in wf and "SMOKE_USER: ${{ matrix.user }}" in wf
     smoke = (ROOT / "tests" / "codex_path_smoke.sh").read_text()
     assert 'U=${SMOKE_USER:-codex}' in smoke and 'if [ "$U" = codex ]; then CODEX_HOME_DIR' in smoke
+
+
+def test_the_launch_dies_with_sudo_before_it_prepares_anything():
+    text = AGENT_NS.read_text()
+    body = text[text.index("def launch(argv):"):]
+    armed = body.index("arm_parent_death_signal()")
+    assert body.index("sudo_pid = os.getppid()") < armed < body.index("if os.getppid() != sudo_pid:")
+    for later in ("check_action_process(", "write_settings(", "grant_wif(", "regrant_workspace(", "os.execve("):
+        assert armed < body.index(later), later
+    assert "libc.prctl(PR_SET_PDEATHSIG, ctypes.c_ulong(signal.SIGKILL)" in text

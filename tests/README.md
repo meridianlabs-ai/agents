@@ -422,7 +422,10 @@ Testing a change).
   namespace read is recorded, the pinned-version pattern against sample
   `run.ts` files), the isolation check's arguments, and `reclaim.sh`'s
   removal of the WIF ACL and the agent's config dir (real xattrs on Linux).
-  The namespace itself runs in the hosted canary's `claude-launcher` job.
+  The namespace itself is not run by any test here or in CI: the hosted
+  canary's `claude-launcher` job stops at an intentional refusal before the
+  namespace exists, and a successful launch needs a CLI stand-in that has
+  not been written yet (design/executed-paths-residual.md → Testing).
 - `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
   the same way against a stub `gh`: an issue's `auto` label is the run's
   opt-in only when the account that applied it most recently is a human

@@ -1276,13 +1276,17 @@ Untrusted input reaching the new code, and how each is handled:
   plan until step 4. Ransom chose to assess the boundary with Claude
   Security scans instead of a hostile-probe canary ("in reality we
   probably won't rely on the adversarial probes and will use Claude
-  Security scans instead"), so step 4 ships the unit tests, the smoke
-  cases and a probe-free `claude-launcher` canary job, and the next two
-  bullets record the rejected plan. The launch chain's teardown (the CLI's
-  exit, a KILL of `sudo`, the action process's exit) was exercised by hand
-  in a privileged container while step 4 was written.
-- **The action's post-CLI window, against the real SDK** (not built; see
-  above).
+  Security scans instead"). Step 4 keeps the non-adversarial part: a
+  benign CLI stand-in that reports its own environment, argv and mount
+  view, launched through the real SDK in both grant modes (completion,
+  teardown, the WIF/config grant and its reclaim), with the report
+  compared with the tokens runner-side. The next two bullets describe the
+  full original plan; their hostile probes are not built. The launch
+  chain's teardown (the CLI's exit, a KILL of `sudo`, the action process's
+  exit) was exercised by hand in a privileged container while step 4 was
+  written; that is not a substitute for the benign launch coverage.
+- **The action's post-CLI window, against the real SDK** (its
+  non-adversarial variants are kept; see above).
   `tests/sdk_barrier/` is a small harness pinned to the SDK version the
   action's lockfile resolves (0.3.280 today). It runs **under Bun**, at
   the version the action pins (`bun-version` in its `action.yml`,
@@ -1342,7 +1346,7 @@ Untrusted input reaching the new code, and how each is handled:
 
   The round-1 and round-2 reviewer probes (2,237 ms, 2,713 ms, 3,003 ms)
   become these regression cases.
-- **Hosted canary** (the probe-driven jobs are not built; see above).
+- **Hosted canary** (the adversarial probes are not built; see above).
   `engine-isolation-canary.yml` gains a `claude-boundary`
   job, which runs the real claude-code-action at `@v1` on this repository
   (the Claude App is installed here and WIF matches `meridianlabs-ai`). It
@@ -1473,13 +1477,18 @@ Untrusted input reaching the new code, and how each is handled:
    `claude` wrapper, `agent-ns-launch`, `agent-ns-init`, the adapted
    isolation check), the post-agent reclaim's cleanup of the WIF ACL and
    the agent's config dir, `codex_path_smoke.sh`'s claude-agent cases, the
-   wrapper and namespace unit tests, and a canary job (`claude-launcher`)
-   that runs the composite on a hosted runner without a probe. Run the
-   canary green before step 5. The hostile-probe parts of Testing — the
-   probe fixture, `tests/sdk_barrier/`, and the `claude-boundary`,
-   `claude-revoke-window` and `claude-sandbox-review` jobs — are not part of
-   this step: the boundary is assessed with Claude Security scans instead
-   (decision: Ransom, 2026-09-24; Testing).
+   wrapper and namespace unit tests, a canary job (`claude-launcher`) that
+   runs the composite on a hosted runner, and benign launch coverage: a CLI
+   stand-in that reports only its own environment, argv and mount view for
+   a runner-side by-value comparison with the tokens, launched through the
+   real SDK in both grant modes with normal completion and teardown, the
+   WIF/config grant and the reclaim after it. Run the canary green before
+   step 5. The adversarial parts of Testing (the `/proc` and escape probes,
+   the fsmonitor survivors, and the `claude-revoke-window` and
+   `claude-sandbox-review` jobs) are not part of this step: the boundary is
+   assessed with Claude Security scans instead (decision: Ransom,
+   2026-09-24; Testing). The benign launch coverage is still missing from
+   PR #165.
 5. **Switch the Claude jobs.** In the four workflows, remove
    `claude-setup` and the runner fallback. Add steps 2-4, the launcher, the
    executable input, the post-agent reclaim, the moved `reset-origin-url`,
