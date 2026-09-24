@@ -15,8 +15,10 @@ compose steps do (the same `bin` directories) and runs each as the codex
 user under codex-action's launch shape (`sudo -u codex` with a reset PATH)
 by absolute path, then by name under `codex sandbox` (the codex CLI's own
 command environment and the workflows' `workspace_net` profile) with a
-`bwrap` planted in `~codex/.local/bin` that codex must not run (the pinned
-system bubblewrap comes first; without the pin it does run it), then the
+`bwrap` planted in each bin directory that codex must not run from any of
+eight working directories, the pins' own trees included (the pinned system
+bubblewrap comes first; with only the link pin from `/usr`, or without the
+pins, it does run one), then the
 fixture's `gate` there if it has one (a project script whose tools find one
 another on PATH), then `check.sh`.
 

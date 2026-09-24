@@ -189,14 +189,19 @@ text are checked by the tests under `tests/`.
   commands. Those commands get the provisioned tools' directories on their
   PATH (codex's `config.toml`; never the job PATH), and the directories are
   codex-writable, while codex's Linux sandbox runs the first `bwrap` on
-  that PATH outside the command's working directory. So before writing the
-  PATH, the codex jobs install the distribution's bubblewrap and put a
-  root-owned directory holding only a link to `/usr/bin/bwrap` first on
-  it, refusing to write the PATH if the binary or any directory on the way
-  is not root's alone. The hosted canary plants a `bwrap` in
-  `~codex/.local/bin` and checks that codex's sandbox does not run it, and
-  that it does when the pin is left off (decision: Ransom, 2026-09-24;
-  design/codex-engine.md → Tools in the codex sandbox).
+  that PATH that, resolved, is not under the command's working directory.
+  So before writing the PATH, the codex jobs install the distribution's
+  bubblewrap and put two root-owned directories first on it: one holding
+  only a link to `/usr/bin/bwrap`, one holding only a copy of it under
+  `/var/lib`. No working directory but `/`, where codex excludes nothing,
+  contains both, so one of them is always taken. The PATH is not written
+  if the binary or any directory on the way is not root's alone. The
+  hosted canary plants a `bwrap` in each of the three writable directories
+  and checks that codex's sandbox runs none of them from the workspace,
+  `/usr`, `/usr/bin`, `/var/lib`, either pin directory, `/tmp` or `/`, and
+  that it does reach one with only the link pin and cwd `/usr`, and with
+  no pin (decision: Ransom, 2026-09-24; design/codex-engine.md → Tools in
+  the codex sandbox).
 - The reviewer runs only when a trusted commenter asks for it, except inside
   the `@auto` loop, where the machine account requests each round's review.
 - A CI-fix round acts on the PR its failed run is bound to, not on the

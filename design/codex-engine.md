@@ -712,8 +712,9 @@ counterpart.
   scripts they start. codex-action rejects `shell_environment_policy` in
   `codex-args`, so the file is the only route, as for the network profile.
   **The bwrap pin** (decision: Ransom, 2026-09-24). codex's Linux sandbox
-  helper runs the first `bwrap` on the command's PATH that is not under the
-  command's working directory, and falls back to the bubblewrap bundled
+  helper runs the first `bwrap` on the command's PATH that, canonicalised,
+  is not under the command's working directory (cwd `/` excluding
+  nothing), and falls back to the bubblewrap bundled
   with codex only when there is none (codex-rs/sandboxing/src/bwrap.rs
   `find_system_bwrap_in_path`; codex-rs/linux-sandbox/README.md). The
   hosted image ships no bubblewrap, and the new PATH leads with directories
@@ -724,12 +725,19 @@ counterpart.
   would run every later command outside the profile sandbox. So the
   `reset-home` mode first runs `create-codex-user/pin-bwrap.sh`: it
   installs the `bubblewrap` package with apt (the lists are refreshed and
-  the install retried on failure; roughly 10-30 s per codex job), checks
-  that `/usr/bin/bwrap` and every directory from `/` to the pin are root's
-  alone, and re-creates `/usr/lib/codex-bwrap`, root-owned, holding only a
-  `bwrap` link to it. `codex-home.sh` puts that directory first on the
-  PATH, and refuses to write the PATH without it. codex then uses the
-  system bubblewrap (0.9 on 24.04), as it does wherever one is installed.
+  the install retried on failure; 4-14 s per job on the hosted canary),
+  checks that `/usr/bin/bwrap` and every directory from `/` to each pin
+  are root's alone, and re-creates two root-owned directories:
+  `/usr/lib/codex-bwrap`, holding only a `bwrap` link to it, and
+  `/var/lib/codex-bwrap`, holding only a root-owned copy of it.
+  `codex-home.sh` puts both first on the PATH, and refuses to write the
+  PATH without them. Two, because the cwd test runs on the canonical path:
+  the link counts as `/usr/bin/bwrap`, so from `/usr` or `/usr/bin` codex
+  would skip it and reach the writable directories (review round 1 of
+  #163). No cwd but `/` contains both `/usr/bin/bwrap` and
+  `/var/lib/codex-bwrap/bwrap`, so one of them is always taken. codex then
+  uses the system bubblewrap (0.9 on 24.04), as it does wherever one is
+  installed.
   The alternatives were leaving the residual documented (containment
   resting on the codex user alone) and per-tool wrappers in a root-owned
   directory instead of the bin directories (only listed tools would
@@ -742,9 +750,14 @@ counterpart.
   path, above), and the recipe runs as codex under `env -i` and cannot
   reach `GITHUB_PATH`. The canary's `caller-recipes` job runs every
   discovered tool, and the ts-mono-like fixture's turbo gate, by name under
-  `codex sandbox` as codex, after planting a `bwrap` in
-  `~codex/.local/bin`: codex must not run it with the pin, and does
-  without (the positive control).
+  `codex sandbox` as codex, after planting a `bwrap` in each of the three
+  bin directories. codex must run none of them from the workspace, `/usr`,
+  `/usr/bin`, `/var/lib`, either pin directory, `/tmp` or `/`. Each run
+  must either succeed or fail inside the system bubblewrap (outside the
+  workspace the profile makes the cwd a root it cannot write). The
+  positive controls are that
+  it does reach one with only the link pin and cwd `/usr`, and with no
+  pin.
 - **CI-trigger parity depends on the machine account's secrets**: codex-path
   pushes fall back to `github.token` where the app secrets are absent, and
   those pushes do not trigger CI (the Claude path pushes via the app token,

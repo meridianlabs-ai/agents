@@ -149,10 +149,13 @@ description: >-
   `bwrap` on that PATH outside the command's working directory, so before
   writing it the pass runs `pin-bwrap.sh` (decision: Ransom, 2026-09-24):
   it installs the distribution's bubblewrap (the hosted image has none)
-  and re-creates `/usr/lib/codex-bwrap`, root-owned, holding only a `bwrap`
-  link to `/usr/bin/bwrap`, which goes first on the PATH. A `bwrap` codex
-  or its provisioning plants is then never the one that sandboxes codex's
-  commands.
+  and re-creates two root-owned directories, `/usr/lib/codex-bwrap`
+  holding only a `bwrap` link to `/usr/bin/bwrap` and `/var/lib/codex-bwrap`
+  holding only a copy of it, which go first on the PATH. There are two
+  because codex skips a candidate whose resolved path is under the
+  command's working directory, and no directory but `/` contains both. A
+  `bwrap` codex or its provisioning plants is then never the one that
+  sandboxes codex's commands.
 
   Runs no git command against the checkout. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
@@ -194,7 +197,7 @@ inputs:
       the re-created `config.toml` as the PATH of every command codex runs,
       ahead of the PATH sudo gives the codex user; an empty or relative
       entry, a single quote or a control character fails the step. The
-      pinned bubblewrap's directory goes first (`pin-bwrap.sh`, which the
+      pinned bubblewrap's two directories go first (`pin-bwrap.sh`, which the
       step runs before, installing `bubblewrap` with apt). Empty (the
       default, and what a skipped provisioning step passes) leaves codex's
       commands on sudo's PATH and installs nothing. Ignored by `create`,

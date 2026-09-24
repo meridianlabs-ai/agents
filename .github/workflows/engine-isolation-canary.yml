@@ -63,8 +63,9 @@
 #                          way the compose steps do and run each as codex
 #                          under codex-action's launch shape, by absolute
 #                          path and then by name under `codex sandbox` with
-#                          a planted ~codex/.local/bin/bwrap it must not
-#                          run (the pinned bubblewrap first), run
+#                          a bwrap planted in each bin dir that it must not
+#                          run from any cwd tried (the pinned bubblewrap
+#                          first), run
 #                          the fixture's `gate` there (ts-mono-like's turbo
 #                          `pnpm check`), then the fixture's own checks
 #                          (interpreter/Node version, groups, lockfile
@@ -328,12 +329,21 @@ jobs:
           got=$(run /bin/sh -c 'command -v bwrap')
           [ "$got" = /usr/lib/codex-bwrap/bwrap ] || { echo "::error::the first bwrap on codex's command PATH is '$got', not the pin"; exit 1; }
           for cwd in "$GITHUB_WORKSPACE" /usr /usr/bin /usr/lib/codex-bwrap /var/lib /var/lib/codex-bwrap /tmp /; do
-            # Must succeed too: a run that failed before choosing a bwrap
-            # would pass the marker check vacuously.
-            rc=0; sudo -u codex -- "$codex" sandbox -P workspace_net -C "$cwd" -- /bin/true || rc=$?
+            # Not vacuous: the run either succeeds or fails inside the
+            # system bubblewrap, whose messages start `bwrap: ` (outside
+            # the workspace the profile makes cwd a root it cannot write,
+            # e.g. "bwrap: Can't mkdir /usr/.codex"); a run that failed
+            # before choosing a bwrap would pass the marker check for
+            # nothing. A plant writes the marker and exits 97.
+            rc=0; sudo -u codex -- "$codex" sandbox -P workspace_net -C "$cwd" -- /bin/true 2>"$RUNNER_TEMP/sandbox.err" || rc=$?
             if [ -e "$marker" ]; then echo "::error::with cwd $cwd codex ran a planted bwrap: $(cat "$marker")"; exit 1; fi
-            [ "$rc" = 0 ] || { echo "::error::with cwd $cwd the sandboxed /bin/true failed (exit $rc)"; exit 1; }
-            echo "cwd $cwd: sandboxed /bin/true ran, no planted bwrap ran"
+            if [ "$rc" = 0 ]; then
+              echo "cwd $cwd: sandboxed /bin/true ran; no planted bwrap ran"
+            elif grep -q '^bwrap: ' "$RUNNER_TEMP/sandbox.err"; then
+              echo "cwd $cwd: the system bubblewrap ran and refused ($(grep -m1 '^bwrap: ' "$RUNNER_TEMP/sandbox.err")); no planted bwrap ran"
+            else
+              echo "::error::with cwd $cwd codex failed (exit $rc) without the system bubblewrap speaking:"; cat "$RUNNER_TEMP/sandbox.err"; exit 1
+            fi
           done
           # Positive controls: the plants are reachable. Only the link pin,
           # cwd /usr (codex skips /usr/bin/bwrap there), then no pin at all.

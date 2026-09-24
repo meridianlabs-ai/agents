@@ -448,12 +448,13 @@ Testing a change).
   directories it appends them, ahead of the PATH sudo gives the user, as
   the `shell_environment_policy.set` PATH of codex's commands, and refuses
   an empty or relative entry or a character a TOML literal string cannot
-  hold, and puts the bwrap pin directory first, refusing without it),
-  `pin-bwrap.sh` against stub `sudo`/`apt-get`/`stat` (installs bubblewrap
-  when missing, refreshing the lists and retrying on a failed install and
-  giving up after three; re-creates the pin directory holding only the
-  `bwrap` link; refuses a binary or directory hop that is not root's alone
-  and a pin the codex user could write) and its `reset-home` step (kills,
+  hold, and puts the two bwrap pin directories first, refusing without
+  them), `pin-bwrap.sh` against stub `sudo`/`apt-get`/`stat`/`install`
+  (installs bubblewrap when missing, refreshing the lists and retrying on a
+  failed install and giving up after three; re-creates the link pin and
+  the copy pin, each holding only `bwrap`, in trees that share nothing but
+  `/`; refuses a binary, copy or directory hop that is not root's alone and
+  a pin the codex user could write) and its `reset-home` step (kills,
   then the pin when there are bin directories, then the home script with
   the `bin` input; refuses while `pkill` keeps finding codex processes),
   and every codex job's reset step passes the provisioning step's `bin`
