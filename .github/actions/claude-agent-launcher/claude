@@ -1,0 +1,281 @@
+#!/bin/bash
+# The Claude agent's launch wrapper: claude-code-action's
+# `path_to_claude_code_executable`, installed root-owned as
+# /opt/meridian-agent/bin/claude by the claude-agent-launcher composite
+# (design/executed-paths-residual.md → The launcher (step 5) and the wrapper).
+# The action's SDK spawns it with the CLI's argv and the action process's
+# environment — the App token in GH_TOKEN/GITHUB_TOKEN, the MCP servers
+# carrying it on the argv — as the runner. It never hands any of that to the
+# agent: it rebuilds the argv and an allow-listed environment, prepares git,
+# refuses a launch that would still carry a privileged token or that the
+# action's post-CLI branch cleanup could act on, writes the result to a
+# runner-only handoff file and execs `sudo -n agent-ns-launch`, which starts
+# the real CLI as the unprivileged `claude-agent` user in its own PID and
+# mount namespace.
+#
+# Two paths:
+#   - passthrough: `claude --version`, or any call not from the action step
+#     (CLAUDE_CODE_ACTION != 1), execs the real root-owned CLI as the caller
+#     with the caller's environment — the reviewer's version check, nothing
+#     else;
+#   - launch: everything else. Every refusal exits non-zero before the agent
+#     starts; the message goes to stderr, which the SDK reports.
+#
+# Everything it trusts comes from the root-owned run directory next to its
+# own `bin` (the launcher wrote it), never from the environment the SDK
+# hands it. Arguments are data: nothing is evaluated.
+set -euo pipefail
+
+die() { printf 'claude-agent wrapper: refusing to launch the agent: %s\n' "$*" >&2; exit 1; }
+
+case "$0" in
+  /*/bin/claude) root=${0%/bin/claude} ;;
+  *) die "run by its absolute path (as /opt/meridian-agent/bin/claude), not '$0'" ;;
+esac
+run="$root/run"
+read_run() { # <name>: the one line the launcher recorded
+  local v=""
+  [ -f "$run/$1" ] && [ ! -L "$run/$1" ] || die "$run/$1 is missing"
+  IFS= read -r v <"$run/$1" || true
+  printf '%s' "$v"
+}
+caller_path=${PATH:-}
+PATH=$(read_run system-path)
+[ -n "$PATH" ] || PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+cli=$(read_run cli)
+
+# --- passthrough ---------------------------------------------------------------
+if [ "${CLAUDE_CODE_ACTION:-}" != 1 ] || { [ "$#" -eq 1 ] && [ "$1" = --version ]; }; then
+  PATH=$caller_path exec "$cli" "$@"
+fi
+
+# --- launch --------------------------------------------------------------------
+grant=$(read_run grant)
+case "$grant" in workspace|none) ;; *) die "unknown grant mode '$grant' in $run/grant" ;; esac
+ws=$(read_run workspace)
+rt=$(read_run runner-temp)
+recorded_head=$(read_run head)
+agent_path=$(read_run path)
+runner_root=$(read_run runner-root)
+agent_home=/home/claude-agent
+agent_config_dir="$agent_home/.anthropic-config"
+wif_dir="$rt/claude-workload-identity"
+
+# The job token is the one token the agent may hold (read-only by the job's
+# `permissions:`). Every other value the action put in GH_TOKEN, GITHUB_TOKEN
+# or OVERRIDE_GITHUB_TOKEN — the App token, or a caller's PAT or minted token
+# passed as `github_token` — is privileged and may appear nowhere in what the
+# agent gets. In job-token mode (`github_token: ${{ github.token }}`) all
+# three equal the job token and the set is empty.
+job=${DEFAULT_WORKFLOW_TOKEN:-}
+[ -n "$job" ] || die "DEFAULT_WORKFLOW_TOKEN (the job token) is not set"
+priv=()
+for v in "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}" "${OVERRIDE_GITHUB_TOKEN:-}"; do
+  if [ -n "$v" ] && [ "$v" != "$job" ]; then priv+=("$v"); fi
+done
+holds_privileged() { # <string>: a privileged token value occurs in it
+  local t
+  for t in ${priv[@]+"${priv[@]}"}; do
+    case "$1" in *"$t"*) return 0 ;; esac
+  done
+  return 1
+}
+
+[ "${1:-}" != plugin ] || die "a 'plugin' command would run as the agent without this launch's preparation"
+
+# 1. The argv. Each --mcp-config value is JSON (a parse failure refuses):
+#    drop the five servers the action composes, by name, and any other server
+#    whose JSON holds a privileged token value anywhere. Then the wrapper's
+#    flag settings file, last.
+mcp_rewrite() {
+  printf '%s' "$1" | jq -ces --args '
+    if length != 1 then error("not exactly one JSON value") else .[0] end
+    | if type != "object" then error("not an object") else . end
+    | if has("mcpServers") then
+        if (.mcpServers | type) != "object" then error("mcpServers is not an object") else . end
+        | .mcpServers |= with_entries(select(
+            (.key | IN("github_comment", "github_inline_comment", "github_file_ops", "github", "github_ci") | not)
+            and ((.key + "\n" + (.value | tostring)) as $s | [$ARGS.positional[] | . as $t | $s | contains($t)] | any | not)))
+      else . end' ${priv[@]+"${priv[@]}"}
+}
+args=("$@")
+out=()
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a=${args[$i]}
+  case "$a" in
+    --mcp-config)
+      out+=("$a")
+      i=$((i + 1))
+      n=0
+      # The CLI takes one or more values (variadic); every one is rewritten.
+      while [ "$i" -lt "${#args[@]}" ] && [ "${args[$i]#-}" = "${args[$i]}" ]; do
+        v=$(mcp_rewrite "${args[$i]}") || die "--mcp-config value $((n + 1)) is not a JSON MCP config"
+        out+=("$v")
+        i=$((i + 1)); n=$((n + 1))
+      done
+      [ "$n" -ge 1 ] || die "--mcp-config has no value"
+      ;;
+    --mcp-config=*)
+      v=$(mcp_rewrite "${a#--mcp-config=}") || die "--mcp-config value is not a JSON MCP config"
+      out+=("--mcp-config=$v")
+      i=$((i + 1))
+      ;;
+    --settings|--settings=*)
+      die "the argv already names --settings; the wrapper's flag settings file must be the only one"
+      ;;
+    *)
+      out+=("$a")
+      i=$((i + 1))
+      ;;
+  esac
+done
+out+=(--settings "$run/settings.json")
+
+# 2. The environment: a fixed allow-list of names, as `env -i` input.
+envv=()
+add_env() { envv+=("$1=$2"); }
+pass_env() { # <name>...: each set, non-empty incoming value, verbatim
+  local n
+  for n in "$@"; do
+    if [ -n "${!n:-}" ]; then add_env "$n" "${!n}"; fi
+  done
+}
+add_env HOME "$agent_home"
+add_env PATH "$agent_path"
+add_env SHELL /bin/bash
+add_env DISABLE_AUTOUPDATER 1
+pass_env LANG
+pass_env CLAUDE_CODE_ACTION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS \
+  CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY \
+  CLAUDE_AGENT_SDK_VERSION DETAILED_PERMISSION_MESSAGES GITHUB_ACTION_INPUTS
+pass_env ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID \
+  ANTHROPIC_SCOPE ANTHROPIC_BASE_URL ANTHROPIC_PROFILE \
+  ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+add_env GH_TOKEN "$job"
+add_env GITHUB_TOKEN "$job"
+pass_env GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_API_URL GITHUB_RUN_ID GITHUB_EVENT_NAME \
+  MCP_TIMEOUT MCP_TOOL_TIMEOUT MAX_MCP_OUTPUT_TOKENS
+# The step's job-token credential helper, as the workflows set it today.
+if [ -n "${GIT_TOKEN:-}" ]; then
+  [ "$GIT_TOKEN" = "$job" ] || die "GIT_TOKEN is not the job token"
+  add_env GIT_TOKEN "$job"
+fi
+if [ -n "${GIT_CONFIG_COUNT:-}" ]; then
+  case "$GIT_CONFIG_COUNT" in [0-9]|1[0-6]) ;; *) die "GIT_CONFIG_COUNT '$GIT_CONFIG_COUNT' is out of range" ;; esac
+  add_env GIT_CONFIG_COUNT "$GIT_CONFIG_COUNT"
+  n=0
+  while [ "$n" -lt "$GIT_CONFIG_COUNT" ]; do
+    k="GIT_CONFIG_KEY_$n" v="GIT_CONFIG_VALUE_$n"
+    add_env "$k" "${!k:-}"
+    add_env "$v" "${!v:-}"
+    n=$((n + 1))
+  done
+fi
+
+# 3. Workload Identity: the token file is the one the action writes (the
+#    ACL entries that let the agent read it are agent-ns-launch's), and the
+#    profile dir is replaced by the agent's own copy (agent-ns-launch writes
+#    it from the handoff), so the CLI's credential cache is the agent's.
+wif_config=""
+if [ -n "${ANTHROPIC_IDENTITY_TOKEN_FILE:-}" ]; then
+  [ "$ANTHROPIC_IDENTITY_TOKEN_FILE" = "$wif_dir/identity-token" ] ||
+    die "ANTHROPIC_IDENTITY_TOKEN_FILE is '$ANTHROPIC_IDENTITY_TOKEN_FILE', not the action's $wif_dir/identity-token"
+  add_env ANTHROPIC_IDENTITY_TOKEN_FILE "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+fi
+if [ -n "${ANTHROPIC_CONFIG_DIR:-}" ]; then
+  case "$ANTHROPIC_CONFIG_DIR" in
+    "$wif_dir"/config-*) ;;
+    *) die "ANTHROPIC_CONFIG_DIR '$ANTHROPIC_CONFIG_DIR' is not the action's profile dir under $wif_dir" ;;
+  esac
+  profile="$ANTHROPIC_CONFIG_DIR/configs/default.json"
+  [ -f "$profile" ] && [ ! -L "$profile" ] || die "$profile is not the action's profile file"
+  wif_config=$(cat "$profile")
+  add_env ANTHROPIC_CONFIG_DIR "$agent_config_dir"
+fi
+
+# 4. Settings: the action merged our `settings` input into the runner's
+#    user settings; the agent gets them as a root-owned flag settings file,
+#    which takes precedence over the user settings it can write.
+settings_file="$HOME/.claude/settings.json"
+[ -f "$settings_file" ] && [ ! -L "$settings_file" ] || die "the action's settings file $settings_file is missing"
+settings=$(cat "$settings_file")
+printf '%s' "$settings" | jq -e 'type == "object"' >/dev/null || die "$settings_file is not a JSON object"
+
+# 5. Git, as the runner over the reclaimed .git: the credential-free origin
+#    URL (the action's prepare wrote the App token into it), then a fresh
+#    snapshot for the post-agent reclaim (prepare also set user.name/email,
+#    which the pre-action snapshot lacks). The re-grant of .git and the root
+#    (workspace mode) is agent-ns-launch's, after the last runner git below.
+gitr() { GIT_CONFIG_GLOBAL=/dev/null git -C "$ws" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+[ -n "${GITHUB_SERVER_URL:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] || die "GITHUB_SERVER_URL and GITHUB_REPOSITORY are required"
+gitr remote set-url origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" || die "cannot reset origin's URL"
+cp "$ws/.git/config" "$rt/git-config.pre-codex" || die "cannot snapshot .git/config"
+
+# 6. A branch the action's prepare created (an issue run, or a closed or
+#    merged PR) is the `claudeBranch` its post-CLI cleanup would commit and
+#    push to as the runner if it exists on origin — so it must not. Only "no
+#    such ref" lets the launch proceed; a hit or a lookup error refuses.
+if cur=$(gitr symbolic-ref -q HEAD); then :; else
+  cur="detached:$(gitr rev-parse --verify HEAD)" || die "cannot read HEAD"
+fi
+if [ "$cur" != "$recorded_head" ]; then
+  case "$cur" in
+    refs/heads/?*) branch=${cur#refs/heads/} ;;
+    *) die "HEAD is '$cur', neither the checkout the launcher recorded ('$recorded_head') nor a new branch" ;;
+  esac
+  rc=0
+  # shellcheck disable=SC2016 # the helper expands $GIT_TOKEN when git runs it
+  GIT_TOKEN=$job GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+    GIT_CONFIG_KEY_1="credential.$GITHUB_SERVER_URL.helper" \
+    GIT_CONFIG_VALUE_1='!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' \
+    GIT_TERMINAL_PROMPT=0 gitr ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    2) ;;
+    0) die "the action checked out a new branch '$branch' that already exists on origin — its post-CLI cleanup would commit and push to it as the runner" ;;
+    *) die "cannot tell whether the new branch '$branch' exists on origin (git ls-remote exit $rc)" ;;
+  esac
+fi
+
+# The by-value check: no privileged token anywhere the agent reaches.
+for v in "${out[@]}"; do holds_privileged "$v" && die "a privileged token value is on the rewritten argv"; done
+for v in "${envv[@]}"; do holds_privileged "$v" && die "a privileged token value is in the agent's environment"; done
+holds_privileged "$settings" && die "a privileged token value is in the settings"
+holds_privileged "$wif_config" && die "a privileged token value is in the WIF profile"
+holds_privileged "$(cat "$ws/.git/config")" && die "a privileged token value is in .git/config"
+
+# 7. The handoff, runner-only, and the namespace. The paths the isolation
+#    check must find unreachable: the step's command files, the runner's
+#    registration key, the downloaded actions, the runner's settings and
+#    this handoff's own directory.
+hdir="$rt/claude-agent-launch"
+rm -rf "$hdir"
+(umask 077 && mkdir "$hdir") || die "cannot create $hdir"
+unreach=()
+for f in "${GITHUB_ENV:-}" "${GITHUB_PATH:-}" "${GITHUB_OUTPUT:-}" "${GITHUB_STATE:-}" "${GITHUB_STEP_SUMMARY:-}"; do
+  if [ -n "$f" ]; then unreach+=("$f"); fi
+done
+if [ -n "$runner_root" ]; then unreach+=("$runner_root/.credentials_rsaparams" "$runner_root"); fi
+if [ -n "${RUNNER_WORKSPACE:-}" ]; then unreach+=("${RUNNER_WORKSPACE%/*}/_actions"); fi
+unreach+=("$settings_file" "$hdir")
+file="$hdir/handoff"
+section() { # <name> <item>...
+  local name=$1
+  shift
+  printf '%s\0%s\0' "$name" "$#"
+  if [ "$#" -gt 0 ]; then printf '%s\0' "$@"; fi
+}
+(
+  umask 077
+  {
+    printf '%s\0' meridian-agent-handoff-1
+    section argv "${out[@]}"
+    section env "${envv[@]}"
+    section unreachable "${unreach[@]}"
+    section settings "$settings"
+    if [ -n "$wif_config" ]; then section wif-config "$wif_config"; else section wif-config; fi
+  } >"$file"
+) || die "cannot write the handoff"
+cd /
+exec sudo -n "$root/bin/agent-ns-launch" "$file" "$PPID"

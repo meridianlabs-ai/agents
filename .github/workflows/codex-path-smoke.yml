@@ -3,7 +3,8 @@
 # search path). Not a caller stub and not an agent run: no secret, no model,
 # no codex-action. Two jobs on the stock `ubuntu-latest` image:
 #
-#   guard      runs tests/codex_path_smoke.sh — the reviewed composite bodies
+#   guard      runs tests/codex_path_smoke.sh, once as the codex user and once
+#              as claude-agent (SMOKE_USER) — the reviewed composite bodies
 #              of THIS revision (lifted from the checkout, not `@main`, so a
 #              branch is tested as itself) with the real codex user, the real
 #              image PATH and real sudo: the pre-grant check passes on the
@@ -45,11 +46,19 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Once per agent user: codex, and claude-agent, the Claude jobs' user
+    # (design/executed-paths-residual.md → The agent user), on its own VM.
+    strategy:
+      fail-fast: false
+      matrix:
+        user: [codex, claude-agent]
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Run the smoke harness against this revision
+        env:
+          SMOKE_USER: ${{ matrix.user }}
         run: bash tests/codex_path_smoke.sh
       # The runner chose this step's interpreter from the job PATH, which
       # never held the workspace venv: the planted bash did not run.
