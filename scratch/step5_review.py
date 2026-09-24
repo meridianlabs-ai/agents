@@ -3,4 +3,4 @@
 
 def safe_div(a: float, b: float) -> float:
     """Return a / b, or 0.0 when b is 0."""
-    return a / b
+    return 0.0 if b == 0 else a / b
