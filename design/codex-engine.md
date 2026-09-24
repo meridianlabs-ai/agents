@@ -575,7 +575,9 @@ usage`, guard and commit steps must complete normally, no step's log may
 show `HIJACKED`, and a scratch step after the reclaim that prints `$PATH`
 must show no entry under the workspace. Control: nothing in a codex job
 adds to the job PATH before `Create codex user` since the engine split (the
-caller's `claude-setup` runs only in the Claude job), so a live control
+caller's `claude-setup` then ran only in the Claude job, and since plan
+step 5 of design/executed-paths-residual.md it runs in no agent job), so a
+live control
 needs a scratch workflow step that appends `$GITHUB_WORKSPACE/.venv/bin` to
 `GITHUB_PATH` before it: the run must go red on `Create codex user` with
 the entry named in its log, the codex step skipped, and the Surface comment
@@ -596,8 +598,10 @@ counterpart.
   writes die with the runner (decided after inspect_ai#392's review
   produced four static "blocking" findings of uncertain reality). The
   reviewer
-  workflow provisions a fallback venv (uv dev-install, as the runner)
-  when claude-setup is absent and a pyproject.toml
+  workflow provisions a fallback venv (uv dev-install; as the runner
+  when claude-setup was absent until 2026-09-24, as the agent user in
+  place of claude-setup since plan step 5 of
+  design/executed-paths-residual.md) when a pyproject.toml
   exists, so PR heads on the inspect_ai fork (cut from pristine main;
   cross-repository fork heads are deliberately never provisioned, issue
   #59) — and Python caller repos that never added claude-setup — get
