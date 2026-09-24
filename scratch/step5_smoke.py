@@ -1,4 +1,4 @@
-"""Scratch module for the executed-paths-residual step 5 smoke run (#168)."""
+"""Scratch fixture for the step 5 real-model runs (#168); must not be merged."""
 
 
 def double(x: int) -> int:
