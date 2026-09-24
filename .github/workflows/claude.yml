@@ -2441,6 +2441,9 @@ jobs:
         uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
         with:
           mode: reset-home
+          # The provisioned tools on the PATH of codex's own commands, never
+          # the job PATH (create-codex-user's `bin` input).
+          bin: ${{ steps.setup.outputs.bin }}
 
       - name: Compose codex prompt
         id: codexcompose
@@ -2463,16 +2466,19 @@ jobs:
           BIN: ${{ steps.setup.outputs.bin }}
         run: |
           set -euo pipefail
-          # Verification instruction keyed on what provisioning did, with the
-          # tools' ABSOLUTE paths: under the unprivileged-user strategy
-          # codex-action launches codex via `sudo -u codex` (no -E), and
-          # sudo's env_reset/secure_path replaces PATH before codex starts —
-          # so a venv on PATH would NOT resolve as bare names there
-          # (inspect_flow#818 dev run, 2026-09-09: `command -v pytest ruff
-          # mypy` printed nothing under codex while the venv was on the
-          # runner PATH). The provisioning step ran as codex, so there is no
-          # runner PATH to discover from either: the tools are looked up in
-          # the venv's bin directory the composite reports. A provisioning
+          # Verification instruction keyed on what provisioning did. Under
+          # the unprivileged-user strategy codex-action launches codex via
+          # `sudo -u codex` (no -E), and sudo's env_reset/secure_path
+          # replaces PATH before codex starts, so the job PATH never reaches
+          # codex (inspect_flow#818 dev run, 2026-09-09: `command -v pytest
+          # ruff mypy` printed nothing under codex while the venv was on the
+          # runner PATH); the Reset codex home step writes the composite's
+          # `bin` directories into codex's config.toml as the PATH of every
+          # command codex runs instead, so the tools resolve by name there,
+          # and so do project scripts that find one another by name (a
+          # turbo-run pnpm script). The provisioning step ran as codex, so
+          # there is no runner PATH to discover from: the tools named below
+          # are looked up in those same directories. A provisioning
           # failure reaches this branch only on the tolerated codex conflict
           # path (fatal otherwise — the agent is skipped), so that text names
           # the conflicted dependency file as the likely cause.
@@ -2484,7 +2490,7 @@ jobs:
                 [ -x "$d/$t" ] && { tools="$tools$t=$d/$t "; break; }
               done
             done
-            verify="Verify your work with the locally provisioned tools where relevant. Your process runs under sudo with a reset PATH, so bare command names will NOT resolve — invoke them by these ABSOLUTE paths: ${tools:-none discovered}."
+            verify="Verify your work with the locally provisioned tools where relevant. Their directories are on the PATH of every command you run, so they resolve by name, as do project scripts that call one another: ${tools:-none discovered}."
           elif [ "${SETUP_OUTCOME:-}" = "failure" ]; then
             verify="NOTE: environment provisioning FAILED before you started (on this conflicted run the likely cause is a conflicted dependency file — pyproject.toml or a lockfile — see the merge conflict task below), so pytest and the project's dependencies are probably NOT installed. Resolve the merge conflict first; THEN you may provision them yourself (network is available inside your sandbox): create .venv in the project root and dev-install the project into it (e.g. /usr/bin/python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' — .venv/ and *.egg-info/ are already git-excluded; keep it to that). If that fails too, verify as far as the bare runner allows (py_compile, reading the code) and state plainly in your final message that verification was static-only — the next run provisions normally once the resolved branch is pushed."
           else

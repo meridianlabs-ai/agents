@@ -6,8 +6,8 @@
 # directory (the checkout) either way, and the two GITHUB_PATH appends
 # below run only when the file is there to append to (the runner case,
 # where the Claude engine's bare `pytest`/`ruff`/`mypy` need it; codex
-# starts under its own reset PATH and is handed the venv's absolute paths
-# by the compose steps instead). One optional argument: a caller's own
+# starts under its own reset PATH and gets the venv's bin directory on its
+# commands' PATH from its config.toml instead). One optional argument: a caller's own
 # recipe file (the reusable workflows' `codex_provision` input, written to
 # $RUNNER_TEMP by the composite), run in place of the default venv +
 # dev-install block after the uv bootstrap — the caller's trusted counterpart

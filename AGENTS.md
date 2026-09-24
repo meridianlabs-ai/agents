@@ -162,8 +162,10 @@ take effect on every repo's next run.
   runs as `runner`. Never put a path under `$GITHUB_WORKSPACE` on
   `GITHUB_PATH` in a job that runs codex (the codex jobs provision with
   `provision-fallback` `user: codex`, whose recipe runs under `env -i` and
-  cannot reach `GITHUB_PATH`; the codex prompts get the tools by absolute
-  path from the composite's `bin` output); `create-codex-user` walks every
+  cannot reach `GITHUB_PATH`; codex's own commands get the composite's
+  `bin` directories on their PATH from codex's `config.toml`, which
+  `create-codex-user`'s `reset-home` mode writes, and that PATH is never
+  the job's); `create-codex-user` walks every
   hop of every PATH entry (symlink targets too) before the grant, refuses a
   workspace hop, makes a codex-writable hop outside the workspace
   runner-only (the image ships `/opt` and `/usr/local/bin` mode 777) and
