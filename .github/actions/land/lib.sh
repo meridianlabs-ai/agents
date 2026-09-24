@@ -123,7 +123,7 @@ remote_branch_exists() {
   return 1
 }
 
-# open_or_adopt_pr REPO BRANCH BASE TITLE BODY_FILE — adopt the open PR
+# open_or_adopt_pr REPO BRANCH BASE TITLE BODY_FILE [DRAFT] — adopt the open PR
 # whose head is REPO's own BRANCH if there is one (the agent may have opened
 # it itself — the fork's prompt mandates it), else create one; prints
 # `adopted|opened <number> <url>`. Only a SAME-REPO head is adopted:
@@ -139,8 +139,12 @@ remote_branch_exists() {
 # whose response was lost (timeout / 5xx after the write) is found by the
 # next attempt's list and adopted, not re-created into "a pull request
 # already exists". Same two paths as claude.yml's "Open or adopt PR".
+# DRAFT `true` (the caller's `pr-draft`) creates the PR as a draft; an
+# adopted PR's draft state is never touched, either way — a maintainer may
+# already have marked it ready (a create whose response was lost is adopted
+# as the draft it was created as).
 open_or_adopt_pr() {
-  local repo="$1" branch="$2" base="$3" title="$4" body_file="$5" owner="${1%%/*}" list found skipped url
+  local repo="$1" branch="$2" base="$3" title="$4" body_file="$5" draft="${6:-false}" owner="${1%%/*}" list found skipped url
   list=$(gh pr list --repo "$repo" --head "$branch" --state open \
            --json number,url,isCrossRepository,headRepositoryOwner,headRefName) || return 1
   # Logins are case-insensitive on GitHub; the repo input may not carry the
@@ -158,8 +162,11 @@ open_or_adopt_pr() {
     "land: not adopting PR #\(.number) (\(.url)): its head \(.headRepositoryOwner.login // "?"):\(.headRefName // "?") is not \($repo) \($branch) (cross-repository: \(.isCrossRepository | tostring)); opening a PR for the pushed branch instead."' \
             <<<"$list") || return 1
   [ -z "$skipped" ] || printf '%s\n' "$skipped" >&2
+  # The arguments are all read; "$@" carries the optional flag (an empty
+  # array would trip `set -u` on bash < 4.4).
+  if [ "$draft" = "true" ]; then set -- --draft; else set --; fi
   url=$(gh pr create --repo "$repo" --head "$branch" --base "$base" \
-          --title "$title" --body-file "$body_file") || return 1
+          --title "$title" --body-file "$body_file" "$@") || return 1
   echo "opened ${url##*/} $url"
 }
 

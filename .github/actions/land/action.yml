@@ -12,7 +12,8 @@ description: >-
   another entry point or configuration file a later automated job executes
   or loads, build and dependency configuration included unless the caller
   passes `allow-build-config`), open
-  or adopt the PR, post the
+  (as a draft under the caller's `pr-draft`) or adopt the PR and assign it
+  to the caller's `pr-assignees`, post the
   de-fanged comments, inline review comments and review replies, resolve
   review threads that belong to that PR, file follow-up issues in
   allow-listed repos (or comment on, reopen and assign existing ones) and
@@ -179,6 +180,35 @@ inputs:
       Callers that open PRs keep the default.
     required: false
     default: "false"
+  pr-draft:
+    description: >-
+      "true" opens the PR this action creates for `pr.open` as a draft
+      (`gh pr create --draft`), so a human reads it before any agent or loop
+      acts on it (inspect_flow's scheduled workflows, whose agents read
+      third-party input). A PR this action ADOPTS keeps its draft state
+      either way: a maintainer may already have marked it ready, and this
+      action never flips it. The trusted caller's decision, never the
+      agent's, so it is an input and not a `pr` manifest key (the validator
+      refuses a `pr.draft`); exactly "true" or "false", anything else
+      refuses the landing before anything is pushed or posted. Default
+      "false": the PR opens ready for review, as before.
+    required: false
+    default: "false"
+  pr-assignees:
+    description: >-
+      Comma-separated GitHub logins (no spaces, no repeats, at most 10)
+      assigned to the PR this action opens or adopts for `pr.open`, on both
+      paths, with `gh pr edit --add-assignee`: existing assignees stay, and
+      re-adding one is a no-op, so an adopted PR a human already owns keeps
+      its owner. A PR the manifest names by `pr_number` is not touched. Like
+      `pr-draft`, the caller's decision and not a manifest key (the
+      validator refuses a `pr.assignees`); a malformed value refuses the
+      landing. A failed assignment does not fail the PR step — the PR
+      exists, and the hand-back, hand-off and stage move still run — but is
+      recorded like a lost comment: the Report step names it on the PR and
+      fails the run at the end. Default empty: no assignment, as before.
+    required: false
+    default: ""
   start-sha:
     description: >-
       The run's start SHA as the caller's TRUSTED context recorded it before
@@ -467,6 +497,8 @@ runs:
         ALLOWED_ASSIGNEES: ${{ inputs.allowed-issue-assignees }}
         MAX_ISSUES: ${{ inputs.max-issues }}
         ALLOWED_PR_LABELS: ${{ inputs.allowed-pr-labels }}
+        PR_DRAFT: ${{ inputs.pr-draft }}
+        PR_ASSIGNEES: ${{ inputs.pr-assignees }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
@@ -477,6 +509,7 @@ runs:
           --branch-prefix "$BRANCH_PREFIX" ${REFUSE_BUNDLE:+--refuse-bundle} ${REFUSE_PR:+--refuse-pr} ${ALLOW_REVIEW:+--allow-review} \
           --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
           --max-issues "$MAX_ISSUES" --allowed-pr-labels "$ALLOWED_PR_LABELS" \
+          --pr-draft "$PR_DRAFT" --pr-assignees "$PR_ASSIGNEES" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.
@@ -842,12 +875,17 @@ runs:
         # Base of a PR whose manifest sets none — what `gh pr create` would
         # default to anyway, resolved here so no converting workflow has to.
         DEFAULT_BRANCH: ${{ inputs.default-branch || steps.lookup.outputs.default_branch }}
+        # The caller's PR policy (inputs, never manifest keys), shape-checked
+        # by the validate step.
+        PR_DRAFT: ${{ inputs.pr-draft }}
+        PR_ASSIGNEES: ${{ inputs.pr-assignees }}
       run: |
         set -euo pipefail
         . "$LIB"
         [ -n "$GH_TOKEN" ] || { echo "::error::land: token is empty."; exit 1; }
         m="$DIR/manifest.json"
         number="$PR_NUMBER"
+        failed=""
         if [ -z "$number" ] && [ "$PR_OPEN" = "true" ]; then
           # remote_branch_exists (lib.sh) answers yes/no and fails only on a
           # non-404 error, so a transient API blip is retried rather than
@@ -867,12 +905,33 @@ runs:
           # open_or_adopt_pr (lib.sh) under retry: the adopt check is inside
           # the retried unit, so a create whose response was lost is adopted
           # by the next attempt, not re-created. Prints `adopted|opened N URL`.
+          # `pr-draft` reaches the create only; an adopted PR's draft state
+          # is left as it is.
           result=$(retry 3 "open or adopt PR for $BRANCH" \
-                     open_or_adopt_pr "$REPO" "$BRANCH" "$base" "$title" "$RUNNER_TEMP/pr-body.md") \
+                     open_or_adopt_pr "$REPO" "$BRANCH" "$base" "$title" "$RUNNER_TEMP/pr-body.md" "$PR_DRAFT") \
             || { echo "::error::land: could not open or adopt a PR for $BRANCH."; exit 1; }
           read -r how number url <<<"$result"
           [[ "$number" =~ ^[0-9]+$ ]] || { echo "::error::land: open-or-adopt returned '$result'."; exit 1; }
           echo "land: $how PR #$number ($url) for $BRANCH."
+          # Assignees on BOTH paths, from the caller's `pr-assignees` (the
+          # validator refused anything but comma-separated logins, so each
+          # entry is one login). `--add-assignee` keeps existing assignees,
+          # so adopting a PR a human owns leaves them in place. A failure
+          # does not fail this step — the PR exists and the hand-back,
+          # hand-off and stage move are still owed — but is recorded in the
+          # `failed` output, which Report names on the PR and fails the run
+          # over, like the Post step's lost comments.
+          if [ -n "$PR_ASSIGNEES" ]; then
+            IFS=, read -r -a logins <<<"$PR_ASSIGNEES"
+            args=()
+            for a in "${logins[@]}"; do args+=(--add-assignee "$a"); done
+            if retry 3 "assign #$number" gh pr edit "$number" --repo "$REPO" "${args[@]}"; then
+              echo "land: assigned #$number to ${logins[*]}."
+            else
+              failed="assign of #$number to ${logins[*]} failed"
+              echo "::error::land: $failed"
+            fi
+          fi
           # Labels on BOTH paths, like claude.yml: the `auto` label opts the
           # PR into the loop and engine:* selects the engine, and an
           # agent-opened (adopted) PR would otherwise never get them — the
@@ -898,6 +957,7 @@ runs:
           fi
         fi
         echo "number=$number" >>"$GITHUB_OUTPUT"
+        echo "failed=$failed" >>"$GITHUB_OUTPUT"
 
     # Comments, inline review comments, review replies, thread resolutions,
     # follow-up issues, the Slack text. Every body passes through defang
@@ -1393,6 +1453,9 @@ runs:
         # (tier 2) unchecked: the hint then does not name it.
         ALLOW_BUILD_CONFIG: ${{ inputs.allow-build-config == 'true' && '1' || '' }}
         POST_FAILED: ${{ steps.post.outputs.failed }}
+        # What the PR step recorded without failing (a `pr-assignees`
+        # assignment that did not take).
+        PR_STEP_FAILED: ${{ steps.pr.outputs.failed }}
         # The PR step runs only after the push succeeded or was not needed,
         # and its failure skips every step that follows — so it is exactly
         # when a planned hand-back, hand-off or stage move is owed but never
@@ -1432,6 +1495,7 @@ runs:
         for kv in $OUTCOMES; do
           case "$kv" in *=failure) failed="${failed:+$failed, }${kv%=failure}" ;; esac
         done
+        [ -z "$PR_STEP_FAILED" ] || failed="${failed:+$failed, }pr ($PR_STEP_FAILED)"
         [ -z "$POST_FAILED" ] || failed="${failed:+$failed, }post ($POST_FAILED)"
         [ -z "$failed" ] || echo "::error::land: step(s) failed: $failed"
         # Planned steps that never ran because the PR step failed after the

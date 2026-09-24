@@ -270,6 +270,19 @@ true` on its own, so a caller whose token reaches the repository's pull
 requests (the `MARVIN_TOKEN` fallback) cannot be made to label an existing
 PR `auto` or post `@review` by a forged artifact.
 
+Whether a PR the land job opens is a draft, and whom the PR it opens or
+adopts is assigned to, are the land job's `pr-draft` and `pr-assignees`
+inputs (2026-09-24), not `pr` manifest keys: the manifest is written by the
+untrusted agent job, and a caller whose agent read third-party input
+(inspect_flow's scheduled workflows) wants its PRs held as drafts for a
+maintainer before any agent or loop acts on them. `KNOWN_PR` has neither
+key, so a `pr.draft` or `pr.assignees` is refused as unknown. The validator
+shape-checks both inputs (`true`/`false`; comma-separated logins, no
+repeats, at most ten) and refuses the landing on a malformed value. The
+draft state is set at create only; an adopted PR keeps whatever state a
+maintainer left it in. A failed assignment is recorded and reported like a
+lost comment rather than failing the PR step.
+
 The review fields — `review_verdict`, `comments[].review` and
 `review_comments` — are accepted only on a land job whose caller passes
 `allow-review`, which claude-review.yml alone does (Claude Security finding

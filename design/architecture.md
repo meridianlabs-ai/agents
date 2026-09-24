@@ -447,7 +447,10 @@ Three rules define the shape:
   privileged token through the same step-scoped credential-helper block as
   every other push — never `--force`, and the read and the write are
   separate steps because a step has one `GIT_TOKEN`. After the push it
-  opens or adopts the PR, posts comments and review replies, resolves only
+  opens or adopts the PR (opened as a draft, and assigned on both paths,
+  when the caller's `pr-draft` / `pr-assignees` inputs say so: the trusted
+  caller's policy, never manifest keys; an adopted PR's draft state is
+  left as it is), posts comments and review replies, resolves only
   the review threads that belong to that PR, files follow-up issues in
   allow-listed repos (or comments on, reopens and assigns existing ones)
   and puts them on Atlas by node ID at Todo, posts the manifest's Slack text
