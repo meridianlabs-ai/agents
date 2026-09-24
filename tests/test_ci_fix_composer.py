@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import WORKFLOW_FILES_RULE, sh, git, step_block, job_block  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, WORKFLOW_FILES_RULE_ALLOWED, assert_prompt_rule, claude_prompt, sh, git, step_block, job_block  # noqa: E402
 
 
 def composer_script(engine: str = "claude") -> str:
@@ -154,10 +154,17 @@ def test_a_codex_round_whose_guard_did_not_succeed_lands_nothing(repo):
     assert not (landing / "agent-summary.md").exists()
 
 
-def test_prompts_forbid_workflow_file_edits():
+def test_prompts_forbid_workflow_file_edits(tmp_path):
     # As test_dev_agent_composer: the CI fixer's prompt, on both engines,
     # says not to touch .github/workflows/ — the land composite refuses the
     # whole bundle otherwise.
     text = WORKFLOW.read_text()
-    assert WORKFLOW_FILES_RULE + " in a comment so a maintainer makes it from their machine." in step_block(text, "prompt")
-    assert WORKFLOW_FILES_RULE + " in your final message so a maintainer makes it from their machine." in step_block(text, "codexcompose")
+    assert_prompt_rule(step_block(text, "prompt"), " in a comment so a maintainer makes it from their machine.")
+    assert_prompt_rule(step_block(text, "codexcompose"), " in your final message so a maintainer makes it from their machine.")
+    # The Claude prompt as composed: the build and dependency group is
+    # named as refused unless the caller opted in (allow_build_config).
+    refused = claude_prompt(text, "prompt", tmp_path, allow=False)
+    assert WORKFLOW_FILES_RULE + " in a comment so a maintainer makes it from their machine." in refused
+    allowed = claude_prompt(text, "prompt", tmp_path, allow=True)
+    assert WORKFLOW_FILES_RULE_ALLOWED + " in a comment so a maintainer makes it from their machine." in allowed
+    assert "pyproject.toml" not in allowed and "build and dependency" not in allowed

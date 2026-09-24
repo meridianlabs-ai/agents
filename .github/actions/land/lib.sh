@@ -163,8 +163,8 @@ open_or_adopt_pr() {
   echo "opened ${url##*/} $url"
 }
 
-# landing_failure_hint FAILED PUSHED [WITHHELD [WORKFLOW_FILES]] — the
-# one-line consequence
+# landing_failure_hint FAILED PUSHED [WITHHELD [WORKFLOW_FILES [ALLOW_BUILD_CONFIG]]]
+# — the one-line consequence
 # the Report step adds under "Landing failed at step(s): FAILED" (a
 # comma-separated list of step names, `post (…)` included): whether the
 # agent's commits reached the branch, and which hand-back / verdict /
@@ -178,10 +178,13 @@ open_or_adopt_pr() {
 # load as configuration (its `protected` list) — agent-chosen paths, so they are
 # de-fanged here; empty with `workflows` failed means the step could not list
 # the paths at all (the listing failed, or the push would create the branch
-# and no base tip was fetched) and refused the bundle unchecked. Everything
-# else is our own text, so the line names no live trigger token.
+# and no base tip was fetched) and refused the bundle unchecked.
+# ALLOW_BUILD_CONFIG non-empty (the caller's `allow-build-config`) leaves the
+# build and dependency group out of the refused kinds the line names, since
+# the step did not check it. Everything else is our own text, so the line
+# names no live trigger token.
 landing_failure_hint() {
-  local failed="$1" pushed="$2" withheld="${3:-}" files="${4:-}" hint="" list owed
+  local failed="$1" pushed="$2" withheld="${3:-}" files="${4:-}" allow_build="${5:-}" hint="" list owed kinds
   # Report joins with ", "; match on step names with the spaces removed.
   list=",${failed// /},"
   owed="$list${withheld// /},"
@@ -190,7 +193,9 @@ landing_failure_hint() {
       hint="The landing was refused before any write: the agent's commits were **not** pushed and nothing was posted." ;;
     *,workflows,*)
       if [ -n "$files" ]; then
-        hint="The agent's commits change files later automated runs execute or load as configuration ($(defang_str "$files")): workflows, which the machine account may not push (it has no Workflows permission), anything else under \`.github/\`, agent instructions and settings (\`CLAUDE.md\`, \`AGENTS.md\`, \`.claude/\`, \`.mcp.json\`, …), or build and dependency configuration (\`pyproject.toml\`, lockfiles, \`package.json\`, …). Such changes are made from a maintainer's machine, where a human reads them before automation runs them. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
+        kinds="anything else under \`.github/\`, agent instructions and settings (\`CLAUDE.md\`, \`AGENTS.md\`, \`.claude/\`, \`.mcp.json\`, …), or build and dependency configuration (\`pyproject.toml\`, lockfiles, \`package.json\`, …)"
+        [ -z "$allow_build" ] || kinds="anything else under \`.github/\`, or agent instructions and settings (\`CLAUDE.md\`, \`AGENTS.md\`, \`.claude/\`, \`.mcp.json\`, …)"
+        hint="The agent's commits change files later automated runs execute or load as configuration ($(defang_str "$files")): workflows, which the machine account may not push (it has no Workflows permission), $kinds. Such changes are made from a maintainer's machine, where a human reads them before automation runs them. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
       else
         hint="The landing could not check whether the agent's commits change workflow or other executed files (the listing failed, or a new branch had no base tip to list against; see the run log), so the bundle was refused unchecked. The commits were **not** pushed and are lost with the runner: there is no branch to look for."
       fi ;;
@@ -206,16 +211,23 @@ landing_failure_hint() {
   printf '%s' "$hint"
 }
 
-# PROTECTED_PATHSPECS — the entry points and configuration files a later
-# automated job on an agent's branch executes or loads, as git pathspecs
-# (not everything those run: see below); the `workflows`
-# step refuses a bundle in which the agent changed any of them (Claude
-# Security 4628446, criterion 2, 2026-09-23): the machine account's push
-# would otherwise move agent-written files into the same-repo tree the next
-# run — the reviewer the `@review` hand-back starts, a loop round, a
-# `@claude` follow-up — provisions from as `runner` or reads as
-# instructions, with no human having read them. Grouped by the consumer
-# that reads them from the checkout:
+# TIER1_PATHSPECS, TIER2_PATHSPECS — the entry points and configuration
+# files a later automated job on an agent's branch executes or loads, as git
+# pathspecs (not everything those run: see below); the `workflows` step
+# refuses a bundle in which the agent changed any of them (Claude Security
+# 4628446, criterion 2, 2026-09-23): the machine account's push would
+# otherwise move agent-written files into the same-repo tree the next run —
+# the reviewer the `@review` hand-back starts, a loop round, a `@claude`
+# follow-up — provisions from or reads as instructions, with no human having
+# read them. Tier 1 is always refused. Tier 2 is refused unless the caller
+# passes `allow-build-config: "true"` (design/executed-paths-residual.md →
+# Land: tier-2 opt-in), which a caller may do only when every automated
+# consumer of the branches it pushes provisions and runs its agent as an
+# unprivileged user, as the reusable workflows do since that design's plan
+# step 5; the files then land, and what executes them holds only the
+# read-only job token (decision: Ransom, 2026-09-23: that meets criterion 2
+# for tier 2). Grouped by the consumer that reads them from the checkout:
+#   Tier 1:
 #   - .github/ whole (root only: GitHub reads no nested one): the workflows
 #     (the machine account has no Workflows permission), the composite
 #     actions a workflow runs with `uses: ./…` — the callers' claude-setup,
@@ -231,8 +243,9 @@ landing_failure_hint() {
 #     skills), and the rest of what claude-code-action's
 #     restoreConfigFromBase treats as executable configuration:
 #     .claude.json, .gitmodules, .ripgreprc, .husky/.
-#   - Build and dependency configuration provisioning executes as `runner`,
-#     at every depth (workspace members are built and installed too):
+#   Tier 2:
+#   - Build and dependency configuration provisioning executes, at every
+#     depth (workspace members are built and installed too):
 #     provision-fallback's `uv pip install -e .[dev]` runs the build backend
 #     pyproject.toml / setup.py / setup.cfg name and installs what they, and
 #     uv.toml's indexes and .python-version, select; callers' recipes run
@@ -244,19 +257,21 @@ landing_failure_hint() {
 # claude-setup step, a settings hook or an MCP server command runs, a build
 # backend on `backend-path`, a module a setup.py or build hook imports, any
 # file a caller's recipe reads — are not listed, and an agent's change to
-# one still lands; the next run executes it during provisioning or at
-# agent start (as the codex user on codex jobs, as `runner` on Claude jobs).
-# Closing it is a separate design follow-up (approval gating, dependency
-# following, or an unprivileged Claude user); SECURITY.md → Guarantees
-# states it. Links and CLAUDE.md imports out of these paths are followed by
-# protected_reach below.
+# one still lands; the reusable workflows' next run executes it during
+# provisioning, at agent start or in the agent's own tool calls only as the
+# unprivileged agent user (`codex`, or `claude-agent` on Claude jobs);
+# SECURITY.md → Guarantees states it. Links and CLAUDE.md imports out of
+# the checked paths are followed by protected_reach below.
 # shellcheck disable=SC2034  # read by the land composite's `workflows` step
-PROTECTED_PATHSPECS=(
+TIER1_PATHSPECS=(
   .github
   ':(glob)**/CLAUDE.md' ':(glob)**/CLAUDE.local.md' ':(glob)**/AGENTS.md' ':(glob)**/AGENTS.override.md'
   ':(glob)**/.claude' ':(glob)**/.claude/**' ':(glob)**/.mcp.json' ':(glob)**/.claude.json'
   ':(glob)**/.codex' ':(glob)**/.codex/**' ':(glob)**/.agents' ':(glob)**/.agents/**'
   ':(glob)**/.gitmodules' ':(glob)**/.ripgreprc' ':(glob)**/.husky' ':(glob)**/.husky/**'
+)
+# shellcheck disable=SC2034  # read by the land composite's `workflows` step
+TIER2_PATHSPECS=(
   ':(glob)**/pyproject.toml' ':(glob)**/setup.py' ':(glob)**/setup.cfg'
   ':(glob)**/uv.lock' ':(glob)**/uv.toml' ':(glob)**/.python-version' ':(glob)**/requirements*.txt'
   ':(glob)**/package.json' ':(glob)**/package-lock.json' ':(glob)**/npm-shrinkwrap.json'

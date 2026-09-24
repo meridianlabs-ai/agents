@@ -21,7 +21,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "claude.yml"
 VALIDATOR = ROOT / ".github" / "scripts" / "validate_manifest.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import WORKFLOW_FILES_RULE, run_emit_landing, sh, git, step_block, job_block  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, WORKFLOW_FILES_RULE_ALLOWED, assert_prompt_rule, claude_prompt, run_emit_landing, sh, git, step_block, job_block  # noqa: E402
 
 
 def composer_script(engine: str = "claude") -> str:
@@ -745,11 +745,18 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_reset():
     assert "trusted-logins: ${{ env.TRUSTED_LOGINS }}" in text
 
 
-def test_prompts_forbid_workflow_file_edits():
+def test_prompts_forbid_workflow_file_edits(tmp_path):
     # The land composite refuses a bundle touching .github/workflows/ (the
     # machine account has no Workflows permission), so the dev agent hears
     # it in its LANDING paragraph before spending the run — on both
     # engines: the Claude system prompt and codex's CONSTRAINTS line.
     text = WORKFLOW.read_text()
-    assert WORKFLOW_FILES_RULE + " in a comment so a maintainer makes it from their machine." in step_block(text, "sysprompt")
-    assert WORKFLOW_FILES_RULE + " in your final message so a maintainer makes it from their machine." in step_block(text, "codexcompose")
+    assert_prompt_rule(step_block(text, "sysprompt"), " in a comment so a maintainer makes it from their machine.")
+    assert_prompt_rule(step_block(text, "codexcompose"), " in your final message so a maintainer makes it from their machine.")
+    # The Claude prompt as composed: the build and dependency group is
+    # named as refused unless the caller opted in (allow_build_config).
+    refused = claude_prompt(text, "sysprompt", tmp_path, allow=False)
+    assert WORKFLOW_FILES_RULE + " in a comment so a maintainer makes it from their machine." in refused
+    allowed = claude_prompt(text, "sysprompt", tmp_path, allow=True)
+    assert WORKFLOW_FILES_RULE_ALLOWED + " in a comment so a maintainer makes it from their machine." in allowed
+    assert "pyproject.toml" not in allowed and "build and dependency" not in allowed

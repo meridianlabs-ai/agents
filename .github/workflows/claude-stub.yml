@@ -166,6 +166,17 @@ jobs:
         (contains(github.event.issue.body, '@i-am-marvin') || contains(github.event.issue.title, '@i-am-marvin')) && '@i-am-marvin' ||
         '@claude'
         }}
+      # allow_build_config (optional, default false; agents repo:
+      # design/executed-paths-residual.md → Land: tier-2 opt-in): let the
+      # agent's commits change build and dependency configuration
+      # (pyproject.toml, setup.py, uv.lock, requirements*.txt, package.json,
+      # the npm, pnpm and yarn lockfiles, …), which the land job otherwise
+      # refuses. Set it in the dev-agent and @auto stubs alike, and only when
+      # no other automation in this repository checks out and runs code from
+      # agent-landed branches as the runner (a scheduled agent job that
+      # continues an earlier agent branch, say; CI on agent PRs does not
+      # count). .github/ and agent instructions stay refused either way.
+      # allow_build_config: true
 
   # @auto kickoff (distinct from the one-shot `claude` above). An `auto` label or
   # `@auto` mention drives the issue autonomously: the dev agent opens a PR, the
@@ -268,3 +279,14 @@ jobs:
       #   uv sync --dev
       trigger_phrase: "@auto"
       label_trigger: "auto"
+      # allow_build_config (optional, default false; agents repo:
+      # design/executed-paths-residual.md → Land: tier-2 opt-in): let the
+      # agent's commits change build and dependency configuration
+      # (pyproject.toml, setup.py, uv.lock, requirements*.txt, package.json,
+      # the npm, pnpm and yarn lockfiles, …), which the land job otherwise
+      # refuses. Set it in the dev-agent and @auto stubs alike, and only when
+      # no other automation in this repository checks out and runs code from
+      # agent-landed branches as the runner (a scheduled agent job that
+      # continues an earlier agent branch, say; CI on agent PRs does not
+      # count). .github/ and agent instructions stay refused either way.
+      # allow_build_config: true
