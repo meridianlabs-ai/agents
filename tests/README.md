@@ -509,7 +509,8 @@ Testing a change).
   default false, read only by the land step (as `allow-build-config`) and
   by each agent job's prompt env; the reviewer, whose land refuses any
   bundle, declares none; the example stubs show it commented out in every
-  job that calls a pushing workflow. Also the composites,
+  job that calls a pushing workflow, and this repo's own stubs set it in
+  every such job. Also the composites,
   lifted and run against stubs:
   `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
   codex -H` when `user` is set, the recipe directly otherwise, a caller
@@ -599,7 +600,8 @@ Testing a change).
   tag and nothing that could start an agent; and the dogfood @auto stub
   (`claude-auto-stub.yml`) equal to `examples/claude-auto-stub.yml` from
   `name:` on, both halves included, except the `workflow_run` `workflows:`
-  line, which names that workflow's `name:`, and its `provision` recipe;
+  line, which names that workflow's `name:`, its `provision` recipe and
+  its uncommented `allow_build_config: true`;
   every job of the three dogfood stubs calling a reusable agent workflow
   with the same recipe (a venv on tests.yml's Python with pytest, what
   tests.yml installs), while the examples leave it commented.

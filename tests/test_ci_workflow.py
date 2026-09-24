@@ -114,6 +114,10 @@ def test_own_auto_stub_is_the_example_watching_the_tests_workflow():
     # and this repo's `provision` recipe, which the example leaves commented
     stub, recipes = RECIPE_BLOCK.subn("", stub)
     assert recipes == 2
+    # and its tier-2 opt-in, which the example leaves commented in each job
+    # (decision: Ransom, 2026-09-24)
+    stub, opt_ins = re.subn(r"^      allow_build_config: true\n", "      # allow_build_config: true\n", stub, flags=re.M)
+    assert opt_ins == 2
     assert body(stub) == body(example)
     # both halves of @auto, as in the example
     jobs = top_level_block(stub, "jobs")
