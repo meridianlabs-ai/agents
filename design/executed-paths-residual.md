@@ -119,7 +119,9 @@ In `claude.yml` `agent-codex` the order is: `create-codex-user` (2082:
 snapshot `.git/config` and the nested `.git` list, create the user, PATH
 check, group-grant the workspace), then `provision-fallback` with `user:
 codex` (2120), then `create-codex-user` `mode: reset-home` (2144: kill
-every codex process, re-create the codex home), then codex-action (2301,
+every codex process, re-create the codex home; since 2026-09-23 also with
+the provisioning's `bin` directories as codex's command PATH, see
+Provisioning), then codex-action (2301,
 which runs `sudo -u codex -- codex exec`). After codex come
 `reclaim-codex-workspace` (2332: kill, refuse a redirected git dir or a
 new embedded repository, chown `.git` back, revoke the group grant on
@@ -470,7 +472,19 @@ the runner.
 
 The composite's `bin` output (venv `bin`, `node_modules/.bin`,
 `~claude-agent/.local/bin`) becomes the CLI's `PATH` prefix (step 5).
-Nothing goes on `GITHUB_PATH`, as on the codex path.
+Nothing goes on `GITHUB_PATH`, as on the codex path. The codex jobs already
+do the same for codex (since 2026-09-23, option B of ts-mono#694's step-2
+finding; decision: Ransom): `create-codex-user`'s `reset-home` mode writes
+the `bin` output into codex's `config.toml` as the PATH of every command
+codex runs, ahead of sudo's PATH. Before that codex named tools by absolute
+path, and ts-mono's turbo-based `pnpm check` failed because turbo looks
+`pnpm` up on PATH (design/codex-engine.md → Tools in the codex sandbox).
+Because those directories are agent-writable and codex's sandbox runs the
+first `bwrap` on that PATH, two root-owned directories go first, one
+holding only a link to the apt-installed `/usr/bin/bwrap` and one only a
+copy of it under `/var/lib` (decision: Ransom, 2026-09-24; two so that one
+survives codex's working-directory exclusion).
+The caller recipes in the table under Compatibility are unchanged by it.
 
 ### Pre-agent reclaim (step 4)
 

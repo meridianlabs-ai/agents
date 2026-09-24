@@ -73,13 +73,17 @@ description: >-
   `pyproject.toml`: a Node repository's recipe runs too (the workflows'
   `if:`), and only the generic recipe needs the Python project.
 
-  The `bin` output is the directories the codex compose steps look the
-  tools up in, colon-separated and absolute — `<workspace>/.venv/bin`,
-  `<workspace>/node_modules/.bin` and, under `user`, `/home/<user>/.local/bin`
-  (where a recipe's `corepack enable --install-directory` or `uv tool
-  install` puts binaries): codex starts under `sudo -u codex` with a reset
-  PATH, so its prompts name every tool by absolute path, and with the recipe
-  running as codex there is no runner PATH to discover them from.
+  The `bin` output is the provisioned tools' directories, colon-separated
+  and absolute — `<workspace>/.venv/bin`, `<workspace>/node_modules/.bin`
+  and, under `user`, `/home/<user>/.local/bin` (where a recipe's `corepack
+  enable --install-directory` or `uv tool install` puts binaries). codex
+  starts under `sudo -u codex` with a reset PATH, and with the recipe
+  running as codex there is no runner PATH to discover the tools from, so
+  the codex jobs hand this output to `create-codex-user`'s `reset-home`
+  mode, which writes it into codex's `config.toml` as the PATH of every
+  command codex runs (executed-paths follow-up, option B, 2026-09-23), and
+  their compose steps look the tools up in the same directories to name
+  them in the prompt.
 
   The recipe (decision: Ransom, 2026-09-01), mirroring the fork's
   claude-setup: the uv installer curl is retried — its tarball download
@@ -100,8 +104,8 @@ description: >-
   way: under the unprivileged-user strategy codex-action launches codex via
   `sudo -u codex` (no -E), and sudo's env_reset/secure_path replaces PATH
   before codex starts (the drop-sudo strategy would forward the runner
-  PATH; this repo does not use it), so the codex prompts name these tools
-  by absolute path, taken from the `bin` output by the compose steps. Fatal on
+  PATH; this repo does not use it), so codex's commands get these tools on
+  their PATH from its `config.toml` instead (the `bin` output, above). Fatal on
   failure, exactly like claude-setup: a repo whose pyproject exists but
   cannot dev-install is a loud signal, not a silent static-only run — the
   callers' Surface steps report a failed outcome. No plain `-e .` fallback:
@@ -172,9 +176,11 @@ inputs:
 outputs:
   bin:
     description: >-
-      Where prompts that must name the tools by absolute path look them up:
-      colon-separated absolute directories — the venv's bin, node_modules'
-      bin and, under `user`, that user's `~/.local/bin`.
+      The provisioned tools' directories, colon-separated and absolute —
+      the venv's bin, node_modules' bin and, under `user`, that user's
+      `~/.local/bin`: the codex jobs put them on the PATH of codex's
+      commands (`create-codex-user`'s `bin` input) and name the tools found
+      there in the prompt.
     value: ${{ github.workspace }}/.venv/bin:${{ github.workspace }}/node_modules/.bin${{ inputs.user != '' && format(':/home/{0}/.local/bin', inputs.user) || '' }}
 
 runs:

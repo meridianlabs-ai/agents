@@ -58,11 +58,18 @@
 #                          pyproject.toml, the recipe-without-Python route):
 #                          this revision's composites provision the fixture
 #                          as codex with its `codex_provision` recipe, reset
-#                          the home, discover the tools the way the compose
-#                          steps do and run each as codex under
-#                          codex-action's launch shape, then the fixture's
-#                          own checks (interpreter/Node version, groups,
-#                          lockfile unchanged).
+#                          the home with the composite's `bin` directories
+#                          as codex's command PATH, discover the tools the
+#                          way the compose steps do and run each as codex
+#                          under codex-action's launch shape, by absolute
+#                          path and then by name under `codex sandbox` with
+#                          a bwrap planted in each bin dir that it must not
+#                          run from any cwd tried (the pinned bubblewrap
+#                          first), run
+#                          the fixture's `gate` there (ts-mono-like's turbo
+#                          `pnpm check`), then the fixture's own checks
+#                          (interpreter/Node version, groups, lockfile
+#                          unchanged).
 #
 # Runs on pushes that touch the composites, the harness, the scanner or the
 # fixtures, by hand, and weekly on `main`: per-job secret delivery is the
@@ -243,10 +250,13 @@ jobs:
           user: codex
           recipe: ${{ steps.fx.outputs.recipe }}
 
+      # As the reusable workflows do: the provisioning's bin directories go
+      # on the PATH of codex's own commands (config.toml).
       - name: Reset codex home (this revision)
         uses: ./.github/actions/create-codex-user
         with:
           mode: reset-home
+          bin: ${{ steps.setup.outputs.bin }}
 
       # Tool discovery exactly as the compose steps do it (the composite's
       # `bin` directories, the same list), then every discovered tool runs
@@ -272,6 +282,104 @@ jobs:
             sudo -u codex -H -- "$path" --version >/dev/null 2>&1 || { echo "::error::$path does not run as codex"; exit 1; }
             echo "runs as codex: $path"
           done
+
+      # The tools by NAME inside codex's own command environment: the
+      # codex CLI codex-action installs, run as codex the way codex-action
+      # launches it (`sudo -u codex --`, sudo's reset PATH), with `codex
+      # sandbox`, which builds each command's environment from the
+      # config.toml the reset wrote (shell_environment_policy) and runs it
+      # under the workflows' workspace_net profile — so a tool resolves only
+      # through the PATH that file gives it. Then the fixture's `gate`, if
+      # it has one: a project script whose tools find one another by name
+      # (ts-mono-like: `pnpm check`, turbo looking pnpm up on PATH). First,
+      # the bwrap pin: codex's sandbox runs the first `bwrap` on the command
+      # PATH that, canonicalised, is not under the command's cwd, and that
+      # PATH now leads with codex-writable directories. So a `bwrap` planted
+      # in each of them (~codex/.local/bin, where provisioning's build
+      # backend writes; .venv/bin and node_modules/.bin, where codex's own
+      # commands write) must never be the one that runs, from any cwd,
+      # including the pins' own trees (/usr, /usr/bin, /var/lib), where
+      # codex skips the candidate that lives there (review round 1 of #163).
+      # Positive controls: the plant does run with only the link pin and
+      # cwd /usr, and with no pin at all. The sysctls are codex-action's
+      # own bubblewrap step.
+      - name: Tools and gate by name under codex's command environment
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+          BIN: ${{ steps.setup.outputs.bin }}
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex >/dev/null
+          codex=$(command -v codex)
+          echo "codex: $codex ($("$codex" --version)); system bwrap: $(command -v bwrap || echo none)"
+          if [ "$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo 1)" != 1 ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 0 ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          grep -A1 '^\[shell_environment_policy.set\]$' /home/codex/.codex/config.toml
+          run() { sudo -u codex -- "$codex" sandbox -P workspace_net -C "$GITHUB_WORKSPACE" -- "$@"; }
+          marker=/tmp/planted-bwrap-ran
+          IFS=: read -r -a dirs <<<"$BIN"
+          for d in "${dirs[@]}"; do
+            sudo -u codex -H -- /bin/sh -c 'mkdir -p "$1" && printf "#!/bin/sh\necho %s >>%s\nexit 97\n" "$1/bwrap" "$2" >"$1/bwrap" && chmod 755 "$1/bwrap"' sh "$d" "$marker"
+          done
+          sudo rm -f "$marker"
+          got=$(run /bin/sh -c 'command -v bwrap')
+          [ "$got" = /usr/lib/codex-bwrap/bwrap ] || { echo "::error::the first bwrap on codex's command PATH is '$got', not the pin"; exit 1; }
+          for cwd in "$GITHUB_WORKSPACE" /usr /usr/bin /usr/lib/codex-bwrap /var/lib /var/lib/codex-bwrap /tmp /; do
+            # Not vacuous: the run either succeeds or fails inside the
+            # system bubblewrap, whose messages start `bwrap: ` (outside
+            # the workspace the profile makes cwd a root it cannot write,
+            # e.g. "bwrap: Can't mkdir /usr/.codex"); a run that failed
+            # before choosing a bwrap would pass the marker check for
+            # nothing. A plant writes the marker and exits 97.
+            rc=0; sudo -u codex -- "$codex" sandbox -P workspace_net -C "$cwd" -- /bin/true 2>"$RUNNER_TEMP/sandbox.err" || rc=$?
+            if [ -e "$marker" ]; then echo "::error::with cwd $cwd codex ran a planted bwrap: $(cat "$marker")"; exit 1; fi
+            if [ "$rc" = 0 ]; then
+              echo "cwd $cwd: sandboxed /bin/true ran; no planted bwrap ran"
+            elif grep -q '^bwrap: ' "$RUNNER_TEMP/sandbox.err"; then
+              echo "cwd $cwd: the system bubblewrap ran and refused ($(grep -m1 '^bwrap: ' "$RUNNER_TEMP/sandbox.err")); no planted bwrap ran"
+            else
+              echo "::error::with cwd $cwd codex failed (exit $rc) without the system bubblewrap speaking:"; cat "$RUNNER_TEMP/sandbox.err"; exit 1
+            fi
+          done
+          # Positive controls: the plants are reachable. Only the link pin,
+          # cwd /usr (codex skips /usr/bin/bwrap there), then no pin at all.
+          cfg_path=$(sed -n "s/^PATH = '\(.*\)'$/\1/p" /home/codex/.codex/config.toml)
+          link_only=${cfg_path/\/var\/lib\/codex-bwrap:/}
+          no_pin=${link_only/\/usr\/lib\/codex-bwrap:/}
+          [ "$link_only" != "$cfg_path" ] && [ "$no_pin" != "$link_only" ] || { echo "::error::could not derive the control PATHs from $cfg_path"; exit 1; }
+          sudo -u codex -- "$codex" -c "shell_environment_policy.set.PATH=\"$link_only\"" \
+            sandbox -P workspace_net -C /usr -- /bin/true || true
+          [ -e "$marker" ] || { echo "::error::positive control missing: with only the link pin and cwd /usr codex did not reach a planted bwrap, so the cwd checks above prove nothing"; exit 1; }
+          echo "control, link pin only, cwd /usr: codex ran $(head -1 "$marker")"
+          sudo rm -f "$marker"
+          sudo -u codex -- "$codex" -c "shell_environment_policy.set.PATH=\"$no_pin\"" \
+            sandbox -P workspace_net -C "$GITHUB_WORKSPACE" -- /bin/true || true
+          [ -e "$marker" ] || { echo "::error::positive control missing: without the pins codex did not run a planted bwrap, so the checks above prove nothing"; exit 1; }
+          echo "control, no pin: codex ran $(head -1 "$marker")"
+          sudo rm -f "$marker"
+          echo "bwrap pin holds: from every cwd tried codex's sandbox ran $(readlink /usr/lib/codex-bwrap/bwrap) or its copy /var/lib/codex-bwrap/bwrap ($(/usr/bin/bwrap --version)), never a planted one"
+          for t in pytest ruff mypy pyright python3 node pnpm npm; do
+            for d in "${dirs[@]}"; do
+              if [ -x "$d/$t" ]; then
+                got=$(run /bin/sh -c "command -v $t")
+                [ "$got" = "$d/$t" ] || { echo "::error::$t resolves to '$got' in codex's command environment, expected $d/$t"; exit 1; }
+                run "$t" --version >/dev/null || { echo "::error::$t --version failed in codex's command environment"; exit 1; }
+                echo "by name as codex: $t -> $got"
+                break
+              fi
+            done
+          done
+          gate="tests/fixtures/callers/$FIXTURE/gate"
+          if [ -f "$gate" ]; then
+            read -r -a cmd <"$gate"
+            echo "gate: ${cmd[*]}"
+            run "${cmd[@]}"
+          fi
+          [ ! -e "$marker" ] || { echo "::error::codex ran the planted ~codex/.local/bin/bwrap"; exit 1; }
 
       - name: The fixture's checks
         env:

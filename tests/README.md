@@ -457,8 +457,21 @@ Testing a change).
   lines, the `GITHUB_PATH` appends made only when that file is there),
   `create-codex-user`'s `codex-home.sh` (a planted `config.toml` symlink
   and a stray file are replaced by the profile and the server-info file;
-  the link's target is untouched) and its `reset-home` step (kills, then
-  the home script; refuses while `pkill` keeps finding codex processes).
+  the link's target is untouched; given the provisioning's `bin`
+  directories it appends them, ahead of the PATH sudo gives the user, as
+  the `shell_environment_policy.set` PATH of codex's commands, and refuses
+  an empty or relative entry or a character a TOML literal string cannot
+  hold, and puts the two bwrap pin directories first, refusing without
+  them), `pin-bwrap.sh` against stub `sudo`/`apt-get`/`stat`/`install`
+  (installs bubblewrap when missing, refreshing the lists and retrying on a
+  failed install and giving up after three; re-creates the link pin and
+  the copy pin, each holding only `bwrap`, in trees that share nothing but
+  `/`; refuses a binary, copy or directory hop that is not root's alone and
+  a pin the codex user could write) and its `reset-home` step (kills,
+  then the pin when there are bin directories, then the home script with
+  the `bin` input; refuses while `pkill` keeps finding codex processes),
+  and every codex job's reset step passes the provisioning step's `bin`
+  output.
   The four composer tests lift each engine's composer from its own job
   (`job_block` / `lift_run` in `test_land_helpers.py`).
 - `test_secret_delivery_canary.py` — the hosted canary's pipeline probe
@@ -485,8 +498,10 @@ Testing a change).
   installs as the codex user, and the four representative caller projects
   (with the `codex_provision` recipe each caller's stub would set and the
   checks that its interpreter/Node version, dependency groups and lockfile
-  came out as intended, run as the codex user) — `fixtures/callers/README.md`
-  has the table.
+  came out as intended, run as the codex user; ts-mono-like also carries a
+  turbo `gate` the canary runs by name under `codex sandbox`, and checks
+  that it fails under sudo's reset PATH alone) —
+  `fixtures/callers/README.md` has the table.
 - `test_import.py` — `skills/import/import.sh` against a stub `gh` that
   answers the upstream issue from a fixture and records the created title
   and body: every trigger phrase and loop marker in the copied title and
