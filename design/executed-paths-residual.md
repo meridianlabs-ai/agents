@@ -1083,7 +1083,8 @@ step 2):
 | inspect_harbor | setup-python 3.12, setup-uv, `uv sync` | `uv venv --python 3.12 && uv sync` (inspect-harbor-like) | GitHub uv cache |
 | ts-mono | pnpm/action-setup, setup-node 22 with pnpm cache, turbo cache, `pnpm install --frozen-lockfile` | `corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile` (ts-mono-like) | pnpm and turbo caches (slower installs) |
 | inspect_swe, inspect_sandboxes, inspect_scout | runner fallback (generic dev-install) | none; the generic recipe runs as `claude-agent` | Docker (inspect_sandboxes' provider tests) |
-| actions, agents (dogfood) | nothing provisioned | none | nothing |
+| actions | nothing provisioned | none | nothing |
+| agents (dogfood) | nothing provisioned | `uv venv --python 3.12 && uv pip install pytest` (added 2026-09-24, after the step-5 real-model runs found the dev agent installing pytest itself; decision: Ransom) | nothing |
 
 A caller that has not added its recipe when step 5 lands gets the generic
 recipe on Python repositories, or nothing (ts-mono). The run still works,

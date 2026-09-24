@@ -3,7 +3,8 @@
 # reusable definition here). It is the example minus this header, with the
 # example's REQUIRED EDIT made: `workflows:` names this repo's CI workflow,
 # `tests` (.github/workflows/tests.yml — the `name:` field, not the
-# filename). Keep the jobs in sync with the example;
+# filename), and with this repo's `provision` recipe set in both jobs (the
+# example leaves it commented). Keep the jobs in sync with the example;
 # tests/test_ci_workflow.py checks both.
 #
 # The @auto loop is not engaged on new PRs (policy: Ransom, 2026-09-11), so
@@ -88,6 +89,15 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
+      # pyproject.toml, so without a recipe nothing is provisioned and the
+      # agent had to install pytest itself. The suite needs only pytest, on
+      # tests.yml's Python; the venv's bin leads the agent's PATH, so
+      # `python3 -m pytest` (AGENTS.md → Testing a change) runs in it. The
+      # same in every job here; tests/test_ci_workflow.py checks it.
+      provision: |
+        uv venv --python 3.12
+        uv pip install pytest
       head_branch: ${{ github.event.workflow_run.head_branch }}
       pr_number: ${{ github.event.workflow_run.pull_requests[0].number }}
       ci_run_id: ${{ github.event.workflow_run.id }}
@@ -135,5 +145,14 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
+      # pyproject.toml, so without a recipe nothing is provisioned and the
+      # agent had to install pytest itself. The suite needs only pytest, on
+      # tests.yml's Python; the venv's bin leads the agent's PATH, so
+      # `python3 -m pytest` (AGENTS.md → Testing a change) runs in it. The
+      # same in every job here; tests/test_ci_workflow.py checks it.
+      provision: |
+        uv venv --python 3.12
+        uv pip install pytest
       pr_number: ${{ github.event.issue.number }}
       comment_author: ${{ github.event.comment.user.login }}

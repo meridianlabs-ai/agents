@@ -18,7 +18,9 @@ take effect on every repo's next run.
 - `.github/workflows/*-stub.yml` — this repo's OWN caller stubs (dogfood): the
   agents run here too. `-stub` suffix because the canonical stub filenames are
   taken by the reusable definitions; keep them in sync with `examples/`. The
-  @auto stub has both halves: its CI-fix half watches `tests` (below).
+  @auto stub has both halves: its CI-fix half watches `tests` (below). Every
+  job sets a `provision` recipe (a venv with pytest, on the Python `tests`
+  uses) so the agents can run the suite; the examples leave it commented.
 - `.github/workflows/tests.yml` — this repo's CI (workflow `name: tests`): the
   full `python3 -m pytest` suite on every PR and push to main, with a
   read-only token and no secrets (see Testing a change).
