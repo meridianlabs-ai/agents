@@ -1,7 +1,9 @@
 # The agents repo's OWN caller stub — this repo eats its own dogfood. It is a
-# copy of examples/claude-stub.yml with one deviation: the canonical stub
+# copy of examples/claude-stub.yml with two deviations: the canonical stub
 # filename (claude.yml) is taken here by the REUSABLE workflow definition, so
-# the stubs carry a -stub suffix. Keep the jobs in sync with the example.
+# the stubs carry a -stub suffix; and both jobs set this repo's `provision`
+# recipe, which the example leaves commented. Keep the jobs in sync with the
+# example.
 # Uses the @main reusable workflows like every other caller; requires the
 # MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY org secrets to be scoped to
 # this repo (the machine account's GitHub App).
@@ -139,6 +141,15 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
+      # pyproject.toml, so without a recipe nothing is provisioned and the
+      # agent had to install pytest itself. The suite needs only pytest, on
+      # tests.yml's Python; the venv's bin leads the agent's PATH, so
+      # `python3 -m pytest` (AGENTS.md → Testing a change) runs in it. The
+      # same in every job here; tests/test_ci_workflow.py checks it.
+      provision: |
+        uv venv --python 3.12
+        uv pip install pytest
       # trigger_phrase is single-valued, so resolve it from the SAME source the
       # action will check for this event (comment > review > issue), not from a
       # union of all sources — otherwise a stale @claude in an enclosing issue
@@ -277,6 +288,15 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
+      # pyproject.toml, so without a recipe nothing is provisioned and the
+      # agent had to install pytest itself. The suite needs only pytest, on
+      # tests.yml's Python; the venv's bin leads the agent's PATH, so
+      # `python3 -m pytest` (AGENTS.md → Testing a change) runs in it. The
+      # same in every job here; tests/test_ci_workflow.py checks it.
+      provision: |
+        uv venv --python 3.12
+        uv pip install pytest
       trigger_phrase: "@auto"
       label_trigger: "auto"
       # allow_build_config (optional, default false; agents repo:

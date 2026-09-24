@@ -599,7 +599,10 @@ Testing a change).
   tag and nothing that could start an agent; and the dogfood @auto stub
   (`claude-auto-stub.yml`) equal to `examples/claude-auto-stub.yml` from
   `name:` on, both halves included, except the `workflow_run` `workflows:`
-  line, which names that workflow's `name:`.
+  line, which names that workflow's `name:`, and its `provision` recipe;
+  every job of the three dogfood stubs calling a reusable agent workflow
+  with the same recipe (a venv on tests.yml's Python with pytest, what
+  tests.yml installs), while the examples leave it commented.
 - `test_model_defaults.py` — the four Claude workflows' `model` input
   defaults to the `opus` alias (never a dated id) with `fallback_model`
   `default`, and both still reach Claude Code as `--model` /

@@ -1,5 +1,6 @@
-"""The repo's own CI workflow (.github/workflows/tests.yml) and the @auto
-stub that watches it (.github/workflows/claude-auto-stub.yml).
+"""The repo's own CI workflow (.github/workflows/tests.yml), the @auto stub
+that watches it (.github/workflows/claude-auto-stub.yml), and the dogfood
+stubs' provisioning recipe for that suite.
 
 tests.yml runs this suite on every PR and push to main with no secrets: a
 read-only job token, no `secrets.` reference, no `pull_request_target`, a
@@ -7,6 +8,12 @@ checkout that persists no credential (AGENTS.md → No git credential is ever
 written to the workspace), and nothing that could start an agent. The
 dogfood @auto stub is examples/claude-auto-stub.yml with its REQUIRED EDIT
 made: its `workflow_run` names tests.yml's `name:`.
+
+Every job in the three dogfood stubs calls a reusable agent workflow and sets
+the same `provision` recipe: a venv on tests.yml's Python with pytest, what
+tests.yml installs, so `python3 -m pytest` runs as the agent user (this repo
+has no pyproject.toml, so without a recipe nothing is provisioned; decision:
+Ransom, 2026-09-24). The examples keep the recipe commented.
 """
 
 import re
@@ -17,6 +24,13 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 TESTS_YML = WORKFLOWS / "tests.yml"
 AUTO_STUB = WORKFLOWS / "claude-auto-stub.yml"
 AUTO_EXAMPLE = ROOT / "examples" / "claude-auto-stub.yml"
+STUBS = ("claude-stub.yml", "claude-review-stub.yml", "claude-auto-stub.yml")
+REUSABLE_CALL = re.compile(
+    r"    uses: meridianlabs-ai/agents/\.github/workflows/(claude|claude-review|claude-auto|claude-auto-review)\.yml@main"
+)
+# The dogfood recipe with the comment above it, as the auto stub carries it
+# in both jobs (set aside when comparing the stub with the example).
+RECIPE_BLOCK = re.compile(r"^      # This repo's own recipe .*\n(?:      # .*\n)*      provision: \|\n(?:        .*\n)+", re.M)
 
 
 def code_lines(text):
@@ -97,7 +111,62 @@ def test_own_auto_stub_is_the_example_watching_the_tests_workflow():
         text = re.sub(r"^    workflows: .+\n", "", text, flags=re.M)
         return re.sub(r"^    # .*CI workflow.*\n", "", text, flags=re.M)
 
+    # and this repo's `provision` recipe, which the example leaves commented
+    stub, recipes = RECIPE_BLOCK.subn("", stub)
+    assert recipes == 2
     assert body(stub) == body(example)
     # both halves of @auto, as in the example
     jobs = top_level_block(stub, "jobs")
     assert [line for line in jobs if re.fullmatch(r"  [a-z-]+:", line)] == ["  ci-fix:", "  review-fix:"]
+
+
+def jobs_by_name(text):
+    """{job: its code lines} for every job of the workflow."""
+    jobs, name = {}, None
+    for line in top_level_block(text, "jobs"):
+        m = re.fullmatch(r"  ([a-z-]+):", line)
+        if m:
+            name = m.group(1)
+            jobs[name] = []
+        else:
+            jobs[name].append(line)
+    return jobs
+
+
+def provision_recipe(job):
+    """The job's `with: provision: |` recipe lines, or None when unset."""
+    if "      provision: |" not in job:
+        return None
+    i = job.index("      provision: |")
+    assert "    with:" in job[:i]
+    recipe = []
+    for line in job[i + 1:]:
+        if not line.startswith("        "):
+            break
+        recipe.append(line[8:])
+    return recipe
+
+
+def test_own_stubs_provision_the_tests_workflows_tools_in_every_job():
+    ci = TESTS_YML.read_text()
+    (python,) = re.findall(r'^          python-version: "([0-9.]+)"$', ci, re.M)
+    # what tests.yml installs before `python3 -m pytest`: pytest alone; a
+    # new test dependency there belongs in the recipe too
+    assert "      - run: pip install pytest" in code_lines(ci)
+    expected = [f"uv venv --python {python}", "uv pip install pytest"]
+    for stub in STUBS:
+        jobs = jobs_by_name((WORKFLOWS / stub).read_text())
+        assert jobs, stub
+        for name, job in jobs.items():
+            # every job calls a reusable agent workflow, so every job runs an
+            # agent that needs the suite's tools
+            assert [line for line in job if REUSABLE_CALL.fullmatch(line)], (stub, name)
+            assert provision_recipe(job) == expected, (stub, name)
+
+
+def test_examples_leave_the_provision_recipe_commented():
+    for example in STUBS:
+        jobs = jobs_by_name((ROOT / "examples" / example).read_text())
+        calling = [job for job in jobs.values() if any(REUSABLE_CALL.fullmatch(line) for line in job)]
+        assert calling, example
+        assert all(provision_recipe(job) is None for job in calling), example
