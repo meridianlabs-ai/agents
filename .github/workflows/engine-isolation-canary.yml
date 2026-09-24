@@ -292,13 +292,16 @@ jobs:
       # it has one: a project script whose tools find one another by name
       # (ts-mono-like: `pnpm check`, turbo looking pnpm up on PATH). First,
       # the bwrap pin: codex's sandbox runs the first `bwrap` on the command
-      # PATH outside the command's cwd, and that PATH now leads with
-      # codex-writable directories, so a `bwrap` planted in
-      # ~codex/.local/bin (where provisioning's build backend can write)
-      # must never be the one that runs: the reset put the root-owned pin
-      # directory first. Positive control: the same codex run with a
-      # command PATH that lacks the pin does run the planted one. The
-      # sysctls are codex-action's own bubblewrap step.
+      # PATH that, canonicalised, is not under the command's cwd, and that
+      # PATH now leads with codex-writable directories. So a `bwrap` planted
+      # in each of them (~codex/.local/bin, where provisioning's build
+      # backend writes; .venv/bin and node_modules/.bin, where codex's own
+      # commands write) must never be the one that runs, from any cwd,
+      # including the pins' own trees (/usr, /usr/bin, /var/lib), where
+      # codex skips the candidate that lives there (review round 1 of #163).
+      # Positive controls: the plant does run with only the link pin and
+      # cwd /usr, and with no pin at all. The sysctls are codex-action's
+      # own bubblewrap step.
       - name: Tools and gate by name under codex's command environment
         env:
           FIXTURE: ${{ matrix.fixture }}
@@ -317,17 +320,38 @@ jobs:
           grep -A1 '^\[shell_environment_policy.set\]$' /home/codex/.codex/config.toml
           run() { sudo -u codex -- "$codex" sandbox -P workspace_net -C "$GITHUB_WORKSPACE" -- "$@"; }
           marker=/tmp/planted-bwrap-ran
-          sudo -u codex -H -- /bin/sh -c 'mkdir -p "$HOME/.local/bin" && printf "#!/bin/sh\necho ran >%s\nexit 97\n" "$1" >"$HOME/.local/bin/bwrap" && chmod 755 "$HOME/.local/bin/bwrap"' sh "$marker"
+          IFS=: read -r -a dirs <<<"$BIN"
+          for d in "${dirs[@]}"; do
+            sudo -u codex -H -- /bin/sh -c 'mkdir -p "$1" && printf "#!/bin/sh\necho %s >>%s\nexit 97\n" "$1/bwrap" "$2" >"$1/bwrap" && chmod 755 "$1/bwrap"' sh "$d" "$marker"
+          done
           sudo rm -f "$marker"
           got=$(run /bin/sh -c 'command -v bwrap')
           [ "$got" = /usr/lib/codex-bwrap/bwrap ] || { echo "::error::the first bwrap on codex's command PATH is '$got', not the pin"; exit 1; }
-          [ ! -e "$marker" ] || { echo "::error::codex ran the planted ~codex/.local/bin/bwrap"; exit 1; }
-          sudo -u codex -- "$codex" -c 'shell_environment_policy.set.PATH="/home/codex/.local/bin:/usr/bin:/bin"' \
-            sandbox -P workspace_net -C "$GITHUB_WORKSPACE" -- /bin/true || true
-          [ -e "$marker" ] || { echo "::error::positive control missing: without the pin codex did not run the planted bwrap, so the check above proves nothing"; exit 1; }
+          for cwd in "$GITHUB_WORKSPACE" /usr /usr/bin /usr/lib/codex-bwrap /var/lib /var/lib/codex-bwrap /tmp /; do
+            # Must succeed too: a run that failed before choosing a bwrap
+            # would pass the marker check vacuously.
+            rc=0; sudo -u codex -- "$codex" sandbox -P workspace_net -C "$cwd" -- /bin/true || rc=$?
+            if [ -e "$marker" ]; then echo "::error::with cwd $cwd codex ran a planted bwrap: $(cat "$marker")"; exit 1; fi
+            [ "$rc" = 0 ] || { echo "::error::with cwd $cwd the sandboxed /bin/true failed (exit $rc)"; exit 1; }
+            echo "cwd $cwd: sandboxed /bin/true ran, no planted bwrap ran"
+          done
+          # Positive controls: the plants are reachable. Only the link pin,
+          # cwd /usr (codex skips /usr/bin/bwrap there), then no pin at all.
+          cfg_path=$(sed -n "s/^PATH = '\(.*\)'$/\1/p" /home/codex/.codex/config.toml)
+          link_only=${cfg_path/\/var\/lib\/codex-bwrap:/}
+          no_pin=${link_only/\/usr\/lib\/codex-bwrap:/}
+          [ "$link_only" != "$cfg_path" ] && [ "$no_pin" != "$link_only" ] || { echo "::error::could not derive the control PATHs from $cfg_path"; exit 1; }
+          sudo -u codex -- "$codex" -c "shell_environment_policy.set.PATH=\"$link_only\"" \
+            sandbox -P workspace_net -C /usr -- /bin/true || true
+          [ -e "$marker" ] || { echo "::error::positive control missing: with only the link pin and cwd /usr codex did not reach a planted bwrap, so the cwd checks above prove nothing"; exit 1; }
+          echo "control, link pin only, cwd /usr: codex ran $(head -1 "$marker")"
           sudo rm -f "$marker"
-          echo "bwrap pin holds: codex's sandbox runs $(readlink /usr/lib/codex-bwrap/bwrap) ($(/usr/bin/bwrap --version)), not the planted ~codex/.local/bin/bwrap (which it runs without the pin)"
-          IFS=: read -r -a dirs <<<"$BIN"
+          sudo -u codex -- "$codex" -c "shell_environment_policy.set.PATH=\"$no_pin\"" \
+            sandbox -P workspace_net -C "$GITHUB_WORKSPACE" -- /bin/true || true
+          [ -e "$marker" ] || { echo "::error::positive control missing: without the pins codex did not run a planted bwrap, so the checks above prove nothing"; exit 1; }
+          echo "control, no pin: codex ran $(head -1 "$marker")"
+          sudo rm -f "$marker"
+          echo "bwrap pin holds: from every cwd tried codex's sandbox ran $(readlink /usr/lib/codex-bwrap/bwrap) or its copy /var/lib/codex-bwrap/bwrap ($(/usr/bin/bwrap --version)), never a planted one"
           for t in pytest ruff mypy pyright python3 node pnpm npm; do
             for d in "${dirs[@]}"; do
               if [ -x "$d/$t" ]; then

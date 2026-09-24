@@ -14,17 +14,25 @@
 # `.venv/bin` and `node_modules/.bin`, which codex's own sandboxed commands
 # write), and the hosted image ships no bubblewrap, so a planted `bwrap`
 # there would run every later command outside the sandbox. So: install the
-# distribution's bubblewrap (root-owned `/usr/bin/bwrap`), and re-create a
-# root-owned directory holding only a `bwrap` link to it, which
-# `codex-home.sh` puts FIRST on the command PATH. The first `bwrap` codex
-# finds is then that link, which neither codex nor anything it runs can
-# replace or shadow.
+# distribution's bubblewrap (root-owned `/usr/bin/bwrap`), and re-create two
+# root-owned directories that `codex-home.sh` puts FIRST on the command
+# PATH: `$pin`, holding only a `bwrap` link to it, and `$pin_copy`, holding
+# only a root-owned copy of it. Two, in trees that share no directory but
+# `/`, because codex canonicalises each candidate before the cwd test: the
+# link counts as `/usr/bin/bwrap`, so a command working in `/usr` or
+# `/usr/bin` would skip it and fall through to the writable directories
+# (review round 1 of #163). No working directory other than `/` contains
+# both `/usr/bin/bwrap` and `/var/lib/codex-bwrap/bwrap`, and at `/` codex
+# excludes nothing. So whatever the command's cwd, the first `bwrap` codex
+# accepts is one of the two, and neither codex nor anything it runs can
+# replace or shadow them.
 #
 # Idempotent: the install is skipped when the package's binary is already
-# there, and the directory is re-created every run.
+# there, and both directories are re-created every run.
 set -euo pipefail
 bwrap=/usr/bin/bwrap
 pin=/usr/lib/codex-bwrap
+pin_copy=/var/lib/codex-bwrap
 user="${1:-codex}"
 
 if [ ! -x "$bwrap" ]; then
@@ -62,28 +70,40 @@ if [ -L "$bwrap" ] || [ ! -f "$bwrap" ] || ! root_only "$bwrap"; then
   exit 1
 fi
 
-sudo rm -rf "$pin"
-sudo install -d -o root -g root -m 755 "$pin"
+sudo rm -rf "$pin" "$pin_copy"
+sudo install -d -o root -g root -m 755 "$pin" "$pin_copy"
 sudo ln -s "$bwrap" "$pin/bwrap"
+sudo install -o root -g root -m 755 "$bwrap" "$pin_copy/bwrap"
 
-# Every hop from / to the link is root's alone, so the codex user can neither
-# replace the link nor add a second `bwrap` next to it.
-hop="$pin"
-while :; do
-  if [ -L "$hop" ] || [ ! -d "$hop" ] || ! root_only "$hop"; then
-    echo "::error::$hop is not a root-owned directory writable by root alone" >&2
+# Every hop from / to each directory is root's alone, so the codex user can
+# neither replace what is there nor add a second `bwrap` next to it.
+for dir in "$pin" "$pin_copy"; do
+  hop="$dir"
+  while :; do
+    if [ -L "$hop" ] || [ ! -d "$hop" ] || ! root_only "$hop"; then
+      echo "::error::$hop is not a root-owned directory writable by root alone" >&2
+      exit 1
+    fi
+    [ "$hop" = / ] && break
+    hop=$(dirname "$hop")
+  done
+  if sudo -u "$user" test -w "$dir"; then
+    echo "::error::$user can write $dir" >&2
     exit 1
   fi
-  [ "$hop" = / ] && break
-  hop=$(dirname "$hop")
+  entries=$(ls -A "$dir")
+  if [ "$entries" != bwrap ]; then
+    echo "::error::$dir must hold only bwrap (has: $entries)" >&2
+    exit 1
+  fi
 done
-if sudo -u "$user" test -w "$pin"; then
-  echo "::error::$user can write $pin" >&2
+if [ "$(readlink "$pin/bwrap")" != "$bwrap" ]; then
+  echo "::error::$pin/bwrap is not a link to $bwrap" >&2
   exit 1
 fi
-entries=$(ls -A "$pin")
-if [ "$entries" != bwrap ] || [ "$(readlink "$pin/bwrap")" != "$bwrap" ]; then
-  echo "::error::$pin must hold only a bwrap link to $bwrap (has: $entries)" >&2
+if [ -L "$pin_copy/bwrap" ] || [ ! -f "$pin_copy/bwrap" ] || ! root_only "$pin_copy/bwrap" \
+   || ! cmp -s "$bwrap" "$pin_copy/bwrap"; then
+  echo "::error::$pin_copy/bwrap is not a root-owned copy of $bwrap" >&2
   exit 1
 fi
-echo "bwrap pinned: $pin/bwrap -> $bwrap ($("$bwrap" --version))"
+echo "bwrap pinned: $pin/bwrap -> $bwrap and $pin_copy/bwrap (a copy; $("$bwrap" --version))"

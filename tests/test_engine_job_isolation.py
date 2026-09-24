@@ -42,9 +42,10 @@ job is dispatched, and a skipped job gets no job message at all.
   of codex's commands, after the pinned bubblewrap's directory and ahead of
   the PATH sudo gives the user, and refuses a value a TOML literal string
   cannot hold, an empty or relative entry, or a missing pin. `pin-bwrap.sh`
-  installs bubblewrap when it is missing, re-creates the pin directory
-  holding only a `bwrap` link, and refuses a binary or a directory hop that
-  is not root's alone or a pin the codex user could write; the reset mode
+  installs bubblewrap when it is missing, re-creates the two pin directories
+  (one holding only a `bwrap` link, one only a root-owned copy, in trees
+  sharing no directory but `/`), and refuses a binary or a directory hop
+  that is not root's alone or a pin the codex user could write; the reset mode
   runs it only when it has bin directories to write.
 """
 
@@ -453,13 +454,14 @@ def home_env(tmp_path: Path, **extra):
 
 
 def run_home_script(tmp_path: Path, env: dict, *args: str):
-    """codex-home.sh addresses /home/<user> and the bwrap pin under /usr/lib;
-    the test rewrites both to a scratch root through a copy of the script
-    (the logic is the point, not the literal paths)."""
+    """codex-home.sh addresses /home/<user> and the two bwrap pins; the test
+    rewrites them to a scratch root through a copy of the script (the logic
+    is the point, not the literal paths)."""
     script = (CODEX_USER / "codex-home.sh").read_text()
-    assert 'home="/home/$user"' in script and "\npin=/usr/lib/codex-bwrap\n" in script
+    pins = "\npin=/usr/lib/codex-bwrap\npin_copy=/var/lib/codex-bwrap\n"
+    assert 'home="/home/$user"' in script and pins in script
     script = script.replace('home="/home/$user"', 'home="$HOME_ROOT/home/$user"').replace(
-        "\npin=/usr/lib/codex-bwrap\n", '\npin="$HOME_ROOT/pin"\n')
+        pins, '\npin="$HOME_ROOT/pin"\npin_copy="$HOME_ROOT/pin-copy"\n')
     (tmp_path / "home" / "codex").mkdir(parents=True, exist_ok=True)
     return sh("bash", "-c", script + "\n", "codex-home", "codex", *args, check=False, env=env)
 
@@ -488,11 +490,14 @@ PROFILE = ['[permissions.workspace_net]', 'extends = ":workspace"',
            '[permissions.workspace_net.network]', 'enabled = true']
 
 
-def make_pin(tmp_path: Path) -> Path:
-    pin = tmp_path / "pin"
+def make_pin(tmp_path: Path, *, copy: bool = True) -> tuple[Path, Path]:
+    pin, pin_copy = tmp_path / "pin", tmp_path / "pin-copy"
     pin.mkdir()
     (pin / "bwrap").symlink_to("/usr/bin/bwrap")
-    return pin
+    pin_copy.mkdir()
+    if copy:
+        write_exe(pin_copy / "bwrap", "#!/bin/sh\n")
+    return pin, pin_copy
 
 
 def test_codex_home_script_puts_the_pin_then_the_bin_dirs_ahead_of_sudos_path(tmp_path):
@@ -500,19 +505,23 @@ def test_codex_home_script_puts_the_pin_then_the_bin_dirs_ahead_of_sudos_path(tm
     # "gives the user" is the test's own; the pinned bwrap's directory goes
     # first, then the bin directories.
     env = home_env(tmp_path)
-    pin = make_pin(tmp_path)
+    pin, pin_copy = make_pin(tmp_path)
     bin_dirs = "/ws/.venv/bin:/ws/node_modules/.bin:/home/codex/.local/bin"
     r = run_home_script(tmp_path, env, bin_dirs)
     assert r.returncode == 0, r.stderr
     lines = (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text().splitlines()
-    assert lines[1:] == PROFILE + ['[shell_environment_policy.set]', f"PATH = '{pin}:{bin_dirs}:{env['PATH']}'"]
+    assert lines[1:] == PROFILE + ['[shell_environment_policy.set]',
+                                   f"PATH = '{pin}:{pin_copy}:{bin_dirs}:{env['PATH']}'"]
     import tomllib
     cfg = tomllib.loads("\n".join(lines))
-    assert cfg["shell_environment_policy"]["set"]["PATH"].split(":")[:4] == [str(pin)] + bin_dirs.split(":")
+    assert cfg["shell_environment_policy"]["set"]["PATH"].split(":")[:5] == [str(pin), str(pin_copy)] + bin_dirs.split(":")
     assert cfg["permissions"]["workspace_net"]["network"]["enabled"] is True
 
 
-def test_codex_home_script_refuses_bin_dirs_without_the_bwrap_pin(tmp_path):
+@pytest.mark.parametrize("pins", ["none", "link only"])
+def test_codex_home_script_refuses_bin_dirs_without_both_bwrap_pins(tmp_path, pins):
+    if pins == "link only":
+        make_pin(tmp_path, copy=False)
     r = run_home_script(tmp_path, home_env(tmp_path), "/ws/.venv/bin")
     assert r.returncode != 0
     assert "no pinned bwrap" in r.stderr
@@ -558,13 +567,18 @@ def run_pin_script(tmp_path: Path, *, bwrap_present: bool = True, install_fails:
     bwrap.parent.mkdir(parents=True, exist_ok=True)
     pin = tmp_path / "usr" / "lib" / "codex-bwrap"
     pin.parent.mkdir(parents=True, exist_ok=True)
+    pin_copy = tmp_path / "var" / "lib" / "codex-bwrap"
+    pin_copy.parent.mkdir(parents=True, exist_ok=True)
     write_exe(bins / "sudo", '#!/usr/bin/env bash\n'
               'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H|--) shift ;; *) break ;; esac; done\n'
               'if [ "$1" = test ]; then exit "$TEST_W_RC"; fi\n'
               'exec "$@"\n')
+    # `install [-d] -o -g -m MODE ...` without root: ownership dropped, the
+    # directories or the file copy and the mode are real.
     write_exe(bins / "install", '#!/usr/bin/env bash\n'
-              'mode=755; while [ "$#" -gt 1 ]; do case "$1" in -d) shift ;; -o|-g) shift 2 ;; -m) mode=$2; shift 2 ;; *) break ;; esac; done\n'
-              'mkdir -p "$1" && chmod "$mode" "$1"\n')
+              'dir=0; mode=755; while [ "$#" -gt 1 ]; do case "$1" in -d) dir=1; shift ;; -o|-g) shift 2 ;; -m) mode=$2; shift 2 ;; *) break ;; esac; done\n'
+              'if [ "$dir" = 1 ]; then for d in "$@"; do mkdir -p "$d" && chmod "$mode" "$d"; done\n'
+              'else cp "$1" "$2" && chmod "$mode" "$2"; fi\n')
     write_exe(bins / "apt-get", '#!/usr/bin/env bash\n'
               'for a in "$@"; do case "$a" in install|update) verb=$a ;; esac; done\n'
               'echo "apt-get $verb" >>"$LOG"\n'
@@ -579,56 +593,76 @@ def run_pin_script(tmp_path: Path, *, bwrap_present: bool = True, install_fails:
     if bwrap_present:
         write_exe(bwrap, "#!/bin/sh\necho bubblewrap 0.9.0\n")
     script = (CODEX_USER / "pin-bwrap.sh").read_text()
-    assert "\nbwrap=/usr/bin/bwrap\npin=/usr/lib/codex-bwrap\n" in script
-    script = script.replace("\nbwrap=/usr/bin/bwrap\npin=/usr/lib/codex-bwrap\n", f"\nbwrap={bwrap}\npin={pin}\n")
+    paths = "\nbwrap=/usr/bin/bwrap\npin=/usr/lib/codex-bwrap\npin_copy=/var/lib/codex-bwrap\n"
+    assert paths in script
+    script = script.replace(paths, f"\nbwrap={bwrap}\npin={pin}\npin_copy={pin_copy}\n")
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "LOG": str(log), "BWRAP": str(bwrap),
            "INSTALL_FAILS": str(install_fails), "BAD": bad, "TEST_W_RC": "0" if codex_can_write else "1"}
     r = sh("bash", "-c", script + "\n", "pin-bwrap", "codex", check=False, env=env)
-    return r, (log.read_text() if log.exists() else ""), bwrap, pin
+    return r, (log.read_text() if log.exists() else ""), bwrap, pin, pin_copy
 
 
-def test_pin_bwrap_installs_bubblewrap_and_pins_a_lone_link(tmp_path):
-    r, log, bwrap, pin = run_pin_script(tmp_path, bwrap_present=False)
+def test_pin_bwrap_installs_bubblewrap_and_pins_a_link_and_a_copy(tmp_path):
+    r, log, bwrap, pin, pin_copy = run_pin_script(tmp_path, bwrap_present=False)
     assert r.returncode == 0, r.stderr
     assert log == "apt-get install\n"
     assert sorted(p.name for p in pin.iterdir()) == ["bwrap"]
     assert (pin / "bwrap").is_symlink() and os.readlink(pin / "bwrap") == str(bwrap)
-    assert f"bwrap pinned: {pin}/bwrap -> {bwrap} (bubblewrap 0.9.0)" in r.stdout
+    assert sorted(p.name for p in pin_copy.iterdir()) == ["bwrap"]
+    copy = pin_copy / "bwrap"
+    assert not copy.is_symlink() and copy.read_bytes() == bwrap.read_bytes()
+    assert stat.S_IMODE(copy.stat().st_mode) == 0o755
+    assert (f"bwrap pinned: {pin}/bwrap -> {bwrap} and {pin_copy}/bwrap (a copy; bubblewrap 0.9.0)"
+            in r.stdout)
 
 
-def test_pin_bwrap_skips_the_install_and_recreates_the_directory(tmp_path):
-    pin = tmp_path / "usr" / "lib" / "codex-bwrap"
-    pin.mkdir(parents=True)
-    (pin / "stray").write_text("x")
-    r, log, bwrap, pin = run_pin_script(tmp_path)
+def test_pin_bwrap_trees_share_nothing_but_the_root():
+    """The reason for two pins: codex canonicalises a candidate and skips it
+    when the command's cwd contains it (cwd `/` excepted), so no cwd but `/`
+    may contain both the link's target and the copy."""
+    script = (CODEX_USER / "pin-bwrap.sh").read_text()
+    target = Path(re.search(r"\nbwrap=(\S+)\n", script).group(1))
+    copy = Path(re.search(r"\npin_copy=(\S+)\n", script).group(1)) / "bwrap"
+    common = set(target.parents) & set(copy.parents)
+    assert common == {Path("/")}
+
+
+def test_pin_bwrap_skips_the_install_and_recreates_the_directories(tmp_path):
+    for d in (tmp_path / "usr" / "lib" / "codex-bwrap", tmp_path / "var" / "lib" / "codex-bwrap"):
+        d.mkdir(parents=True)
+        (d / "stray").write_text("x")
+    r, log, bwrap, pin, pin_copy = run_pin_script(tmp_path)
     assert r.returncode == 0, r.stderr
     assert log == ""
     assert sorted(p.name for p in pin.iterdir()) == ["bwrap"]
+    assert sorted(p.name for p in pin_copy.iterdir()) == ["bwrap"]
 
 
 def test_pin_bwrap_refreshes_the_lists_when_the_install_fails(tmp_path):
-    r, log, _, _ = run_pin_script(tmp_path, bwrap_present=False, install_fails=2)
+    r, log, _, _, _ = run_pin_script(tmp_path, bwrap_present=False, install_fails=2)
     assert r.returncode == 0, r.stderr
     assert log == "apt-get install\napt-get update\napt-get install\napt-get update\napt-get install\n"
 
 
 def test_pin_bwrap_gives_up_after_three_refreshes(tmp_path):
-    r, log, _, pin = run_pin_script(tmp_path, bwrap_present=False, install_fails=9)
+    r, log, _, pin, pin_copy = run_pin_script(tmp_path, bwrap_present=False, install_fails=9)
     assert r.returncode != 0
     assert log.count("apt-get update") == 3 and "could not install bubblewrap" in r.stderr
-    assert not pin.exists()
+    assert not pin.exists() and not pin_copy.exists()
 
 
-@pytest.mark.parametrize("which", ["bwrap", "parent"])
+@pytest.mark.parametrize("which", ["bwrap", "parent", "copy parent", "copy"])
 def test_pin_bwrap_refuses_what_is_not_roots_alone(tmp_path, which):
-    bad = tmp_path / "usr" / "bin" / "bwrap" if which == "bwrap" else tmp_path / "usr" / "lib"
-    r, _, _, _ = run_pin_script(tmp_path, bad=str(bad))
+    bad = {"bwrap": tmp_path / "usr" / "bin" / "bwrap", "parent": tmp_path / "usr" / "lib",
+           "copy parent": tmp_path / "var" / "lib",
+           "copy": tmp_path / "var" / "lib" / "codex-bwrap" / "bwrap"}[which]
+    r, _, _, _, _ = run_pin_script(tmp_path, bad=str(bad))
     assert r.returncode != 0
     assert f"{bad} is not a root-owned" in r.stderr
 
 
 def test_pin_bwrap_refuses_a_pin_codex_can_write(tmp_path):
-    r, _, _, _ = run_pin_script(tmp_path, codex_can_write=True)
+    r, _, _, _, _ = run_pin_script(tmp_path, codex_can_write=True)
     assert r.returncode != 0
     assert "codex can write" in r.stderr
 

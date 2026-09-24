@@ -14,8 +14,9 @@
 set -euo pipefail
 user="$1"
 bin="${2:-}"
-# The pinned bubblewrap's directory (pin-bwrap.sh), first on that PATH.
+# The pinned bubblewrap's two directories (pin-bwrap.sh), first on that PATH.
 pin=/usr/lib/codex-bwrap
+pin_copy=/var/lib/codex-bwrap
 home="/home/$user"
 codex_home="$home/.codex"
 # Whatever is there goes (rm -rf on a symlink removes the link, not what it
@@ -62,20 +63,22 @@ printf '%s\n' \
 # `shell_environment_policy`, whose `set` table overrides what codex
 # inherited; codex-action rejects that key in `codex-args`, so it goes in
 # this file like the profile above. The value is the pinned bubblewrap's
-# directory, then the bin directories, then the PATH sudo gives the user,
+# two directories, then the bin directories, then the PATH sudo gives the user,
 # probed the way codex-action launches codex. The pin comes first because
 # codex's sandbox runs the first `bwrap` on this PATH outside the command's
 # working directory, and the bin directories are codex-writable: without it
-# a planted `bwrap` would run codex's commands unsandboxed (pin-bwrap.sh,
-# which the reset-home mode runs first; this refuses without it). Only
+# a planted `bwrap` would run codex's commands unsandboxed. It is two
+# directories in disjoint trees so that one survives any working directory
+# (pin-bwrap.sh, which the reset-home mode runs first; this refuses without
+# them). Only
 # codex's commands see the PATH: nothing here touches the job PATH
 # (GITHUB_PATH) the runner-side steps resolve through. Written as a TOML
 # literal string, so a character one cannot hold (a single quote, a control
 # character) is refused rather than escaped, and so is an entry that is not
 # an absolute directory (an empty one would mean the working directory).
 if [ -n "$bin" ]; then
-  if [ ! -L "$pin/bwrap" ]; then
-    echo "::error::no pinned bwrap at $pin/bwrap (pin-bwrap.sh runs first); refusing to put codex-writable directories on codex's command PATH" >&2
+  if [ ! -L "$pin/bwrap" ] || [ -L "$pin_copy/bwrap" ] || [ ! -f "$pin_copy/bwrap" ]; then
+    echo "::error::no pinned bwrap at $pin/bwrap and $pin_copy/bwrap (pin-bwrap.sh runs first); refusing to put codex-writable directories on codex's command PATH" >&2
     exit 1
   fi
   base=$(sudo -u "$user" -- /usr/bin/printenv PATH) || base=""
@@ -83,7 +86,7 @@ if [ -n "$bin" ]; then
     echo "::error::could not read the PATH sudo gives $user" >&2
     exit 1
   fi
-  path="$pin:$bin:$base"
+  path="$pin:$pin_copy:$bin:$base"
   if [[ "$path" == *"'"* ]] || ! [[ "$path" =~ ^[[:print:]]+$ ]]; then
     echo "::error::the codex command PATH has a character a TOML literal string cannot hold: $path" >&2
     exit 1
