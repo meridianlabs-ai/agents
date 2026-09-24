@@ -24,7 +24,13 @@ Testing a change).
   the expected user is copied byte for byte; a symlink (to a runner file, or
   dangling), a directory, a FIFO (without blocking), a file owned by someone
   else and an unknown owner are refused with no copy and a stale copy
-  removed; oversize input is truncated. Plus the `resolve-reported-threads`
+  removed; oversize input is truncated. Its `dir` mode (the Claude agent's
+  landing directory): regular single-link files of the expected owner
+  copied into a fresh 0700 directory; symlinks, hard links, another owner's
+  files, bad names (logged escaped), directories, FIFOs, unreadable and
+  over-cap files skipped; the aggregate byte and file-count caps refusing
+  the whole import; a stale or symlinked destination replaced, never
+  followed; and the composite's step in both modes with its defaults. Plus the `resolve-reported-threads`
   composite's step, lifted the same way, refusing a symlinked final message
   (no ids, no stripped copy), and the structural rule over the three
   write-path workflows: the codex-owned output file is named only by
@@ -379,7 +385,14 @@ Testing a change).
   steps discover the tools from the composite's `bin` directories and never
   through `command -v`, the commit steps pin PATH, the user is created,
   checked, then granted, and `create-codex-user`'s `reset-home` mode
-  re-checks and pins PATH. `codex_path_smoke.sh` is the
+  re-checks and pins PATH (and is codex-only). `create-codex-user`'s create
+  steps run against a logging `sudo` for its `user` and `grant` inputs: the
+  codex sequence unchanged by default, `claude-agent` with its landing dir,
+  system `safe.directory` and `/opt/meridian-agent` and none of the codex
+  parts, `grant: none` without the workspace grant, and an unknown user or
+  grant refused before any command; `reclaim.sh` (the reclaim's body) for
+  either user, run twice in a row with the agent tampering in between
+  (idempotent), and refusing an unknown user. `codex_path_smoke.sh` is the
   hosted-runner counterpart (`.github/workflows/codex-path-smoke.yml`): the
   same lifted bodies with the real codex user, image PATH and sudo, plus a
   control job showing the runner pick a planted interpreter when the venv IS

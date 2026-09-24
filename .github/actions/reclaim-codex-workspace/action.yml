@@ -112,12 +112,29 @@ description: >-
      each step carrying an env pin; the guard and landing steps keep their
      env pins as belt and braces.
 
+  Steps 1-9 are `reclaim.sh` next to this file, which the composite's
+  second step runs with its PATH already pinned; the Claude jobs' agent
+  launcher runs the same script. With `user: claude-agent` every "codex"
+  above reads as that user (design/executed-paths-residual.md → Pre-agent
+  reclaim, → After the agent); the snapshot and hooks paths keep their
+  `*-codex` names. Running it twice in a job is safe: each run restores
+  the snapshot afresh and appends the pins once.
+
   Runs no git command itself. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main); NO
   post step (local composite actions with post steps break teardown on the
   fork).
 
 inputs:
+  user:
+    description: >-
+      The agent user whose processes are killed and whose group grant is
+      revoked: `codex` (the default: the codex jobs) or `claude-agent` (the
+      Claude jobs, which run this before the agent as well as after it;
+      design/executed-paths-residual.md → Pre-agent reclaim). The nested
+      PATH check probes as this user too. Any other value fails the step.
+    required: false
+    default: codex
   config-snapshot:
     description: >-
       Path of the pre-codex `.git/config` copy to restore. Defaults to
@@ -153,111 +170,20 @@ runs:
     #    else runs (see description).
     - uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
       with:
-        user: codex
+        user: ${{ inputs.user }}
         system-path: ${{ inputs.system-path }}
 
     - shell: bash
       env:
+        AGENT_USER: ${{ inputs.user }}
         SNAPSHOT: ${{ inputs.config-snapshot }}
         EMBEDDED_SNAPSHOT: ${{ inputs.embedded-snapshot }}
         SYSTEM_PATH: ${{ inputs.system-path }}
+        RECLAIM_SCRIPT: ${{ github.action_path }}/reclaim.sh
       run: |
         set -euo pipefail
-        # 0. System tools only, whatever GITHUB_PATH prepended: nothing
-        #    below may resolve through a directory codex could write.
+        # 0. System tools only, whatever GITHUB_PATH prepended: not even the
+        #    `bash` that runs the script may resolve through a directory the
+        #    agent user could write (reclaim.sh pins the same PATH again).
         export PATH="$SYSTEM_PATH"
-        SNAPSHOT="${SNAPSHOT:-$RUNNER_TEMP/git-config.pre-codex}"
-        EMBEDDED_SNAPSHOT="${EMBEDDED_SNAPSHOT:-$RUNNER_TEMP/embedded-git.pre-codex}"
-        gitdir="$GITHUB_WORKSPACE/.git"
-        # The snapshots are the runner's own files from before the grant; if
-        # one is missing the checks below would either leave codex's config
-        # in place for every later step or wave a nested repo through, so
-        # fail closed rather than fall through.
-        if [ ! -f "$SNAPSHOT" ]; then
-          echo "::error::pre-codex git config snapshot not found at $SNAPSHOT — refusing to reuse the codex-written .git/config."
-          exit 1
-        fi
-        if [ ! -f "$EMBEDDED_SNAPSHOT" ]; then
-          echo "::error::pre-codex embedded-repository snapshot not found at $EMBEDDED_SNAPSHOT — refusing to run git over a tree that may hold a nested .git."
-          exit 1
-        fi
-        # First: nothing may still be running as codex while .git is put
-        # back — a lingering background process could re-tamper the config
-        # after the restore below and before the landing step's credentialed
-        # push. pkill scans /proc once per call and exits 1 when it found
-        # nothing to kill (0 = killed something, 2/3 = pkill itself failed),
-        # so repeat until a pass comes up empty — bounded: a survivor that
-        # keeps forking faster than that is a red step, not a silent one.
-        clear=0
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-          rc=0
-          sudo pkill -KILL -u codex || rc=$?
-          if [ "$rc" -eq 1 ]; then clear=1; break; fi
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::pkill -u codex failed (exit $rc) — cannot tell whether codex processes survive; refusing to reclaim the workspace."
-            exit 1
-          fi
-          sleep 0.2
-        done
-        if [ "$clear" -ne 1 ]; then
-          echo "::error::processes were still running as codex after repeated kills — refusing to reclaim the workspace under them."
-          exit 1
-        fi
-        # Refuse BEFORE the chown: a .git that codex turned into a symlink
-        # would otherwise have its target re-owned first. -L on commondir
-        # too — -e is false for a dangling symlink.
-        if [ -L "$gitdir" ] || [ ! -d "$gitdir" ] || [ -e "$gitdir/commondir" ] || [ -L "$gitdir/commondir" ]; then
-          echo "::error::codex left a redirected git dir (.git is not a plain directory, or .git/commondir exists) — refusing to run git through it."
-          exit 1
-        fi
-        # Refuse an embedded repository too: a nested .git/config is executed
-        # by the landing step's git status / git add (is_submodule_modified
-        # spawns a child git inside it) and is not covered by the restore or
-        # the env pins. `find` runs as root so a directory codex made
-        # unreadable to runner cannot hide one; -P (the default) does not
-        # follow symlinks, and -name matches a gitfile or symlink named .git
-        # as well as a directory. Same find, same sort as the snapshot.
-        sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.post-codex"
-        if ! cmp -s "$EMBEDDED_SNAPSHOT" "$RUNNER_TEMP/embedded-git.post-codex"; then
-          echo "::error::codex left an embedded git repository in the tree — refusing to run git over it (a nested .git/config is executed by the landing step and is not covered by the restore):"
-          diff "$EMBEDDED_SNAPSHOT" "$RUNNER_TEMP/embedded-git.post-codex" || true
-          exit 1
-        fi
-        sudo chown -R runner "$gitdir"
-        # Revoke the codex group's write grant on .git so a survivor of the
-        # kill has no write path into it either (chown -R does not follow
-        # symlinks under .git — GNU default -P — and neither does chmod -R),
-        # and on the workspace root so it cannot rename .git away and
-        # replace it wholesale (a same-parent rename needs write on the
-        # parent only). Root only, not recursive: runner owns it, nothing
-        # runner-side changes, and the tree keeps its grant.
-        sudo chmod -R g-w "$gitdir"
-        sudo chmod g-w "$GITHUB_WORKSPACE"
-        cp --remove-destination "$SNAPSHOT" "$gitdir/config"
-        # Hooks are FILES, so the restore does not reach them, and the chown
-        # above leaves anything codex wrote in .git/hooks runner-owned and
-        # executable. Not only `git commit` runs them: `git fetch` runs
-        # reference-transaction when it updates a tracking ref (codex can
-        # delete the local one so the next fetch deterministically does),
-        # and `git status` runs post-index-change whenever it writes the
-        # refreshed index — both in steps that carry the machine-account
-        # token. Move the whole directory aside (mv moves a symlink, not its
-        # target; nothing runner-side relies on hooks — the landing step
-        # already points hooksPath at a non-existent path) and list what
-        # codex left there, names only, for the log.
-        if [ -e "$gitdir/hooks" ] || [ -L "$gitdir/hooks" ]; then
-          rm -rf "$RUNNER_TEMP/git-hooks.post-codex"
-          mv -T "$gitdir/hooks" "$RUNNER_TEMP/git-hooks.post-codex"
-          if [ -d "$RUNNER_TEMP/git-hooks.post-codex" ] && [ ! -L "$RUNNER_TEMP/git-hooks.post-codex" ]; then
-            find "$RUNNER_TEMP/git-hooks.post-codex" -mindepth 1 ! -name '*.sample' -printf '::warning::.git/hooks/%P found after codex, moved aside (hooks are never run after codex)\n'
-          fi
-        fi
-        # And pin the two keys a config restore cannot cover into the
-        # restored config itself, so EVERY later git in the job — the loops'
-        # hand-back and Surface fetches, claude.yml's open-PR fetch, not just
-        # the guard and landing steps that also pin them by env — runs
-        # hook-free and never consults an fsmonitor command the index's
-        # extension might name. Appended after the cp so the snapshot stays
-        # a faithful copy of checkout's config.
-        printf '[core]\n\thooksPath = %s\n\tfsmonitor = false\n' "$RUNNER_TEMP/no-hooks" >>"$gitdir/config"
-        echo "reclaimed .git from codex (codex processes killed, no embedded repository, group write revoked on .git and the workspace root, hooks moved aside) and restored the pre-codex config with core.hooksPath/core.fsmonitor pinned."
+        bash "$RECLAIM_SCRIPT"
