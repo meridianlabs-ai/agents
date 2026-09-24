@@ -676,7 +676,8 @@ def test_reset_mode_kills_codex_processes_then_recreates_the_home(tmp_path):
     # SYSTEM_PATH: the step pins PATH to it before its first command; the
     # test points it at the stubs (and the real bash/sleep).
     env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PIN_SCRIPT=str(tmp_path / "pin.sh"),
-                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", BIN="/ws/.venv/bin:/home/codex/.local/bin")
+                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", BIN="/ws/.venv/bin:/home/codex/.local/bin",
+                   AGENT_USER="codex")
     (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s bin=%s\\n" "$1" "$2" >>"$LOG"\n')
     (tmp_path / "pin.sh").write_text('#!/usr/bin/env bash\nprintf "pin %s\\n" "$1" >>"$LOG"\n')
     bins = tmp_path / "bin"
@@ -692,7 +693,7 @@ def test_reset_mode_kills_codex_processes_then_recreates_the_home(tmp_path):
 
 def test_reset_mode_pins_nothing_without_bin_dirs(tmp_path):
     env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PIN_SCRIPT=str(tmp_path / "pin.sh"),
-                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", BIN="")
+                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", BIN="", AGENT_USER="codex")
     (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s bin=%s\\n" "$1" "$2" >>"$LOG"\n')
     (tmp_path / "pin.sh").write_text('#!/usr/bin/env bash\nprintf "pin %s\\n" "$1" >>"$LOG"\n')
     write_exe(tmp_path / "bin" / "id", "#!/usr/bin/env bash\nexit 0\n")
@@ -703,7 +704,7 @@ def test_reset_mode_pins_nothing_without_bin_dirs(tmp_path):
 
 def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):
     env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PKILL_RC="0",   # always "killed something"
-                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin")
+                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", AGENT_USER="codex")
     (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
     write_exe(tmp_path / "bin" / "id", "#!/usr/bin/env bash\nexit 0\n")
     r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
@@ -713,14 +714,29 @@ def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):
     assert "still running as codex after repeated kills" in r.stdout + r.stderr
 
 
+def test_reset_mode_is_codex_only(tmp_path):
+    # The Claude jobs' `claude-agent` has no codex home to reset: they reclaim
+    # before the agent instead. The step refuses before any kill.
+    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin",
+                   AGENT_USER="claude-agent")
+    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
+    write_exe(tmp_path / "bin" / "id", "#!/usr/bin/env bash\nexit 0\n")
+    r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
+    assert r.returncode != 0 and "codex-only" in r.stdout + r.stderr
+    assert not (tmp_path / "log").exists()
+
+
 def test_create_mode_runs_the_same_home_script_last():
     text = (CODEX_USER / "action.yml").read_text()
-    # The create mode's last step (the grant, after the PATH check) ends
-    # with the shared home script.
+    # The create mode's last step (the grant, after the PATH check) ends its
+    # codex branch with the shared home script; the claude-agent branch
+    # (the `user` input) runs no home script.
     runs = text[text.index("\nruns:\n"):]
-    grant_at = runs.index("# 2, continued: the workspace grant.")
+    grant_at = runs.index("# 2, continued: the workspace grant")
     create = runs[grant_at:runs.index("\n    - ", grant_at)]
     create = "\n".join(l for l in create.splitlines() if not l.startswith("    #"))  # the next step's comment
-    assert create.rstrip().endswith('bash "$HOME_SCRIPT" codex')
+    codex_branch = create[create.index('if [ "$AGENT_USER" = codex ]; then'):create.index("\n        else\n")]
+    assert codex_branch.rstrip().endswith('bash "$HOME_SCRIPT" codex')
+    assert create.count("HOME_SCRIPT") == 1
     assert "config.toml" not in create and "permissions.workspace_net" not in create
     assert "\n  mode:\n" in text and "    default: create\n" in text

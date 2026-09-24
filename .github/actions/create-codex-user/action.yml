@@ -162,13 +162,49 @@ description: >-
   step (local composite actions with post steps break teardown on the
   fork). The create mode is three steps so that the PATH check sits between
   the user's creation and the grant; the workflows' `steps.codexuser.outcome`
-  is the composite's, failed if any of them fails. Two inputs, `mode` and
-  `bin` (reset-home only); the user name, home and the snapshot paths
-  (`$RUNNER_TEMP/git-config.pre-codex`, `$RUNNER_TEMP/embedded-git.pre-codex`)
-  are the convention the codex-action steps and `reclaim-codex-workspace`
-  are written against.
+  is the composite's, failed if any of them fails. The user's home
+  (`/home/<user>`) and the snapshot paths
+  (`$RUNNER_TEMP/git-config.pre-codex`, `$RUNNER_TEMP/embedded-git.pre-codex`,
+  the same for either user: a job creates one agent user) are the convention
+  the codex-action steps and `reclaim-codex-workspace` are written against.
+  The `user` and `grant` inputs (defaults `codex` and `workspace`, which are
+  everything above) let the Claude jobs create their `claude-agent` user
+  with the same body (design/executed-paths-residual.md → The agent user);
+  `bin` is reset-home only.
 
 inputs:
+  user:
+    description: >-
+      The agent user to create: `codex` (the default: the codex jobs,
+      everything above exactly as written) or `claude-agent` (the Claude
+      jobs' agent user, design/executed-paths-residual.md → The agent
+      user). The snapshots, the user and its group cross-enrolment, the
+      PATH check and the workspace grant are the same for both. The
+      codex-only parts — the `$RUNNER_TEMP/codex` output dir, the codex
+      home (`codex-home.sh`, with its server-info file) and the
+      `safe.directory` entry in the user's global git config — run only for
+      `codex`. For `claude-agent` the step instead writes `safe.directory`
+      to the root-owned system git config (the reviewer's sandbox denies
+      reads of the user's `~/.gitconfig`, and git as that user over the
+      runner-owned checkout would otherwise refuse it as dubious
+      ownership; the system file is not the agent's to change) and creates
+      `$RUNNER_TEMP/claude-agent`, `runner:claude-agent` mode 2775 — the
+      landing directory the Claude agent writes to, read runner-side only
+      through `import-codex-final`'s `dir` mode — and a root-owned 0755
+      `/opt/meridian-agent/` for the CLI and its launcher. Any other value
+      fails the step. `reset-home` is codex-only.
+    required: false
+    default: codex
+  grant:
+    description: >-
+      `workspace` (the default): the group grant of the workspace to the
+      user (step 2). `none`: no grant, so the checkout stays runner-owned
+      and read-only to the user's uid — for the reviewer's fork and
+      external heads, where the agent works in a scratch copy
+      (design/executed-paths-residual.md → Per-workflow notes). Everything
+      else runs either way. Any other value fails the step.
+    required: false
+    default: workspace
   mode:
     description: >-
       `create` (the default): everything below — snapshots, user, grants,
@@ -210,44 +246,76 @@ runs:
   steps:
     - shell: bash
       if: inputs.mode == 'create'
+      env:
+        AGENT_USER: ${{ inputs.user }}
+        GRANT: ${{ inputs.grant }}
       run: |
         set -euo pipefail
-        # 1. Pre-codex snapshots (see description) — before any grant.
+        case "$AGENT_USER" in
+          codex|claude-agent) ;;
+          *) echo "::error::create-codex-user: user must be codex or claude-agent, not '$AGENT_USER'"; exit 1 ;;
+        esac
+        case "$GRANT" in
+          workspace|none) ;;
+          *) echo "::error::create-codex-user: grant must be workspace or none, not '$GRANT'"; exit 1 ;;
+        esac
+        # 1. Pre-agent snapshots (see description) — before any grant.
         cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
         sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
         # 2. User and groups — no grant yet: the PATH check in the next step
         #    probes as this user and must run before the workspace becomes
         #    writable to it.
-        sudo adduser --system --home /home/codex --shell /bin/bash --group codex
-        sudo usermod -a -G codex runner
-        sudo usermod -a -G runner codex
+        sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"
+        sudo usermod -a -G "$AGENT_USER" runner
+        sudo usermod -a -G runner "$AGENT_USER"
 
     # Refuse before the grant if the job PATH has a directory codex could
     # write (see description, 2). Its own probes run by system path.
     - if: inputs.mode == 'create'
       uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
       with:
-        user: codex
+        user: ${{ inputs.user }}
         protect: "true"
 
     - shell: bash
       if: inputs.mode == 'create'
       env:
         HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
+        AGENT_USER: ${{ inputs.user }}
+        GRANT: ${{ inputs.grant }}
       run: |
         set -euo pipefail
-        # 2, continued: the workspace grant.
-        sudo chown -R runner:codex "$GITHUB_WORKSPACE"
-        sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
-        sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
-        # 3. Output dir — a codex-owned subdir, never g+w on the temp root.
-        sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
-        # 4. Dubious-ownership exemption for the runner-owned checkout.
-        sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        # 5 + 6. The codex home: 755 home and .codex, the server-info file
-        #    and the network-on profile (codex-home.sh, shared with the
-        #    reset-home mode below).
-        bash "$HOME_SCRIPT" codex
+        # 2, continued: the workspace grant (not with `grant: none`).
+        if [ "$GRANT" = workspace ]; then
+          sudo chown -R "runner:$AGENT_USER" "$GITHUB_WORKSPACE"
+          sudo chmod -R g+rwX "$GITHUB_WORKSPACE"
+          sudo find "$GITHUB_WORKSPACE" -type d -exec chmod g+s {} +
+        fi
+        if [ "$AGENT_USER" = codex ]; then
+          # 3. Output dir — a codex-owned subdir, never g+w on the temp root.
+          sudo install -d -o codex -g codex -m 755 "$RUNNER_TEMP/codex"
+          # 4. Dubious-ownership exemption for the runner-owned checkout.
+          sudo -u codex -H git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # 5 + 6. The codex home: 755 home and .codex, the server-info file
+          #    and the network-on profile (codex-home.sh, shared with the
+          #    reset-home mode below).
+          bash "$HOME_SCRIPT" codex
+        else
+          # claude-agent (see the `user` input). The landing dir: runner
+          # owns it and the agent writes into it through the group, and
+          # $RUNNER_TEMP itself stays 755 runner:runner.
+          sudo install -d -o runner -g "$AGENT_USER" -m 2775 "$RUNNER_TEMP/$AGENT_USER"
+          # The dubious-ownership exemption, in the root-owned system config.
+          sudo git config --system --add safe.directory "$GITHUB_WORKSPACE"
+          # The root-owned home of the CLI and its launcher, from scratch
+          # (rm -rf on a symlink removes the link, not what it points at).
+          sudo rm -rf /opt/meridian-agent
+          sudo install -d -o root -g root -m 755 /opt/meridian-agent
+          if [ -L /opt/meridian-agent ] || [ "$(stat -c '%U:%G %a' /opt/meridian-agent)" != "root:root 755" ]; then
+            echo "::error::/opt/meridian-agent is not a root-owned 0755 directory after creating it"
+            exit 1
+          fi
+        fi
 
     # reset-home runs after code ran as codex (provisioning), exactly like
     # the reclaim runs after codex, so it takes the reclaim's two PATH
@@ -255,7 +323,7 @@ runs:
     # without `protect` (a hop that became codex-writable since the grant
     # is refused, not fixed), and the step below pins its own PATH to the
     # system directories before its first command.
-    - if: inputs.mode == 'reset-home'
+    - if: inputs.mode == 'reset-home' && inputs.user == 'codex'
       uses: meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main
       with:
         user: codex
@@ -267,10 +335,12 @@ runs:
         PIN_SCRIPT: ${{ github.action_path }}/pin-bwrap.sh
         SYSTEM_PATH: /usr/sbin:/usr/bin:/sbin:/bin
         BIN: ${{ inputs.bin }}
+        AGENT_USER: ${{ inputs.user }}
       run: |
         set -euo pipefail
         # System tools only, whatever GITHUB_PATH prepended (see above).
         export PATH="$SYSTEM_PATH"
+        [ "$AGENT_USER" = codex ] || { echo "::error::reset-home resets the codex home and is codex-only, not for user '$AGENT_USER'"; exit 1; }
         id codex >/dev/null 2>&1 || { echo "::error::no codex user — reset-home runs after the create mode of this composite"; exit 1; }
         # First: nothing may still be running as codex — a background
         # process a hostile build backend left behind during provisioning

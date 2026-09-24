@@ -90,7 +90,7 @@ run_assert() { # <PATH> <protect> [user]
 }
 
 say "1. create-codex-user, step 1: snapshots, user, groups"
-/bin/bash -c "$(lift create-codex-user 1)"
+AGENT_USER=codex GRANT=workspace /bin/bash -c "$(lift create-codex-user 1)"
 id codex
 test -f "$RUNNER_TEMP/git-config.pre-codex" || fail "no config snapshot"
 
@@ -183,9 +183,11 @@ grep -o 'job PATH: .*' "$RUNNER_TEMP/smoke-r2-stock-again.log"
 echo "check without protect took $(( $(date +%s) - t0 )) s"
 
 say "4. create-codex-user, step 3 (its second run block): the grant and the rest"
-# HOME_SCRIPT is the step's env: the grant step ends with the shared
-# codex-home.sh (also run by the composite's reset-home mode).
-HOME_SCRIPT="$root/.github/actions/create-codex-user/codex-home.sh" /bin/bash -c "$(lift create-codex-user 2)"
+# HOME_SCRIPT, AGENT_USER and GRANT are the step's env (the last two its
+# defaults): the grant step ends with the shared codex-home.sh (also run by
+# the composite's reset-home mode).
+HOME_SCRIPT="$root/.github/actions/create-codex-user/codex-home.sh" AGENT_USER=codex GRANT=workspace \
+  /bin/bash -c "$(lift create-codex-user 2)"
 stat -c '%A %U:%G %n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.venv/bin"
 
 say "5. as codex: plant into the venv, tamper with .git/config, try the protected dirs"
@@ -208,7 +210,10 @@ grep -q TAMPERED "$GITHUB_WORKSPACE/.git/config" || fail "tamper did not land"
 
 say "6. reclaim: nested check (no protect) then the reclaim script, with the planted venv NOT on PATH (as in a real job)"
 run_assert "$job_path" false
-SNAPSHOT='' EMBEDDED_SNAPSHOT='' SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$(lift reclaim-codex-workspace 1)"
+# The step's env: its run block pins PATH and runs reclaim.sh.
+reclaim_env=(AGENT_USER=codex SNAPSHOT='' EMBEDDED_SNAPSHOT='' SYSTEM_PATH="$SYSTEM_PATH"
+             RECLAIM_SCRIPT="$root/.github/actions/reclaim-codex-workspace/reclaim.sh")
+env "${reclaim_env[@]}" /bin/bash -c "$(lift reclaim-codex-workspace 1)"
 grep -q TAMPERED "$GITHUB_WORKSPACE/.git/config" && fail "config not restored"
 grep -q 'fsmonitor = false' "$GITHUB_WORKSPACE/.git/config" || fail "pins not appended"
 stat -c '%A %U:%G %n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.git"
@@ -219,7 +224,7 @@ CONFLICTS='' GIT_DIR="$GITHUB_WORKSPACE/.git" GIT_COMMON_DIR="$GITHUB_WORKSPACE/
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$(lift unresolved-merge-guard 1)"
 
 say "6c. and once more with the planted venv FIRST on this shell's PATH — the pins hold even then"
-PATH="$GITHUB_WORKSPACE/.venv/bin:$job_path" SNAPSHOT='' EMBEDDED_SNAPSHOT='' SYSTEM_PATH="$SYSTEM_PATH" /bin/bash -c "$(lift reclaim-codex-workspace 1)"
+/usr/bin/env PATH="$GITHUB_WORKSPACE/.venv/bin:$job_path" "${reclaim_env[@]}" /bin/bash -c "$(lift reclaim-codex-workspace 1)"
 PATH="$GITHUB_WORKSPACE/.venv/bin:$job_path" CODEX_HOME_DIR=/home/codex/.codex REQ_MODEL='' REQ_EFFORT='' SYSTEM_PATH="$SYSTEM_PATH" GITHUB_STEP_SUMMARY="$summary" GITHUB_OUTPUT="$out" /bin/bash -c "$(lift codex-usage 1)"
 
 if [ -e "$hijack_log" ]; then cat "$hijack_log"; fail "a planted file ran"; fi
