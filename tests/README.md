@@ -487,7 +487,8 @@ Testing a change).
   the claude-code-action step, which names the launcher's executable and
   sets `classify_inline_comments: "false"` (every claude-code-action step
   does); the post-agent reclaim is the first step after it, and every later
-  git step (the origin reset, the import, the Surface tree check, the
+  git step (the origin reset, the import — which also needs a successful
+  launcher and an entered Claude step — the Surface tree check, the
   composers, the reviewer's re-plant check and landing prep, emit-landing's
   read-only) is gated on it; the Surface step names each boundary step's
   failure; the reviewer's sandboxed paths create the user and launch with

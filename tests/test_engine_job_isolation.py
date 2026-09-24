@@ -381,7 +381,12 @@ def test_the_post_agent_reclaim_is_first_after_the_action_and_gates_every_later_
             assert gate in step_if(s), s[:60]
             seen.add("reset")
         if "import-codex-final@main" in code:
-            assert gate in step_if(s) and "          mode: dir\n" in s, s[:60]
+            # ...and only for an agent that was launched: a provisioning or
+            # launcher failure skips the agent, and what provisioning left in
+            # the landing directory is not its output (review round 1).
+            assert step_if(s) == (f"always() && {gate} && steps.launcher.outcome == 'success' && "
+                                  "steps.claude.outcome != 'skipped'"), s[:60]
+            assert "          mode: dir\n" in s, s[:60]
             seen.add("import")
         if step_id(s) in ("replant", "claudepost"):
             assert gate in step_if(s), step_id(s)

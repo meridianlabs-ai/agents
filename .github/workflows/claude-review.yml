@@ -1736,10 +1736,15 @@ jobs:
       # only one. Best-effort like the codex import: a refusal leaves no copy,
       # and the prep then finds no summary.md (no review lands, and the land
       # job's landed-review check says so).
+      # Only for an agent that was launched: the launcher succeeded (it
+      # emptied the directory after its last kill) and the Claude step was
+      # entered. A provisioning or launcher failure skips the agent, and what
+      # provisioning wrote into the directory is not its output (review
+      # round 1 of #167). A launched agent that then failed keeps its files.
       - name: Import the review files
         id: agentfiles
         continue-on-error: true
-        if: always() && steps.agentreclaim.outcome == 'success'
+        if: always() && steps.agentreclaim.outcome == 'success' && steps.launcher.outcome == 'success' && steps.claude.outcome != 'skipped'
         uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
         with:
           mode: dir

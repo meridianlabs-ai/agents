@@ -1554,10 +1554,15 @@ jobs:
       # $RUNNER_TEMP/landing, which is the only place the composer and
       # emit-landing read. Best-effort like the codex import: a refusal
       # leaves no copy, and the composer then finds no manifest-extra.json.
+      # Only for an agent that was launched: the launcher succeeded (it
+      # emptied the directory after its last kill) and the Claude step was
+      # entered. A provisioning or launcher failure skips the agent, and what
+      # provisioning wrote into the directory is not its output (review
+      # round 1 of #167). A launched agent that then failed keeps its files.
       - name: Import the agent's landing files
         id: agentfiles
         continue-on-error: true
-        if: always() && steps.agentreclaim.outcome == 'success'
+        if: always() && steps.agentreclaim.outcome == 'success' && steps.launcher.outcome == 'success' && steps.claude.outcome != 'skipped'
         uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
         with:
           mode: dir
@@ -2042,9 +2047,12 @@ jobs:
           # -- comments
           agent='{}'
           # Only the import's copy, which exists only after a reclaim that
-          # succeeded; checked here too, so no decision of the agent's is
-          # honoured from a workspace the runner never took back.
-          if [ "${AGENTRECLAIM_OUTCOME:-}" = "success" ] && [ -f "$DIR/manifest-extra.json" ]; then
+          # succeeded and an agent that was launched (the launcher emptied
+          # the directory, then the Claude step was entered); checked here
+          # too, so no decision is honoured from a workspace the runner
+          # never took back, nor from files provisioning left behind when
+          # it failed and the agent never ran (review round 1).
+          if [ "${AGENTRECLAIM_OUTCOME:-}" = "success" ] && [ "${CLAUDE_OUTCOME:-skipped}" != "skipped" ] && [ -f "$DIR/manifest-extra.json" ]; then
             if ! agent=$(jq -c 'if type=="object" then . else error("not an object") end' "$DIR/manifest-extra.json" 2>&1); then
               echo "::error::landing: the agent's manifest-extra.json is not a JSON object ($agent); its comments were dropped."
               agent='{}'

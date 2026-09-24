@@ -215,7 +215,9 @@ take effect on every repo's next run.
   is read before the user is created, and `.git/info/exclude` is appended
   by the codex prep step before the user is created. The agent's files
   reach the runner only through `import-codex-final` after the reclaim (the
-  codex final message; the Claude agent's landing directory, `dir` mode). A
+  codex final message; the Claude agent's landing directory, `dir` mode,
+  imported only when the launcher succeeded and the Claude step was
+  entered, so files a failed provisioning left there are never read). A
   step that must exist on both engines
   is copied into both jobs (the checkout, assert, base and sync steps
   already are); the composers and Surface steps are per-engine.

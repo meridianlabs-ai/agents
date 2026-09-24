@@ -628,6 +628,22 @@ def test_no_git_runs_unless_the_post_agent_reclaim_succeeded(repo, outcome):
     assert out["read_only"] == "true" and "handback" not in m and "resolve_threads" not in m
 
 
+def test_files_provisioning_left_are_not_the_agents_when_it_never_ran(repo):
+    # Review round 1: provisioning runs as the agent user and can write
+    # the landing directory, then fail; the agent step is skipped, the
+    # reclaim still succeeds. Nothing in the directory is the agent's.
+    on(repo, PR_BRANCH)
+    extra = json.dumps({"comments": [{"number": 34, "body_file": "planted.md"}], "resolve_threads": ["PRRT_a"]})
+    (repo["tmp"] / "landing").mkdir(exist_ok=True)
+    (repo["tmp"] / "landing" / "planted.md").write_text("left by provisioning\n")
+    m, _, _, _ = compose(repo, is_pr=True, claude_outcome="skipped", agent_extra=extra,
+                         error="⚠️ provisioning failed")
+    assert "comments" not in m and "resolve_threads" not in m
+    # A launched agent that failed keeps its own comment.
+    m, _, _, _ = compose(repo, is_pr=True, claude_outcome="failure", agent_extra=extra, error="⚠️ it failed")
+    assert m["comments"] == [{"number": 34, "body_file": "planted.md"}]
+
+
 # --- errors and codex -----------------------------------------------------------
 
 
