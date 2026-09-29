@@ -792,8 +792,8 @@ codex, reads it.
      whose post step implementation must verify. That fixes 4773876 and
      the post-step half of 4773887, whatever the reclaim's outcome, a
      cancellation included.
-  3. **Kills that cannot be outrun: every codex-uid process starts in a
-     root-owned cgroup.** `create-codex-user` creates
+  3. **Kills that cannot be outrun: every codex-uid process the job starts
+     begins in a root-owned cgroup.** `create-codex-user` creates
      `/sys/fs/cgroup/<the job's cgroup parent>/meridian-codex`, owned by
      root, before the user's first process. A process can only move
      between cgroups by writing the destination's and the common
@@ -804,19 +804,27 @@ codex, reads it.
      - **`jail-exec`**, a new root-owned helper in `/opt/meridian-codex/bin`
        (dir and file root-owned, `0755`, verified like the launcher's
        `/opt/meridian-agent/bin`). The runner runs it through its sudo, as
-       root. It accepts exactly `-u codex -- <argv>`, and anything else
-       exits non-zero. It writes its own PID to the jail's `cgroup.procs`,
+       root. It accepts exactly `-u codex [--] <argv>`, and anything else
+       exits non-zero. The optional `--` is there because codex-action
+       omits it on one call (below). It writes its own PID to the jail's `cgroup.procs`,
        reads `/proc/self/cgroup` back and requires the jail path. On any
        failure it exits non-zero **before** dropping privileges, so no
        codex process starts outside the jail. Then it `exec`s `/usr/bin/sudo
        -u codex -- <argv>`, and every descendant inherits the cgroup.
-     - **Provisioning and `Reset codex home`** are our composites.
-       provision-fallback's `sudo -u codex -H -- env -i …`
-       (provision-fallback/action.yml:226) becomes `sudo -n
-       /opt/meridian-codex/bin/jail-exec -u codex -- env -i …` with the same
-       arguments. `codex-home.sh` launches no codex process (it runs root
-       commands only), and its kill step becomes the jail's
-       `cgroup.kill`.
+     - **Our composites' codex-uid launches** all go through `jail-exec`:
+       - provision-fallback's `sudo -u codex -H -- env -i …`
+         (provision-fallback/action.yml:226) becomes `sudo -n
+         /opt/meridian-codex/bin/jail-exec -u codex -- env -i …`, with the
+         same arguments;
+       - `codex-home.sh`'s `sudo -u "$user" tee` and `printenv` calls
+         (:54, :84, :101);
+       - `assert-runner-only-path`'s `runuser -u "$USER_NAME" --` probes
+         (:161), when the user is `codex`; `claude-agent` keeps `runuser`.
+         `create-codex-user` creates the jail before its first PATH walk.
+         They are short, fixed-argv helpers, and they are routed anyway so
+         that the claim below has no exception.
+
+       `codex-home.sh`'s kill step becomes the jail's `cgroup.kill`.
      - **codex-action's launch.** At f367b1e, the `unprivileged-user`
        strategy resolves `codex` with `which` and prepends `sudo`, `-u`,
        `<user>`, `--` **by name** (`runCodexExec.ts:233-253`), so the
@@ -824,9 +832,12 @@ codex, reads it.
        put `/opt/meridian-codex/bin` first on `GITHUB_PATH`. That is
        allowed because it is root-owned and outside the workspace; the PATH
        walk in `create-codex-user` checks it the same way. The directory
-       holds a `sudo` shim. For an argv that begins `-u codex --`, it
-       `exec`s `/usr/bin/sudo -n /opt/meridian-codex/bin/jail-exec "$@"`.
-       Any other argv it passes to `/usr/bin/sudo` unchanged. That covers
+       holds a `sudo` shim. For an argv that begins `-u codex`, with or
+       without a following `--`, it `exec`s `/usr/bin/sudo -n
+       /opt/meridian-codex/bin/jail-exec "$@"`. That includes codex-action's
+       own `sudo -u codex cat <output-file>` finalizer, which has no `--`
+       (runCodexExec.ts:345-356). Any other argv it passes to
+       `/usr/bin/sudo` unchanged. That covers
        the action's own root commands, such as its `sudo chown`/`sysctl`
        lines (codex-action action.yml:262-314). Every
        post-codex composite pins `PATH` to the system directories anyway,
@@ -841,9 +852,13 @@ codex, reads it.
        the hosted test fails closed if the action ever calls
        `/usr/bin/sudo` directly: the stand-in would then be outside the
        jail, and membership is asserted.
-     - **Every other `sudo -u codex`** in the workflows and composites goes
-       through `jail-exec` (a structural test). Cron and at are denied
-       (point 7), which closes the one route the kernel does not.
+     - **Every other `sudo -u codex` or `runuser -u codex`** in the
+       workflows and composites goes through `jail-exec` (a structural test
+       over `sudo`, `runuser`, `su` and `setpriv` with the codex user).
+       Cron and at are denied (point 7), which closes the one route the
+       kernel does not. The reclaim's whole-uid `pgrep -u codex` check
+       below remains the backstop: a process that any missed route
+       started fails the reclaim instead of surviving it.
 
      The reclaim writes `1` to the jail's `cgroup.kill`, which is atomic
      against forks. It then requires `cgroup.procs` to be empty and no
@@ -866,39 +881,89 @@ codex, reads it.
      tree (unresolved-merge-guard/action.yml:70-91). The prompt requires
      codex to `git add` or `git rm` each resolved path. With the private
      git dir, that evidence lives in codex's index file. It is read as
-     **imported data**, never through the codex-owned git dir:
-     - The reclaim, after the kill and the revocation, copies
-       `.git/index` with the same `O_NOFOLLOW`, owner-checked, size-capped
-       import `import-codex-final` uses, to `$RUNNER_TEMP/codex-index`.
-       `.git` itself is not opened as a repository.
-     - The guard lists the paths the snapshot's index holds unmerged
-       (`git --git-dir=<private> ls-files --unmerged`). That is the
-       trusted list of conflicts sync left.
-     - For each such path, it reads codex's index as data:
-       `GIT_INDEX_FILE=$RUNNER_TEMP/codex-index git --git-dir=<private>
-       ls-files --stage -- <path>`, with the private config
-       (fsmonitor off, no hooks, `GIT_CONFIG_GLOBAL=/dev/null`). The path
-       must have exactly one stage-0 entry, or none when the work tree
-       has no file there (a `git rm`). Any stage 1-3 entry means codex
-       left the path unmerged, and the round is refused as today.
-     - A stage-0 entry's object id must equal `git --git-dir=<private>
-       hash-object --path=<path> <work-tree file>`, the hash `git add`
-       would compute. So the staged resolution is what gets committed,
-       including "ours unchanged", whose hash equals ours. A file edited
-       after staging is refused rather than silently re-resolved.
-     - The existing marker scan over sync's conflict list stays.
-     - Only then does the commit step run `git add -A` into the private
-       index and commit, completing the merge with the snapshot's
-       `MERGE_HEAD`.
-     - A missing, unreadable or refused index copy, a parse error, or any
-       mismatch fails the guard. That is fail-closed: nothing lands, and the
-       Surface error says why.
+     **imported data**, never through the codex-owned git dir, and only
+     when the run needs it:
+     - **When the index is needed.** The guard first lists the paths the
+       trusted snapshot's index holds unmerged (`git --git-dir=<private>
+       ls-files --unmerged`), which is the conflict list sync left: `U`.
+       It also lists the snapshot's gitlink (mode 160000) paths: `G`. When
+       both are empty, which is every run with no base-merge conflict in a
+       repository without submodules, nothing is imported or checked. The
+       commit step stages the work tree as below. So an ordinary unstaged
+       edit and a no-change answer never depend on the index file, which
+       codex is allowed to leave untouched (the prompts at
+       claude.yml:2668, claude-auto.yml:2117, claude-auto-review.yml:2388).
+     - **The import, when `U` or `G` is non-empty.** After the kill and the
+       revocation, the reclaim copies `.git/index` to
+       `$RUNNER_TEMP/codex-index`. It uses the `O_NOFOLLOW`, regular-file,
+       single-link, size-capped import of `import-codex-final`, with the
+       owner set to either `runner` or `codex`. `create-codex-user` leaves
+       the original index owned by `runner` and group-writable
+       (create-codex-user/action.yml:290), and a codex `git add` replaces
+       it with a codex-owned file. Both are legitimate, and ownership
+       says nothing about trust here: the copy is data either way.
+       `import_codex_final.py` gains an owner list for this one call. A
+       missing, refused or unparsable copy fails the guard, because the
+       evidence is required.
+     - **Evidence per conflicted path (`U`).** Codex's index is read as
+       data: `GIT_INDEX_FILE=$RUNNER_TEMP/codex-index git
+       --git-dir=<private> ls-files --stage -z -- <path>`, with the
+       private config (fsmonitor off, no hooks,
+       `GIT_CONFIG_GLOBAL=/dev/null`). Each path must have exactly one
+       stage-0 entry, or none at all (a `git rm`). Any stage 1-3 entry
+       means codex left the path unmerged, and the round is refused as
+       today. The entry's mode must be one of `100644`, `100755`, `120000`
+       or `160000`, and the mode and object id are what the check below
+       compares.
+     - **Staging, mode by mode, never inside a nested repository.** The
+       commit step stages into the private index:
+       - Everything but gitlinks: `git add -A -- . ':(exclude)<each path
+         in G and each 160000 path in codex's index>'`. Git computes each
+         entry as it would for codex:
+         - regular and executable files are hashed with the attributes'
+           conversions, and the mode comes from the executable bit;
+         - a symlink is recorded as mode `120000` with the link text as
+           its blob, never followed;
+         - a deleted file is removed.
+       - Gitlinks: never by reading the nested repository. Git would
+         resolve the submodule's HEAD, and runner-side git must not enter
+         a codex-writable repository. Each gitlink comes from codex's
+         index as data. For every `160000` stage-0 entry there, and for
+         every path in `G`, the commit step runs `git update-index
+         --cacheinfo 160000,<oid>,<path>`. It uses `--force-remove` when
+         codex's index has no entry and the path is gone from the work
+         tree. A gitlink in `U` must have its oid among the snapshot's
+         stage 1-3 oids for that path: base, ours or theirs, the only
+         commits sync's conflict offered. Any other oid is refused. A
+         gitlink outside `U` (a submodule bump codex staged) is taken as
+         codex staged it, like any other agent change, and lands in the
+         bundle for land's usual checks. `.gitmodules` stays tier 1. A
+         pointer codex moved in the nested checkout without staging it is
+         not picked up. The codex prompt says to stage submodule
+         pointers, and that is the only behaviour change for honest runs.
+     - **The final tree must equal the evidence.** After staging, for each
+       path in `U`, the private index's entry (`ls-files --stage -z`) must
+       equal codex's stage-0 entry in mode **and** object id, or both must
+       be absent. Because the private index was built by the same `git
+       add` codex ran, a staged resolution that the work tree still holds
+       compares equal for every mode. That covers "ours unchanged", a
+       symlink, an executable bit and a submodule choice. A file edited
+       again after staging, a symlink replaced by a file, or a changed mode
+       compares unequal and is refused rather than silently re-resolved.
+     - The existing marker scan over sync's conflict list stays, for
+       regular files only.
+     - Only then does the commit step commit, completing the merge with
+       the snapshot's `MERGE_HEAD`. Any mismatch, parse error or failed
+       staging command fails the guard. That is fail-closed: nothing lands,
+       and the Surface error says why.
 
      The index is a git-format data file. Git parses it but executes
      nothing from it: its extensions name files in the git dir (the
      private one) and config the private dir does not set. Its object ids
-     need not exist in the private object store, since only
-     `ls-files --stage` reads them.
+     need not exist in the private object store for `ls-files --stage`.
+     A gitlink oid needs no object at all, and a staged blob's content is
+     recomputed from the work tree by the private `git add`, so the
+     comparison needs no object codex wrote.
   6. **`review-codex`** gains the reclaim and the import. Its `Prepare
      Codex review for landing` reads the imported copy, not the codex-owned
      file (claude-review.yml:2669).
@@ -1268,17 +1333,43 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
   - The guard and commit step, lifted and run against a local repository
     with a conflicted `MERGE_HEAD` snapshot and a separately staged
     "codex" index copy.
-    - Refused: an untouched text conflict (markers), an untouched binary
-      conflict, an untouched modify/delete conflict, a staged file edited
-      again after staging, and a missing or corrupt index copy.
-    - Accepted: a staged text resolution, a staged binary choice, a
-      `git rm` of a modify/delete path, and a staged "ours unchanged". Each
-      commits a two-parent merge whose tree equals the staged resolution.
-  - `jail-exec`, lifted: it refuses every argv but `-u codex -- …`, and
+    - Refused:
+      - an untouched text conflict (markers), binary conflict or
+        modify/delete conflict;
+      - a staged file edited again after staging;
+      - a staged symlink replaced by a regular file;
+      - a submodule conflict resolved to an oid outside the snapshot's
+        stages;
+      - a missing or corrupt index copy when the snapshot has a conflict.
+    - Accepted:
+      - a staged text resolution and a staged binary choice;
+      - a `git rm` of a modify/delete path;
+      - a staged "ours unchanged";
+      - a staged symlink resolution, with its link text as the blob;
+      - an executable-bit resolution;
+      - a real submodule conflict, a repository with a `.gitmodules` like
+        inspect_ai's and inspect_scout's ts-mono, resolved to theirs with
+        `git add <submodule>`, with no runner-side git process ever
+        started inside the submodule (asserted with a planted
+        `core.fsmonitor` in the nested repository's config).
+
+      Each commits a two-parent merge whose tree equals the staged
+      resolution, mode and oid for mode.
+    - With no conflict and no submodule, the index is never imported:
+      - an ordinary unstaged edit, with the runner-owned index untouched,
+        commits;
+      - a no-change answer lands nothing and raises no error;
+      - a codex-owned replacement index is not read.
+    - With a submodule and no conflict, an index owned by `runner` and one
+      owned by `codex` are both imported. A staged submodule bump lands,
+      and an unstaged one is ignored.
+  - `jail-exec`, lifted: it refuses every argv but `-u codex [--] …`, and
     exits non-zero before dropping privileges when the cgroup write or
-    the read-back fails. The `sudo` shim passes every other argv through
-    unchanged.
-  - Structurally: every `sudo -u codex` goes through `jail-exec`;
+    the read-back fails. The `sudo` shim routes `-u codex -- …` and `-u
+    codex cat <file>` (the finalizer's form) through it, and passes every
+    other argv through unchanged.
+  - Structurally: every codex-uid launch (`sudo`, `runuser`, `su`,
+    `setpriv`) in the workflows and composites goes through `jail-exec`;
     `/opt/meridian-codex/bin` is the only `GITHUB_PATH` entry in the codex
     jobs; codex-action is pinned to f367b1e.
   - `review-codex` runs the reclaim and the import.
@@ -1402,8 +1493,13 @@ SECURITY.md text that its change makes true.
        provision-fallback launch through `jail-exec`, codex-action pinned
        to f367b1e, and the reclaim's `cgroup.kill`
        (reclaim-codex-workspace).
-     - The reclaim's imported index copy, and the guard's stage-0
-       evidence check before `git add -A` (unresolved-merge-guard).
+     - The reclaim's conditional index import, with the `runner`/`codex`
+       owner list in `import_codex_final.py`.
+     - The guard's mode-aware evidence check, the gitlink staging through
+       `update-index --cacheinfo`, and the final-tree comparison
+       (unresolved-merge-guard and the three commit steps).
+     - `codex-home.sh` and `assert-runner-only-path` routed through
+       `jail-exec`.
      - The reclaim reduced to checks plus revocation.
      - The post-codex steps' `GIT_DIR` pins.
      - `review-codex`'s reclaim and import.
