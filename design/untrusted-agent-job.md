@@ -932,15 +932,20 @@ codex, reads it.
          every path in `G`, the commit step runs `git update-index
          --cacheinfo 160000,<oid>,<path>`. It uses `--force-remove` when
          codex's index has no entry and the path is gone from the work
-         tree. A gitlink in `U` must have its oid among the snapshot's
-         stage 1-3 oids for that path: base, ours or theirs, the only
-         commits sync's conflict offered. Any other oid is refused. A
-         gitlink outside `U` (a submodule bump codex staged) is taken as
-         codex staged it, like any other agent change, and lands in the
-         bundle for land's usual checks. `.gitmodules` stays tier 1. A
-         pointer codex moved in the nested checkout without staging it is
-         not picked up. The codex prompt says to stage submodule
-         pointers, and that is the only behaviour change for honest runs.
+         tree.
+       - An explicitly staged gitlink oid is accepted as codex staged it,
+         inside `U` and outside it alike, as the existing guard and commit
+         step accept it today (unresolved-merge-guard/action.yml:78-88,
+         claude.yml:2905-2906). A valid submodule resolution can be a new
+         merge of ours and theirs, or an existing descendant that contains
+         both, not only one of the three commits sync offered. Accepting
+         the oid needs no nested read: it is copied, not resolved. The
+         final comparison below still requires the staged entry, and the
+         pointer lands in the bundle for land's usual checks, like any
+         other agent change. `.gitmodules` stays tier 1.
+       - A pointer codex moved in the nested checkout without staging it is
+         not picked up. The codex prompt says to stage submodule pointers,
+         and that is the only behaviour change for honest runs.
      - **The final tree must equal the evidence.** After staging, for each
        path in `U`, the private index's entry (`ls-files --stage -z`) must
        equal codex's stage-0 entry in mode **and** object id, or both must
@@ -1338,8 +1343,8 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
         modify/delete conflict;
       - a staged file edited again after staging;
       - a staged symlink replaced by a regular file;
-      - a submodule conflict resolved to an oid outside the snapshot's
-        stages;
+      - a submodule conflict left unstaged (stages 1-3 still in codex's
+        index);
       - a missing or corrupt index copy when the snapshot has a conflict.
     - Accepted:
       - a staged text resolution and a staged binary choice;
@@ -1347,11 +1352,14 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
       - a staged "ours unchanged";
       - a staged symlink resolution, with its link text as the blob;
       - an executable-bit resolution;
-      - a real submodule conflict, a repository with a `.gitmodules` like
-        inspect_ai's and inspect_scout's ts-mono, resolved to theirs with
-        `git add <submodule>`, with no runner-side git process ever
-        started inside the submodule (asserted with a planted
-        `core.fsmonitor` in the nested repository's config).
+      - a real submodule conflict, in a repository with a `.gitmodules`
+        like inspect_ai's and inspect_scout's ts-mono, resolved three ways
+        with `git add <submodule>`: to theirs, to a new merge commit of
+        ours and theirs made in the nested checkout, and to an existing
+        descendant of both, beyond the three commits sync offered. No
+        runner-side git process is ever started inside the submodule
+        (asserted with a planted `core.fsmonitor` in the nested
+        repository's config).
 
       Each commits a two-parent merge whose tree equals the staged
       resolution, mode and oid for mode.
