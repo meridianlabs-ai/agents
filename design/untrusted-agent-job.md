@@ -792,14 +792,63 @@ codex, reads it.
      whose post step implementation must verify. That fixes 4773876 and
      the post-step half of 4773887, whatever the reclaim's outcome, a
      cancellation included.
-  3. **Kills that cannot be outrun.** codex-action's `sudo -u codex`
-     launch runs inside a dedicated cgroup that root creates under the
-     job's slice. Provisioning, `Reset codex home` and codex all run there.
-     The reclaim writes `cgroup.kill` (atomic: a forking process cannot
-     escape it, and codex cannot move itself out, since other cgroups'
-     `cgroup.procs` belong to root). It then requires `cgroup.procs` to be
-     empty, and runs `pkill -u codex` for anything cron or at started
-     before the deny below.
+  3. **Kills that cannot be outrun: every codex-uid process starts in a
+     root-owned cgroup.** `create-codex-user` creates
+     `/sys/fs/cgroup/<the job's cgroup parent>/meridian-codex`, owned by
+     root, before the user's first process. A process can only move
+     between cgroups by writing the destination's and the common
+     ancestor's `cgroup.procs`, and those files are root's. So a process
+     born inside cannot leave, and a process outside cannot enter
+     without root. The integration therefore puts the process in the
+     cgroup while it is still root, before it drops to `codex`:
+     - **`jail-exec`**, a new root-owned helper in `/opt/meridian-codex/bin`
+       (dir and file root-owned, `0755`, verified like the launcher's
+       `/opt/meridian-agent/bin`). The runner runs it through its sudo, as
+       root. It accepts exactly `-u codex -- <argv>`, and anything else
+       exits non-zero. It writes its own PID to the jail's `cgroup.procs`,
+       reads `/proc/self/cgroup` back and requires the jail path. On any
+       failure it exits non-zero **before** dropping privileges, so no
+       codex process starts outside the jail. Then it `exec`s `/usr/bin/sudo
+       -u codex -- <argv>`, and every descendant inherits the cgroup.
+     - **Provisioning and `Reset codex home`** are our composites.
+       provision-fallback's `sudo -u codex -H -- env -i …`
+       (provision-fallback/action.yml:226) becomes `sudo -n
+       /opt/meridian-codex/bin/jail-exec -u codex -- env -i …` with the same
+       arguments. `codex-home.sh` launches no codex process (it runs root
+       commands only), and its kill step becomes the jail's
+       `cgroup.kill`.
+     - **codex-action's launch.** At f367b1e, the `unprivileged-user`
+       strategy resolves `codex` with `which` and prepends `sudo`, `-u`,
+       `<user>`, `--` **by name** (`runCodexExec.ts:233-253`), so the
+       `sudo` it runs is the first one on the step's PATH. The codex jobs
+       put `/opt/meridian-codex/bin` first on `GITHUB_PATH`. That is
+       allowed because it is root-owned and outside the workspace; the PATH
+       walk in `create-codex-user` checks it the same way. The directory
+       holds a `sudo` shim. For an argv that begins `-u codex --`, it
+       `exec`s `/usr/bin/sudo -n /opt/meridian-codex/bin/jail-exec "$@"`.
+       Any other argv it passes to `/usr/bin/sudo` unchanged. That covers
+       the action's own root commands, such as its `sudo chown`/`sysctl`
+       lines (codex-action action.yml:262-314). Every
+       post-codex composite pins `PATH` to the system directories anyway,
+       so it never meets the shim.
+     - **The API-key proxy stays outside.** codex-action starts
+       `codex-responses-api-proxy` as the runner in its own earlier
+       sub-step, not through `sudo -u codex`, so it runs in the runner's
+       cgroup, and `cgroup.kill` on the jail cannot reach it. The hosted
+       test asserts both memberships.
+     - **Pin codex-action to f367b1e under (b).** The shim depends on the
+       by-name `sudo`. A structural test refuses any other ref, and
+       the hosted test fails closed if the action ever calls
+       `/usr/bin/sudo` directly: the stand-in would then be outside the
+       jail, and membership is asserted.
+     - **Every other `sudo -u codex`** in the workflows and composites goes
+       through `jail-exec` (a structural test). Cron and at are denied
+       (point 7), which closes the one route the kernel does not.
+
+     The reclaim writes `1` to the jail's `cgroup.kill`, which is atomic
+     against forks. It then requires `cgroup.procs` to be empty and no
+     process of uid `codex` anywhere (`pgrep -u codex`: a survivor outside
+     the jail means the integration failed, so the reclaim fails).
   4. **Any failure skips, and skipping is safe.**
      - The reclaim does its checks and then only revokes codex's write
        grant on the workspace. It restores nothing into `.git`.
@@ -810,14 +859,46 @@ codex, reads it.
      - Because of 1 and 2, no post action does either.
      - The landing then carries only the Surface error, which needs no
        git.
-  5. **The merge state survives.** Codex's resolution lives in the work
-     tree, and the snapshot holds the pre-codex conflicted index. So the
-     commit step runs `git add -A` into the private index first. Then the
-     guard refuses if unmerged entries remain, or if `git diff --cached
-     --check` reports a leftover conflict marker in any file of
-     sync-branch's conflict list. The existing guard already names both
-     (claude.yml:3133). The commit then completes the merge with the
-     snapshot's `MERGE_HEAD`.
+  5. **The merge state survives, and the guard keeps its evidence.** The
+     existing guard checks the index **before** the blanket `git add -A`
+     on purpose. Binary and modify/delete conflicts have no markers, and a
+     blanket add would silently "resolve" them to whatever is in the work
+     tree (unresolved-merge-guard/action.yml:70-91). The prompt requires
+     codex to `git add` or `git rm` each resolved path. With the private
+     git dir, that evidence lives in codex's index file. It is read as
+     **imported data**, never through the codex-owned git dir:
+     - The reclaim, after the kill and the revocation, copies
+       `.git/index` with the same `O_NOFOLLOW`, owner-checked, size-capped
+       import `import-codex-final` uses, to `$RUNNER_TEMP/codex-index`.
+       `.git` itself is not opened as a repository.
+     - The guard lists the paths the snapshot's index holds unmerged
+       (`git --git-dir=<private> ls-files --unmerged`). That is the
+       trusted list of conflicts sync left.
+     - For each such path, it reads codex's index as data:
+       `GIT_INDEX_FILE=$RUNNER_TEMP/codex-index git --git-dir=<private>
+       ls-files --stage -- <path>`, with the private config
+       (fsmonitor off, no hooks, `GIT_CONFIG_GLOBAL=/dev/null`). The path
+       must have exactly one stage-0 entry, or none when the work tree
+       has no file there (a `git rm`). Any stage 1-3 entry means codex
+       left the path unmerged, and the round is refused as today.
+     - A stage-0 entry's object id must equal `git --git-dir=<private>
+       hash-object --path=<path> <work-tree file>`, the hash `git add`
+       would compute. So the staged resolution is what gets committed,
+       including "ours unchanged", whose hash equals ours. A file edited
+       after staging is refused rather than silently re-resolved.
+     - The existing marker scan over sync's conflict list stays.
+     - Only then does the commit step run `git add -A` into the private
+       index and commit, completing the merge with the snapshot's
+       `MERGE_HEAD`.
+     - A missing, unreadable or refused index copy, a parse error, or any
+       mismatch fails the guard. That is fail-closed: nothing lands, and the
+       Surface error says why.
+
+     The index is a git-format data file. Git parses it but executes
+     nothing from it: its extensions name files in the git dir (the
+     private one) and config the private dir does not set. Its object ids
+     need not exist in the private object store, since only
+     `ls-files --stage` reads them.
   6. **`review-codex`** gains the reclaim and the import. Its `Prepare
      Codex review for landing` reads the imported copy, not the codex-owned
      file (claude-review.yml:2669).
@@ -831,16 +912,37 @@ codex, reads it.
   - leaves a respawning process;
   - tries a crontab.
 
-  It passes when the reclaim either empties the cgroup or fails, the
-  guard, commit and emit steps run (or are skipped) without writing either
-  marker, the runner file is untouched, and the job's last `always()` step
-  finds neither marker. The unit test in point 2 covers the post actions,
-  which run after that last step. A second case forces the reclaim to fail
-  and asserts that every git-running step was skipped.
+  The stand-in is launched **through the real codex-action step** at
+  f367b1e, with a dummy API key: a root-owned test `codex` first on PATH
+  is what the action's `which codex` finds, so the action's own `sudo -u
+  codex --` launch path is exercised. The stand-in records
+  `/proc/self/cgroup` for itself and a forked child, then keeps
+  respawning. The test also records the proxy's cgroup. It passes when:
+  - the stand-in and its child are in the jail, and the proxy is not;
+  - the provisioning recipe's process is in the jail too;
+  - the reclaim either empties the jail or fails;
+  - the guard, commit and emit steps run, or are skipped, without writing
+    either marker;
+  - the runner file is untouched;
+  - the job's last `always()` step finds neither marker.
 
-  Cost: a full `.git` copy per codex run (seconds to tens of seconds on
-  inspect_ai's history), a cgroup launch and a checkout step of our own,
-  plus the maintenance of all of it, for the codex jobs only.
+  The unit test in point 2 covers the post actions, which run after that
+  last step. A second case forces the reclaim to fail and asserts that
+  every git-running step was skipped. A third case makes `jail-exec`'s
+  attachment fail, by pointing it at a missing cgroup, and asserts that
+  the action step failed with no process of uid `codex` ever started.
+
+  Cost:
+  - a full `.git` copy per codex run (seconds to tens of seconds on
+    inspect_ai's history);
+  - a cgroup jail entered through a `sudo` shim that depends on
+    codex-action's by-name `sudo`, which ties the codex jobs to a pinned
+    action ref;
+  - a checkout step of our own;
+  - an index-evidence guard;
+  - the maintenance of all of it, for the codex jobs only.
+
+  Each of these adds to the case for option (a).
 
 **Recommendation: (a).** It gives both engines one boundary, and it
 retires the code the five findings live in rather than patching it. The
@@ -1163,9 +1265,22 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
     allow-list of actions known to register no git-running post step.
   - Every post-codex git step sets `GIT_DIR`/`GIT_COMMON_DIR` to
     `$RUNNER_TEMP/runner-git`, and is gated on the reclaim's `== success`.
-  - The commit step and guard, lifted and run against a local repository
-    with a conflicted `MERGE_HEAD` snapshot: a resolved work tree commits
-    the merge; a leftover conflict marker is refused.
+  - The guard and commit step, lifted and run against a local repository
+    with a conflicted `MERGE_HEAD` snapshot and a separately staged
+    "codex" index copy.
+    - Refused: an untouched text conflict (markers), an untouched binary
+      conflict, an untouched modify/delete conflict, a staged file edited
+      again after staging, and a missing or corrupt index copy.
+    - Accepted: a staged text resolution, a staged binary choice, a
+      `git rm` of a modify/delete path, and a staged "ours unchanged". Each
+      commits a two-parent merge whose tree equals the staged resolution.
+  - `jail-exec`, lifted: it refuses every argv but `-u codex -- …`, and
+    exits non-zero before dropping privileges when the cgroup write or
+    the read-back fails. The `sudo` shim passes every other argv through
+    unchanged.
+  - Structurally: every `sudo -u codex` goes through `jail-exec`;
+    `/opt/meridian-codex/bin` is the only `GITHUB_PATH` entry in the codex
+    jobs; codex-action is pinned to f367b1e.
   - `review-codex` runs the reclaim and the import.
 
 Hosted canaries and smoke runs (these need real runners; none needs a
@@ -1282,11 +1397,15 @@ SECURITY.md text that its change makes true.
    - (b): the fail-closed teardown under Design → Codex jobs (b).
      - The runner-private git dir copy (create-codex-user).
      - The codex jobs' own checkout step.
-     - The cgroup launch and kill (create-codex-user,
-       reclaim-codex-workspace).
+     - The jail cgroup, `jail-exec` and the `sudo` shim
+       (create-codex-user, a new `/opt/meridian-codex/bin`), the
+       provision-fallback launch through `jail-exec`, codex-action pinned
+       to f367b1e, and the reclaim's `cgroup.kill`
+       (reclaim-codex-workspace).
+     - The reclaim's imported index copy, and the guard's stage-0
+       evidence check before `git add -A` (unresolved-merge-guard).
      - The reclaim reduced to checks plus revocation.
      - The post-codex steps' `GIT_DIR` pins.
-     - The guard after `git add -A`.
      - `review-codex`'s reclaim and import.
      - The cron and at denial.
      - codex-path-smoke's hostile stand-in.
