@@ -790,12 +790,19 @@ fail-closed teardown. Both are recorded under Alternatives considered.
 - **Mappings.**
   - A mapping matches raw claims (`sub`, `aud`, `iss`) or `openai.*`
     attributes derived with CEL.
+  - Mapping values must be scalar JSON values. A string may end in one
+    trailing wildcard after a non-empty prefix. Mid-value and path-style
+    wildcards are unsupported.
+  - A CEL transformation reads the verified claim set as `assertion` (for
+    example `assertion.repository`), and may yield a string, `true` or
+    `false`, an integer or a number. The guide's own boolean example is
+    `assertion.ref == "refs/heads/main"`.
   - Conditions within one mapping are ANDed, and "if more than one enabled
     mapping matches an exchange, OpenAI rejects it".
-  - The GitHub guide lists `repository`, `repository_owner`, `ref`,
-    `workflow`, `workflow_ref`, `environment` and the `run_*` claims, and
-    recommends `workflow_ref` over `workflow`. **It does not list
-    `job_workflow_ref`**, the claim that names a reusable workflow.
+  - The GitHub guide names `job_workflow_ref` among the "run and job
+    identifiers that can help with auditing or more advanced trust rules",
+    beside `run_id`, `run_number` and `run_attempt`. It recommends
+    `workflow_ref` over `workflow` for privileged mappings.
 - **Availability.** The API Platform guide carries no beta label; only the
   Codex flavour is marked beta. The GA date (2026-05-26) is the
   coordinator's and was not found on the pages read.
@@ -879,26 +886,35 @@ exactly one enabled mapping):
     or PyPI cannot be replayed here;
   - `repository_owner == "meridianlabs-ai"`, plus `repository_owner_id`,
     so a renamed or recreated organization does not match;
-  - `job_workflow_ref` is one of
-    `meridianlabs-ai/agents/.github/workflows/{claude,claude-review,claude-auto,claude-auto-review}.yml@refs/heads/main`;
-  - `event_name` is one of the events the stubs use (`issue_comment`,
-    `issues`, `pull_request_review`, `pull_request_review_comment`,
-    `workflow_run`, `pull_request`), as depth.
-- **`job_workflow_ref` has to be reachable.** The GitHub guide does not
-  list it among the claims, so step 7 first confirms that a CEL
-  attribute can read it (`openai.job_workflow_ref =
-  assertion.job_workflow_ref`, or whatever the provider's CEL context
-  exposes).
-  - If it cannot, the fallback is GitHub's OIDC subject customization for
-    the organization (`include_claim_keys: ["repo", "context",
-    "job_workflow_ref"]`), matched as a `sub` prefix.
-  - That changes `sub` for every Meridian repository's OIDC tokens. So
-    before switching, step 7 checks that no other relying party keys on
-    `sub`: Anthropic's rule keys on `repository_owner`, and the PyPI and
-    npm trusted publishers from step 5 on their own claims.
-  - If neither route works, step 7 stops and goes back to Ransom, because
-    a mapping on `repository_owner` alone would let any Meridian workflow
-    with `id-token: write` spend on the project.
+  - `openai.agents_workflow == true`, where the provider derives
+    `openai.agents_workflow` with the CEL expression:
+
+    ```
+    assertion.job_workflow_ref in [
+      "meridianlabs-ai/agents/.github/workflows/claude.yml@refs/heads/main",
+      "meridianlabs-ai/agents/.github/workflows/claude-review.yml@refs/heads/main",
+      "meridianlabs-ai/agents/.github/workflows/claude-auto.yml@refs/heads/main",
+      "meridianlabs-ai/agents/.github/workflows/claude-auto-review.yml@refs/heads/main"
+    ]
+    ```
+
+    That is exact membership, with no wildcard. So a different reusable
+    workflow, another ref of these, or a caller's own workflow file
+    derives `false`, and the mapping does not match;
+  - `openai.agents_event == true`, derived as `assertion.event_name in
+    ["issue_comment", "issues", "pull_request_review",
+    "pull_request_review_comment", "workflow_run", "pull_request"]` (the
+    events the stubs use), as depth.
+
+  Scalar values plus derived booleans are exactly what the mapping
+  interface documents. No wildcard and no change to GitHub's subject
+  claim is involved. `sub` is not matched at all, so its format (default,
+  or the immutable form GitHub adopts after 2026-07-15) does not matter.
+  If `job_workflow_ref` were absent from a token, as for a job not in a
+  reusable workflow, the CEL `in` yields an error or `false`. Either way
+  the exchange is refused. The negative canaries in step 7 cover a
+  non-reusable workflow, another reusable workflow of this repository,
+  a wrong audience and a wrong event.
 - **Callers need no mapping of their own.** The exchange runs in the
   caller repository's job, so the token's `repository` is the caller's.
   Its `repository_owner` is `meridianlabs-ai` and its `job_workflow_ref`
@@ -917,8 +933,18 @@ exactly one enabled mapping):
 **`id-token: write` on the codex jobs.** Step 1 removes it, because until
 the App is uninstalled it lets a runner compromise in a codex job mint the
 App token. Step 7 restores it, for the federation, only after step 6 has
-removed the App. No job then references `OPENAI_API_KEY`, the org secret
-is deleted, and the stubs stop passing it.
+removed the App. No agent job then references `OPENAI_API_KEY`, and the
+agent stubs stop passing it.
+
+**The org secret stays.** The org secret `OPENAI_API_KEY` has consumers
+outside the agent jobs. In meridianlabs-ai/actions at 3916d26,
+`inspect-ai-scheduled-tests.yml:325` and `inspect-swe-nightly-tests.yml:121`
+inject it into their model test suites, and the federation mapping, which
+covers only the four reusable workflows, does not serve them. This design
+removes every agent-job reference and every agent-stub forwarding, and
+**does not delete the secret**. Deleting it needs an audit of every
+consumer across the organization, and replacement credentials for those
+tests. That is a separate migration, listed under Not this design.
 
 **What this removes.** The option (b) machinery from the earlier rounds
 is not built: the cgroup jail, `jail-exec`, the `sudo` shim, the
@@ -1115,7 +1141,8 @@ text is updated to name the job-level premise.
     jobs.
   - The stubs keep granting `id-token: write`, which they already do, and
     stop passing `OPENAI_API_KEY`. A stub still passing it is harmless:
-    no job references it. The org secret is deleted afterwards.
+    no agent job references it. The org secret stays for its non-agent
+    consumers (actions' scheduled and nightly model tests).
   - Callers need no OpenAI configuration.
 - **claude.yml users.**
   - The status comment is posted by the machine account, not
@@ -1350,10 +1377,13 @@ model or a real secret):
     codex round runs past at least two renewals. The job summary records
     the measured `expires_in` and the GitHub OIDC `exp - iat`, which
     settles the lifetime assumption.
-  - Negative: a canary workflow in this repository, whose
-    `job_workflow_ref` is not in the mapping, requests a token with the
-    right audience and is refused, as is a request with another
-    audience.
+  - Negative: each of these requests a token and is refused:
+    - a canary job that runs in no reusable workflow, with the right
+      audience;
+    - a canary reusable workflow of this repository that is not one of
+      the four;
+    - one of the four with a wrong audience;
+    - a job on an event outside the list.
   - Usage from the canary appears on the CI project's usage page, under
     its spend limit. That is the spend-limit verification.
 - **A private test repository** (step 4). A `@claude` run on an issue
@@ -1447,21 +1477,25 @@ SECURITY.md text that its change makes true.
      - creates the GitHub identity provider (issuer
        `https://token.actions.githubusercontent.com`, the Meridian
        audience);
-     - creates the one mapping (Design → Codex jobs). The first thing done
-       is confirming that `job_workflow_ref` is reachable through CEL; if
-       it is not, the `sub` customization fallback, with its relying-party
-       check; if neither works, stop and ask.
+     - creates the one mapping (Design → Codex jobs): the issuer, audience
+       and owner conditions, and the two CEL-derived booleans
+       (`openai.agents_workflow`, `openai.agents_event`) required to be
+       `true`.
    - This repository:
      - the `openai-wif-proxy` composite and its test;
      - the four codex jobs: the forwarder step before `Create codex user`,
        the codex-action inputs, `id-token: write` restored and every
        `OPENAI_API_KEY` reference removed;
-     - the negative canary;
+     - the negative canaries: a job outside a reusable workflow, another
+       reusable workflow of this repository, a wrong audience and a wrong
+       event, each refused;
      - SECURITY.md's exception and OpenAI-key bullet, AGENTS.md's
        codex-key and PATH-boundary paragraphs, codex-engine.md and
        credential-separation.md (3.1, 3.5, I1) rewritten to match.
    - Companion PRs in the caller repositories drop `OPENAI_API_KEY` from
-     their stubs. The org secret is deleted once no stub passes it.
+     their agent stubs. The org secret is **not** deleted: actions'
+     `inspect-ai-scheduled-tests.yml` and `inspect-swe-nightly-tests.yml`
+     still use it (Design → Codex jobs).
 
 ## Open questions
 
@@ -1471,9 +1505,6 @@ None. The two left for Ransom were decided on 2026-09-29:
   federation ("let's go with API Platform WIF"). Design → Codex jobs.
 - **Loop refunds:** dropped, with no bounded refund budget. Design → The
   boundary.
-
-Step 7 can still stop for a decision if the mapping cannot be pinned to
-`job_workflow_ref` (Design → Codex jobs).
 
 ## Not this design
 
@@ -1503,6 +1534,11 @@ Step 7 can still stop for a decision if the mapping cannot be pinned to
   the reclaims, PATH walks and env pins could go, simplifying every agent
   job. This design keeps them (cheap, and shared by both engines).
   Whether to remove them is a later cleanup.
+- **The org `OPENAI_API_KEY` secret's other consumers.** actions'
+  `inspect-ai-scheduled-tests.yml` and `inspect-swe-nightly-tests.yml`
+  inject it into model test suites. Moving them to federation, or to
+  another credential, and then deleting the secret after an organization-
+  wide consumer audit, is its own migration.
 - **Native federation in codex-action** (a renewing credential source
   for its proxy, upstream) would make `openai-wif-proxy` unnecessary. It is
   worth asking for, but not this design.
