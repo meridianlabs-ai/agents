@@ -376,16 +376,48 @@ with a backward-compatible default, and the reusable workflows pass the
 strict value. The defaults flip once the direct callers are checked, as
 `allowed-pr-labels` did in #143.
 
-1. **`comment-numbers`**, default `*` (today's behaviour).
-   - With `event`, the validator refuses any `comments[].number` other than
-     the `pr-number` or `issue-number` input. That is claude.yml's
+1. **Every post lands on the run's own issue or PR.** A manifest can name
+   a posting target in five places. Today only the composers constrain
+   them, and the reviewer's land job still accepts `issues[]` in this
+   repository with no count limit (claude-review.yml:2973, where the
+   default `allowed-issue-repos` applies). So a forged review manifest can
+   carry one legitimate review comment and 51 `issues[].comment_on: 999`
+   entries, which post through the same issue-comment endpoint
+   (land/action.yml:1227). The review's validator probe confirmed that
+   such a manifest passes today. The rule covers all five paths:
+   - **`comments[].number`.** A new input, **`comment-numbers`**, defaults
+     to `*` (today). With `event`, the validator refuses any number other
+     than the `pr-number` or `issue-number` input. That is claude.yml's
      composer rule, applied on the trusted runner.
-   - All four reusable workflows pass `event`.
-   - Of the direct callers: inspect_flow's two and ts-mono comment only on
-     their own event numbers (step 3 checks this). actions' triage
-     comments on existing issues through `issues[]`, which this rule does
-     not touch.
+   - **`pr.issue`**, where land posts the "opened a pull request" note
+     (land/action.yml:956; validate_manifest.py:661). Under
+     `comment-numbers: event` it must equal the `issue-number` input.
+   - **`issues[]`**, including `comment_on` and `reopen`. All four reusable
+     land jobs pass `allowed-issue-repos: ""`, the reviewer's included.
+     Its composer never writes `issues[]`, so the validator refuses any
+     manifest that carries one. Direct callers that file issues keep their
+     own allow-lists (actions' triage: `max-issues: 1`, the label and
+     assignee lists).
+   - **`replies[]`.** Land already posts them under `pulls/<pr_number>`,
+     and `pr_number` is pinned. It now also lists the PR's own review
+     comments first, as it lists the PR's threads before resolving
+     (land/action.yml:1187-1200). It skips and reports a
+     `review_comment_id` that is not on the PR, and drops repeats. So
+     replies are bounded by the PR's own review comments and land nowhere
+     else, whatever the reply endpoint does with a foreign id.
+   - **Everything else land posts** (the hand-back, hand-off, provenance
+     note, verdict, error report and the resolved threads) already goes to
+     the pinned `pr_number`/`issue_number` or the event's number. No change.
+
+   All four reusable workflows pass `comment-numbers: event`. Of the direct
+   callers, inspect_flow's two and ts-mono comment only on their own event
+   numbers, and step 3 checks their recent manifests. actions' triage
+   comments on other issues only through `issues[]`, under its own
+   allow-lists, so it keeps `comment-numbers` at `*`.
 2. **`max-comments`** and **`max-review-comments`**, default empty (no cap).
+   Together with item 1, every posting path is either capped, bounded by
+   the PR's own objects (replies and thread resolutions), a single fixed
+   post, or refused.
    - The dev agent and loops pass `5` for comments, the composers' cap.
    - The reviewer passes `5` for comments and `50` for inline review
      comments. This closes 4773341. The reviewer's prompt asks for
@@ -486,29 +518,131 @@ Tag mode cannot run on a read-only token (Current behaviour). So
 `claude.yml`'s Claude job moves to **agent mode with a prompt it builds
 itself**, which is what its codex job already does.
 
-- **Context prompt.** The event context the codex job's `Compose codex
-  prompt` assembles moves into a new composite, `dev-agent-context`:
-  - the issue title and body;
-  - the triggering comment or review body;
-  - on a PR, the PR title and body and the `pr-feedback-context` sections
-    (claude.yml:2690-2711).
-
-  It writes one file under `$RUNNER_TEMP`. Both jobs' prompt steps cat it
-  and add their engine-specific parts (the Claude job's `LANDING` and
-  `ENVIRONMENT` text and `REVIEW_ETIQUETTE`; codex's ending contract).
-  The context comes from the event payload and `gh` reads with the job
-  token. It is the same untrusted text tag mode put in its prompt, as data
-  inside a prompt. The action's `trigger_phrase` and `label_trigger`
-  inputs go: the gate's trigger check is the trigger. The `prompt` input
+- **Context prompt.** A new composite, `dev-agent-context`, writes the
+  event's context to one file under `$RUNNER_TEMP`. Both engines' prompt
+  steps cat it and add their engine-specific parts (the Claude job's
+  `LANDING` and `ENVIRONMENT` text and `REVIEW_ETIQUETTE`; codex's ending
+  contract). The action's `trigger_phrase` and `label_trigger` inputs go,
+  since the gate's trigger check is the trigger, and the `prompt` input
   carries the composed text. The system-prompt append stays as it is.
+
+  Tag mode's context is the bar, not the codex prompt's. The codex prompt
+  gives an issue run only the triggering comment and the issue's title and
+  body (claude.yml:2683-2713), and reads the PR body and thread live
+  (:2703; pr-feedback-context/action.yml:116, 149). Tag mode gives more,
+  and protects it. The composite reproduces both:
+  - **A trigger-time snapshot.** Tag mode resolves a trigger time
+    (`resolveTriggerTimestamp`, modes/tag/index.ts:49). It takes the title
+    and body from the webhook payload (`extractOriginalTitle`/`Body`), and
+    drops every comment, review and review comment created or edited at or
+    after that time (fetcher.ts:241-300, 435-465, 532-541, 571-576). So an
+    author cannot swap the context after a maintainer authorized the run.
+    The composite does the same:
+    - The gate outputs `trigger_time`, resolved as the action's
+      `resolveTriggerTimestamp` and `extractTriggerTimestamp` do
+      (fetcher.ts:38-100):
+      - the triggering comment's `created_at`, or the review's
+        `submitted_at`;
+      - for `issues`/`pull_request` `opened`, the entity's `created_at`;
+      - for `labeled`/`assigned`, the matching entry's `created_at` in the
+        issue's event history (`issues/<n>/events`), falling back to the
+        entity's `updated_at`.
+
+      Step 4 lifts these cases into a test.
+    - The title and body come from the event payload
+      (`github.event.issue` on issue and issue-comment events, a PR's
+      issue object included; `github.event.pull_request` on PR events),
+      never from a live read.
+    - Every comment, review, review thread and thread comment whose
+      creation or last edit (`lastEditedAt`, else `updated_at`) is at or
+      after `trigger_time` is dropped.
+
+    pr-feedback-context gains an optional `trigger-time` input, which
+    applies that filter to its comments and threads. It defaults to empty,
+    which is no filter, so the loops' use of it is unchanged.
+  - **Issue discussion history.** On an issue run (the `issue_comment`,
+    `issues` opened/labeled/assigned and `issue` label triggers), the
+    composite includes the issue's comments (`issues/<n>/comments`, all
+    pages), after the trigger-time filter. It drops machine control
+    comments the same way pr-feedback-context does (loop markers,
+    provenance, bare triggers, `<!-- dev-agent-status -->` and "Claude
+    finished"). It renders them oldest first, with author and time. It
+    keeps the newest 30 comments and at most 40,000 characters, and when
+    it cuts it says so in one line at the top ("N earlier comments
+    omitted"). So "implement the second option above", an answer to an
+    earlier clarification, and a label or assignment trigger after a
+    discussion keep their referents. PR runs get the same through
+    pr-feedback-context (anchored on the newest review, bounded), which
+    already includes the PR's top-level comments.
+  - **Images.** Tag mode downloads the images in the context bodies
+    (utils/image-downloader.ts). It reads each body's `body_html`
+    (`Accept: application/vnd.github.full+json`) through read APIs,
+    `issues.getComment` and `pulls.getReviewComment` (:140-160), and
+    fetches the signed attachment URLs in it. The job token has the read
+    permissions those calls need. So the composite does the same, for the
+    bodies that survived the filter:
+    - only the attachment hosts the action accepts;
+    - at most 20 images, 10 MB each and 50 MB in all;
+    - no redirects off those hosts;
+    - into `$RUNNER_TEMP/agent-context/`.
+
+    The launcher gains an optional `context-dir` input, which it binds
+    read-only into the agent's namespace. The context names each file
+    beside the link it replaced. Whether the job token resolves a
+    *private* repository's attachments is checked on a private test
+    repository in step 4. If it cannot, the fallback is links only, which
+    goes to Ransom as a regression before step 4 merges.
+  - **Fetch failures.** Every fetch is retried three times, then fails the
+    step, as the codex prompt's fetches do (claude.yml:2646-2656): the
+    agent is skipped, and the Surface step names the failed fetch. A
+    failed image download is not fatal. It leaves the link and logs a
+    warning.
+
+  The codex dev path uses the same composite, so it gains the history and
+  the snapshot too. It keeps its current behaviour of taking no images.
 - **Branch.** A `Prepare branch` step, runner-side and before `Create agent
-  user`, does what `setupBranch` did. On an issue run it creates
-  `claude/issue-<N>-<run_number>` from `origin/<base>` with
-  `git checkout -b`, next to codex's `claude/issue-<N>-codex-<run_number>`.
-  On a PR run sync-branch has already checked out the head, and the step
-  only records it. The composer and Surface read this step's `branch`
-  output in place of `steps.claude.outputs.branch_name`. The land job's
-  `branch-prefix` (`claude/issue-N-`) is unchanged.
+  user`, replaces `setupBranch`. It outputs `branch` and `mode`
+  (`commit` or `comment-only`). The composer and Surface read those in
+  place of `steps.claude.outputs.branch_name`. It works from the gate's
+  pins (`head_branch`, `start_sha`) and sync-branch's outputs, and never
+  from a new API read:
+  - **Issue run.** It creates `claude/issue-<N>-<run_number>` from
+    `origin/<base>` with `git checkout -b`, next to codex's
+    `claude/issue-<N>-codex-<run_number>`. The land job's `branch-prefix`
+    (`claude/issue-N-`) is unchanged.
+  - **Open, same-repository PR.** sync-branch has already fetched the head,
+    checked it out at the gate's pinned SHA (`head-sha`) and merged the
+    base, and it may have left a conflicted merge for the agent
+    (`agent_merge=1`). The step verifies that HEAD is on `head_branch` and
+    records it, touching neither the index nor `MERGE_HEAD`.
+  - **Closed or merged PR whose head branch is still on origin.**
+    sync-branch returns before checking anything out
+    (sync-branch/action.yml:233-241) and emits no `branch`, but it does
+    emit `head_sha`, the live tip. The step fetches `head_branch` and
+    refuses unless its tip is the gate's `start_sha`, the head pin. It
+    then checks it out (`git checkout -B <head_branch> <start_sha>`) and
+    merges nothing, as the codex prep step already does for any PR
+    (claude.yml:2434-2445). This covers the inspect_ai fork's closed PR
+    whose same-repository branch still backs an upstream PR. The
+    continuation commits onto that branch, and land pushes it there,
+    because the validator pins `branch` to the PR's live head ref.
+    Today's tag mode instead cut a fresh branch off base, which the
+    composer then rejected ("the agent left its branch") unless the agent
+    checked the head out itself.
+  - **Closed or merged PR whose head branch is gone** (`start_sha` empty:
+    the gate's read 404'd). Nothing can land, since land refuses bundles
+    with no trusted start. The step outputs `mode=comment-only` and leaves
+    HEAD where the checkout put it. The prompt tells the agent that the
+    branch no longer exists and that it answers by comment only. The
+    composer emits read-only. Today this case ends in a rejected-work
+    error.
+  - **Fork heads** stay refused by the gate (claude.yml:685).
+- **Base for the configuration restore.** Agent mode restores `.claude/`
+  and `.mcp.json` from `base_branch` or the default branch on an
+  `issue_comment` event (run.ts:254; modes/agent/index.ts:98). Tag mode
+  used the PR's actual base. So claude.yml's action step passes
+  `base_branch: ${{ steps.sync.outputs.base || inputs.base_branch }}`:
+  the PR's base on PR runs, the configured base on issue runs.
 - **Tracking comment.**
   - The gate posts it right after the 👀 acknowledgement
     (claude.yml:1002-1018), with the machine account's token. It is a
@@ -540,21 +674,23 @@ itself**, which is what its codex job already does.
   post-CLI branch cleanup (tag mode only) is gone. The launcher's
   refuse-if-branch-on-origin check (launch step 6) then has nothing to
   guard and is retired.
-- **What is lost.** Tag mode downloaded images from the issue and comments
-  for the agent (fetcher.ts:144-193), and the new context does not. An
-  image-only bug report reaches the agent as a link. The agent can fetch
-  it with `gh` if the repository is public, and cannot if it is private.
-  This is accepted. The codex engine has always worked this way.
+- **What changes for the requester.** The status comment comes from the
+  machine account, top-level. Issue-run branch names change form. A
+  closed PR with a live branch is continued rather than refused, and one
+  whose branch is gone gets an answer and no commits. The context, its
+  trigger-time snapshot and the images are what tag mode gave.
 
 executed-paths-residual.md → Alternatives considered rejected D2 (run the
 CLI without claude-code-action) because `claude.yml` depends on tag mode:
 the trigger check, the tracking comment, the context prompt, `setupBranch`
 and the base-configuration restore. That reasoning held then. The codex
-job has since grown working equivalents of all but the restore. The
-trigger check is the gate's, the context and the branch are the codex
-job's steps, and the tracking comment is a gate step and a land step
-here. Agent mode keeps the restore (run.ts:263-276). So agent mode costs
-this design little, and claude-code-action still earns its place: it
+job has since grown partial equivalents: the gate's trigger check, the
+codex prep step's branch handling and its prompt context. This design
+completes them. `dev-agent-context` reproduces tag mode's context
+(snapshot, history, images), `Prepare branch` covers every PR state, and
+the tracking comment is a gate step and a land step. Agent mode keeps the
+restore (run.ts:263-276), given the right base. So agent mode costs a
+bounded amount of work, and claude-code-action still earns its place: it
 provides the WIF setup, the pinned CLI, the settings merge, the SDK loop
 and the execution file. D2 stays unnecessary. The same section called
 `github_token` "worthwhile for the three agent-mode workflows" and
@@ -581,8 +717,8 @@ honest run. It is no longer claimed as the boundary.
 | `drop-runner-root` | unused in the reusable workflows | unchanged |
 
 Under open question 1 (b), every "boundary → hygiene" row above stays a
-boundary **in the codex jobs**, and the reclaim is fixed there (option (b)
-below).
+boundary **in the codex jobs**, under the fail-closed teardown described in
+option (b) below.
 
 **4773340 (cron).** With no App token on any argv after steps 1 and 4, an
 escape from the namespace reaches the host as `claude-agent`. From there
@@ -623,31 +759,97 @@ codex, reads it.
     close with the boundary rather than with patches.
   - Cost: a key taken from a compromised job is usable until rotation or
     the budget. That is longer than the WIF token's job-long window.
-- **(b) Keep the codex jobs on the uid boundary, with a fixed reclaim.**
-  - The reclaim takes a runner-private copy of `.git` before the grant
-    (`create-codex-user`, beside the `config` snapshot it takes now). After
-    codex, on **every** path, refusals included, it replaces the
-    workspace's `.git` with that copy (`rm -rf` as root, then copy back).
-    It records the refusal for the landing instead of exiting early. So
-    neither checkout's post-step nor any runner-side git ever opens a
-    `.git` codex could write. That fixes 4773887 and 4773888.
-  - The commit step stages codex's work tree into the restored
-    repository, as it does now.
-  - `review-codex` gains the reclaim and the import (4773876). Its
-    `Prepare Codex review for landing` then reads the imported copy.
-  - Cron and at are denied to `codex`.
-  - The kill loop's exhaustion becomes fatal to the job before any later
-    step, including the checkout post-step.
-  - Every future runner-side step in a codex job keeps the constraints
-    AGENTS.md lists today.
+- **(b) Keep the codex jobs on the uid boundary, with a fail-closed
+  teardown.** Making the reclaim's refusals fatal is not enough, and it is
+  the reason today's refusal exits are unsafe (4773887).
+  actions/checkout registers a post action, and the runner runs post
+  actions under `always()` by default (actions/checkout `action.yml`;
+  actions/runner `ActionManager.cs`). A failed or cancelled job still
+  runs checkout's cleanup git in the workspace. And a codex process that
+  survives can race any replacement of `.git` while it can still write
+  the workspace. So option (b) is a protocol whose safety does not depend
+  on any step succeeding:
+  1. **No runner-side git ever opens the workspace's `.git` after the
+     grant.**
+     - Before the grant, `create-codex-user` copies `.git` to a
+       runner-only `$RUNNER_TEMP/runner-git`. It is a real copy (`cp -a`,
+       not a hardlinked clone: the grant makes object files
+       group-writable, and a hardlink would share them). The copy is taken
+       after sync-branch, so it holds the base merge's `MERGE_HEAD` and
+       index when a conflict was left for codex.
+     - Every post-codex git call runs with `GIT_DIR` and `GIT_COMMON_DIR`
+       on that copy, `GIT_WORK_TREE=$GITHUB_WORKSPACE` and the env pins it
+       already has: the guard, the commit, the composer and emit-landing.
+     - The workspace's own `.git` is never read again and never replaced,
+       so there is nothing to race. That fixes 4773888 (symlinks inside
+       `.git`) by construction.
+  2. **No post action runs git.** The codex jobs stop using
+     `actions/checkout` and check out with a `run:` step (`git init`,
+     then fetch with the step-scoped credential helper, then check out the
+     pinned SHA), which registers no post action. A unit test pins every
+     action a codex job uses to an allow-list of actions known to register
+     no post step that runs git: `upload-artifact`, and codex-action,
+     whose post step implementation must verify. That fixes 4773876 and
+     the post-step half of 4773887, whatever the reclaim's outcome, a
+     cancellation included.
+  3. **Kills that cannot be outrun.** codex-action's `sudo -u codex`
+     launch runs inside a dedicated cgroup that root creates under the
+     job's slice. Provisioning, `Reset codex home` and codex all run there.
+     The reclaim writes `cgroup.kill` (atomic: a forking process cannot
+     escape it, and codex cannot move itself out, since other cgroups'
+     `cgroup.procs` belong to root). It then requires `cgroup.procs` to be
+     empty, and runs `pkill -u codex` for anything cron or at started
+     before the deny below.
+  4. **Any failure skips, and skipping is safe.**
+     - The reclaim does its checks and then only revokes codex's write
+       grant on the workspace. It restores nothing into `.git`.
+     - Kill exhaustion, a redirected git dir, a new embedded repository, a
+       failed revocation or a cancelled reclaim all leave its outcome
+       `!= success`. Every later git-running step is gated on `==
+       success` (they already are), so no step runs git after it.
+     - Because of 1 and 2, no post action does either.
+     - The landing then carries only the Surface error, which needs no
+       git.
+  5. **The merge state survives.** Codex's resolution lives in the work
+     tree, and the snapshot holds the pre-codex conflicted index. So the
+     commit step runs `git add -A` into the private index first. Then the
+     guard refuses if unmerged entries remain, or if `git diff --cached
+     --check` reports a leftover conflict marker in any file of
+     sync-branch's conflict list. The existing guard already names both
+     (claude.yml:3133). The commit then completes the merge with the
+     snapshot's `MERGE_HEAD`.
+  6. **`review-codex`** gains the reclaim and the import. Its `Prepare
+     Codex review for landing` reads the imported copy, not the codex-owned
+     file (claude-review.yml:2669).
+  7. **Cron and at are denied** to `codex` (`/etc/cron.deny`,
+     `/etc/at.deny`, written before the user's first process).
 
-  Cost: the machinery and its maintenance stay, for the codex jobs only.
+  The hosted test (codex-path-smoke) runs a hostile codex stand-in that:
+  - plants `core.fsmonitor` and a hook in the workspace `.git` config,
+    each writing a marker file;
+  - plants a symlink inside `.git` aimed at a runner file;
+  - leaves a respawning process;
+  - tries a crontab.
+
+  It passes when the reclaim either empties the cgroup or fails, the
+  guard, commit and emit steps run (or are skipped) without writing either
+  marker, the runner file is untouched, and the job's last `always()` step
+  finds neither marker. The unit test in point 2 covers the post actions,
+  which run after that last step. A second case forces the reclaim to fail
+  and asserts that every git-running step was skipped.
+
+  Cost: a full `.git` copy per codex run (seconds to tens of seconds on
+  inspect_ai's history), a cgroup launch and a checkout step of our own,
+  plus the maintenance of all of it, for the codex jobs only.
 
 **Recommendation: (a).** It gives both engines one boundary, and it
 retires the code the five findings live in rather than patching it. The
 key's longer exposure window is the price. It is bounded by the project's
-hard budget and scope, and it is Ransom's to accept. If he declines (a),
-step 7 below is (b).
+hard budget and scope, and it is Ransom's to accept. OpenAI documents
+enforced project spend limits, with a short enforcement delay
+(developers.openai.com/api/docs/guides/spend-limits). Deployment still
+has to confirm the limit is set to enforce on the project the key belongs
+to. If he declines (a), step 7 below is (b).
 
 ### What changes in SECURITY.md
 
@@ -665,17 +867,23 @@ makes it true):
   reason a runner compromise is harmless.
 - **Guarantees, the codex PATH bullet**: hygiene under open question 1
   (a), unchanged under (b).
-- **Guarantees, manifest bullet**: adds that the validator and land
-  enforce every rule about what may be posted where and how often
-  (`comment-numbers`, the caps, the de-fang registry). No policy lives
-  only in the agent job.
+- **Guarantees, manifest bullet**: adds that on the reusable workflows'
+  land jobs every post lands on the run's own issue or PR. That covers
+  `comments[]`, `pr.issue`, `replies[]` (own-PR review comments only) and
+  thread resolutions, with `issues[]` refused. Posts are capped where they
+  are not bounded by the PR's own objects, and every body passes the
+  de-fang registry. These rules are enforced by the validator and land,
+  and no policy lives only in the agent job. Direct callers get the same
+  rules through the inputs, and keep today's defaults until those flip.
 - **Guarantees, CI-fix bullet**: the refund sentences go. Every round
   counts, and refunds rest on nothing the agent job reports.
 - **By design, first bullet** (the Claude App's token in the agent job)
   and the `claude[bot]` verdict-author text: deleted.
 - **By design, the reviewer bullet**: "cannot post as `claude[bot]`
-  either" becomes moot and goes. "A comment on another thread" becomes
-  refused (`comment-numbers: event`).
+  either" becomes moot and goes. "A comment on another thread, a
+  caller-repository issue write" become refused (`comment-numbers: event`,
+  `allowed-issue-repos: ""`), leaving the stage move as the one board
+  write a forged review manifest can make.
 - **Adding or changing a workflow, first bullet**: the exceptions list
   loses "the Claude action's own token". Every claude-code-action step
   passes `github_token: ${{ github.token }}`. A job requests
@@ -780,7 +988,15 @@ text is updated to name the job-level premise.
 - **claude.yml users.**
   - The status comment is posted by the machine account, not
     `claude[bot]`, and is top-level on review-comment triggers.
-  - Images are no longer downloaded for the agent.
+  - The context now follows tag mode's (the trigger-time snapshot, the
+    issue history, the images), so what the agent sees is unchanged,
+    unless step 4's private-repository check shows that the job token
+    cannot fetch attachments (Design → Context prompt).
+  - A closed PR with a live head branch is continued on that branch,
+    where tag mode cut a new branch that could not land. One with a
+    deleted branch gets a comment-only run.
+  - Agent mode's configuration restore uses the PR's base, since
+    claude.yml passes it as `base_branch`.
   - The issue-run branch name changes from the action's timestamp form
     to `claude/issue-N-<run_number>`, still under the land prefix.
 - **Claude GitHub App uninstall** (step 6). These stop working on the
@@ -807,10 +1023,18 @@ Untrusted input reaching the new or moved code:
   uses are listed under The boundary. The removed `mention` and
   `agent_skipped` outputs were the two whose forgery mattered.
 - **Event and API text in the context prompt** (issue and PR bodies,
-  comments, reviews, file names in review threads). It is the same text
-  tag mode and the codex prompt already give the agent. It reaches the
-  prompt through a file, never a `run:` expansion, and is data to the
-  model (prompt injection is the agent's existing threat model).
+  comments, reviews, file names in review threads). It reaches the prompt
+  through a file, never a `run:` expansion, and is data to the model
+  (prompt injection is the agent's existing threat model).
+  - The trigger-time snapshot keeps an author from replacing the context
+    after a maintainer authorized the run. Today's codex dev path, which
+    reads the PR body and thread live, gains the same protection.
+  - Anything created or edited at or after the trigger is dropped, so a
+    racing edit is lost, not trusted.
+- **Downloaded images.** The runner fetches them only from the attachment
+  hosts, with no redirects off them, within count and size caps, into a
+  runner-owned directory. It never opens or decodes them. The agent sees
+  them through a read-only bind.
 - **Agent text in bodies land posts.** Now de-fanged for every marker any
   consumer keys on. The class test fails when a consumer adds a marker
   the de-fang misses.
@@ -856,9 +1080,15 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
     composition).
 - **test_skill_resolution.py.** promote.sh ignores a `claude[bot]`
   verdict.
-- **test_validate_manifest.py.**
+- **test_validate_manifest.py.** Adversarial manifests, one per posting
+  path:
   - `--comment-numbers event` refuses a comment on another number and
     accepts the event's.
+  - It also refuses a `pr.issue` other than the event's issue.
+  - The reviewer's land inputs (`allowed-issue-repos: ""`) refuse the
+    review's probe manifest: one review comment plus 51
+    `issues[].comment_on: 999`. They also refuse a single `issues[]`
+    entry, and a `reopen`.
   - `--max-comments` and `--max-review-comments` refuse over-cap
     manifests (4773341's forged manifest).
   - The defaults keep today's acceptance.
@@ -869,6 +1099,8 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
     de-fang on a codex review too.
   - The plan step drops `handback` under `allow-handback: "false"`, and
     `stage-override` replaces or removes the manifest's `stage`.
+  - The post step, against a stub `gh`, skips and reports a reply to a
+    review comment id that is not on the PR, and posts one reply per id.
   - A new class test extracts every marker pr-feedback-context,
     atlas_sync and the loop gates key on in machine-account comments, and
     requires each to be in defang's list or on land's appended-after list.
@@ -884,21 +1116,56 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
     step keeps its round".
 - **test_dev_agent_composer.py, test_dev_agent_trig.py.**
   - The composer reads the `Prepare branch` output.
+  - `Prepare branch`, lifted and run against local repositories:
+    - an issue run;
+    - an open PR with a clean merge, and one with a conflicted merge left
+      for the agent (index and `MERGE_HEAD` untouched);
+    - a closed PR whose head is live at the gate's `start_sha` (checked
+      out, no merge), including a fork-shaped case: a closed `meridian`
+      PR whose same-repository branch backs an upstream PR;
+    - a closed PR whose live tip moved past `start_sha` (refused);
+    - a closed PR with a deleted head (`comment-only`, read-only
+      landing).
+  - The gate's `trigger_time` step against stub payloads: comment, review,
+    review comment, `issues` opened, labeled (event-history lookup and
+    its fallback) and assigned.
   - The gate's tracking-comment step and land's finishing step, lifted
     and run against a stub `gh`, produce the fixed bodies for pushed, no
     change, failed and cancelled runs, and never include agent text.
-- **test_codex_path.py** (the prompt steps). Both engines' prompts include
-  the `dev-agent-context` file, and the composite's output matches the
-  codex prompt's former context sections for the same event.
+- **test_codex_path.py** (the prompt steps), and a new
+  **test_dev_agent_context.py** for the composite, run against a stub
+  `gh`:
+  - Both engines' prompts include the context file.
+  - Issue runs include the issue's comments, oldest first, with machine
+    control comments dropped, the 30-comment and 40,000-character bounds,
+    and the "N earlier comments omitted" line. The cases are a comment
+    that says "implement the second option above", a `labeled` trigger
+    after a discussion, and an `assigned` trigger.
+  - Post-trigger content is excluded:
+    - a body edited after the trigger (the payload's body is used);
+    - a comment created after it;
+    - a comment edited after it;
+    - a review submitted after it;
+    - a review-thread comment added or edited after it. For PR runs this
+      goes through pr-feedback-context's `trigger-time` input.
+  - pr-feedback-context with no `trigger-time` input produces exactly
+    today's output (the loops).
+  - A failed comment fetch fails the step after three attempts.
+  - Images: only the allowed hosts are fetched, the caps hold, a failed
+    download leaves the link, and nothing is followed off-host.
 - **test_claude_agent_launcher.py.** Launch in job-token mode (the loops'
   and dev agent's new shape) passes, and launch step 6 is gone.
 - **The settings helper.** A new test lifts it and covers a regular file,
   a symlinked file, a symlinked directory component, `..` out of the
   workspace, a FIFO and an oversize file.
 - **Codex, under option (b) only.**
-  - reclaim.sh's refusal paths (kill exhaustion, redirected `.git`, new
-    embedded `.git`) leave the runner-private `.git` in place.
-  - A symlink planted in `.git` is gone after the reclaim.
+  - No codex job uses `actions/checkout`, or any action outside the
+    allow-list of actions known to register no git-running post step.
+  - Every post-codex git step sets `GIT_DIR`/`GIT_COMMON_DIR` to
+    `$RUNNER_TEMP/runner-git`, and is gated on the reclaim's `== success`.
+  - The commit step and guard, lifted and run against a local repository
+    with a conflicted `MERGE_HEAD` snapshot: a resolved work tree commits
+    the merge; a leftover conflict marker is refused.
   - `review-codex` runs the reclaim and the import.
 
 Hosted canaries and smoke runs (these need real runners; none needs a
@@ -918,8 +1185,14 @@ model or a real secret):
 - **root-boundary-smoke.yml.** Unchanged (the uid depth).
 - **codex-path-smoke.yml.**
   - Under (a), unchanged, as hygiene.
-  - Under (b), extended with the fixed reclaim's refusal cases, run with
-    the real codex user and sudo.
+  - Under (b), extended with the hostile stand-in described under Design
+    → Codex jobs (b), run with the real codex user, cgroup and sudo: the
+    planted fsmonitor and hook never fire, the planted `.git` symlink's
+    target is untouched, and the respawning process is killed or the
+    reclaim fails with every git step skipped.
+- **A private test repository** (step 4). A `@claude` run on an issue
+  with an uploaded image checks that the job token resolves the
+  attachment and that the agent sees the file.
 - **Live runs** on the inspect_ai fork and this repository after steps 1
   and 4: a `@claude` issue run and a PR follow-up (the status comment,
   branch and PR), a `@review` on each engine, and a loop round of each
@@ -956,7 +1229,9 @@ SECURITY.md text that its change makes true.
      `max-review-comments`, `allow-handback`, `stage-override`, the de-fang
      additions and
      the codex review's `review` flag.
-   - The four land jobs pass the strict values.
+   - The four land jobs pass the strict values, and the reviewer's also
+     passes `allowed-issue-repos: ""`.
+   - Land checks reply ids against the PR's own review comments.
    - The reviewer's `who` and loop-ownership reads move to its land job.
    - Both loops lose their refund steps and `agent_skipped` outputs.
    - Tests as listed.
@@ -965,8 +1240,14 @@ SECURITY.md text that its change makes true.
      their recent manifests (their composers pin numbers already). This
      is the evidence for flipping the default in a later PR.
 4. **claude.yml to agent mode.**
-   - The `dev-agent-context` composite, used by both jobs.
-   - The `Prepare branch` step, the prompt input and `github_token`.
+   - The `dev-agent-context` composite, used by both jobs, with the gate's
+     `trigger_time` output.
+   - pr-feedback-context's `trigger-time` input.
+   - The launcher's read-only `context-dir` bind.
+   - The `Prepare branch` step, `base_branch` from the PR's base, the
+     prompt input and `github_token`.
+   - The private-repository image check. If the job token cannot fetch
+     attachments there, stop and ask Ransom before merging.
    - The gate's status comment and land's finishing step.
    - pr-feedback-context's `dev-agent-status` filter.
    - Launch step 6 and the post-agent `reset-origin-url` retired, in all
@@ -998,9 +1279,17 @@ SECURITY.md text that its change makes true.
      `OPENAI_API_KEY`. This repository's PR updates the exception text and
      reclassifies the codex rows as hygiene in AGENTS.md and
      codex-engine.md.
-   - (b): the fixed reclaim, `review-codex`'s reclaim and import, and the
-     cron and at denial (create-codex-user, reclaim-codex-workspace,
-     claude-review.yml), with codex-path-smoke's new cases.
+   - (b): the fail-closed teardown under Design → Codex jobs (b).
+     - The runner-private git dir copy (create-codex-user).
+     - The codex jobs' own checkout step.
+     - The cgroup launch and kill (create-codex-user,
+       reclaim-codex-workspace).
+     - The reclaim reduced to checks plus revocation.
+     - The post-codex steps' `GIT_DIR` pins.
+     - The guard after `git add -A`.
+     - `review-codex`'s reclaim and import.
+     - The cron and at denial.
+     - codex-path-smoke's hostile stand-in.
 
    It is independent of steps 3 to 6 and can go in parallel.
 
@@ -1008,8 +1297,9 @@ SECURITY.md text that its change makes true.
 
 1. **Codex key: (a) extend the model-credential exception to a
    project-scoped, spend-capped OpenAI key, or (b) keep the codex jobs on
-   the uid boundary with a fixed reclaim?** Recommendation: (a), with a
-   hard project budget verified as enforced. Design → Codex jobs has the
+   the uid boundary with the fail-closed teardown?** Recommendation: (a),
+   with the project's spend limit confirmed as enforcing (OpenAI documents
+   enforced project limits, with a short delay). Design → Codex jobs has the
    trade-off.
 2. **Refunds: drop them, or keep a bounded refund budget?** Recommendation:
    drop them. With them gone every round counts, and nothing the agent job
