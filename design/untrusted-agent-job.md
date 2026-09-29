@@ -1,6 +1,9 @@
 # The untrusted agent job
 
 Status: proposed, 2026-09-29. Issue: none (task from Ransom, 2026-09-29).
+Ransom decided the two open questions on 2026-09-29: the codex jobs use
+OpenAI API Platform workload identity federation, and loop refunds are
+dropped.
 Author: agent (Claude), reviewed by Codex; see the PR. Revisits
 [executed-paths-residual.md](executed-paths-residual.md), whose uid
 boundary this design keeps as defence in depth and stops relying on.
@@ -73,7 +76,8 @@ Goals:
 - An agent job of either engine holds nothing beyond what the agent may
   have: the read-only job token, the declared model credential, and an
   OIDC request token that no relying party exchanges for more than that
-  credential. For codex this depends on open question 1.
+  credential. For codex, that credential is OpenAI API Platform workload
+  identity federation (decision: Ransom, 2026-09-29).
 - No Claude GitHub App token exists in any agent job or caller job, and
   once the App is uninstalled from the Meridian repositories none can be
   minted. `claude[bot]` is trusted nowhere.
@@ -91,7 +95,8 @@ Non-goals:
 
 - **Keeping the model credential from the agent.** That is the declared
   exception (SECURITY.md → Adding or changing a workflow; decision: Ransom,
-  2026-09-23) and stays as it is. The codex key is open question 1.
+  2026-09-23). It stays as it is, and it now covers codex's federated
+  OpenAI token too (Design → Codex jobs).
 - **Removing the agent user boundary.** It stays as the second line
   (Design → What stays in the untrusted job).
 - **meridianlabs-ai/actions** (`isolated-agent` and its `model-broker`):
@@ -291,15 +296,16 @@ The agent job, meaning every job that runs an agent or code from a head an
 agent may have written, is untrusted as a whole, including its `runner`
 uid, root on its VM and every output it reports. Nothing in it may be
 worth more than what the agent may have. What such a job holds after this
-design (Claude jobs after step 6; codex jobs under open question 1):
+design (Claude jobs after step 6; codex jobs after step 7):
 
 | Held in the job | Reachable by `runner`/root | The agent may have it because |
 |---|---|---|
 | Job token: contents, pull requests, issues and actions read | yes | it is the agent's own `GH_TOKEN` (the launcher gives it) |
-| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential: Anthropic WIF is the declared exception; the Claude App exchange has no installation to issue from after step 6; PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` altogether (step 1) |
+| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential. Anthropic WIF and, for the four reusable workflows' jobs, the OpenAI federation mapping are the declared exception. The Claude App exchange has no installation to issue from after step 6. PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` in step 1 and regain it in step 7, after step 6 |
 | WIF JWT and the Anthropic access token | yes | the declared model-credential exception |
+| The exchanged OpenAI token (codex jobs, in the `openai-wif-proxy` process) | yes | the declared model-credential exception, job-bound like Anthropic's: at most an hour, never beyond the OIDC token |
 | `ACTIONS_RUNTIME_TOKEN` | yes | cache access is read-only (`cache-mode: read`). Artifact upload in this run reaches only the `landing` artifact, which land already treats as untrusted, and no trusted job consumes an artifact (the rule below) |
-| `OPENAI_API_KEY` (codex jobs) | yes, from the job message | open question 1 |
+| `OPENAI_API_KEY` | **no job references it** after step 7 | — |
 | Machine account's or Claude App's token | **none in the job** | — |
 
 **The artifact rule.** A trusted job never consumes an artifact of a run in
@@ -340,8 +346,8 @@ this design treats the result as untrusted too. The uses that remain:
 rests on today, and the job writes it. No evidence of "the agent step was
 never entered" is out of the untrusted job's reach: the Actions API's step
 list is the same runner's report. Both refund steps and the
-`agent_skipped` outputs are removed, and every round counts. Open
-question 2 is whether to keep a bounded refund budget instead.
+`agent_skipped` outputs are removed, and every round counts, with no
+bounded refund budget (decision: Ransom, 2026-09-29).
 
 ### The job graph after the change
 
@@ -505,7 +511,8 @@ In the reviewer and both loops (agent mode already):
 - **Codex jobs.** `id-token: write` is removed from `agent-codex`,
   `review-codex` and both `fix-codex` jobs. Nothing in them requests an
   OIDC token, and until the App is uninstalled it lets a runner compromise
-  in a codex job mint the App token.
+  in a codex job mint the App token. Step 7 restores it for the OpenAI
+  federation, after step 6 has removed the App.
 - **The inspect_ai fork's reviewer stub** drops `allowed_bots: "claude[bot]"`
   (`claude-review.yml:124-127` on `meridian`). That is a companion PR in
   the fork, made from a maintainer's machine. Since 2026-09-16 no dev
@@ -703,7 +710,7 @@ account.
 The uid machinery stays where it is cheap and where it still serves an
 honest run. It is no longer claimed as the boundary.
 
-| Mechanism | Before | After (Claude jobs, and codex jobs under open question 1 (a)) |
+| Mechanism | Before | After (both engines; codex jobs from step 7) |
 |---|---|---|
 | Agent user; provisioning as that user; the launcher's namespace, env allow-list, by-value token check and isolation checks | boundary | **kept, as defence in depth.** It keeps the OIDC request token, the runtime token, sudo and the runner's files away from the agent. It also stays the tier-2 requirement (below). The wrapper already has a job-token mode (`claude`:65-75, used by ts-mono), so the by-value check stays meaningful for a direct caller that passes a PAT |
 | Post-agent reclaim: kills, WIF ACL removal, `.git` refusal/restore | boundary | **kept, as hygiene.** It makes the bundle and landing files the agent's final state, and on a redirected `.git` it still packages nothing. Its refusals no longer need to be airtight: 4773887's exits and 4773888's `.git` symlinks now let `runner`, or the checkout post-step, reach nothing the agent lacks |
@@ -716,18 +723,16 @@ honest run. It is no longer claimed as the boundary.
 | `Revoke app token`, `classify_inline_comments: "false"` | boundary | the revoke skips itself with `github_token`. `classify_inline_comments: "false"` stays, since the buffered post-step would still post with the job token |
 | `drop-runner-root` | unused in the reusable workflows | unchanged |
 
-Under open question 1 (b), every "boundary → hygiene" row above stays a
-boundary **in the codex jobs**, under the fail-closed teardown described in
-option (b) below.
+Until step 7 the codex jobs still hold `OPENAI_API_KEY`, so there these
+rows remain a boundary with its five open findings. That is the status
+quo, and the reason step 7 follows step 6 closely.
 
 **4773340 (cron).** With no App token on any argv after steps 1 and 4, an
 escape from the namespace reaches the host as `claude-agent`. From there
 it can read world- or group-readable runner files and see the argv of
 runner processes, and holds nothing more than the job token. Denying
 cron and at to the agent users (`/etc/cron.deny`, `/etc/at.deny`, written
-by `create-codex-user`) is cheap depth for the Claude jobs, and is
-required under open question 1 (b), where codex's kill loops are part of
-the boundary.
+by `create-codex-user`) is cheap depth for both engines.
 
 **4773338 (settings path).** This is independent of the rest and ships
 first. The three `Compose … settings` steps keep accepting a path, because
@@ -738,290 +743,193 @@ workspace, opens it `O_NOFOLLOW`, requires a regular file and caps its
 size. inspect_harbor's inline JSON is unaffected. `.github/` is tier 1,
 so no agent can land a change to ts-mono's file.
 
-### Codex jobs: open question 1
+### Codex jobs: OpenAI API Platform workload identity federation
 
-`OPENAI_API_KEY` is the one secret an agent job references. It stays
-behind codex-action's `codex-responses-api-proxy`, which runs as `runner`,
-and codex gets only the proxy address. So it is the one model credential
-the agent cannot read today. And it is in the job message from the first
-step, so a runner compromise at any point in a codex job, before or after
-codex, reads it.
+Decision (Ransom, 2026-09-29): "let's go with API Platform WIF". The codex
+jobs stop using the long-lived `OPENAI_API_KEY` secret. They authenticate
+to OpenAI with OpenAI API Platform workload identity federation: the job's
+GitHub OIDC token is exchanged for a short-lived bearer token of a project
+service account. That makes the codex credential job-bound like the
+Anthropic WIF token, so the codex jobs fall under the same declared
+model-credential exception. They then hold nothing the agent may not have,
+and the uid machinery is hygiene there too (What stays in the untrusted
+job). This is the API Platform flavour, not Codex's ChatGPT-workspace
+federation (beta, `chatgpt_account_id`, in openai/codex
+`codex-rs/workload-identity`). openai/codex-action has no federation
+support of its own.
 
-- **(a) Extend the declared exception to a project-scoped, spend-capped
-  OpenAI key** (recommended).
-  - The key moves to a dedicated OpenAI project for CI agents, with a hard
-    project budget (verify that the budget is enforced as a hard limit
-    and not only an alert) and a rotation cadence.
-  - SECURITY.md's exception reads: the model credential (WIF, or that
-    key).
-  - Then the codex jobs hold nothing the agent may not have, every row of
-    the table above is hygiene there too, and 4773876, 4773887 and 4773888
-    close with the boundary rather than with patches.
-  - Cost: a key taken from a compromised job is usable until rotation or
-    the budget. That is longer than the WIF token's job-long window.
-- **(b) Keep the codex jobs on the uid boundary, with a fail-closed
-  teardown.** Making the reclaim's refusals fatal is not enough, and it is
-  the reason today's refusal exits are unsafe (4773887).
-  actions/checkout registers a post action, and the runner runs post
-  actions under `always()` by default (actions/checkout `action.yml`;
-  actions/runner `ActionManager.cs`). A failed or cancelled job still
-  runs checkout's cleanup git in the workspace. And a codex process that
-  survives can race any replacement of `.git` while it can still write
-  the workspace. So option (b) is a protocol whose safety does not depend
-  on any step succeeding:
-  1. **No runner-side git ever opens the workspace's `.git` after the
-     grant.**
-     - Before the grant, `create-codex-user` copies `.git` to a
-       runner-only `$RUNNER_TEMP/runner-git`. It is a real copy (`cp -a`,
-       not a hardlinked clone: the grant makes object files
-       group-writable, and a hardlink would share them). The copy is taken
-       after sync-branch, so it holds the base merge's `MERGE_HEAD` and
-       index when a conflict was left for codex.
-     - Every post-codex git call runs with `GIT_DIR` and `GIT_COMMON_DIR`
-       on that copy, `GIT_WORK_TREE=$GITHUB_WORKSPACE` and the env pins it
-       already has: the guard, the commit, the composer and emit-landing.
-     - The workspace's own `.git` is never read again and never replaced,
-       so there is nothing to race. That fixes 4773888 (symlinks inside
-       `.git`) by construction.
-  2. **No post action runs git.** The codex jobs stop using
-     `actions/checkout` and check out with a `run:` step (`git init`,
-     then fetch with the step-scoped credential helper, then check out the
-     pinned SHA), which registers no post action. A unit test pins every
-     action a codex job uses to an allow-list of actions known to register
-     no post step that runs git: `upload-artifact`, and codex-action,
-     whose post step implementation must verify. That fixes 4773876 and
-     the post-step half of 4773887, whatever the reclaim's outcome, a
-     cancellation included.
-  3. **Kills that cannot be outrun: every codex-uid process the job starts
-     begins in a root-owned cgroup.** `create-codex-user` creates
-     `/sys/fs/cgroup/<the job's cgroup parent>/meridian-codex`, owned by
-     root, before the user's first process. A process can only move
-     between cgroups by writing the destination's and the common
-     ancestor's `cgroup.procs`, and those files are root's. So a process
-     born inside cannot leave, and a process outside cannot enter
-     without root. The integration therefore puts the process in the
-     cgroup while it is still root, before it drops to `codex`:
-     - **`jail-exec`**, a new root-owned helper in `/opt/meridian-codex/bin`
-       (dir and file root-owned, `0755`, verified like the launcher's
-       `/opt/meridian-agent/bin`). The runner runs it through its sudo, as
-       root. It accepts exactly `-u codex [--] <argv>`, and anything else
-       exits non-zero. The optional `--` is there because codex-action
-       omits it on one call (below). It writes its own PID to the jail's `cgroup.procs`,
-       reads `/proc/self/cgroup` back and requires the jail path. On any
-       failure it exits non-zero **before** dropping privileges, so no
-       codex process starts outside the jail. Then it `exec`s `/usr/bin/sudo
-       -u codex -- <argv>`, and every descendant inherits the cgroup.
-     - **Our composites' codex-uid launches** all go through `jail-exec`:
-       - provision-fallback's `sudo -u codex -H -- env -i …`
-         (provision-fallback/action.yml:226) becomes `sudo -n
-         /opt/meridian-codex/bin/jail-exec -u codex -- env -i …`, with the
-         same arguments;
-       - `codex-home.sh`'s `sudo -u "$user" tee` and `printenv` calls
-         (:54, :84, :101);
-       - `assert-runner-only-path`'s `runuser -u "$USER_NAME" --` probes
-         (:161), when the user is `codex`; `claude-agent` keeps `runuser`.
-         `create-codex-user` creates the jail before its first PATH walk.
-         They are short, fixed-argv helpers, and they are routed anyway so
-         that the claim below has no exception.
+Two alternatives were on the table: a project-scoped, spend-capped
+long-lived key, and keeping the codex jobs on the uid boundary with a
+fail-closed teardown. Both are recorded under Alternatives considered.
 
-       `codex-home.sh`'s kill step becomes the jail's `cgroup.kill`.
-     - **codex-action's launch.** At f367b1e, the `unprivileged-user`
-       strategy resolves `codex` with `which` and prepends `sudo`, `-u`,
-       `<user>`, `--` **by name** (`runCodexExec.ts:233-253`), so the
-       `sudo` it runs is the first one on the step's PATH. The codex jobs
-       put `/opt/meridian-codex/bin` first on `GITHUB_PATH`. That is
-       allowed because it is root-owned and outside the workspace; the PATH
-       walk in `create-codex-user` checks it the same way. The directory
-       holds a `sudo` shim. For an argv that begins `-u codex`, with or
-       without a following `--`, it `exec`s `/usr/bin/sudo -n
-       /opt/meridian-codex/bin/jail-exec "$@"`. That includes codex-action's
-       own `sudo -u codex cat <output-file>` finalizer, which has no `--`
-       (runCodexExec.ts:345-356). Any other argv it passes to
-       `/usr/bin/sudo` unchanged. That covers
-       the action's own root commands, such as its `sudo chown`/`sysctl`
-       lines (codex-action action.yml:262-314). Every
-       post-codex composite pins `PATH` to the system directories anyway,
-       so it never meets the shim.
-     - **The API-key proxy stays outside.** codex-action starts
-       `codex-responses-api-proxy` as the runner in its own earlier
-       sub-step, not through `sudo -u codex`, so it runs in the runner's
-       cgroup, and `cgroup.kill` on the jail cannot reach it. The hosted
-       test asserts both memberships.
-     - **Pin codex-action to f367b1e under (b).** The shim depends on the
-       by-name `sudo`. A structural test refuses any other ref, and
-       the hosted test fails closed if the action ever calls
-       `/usr/bin/sudo` directly: the stand-in would then be outside the
-       jail, and membership is asserted.
-     - **Every other `sudo -u codex` or `runuser -u codex`** in the
-       workflows and composites goes through `jail-exec` (a structural test
-       over `sudo`, `runuser`, `su` and `setpriv` with the codex user).
-       Cron and at are denied (point 7), which closes the one route the
-       kernel does not. The reclaim's whole-uid `pgrep -u codex` check
-       below remains the backstop: a process that any missed route
-       started fails the reclaim instead of surviving it.
+**What the OpenAI documentation says** (developers.openai.com, guides
+`workload-identity-federation` and `…/github-actions`, and reference
+`workload-identity-federation`, read 2026-09-29):
 
-     The reclaim writes `1` to the jail's `cgroup.kill`, which is atomic
-     against forks. It then requires `cgroup.procs` to be empty and no
-     process of uid `codex` anywhere (`pgrep -u codex`: a survivor outside
-     the jail means the integration failed, so the reclaim fails).
-  4. **Any failure skips, and skipping is safe.**
-     - The reclaim does its checks and then only revokes codex's write
-       grant on the workspace. It restores nothing into `.git`.
-     - Kill exhaustion, a redirected git dir, a new embedded repository, a
-       failed revocation or a cancelled reclaim all leave its outcome
-       `!= success`. Every later git-running step is gated on `==
-       success` (they already are), so no step runs git after it.
-     - Because of 1 and 2, no post action does either.
-     - The landing then carries only the Surface error, which needs no
-       git.
-  5. **The merge state survives, and the guard keeps its evidence.** The
-     existing guard checks the index **before** the blanket `git add -A`
-     on purpose. Binary and modify/delete conflicts have no markers, and a
-     blanket add would silently "resolve" them to whatever is in the work
-     tree (unresolved-merge-guard/action.yml:70-91). The prompt requires
-     codex to `git add` or `git rm` each resolved path. With the private
-     git dir, that evidence lives in codex's index file. It is read as
-     **imported data**, never through the codex-owned git dir, and only
-     when the run needs it:
-     - **When the index is needed.** The guard first lists the paths the
-       trusted snapshot's index holds unmerged (`git --git-dir=<private>
-       ls-files --unmerged`), which is the conflict list sync left: `U`.
-       It also lists the snapshot's gitlink (mode 160000) paths: `G`. When
-       both are empty, which is every run with no base-merge conflict in a
-       repository without submodules, nothing is imported or checked. The
-       commit step stages the work tree as below. So an ordinary unstaged
-       edit and a no-change answer never depend on the index file, which
-       codex is allowed to leave untouched (the prompts at
-       claude.yml:2668, claude-auto.yml:2117, claude-auto-review.yml:2388).
-     - **The import, when `U` or `G` is non-empty.** After the kill and the
-       revocation, the reclaim copies `.git/index` to
-       `$RUNNER_TEMP/codex-index`. It uses the `O_NOFOLLOW`, regular-file,
-       single-link, size-capped import of `import-codex-final`, with the
-       owner set to either `runner` or `codex`. `create-codex-user` leaves
-       the original index owned by `runner` and group-writable
-       (create-codex-user/action.yml:290), and a codex `git add` replaces
-       it with a codex-owned file. Both are legitimate, and ownership
-       says nothing about trust here: the copy is data either way.
-       `import_codex_final.py` gains an owner list for this one call. A
-       missing, refused or unparsable copy fails the guard, because the
-       evidence is required.
-     - **Evidence per conflicted path (`U`).** Codex's index is read as
-       data: `GIT_INDEX_FILE=$RUNNER_TEMP/codex-index git
-       --git-dir=<private> ls-files --stage -z -- <path>`, with the
-       private config (fsmonitor off, no hooks,
-       `GIT_CONFIG_GLOBAL=/dev/null`). Each path must have exactly one
-       stage-0 entry, or none at all (a `git rm`). Any stage 1-3 entry
-       means codex left the path unmerged, and the round is refused as
-       today. The entry's mode must be one of `100644`, `100755`, `120000`
-       or `160000`, and the mode and object id are what the check below
-       compares.
-     - **Staging, mode by mode, never inside a nested repository.** The
-       commit step stages into the private index:
-       - Everything but gitlinks: `git add -A -- . ':(exclude)<each path
-         in G and each 160000 path in codex's index>'`. Git computes each
-         entry as it would for codex:
-         - regular and executable files are hashed with the attributes'
-           conversions, and the mode comes from the executable bit;
-         - a symlink is recorded as mode `120000` with the link text as
-           its blob, never followed;
-         - a deleted file is removed.
-       - Gitlinks: never by reading the nested repository. Git would
-         resolve the submodule's HEAD, and runner-side git must not enter
-         a codex-writable repository. Each gitlink comes from codex's
-         index as data. For every `160000` stage-0 entry there, and for
-         every path in `G`, the commit step runs `git update-index
-         --cacheinfo 160000,<oid>,<path>`. It uses `--force-remove` when
-         codex's index has no entry and the path is gone from the work
-         tree.
-       - An explicitly staged gitlink oid is accepted as codex staged it,
-         inside `U` and outside it alike, as the existing guard and commit
-         step accept it today (unresolved-merge-guard/action.yml:78-88,
-         claude.yml:2905-2906). A valid submodule resolution can be a new
-         merge of ours and theirs, or an existing descendant that contains
-         both, not only one of the three commits sync offered. Accepting
-         the oid needs no nested read: it is copied, not resolved. The
-         final comparison below still requires the staged entry, and the
-         pointer lands in the bundle for land's usual checks, like any
-         other agent change. `.gitmodules` stays tier 1.
-       - A pointer codex moved in the nested checkout without staging it is
-         not picked up. The codex prompt says to stage submodule pointers,
-         and that is the only behaviour change for honest runs.
-     - **The final tree must equal the evidence.** After staging, for each
-       path in `U`, the private index's entry (`ls-files --stage -z`) must
-       equal codex's stage-0 entry in mode **and** object id, or both must
-       be absent. Because the private index was built by the same `git
-       add` codex ran, a staged resolution that the work tree still holds
-       compares equal for every mode. That covers "ours unchanged", a
-       symlink, an executable bit and a submodule choice. A file edited
-       again after staging, a symlink replaced by a file, or a changed mode
-       compares unequal and is refused rather than silently re-resolved.
-     - The existing marker scan over sync's conflict list stays, for
-       regular files only.
-     - Only then does the commit step commit, completing the merge with
-       the snapshot's `MERGE_HEAD`. Any mismatch, parse error or failed
-       staging command fails the guard. That is fail-closed: nothing lands,
-       and the Surface error says why.
+- **The exchange.**
+  - The request goes to `POST https://auth.openai.com/oauth/token`, with
+    `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+    `identity_provider_id`, `service_account_id`, `subject_token_type`
+    (`urn:ietf:params:oauth:token-type:jwt` or `…:id_token`) and
+    `subject_token` (the GitHub OIDC JWT).
+  - The response carries `access_token`, `token_type: "Bearer"`,
+    `expires_in`, `expires_at` and, when the mapping sets permissions,
+    `scope`. **No refresh token** is issued: renewal is a fresh exchange
+    with a fresh subject token.
+- **Lifetime.** The token lasts "at most one hour", and "a JWT exchange
+  token never outlives its external subject token". GitHub does not
+  document its OIDC token's lifetime (docs.github.com → Actions → OIDC
+  reference lists `exp` without a duration). claude-code-action rewrites
+  its identity token every 4 minutes (workload-identity.ts), which points
+  to a lifetime of minutes. So **the design assumes the exchanged token
+  lives only minutes**, not an hour. The canary measures the real value.
+- **Authorization.** Tokens authorize "like service-account API
+  credentials", backed by the service account's project roles and
+  narrowed by any mapping permissions. The exchange "never creates
+  principals, projects, or workspace membership".
+- **Mappings.**
+  - A mapping matches raw claims (`sub`, `aud`, `iss`) or `openai.*`
+    attributes derived with CEL.
+  - Conditions within one mapping are ANDed, and "if more than one enabled
+    mapping matches an exchange, OpenAI rejects it".
+  - The GitHub guide lists `repository`, `repository_owner`, `ref`,
+    `workflow`, `workflow_ref`, `environment` and the `run_*` claims, and
+    recommends `workflow_ref` over `workflow`. **It does not list
+    `job_workflow_ref`**, the claim that names a reusable workflow.
+- **Availability.** The API Platform guide carries no beta label; only the
+  Codex flavour is marked beta. The GA date (2026-05-26) is the
+  coordinator's and was not found on the pages read.
+- **Spend limits.** The federation pages say nothing about budgets or
+  spend limits. Usage by a project service account is the project's usage,
+  so project spend limits are expected to apply (OpenAI documents enforced
+  project spend limits, developers.openai.com/api/docs/guides/spend-limits).
+  Step 7 verifies it on the project's usage page after the first runs.
+  Until then it is an expectation, not a fact.
 
-     The index is a git-format data file. Git parses it but executes
-     nothing from it: its extensions name files in the git dir (the
-     private one) and config the private dir does not set. Its object ids
-     need not exist in the private object store for `ls-files --stage`.
-     A gitlink oid needs no object at all, and a staged blob's content is
-     recomputed from the work tree by the private `git add`, so the
-     comparison needs no object codex wrote.
-  6. **`review-codex`** gains the reclaim and the import. Its `Prepare
-     Codex review for landing` reads the imported copy, not the codex-owned
-     file (claude-review.yml:2669).
-  7. **Cron and at are denied** to `codex` (`/etc/cron.deny`,
-     `/etc/at.deny`, written before the user's first process).
+**What codex-action's proxy accepts** (codex-action f367b1e `action.yml`
+"Start Responses API proxy"; openai/codex `codex-rs/responses-api-proxy`
+at 2a34aef, `read_api_key.rs`):
 
-  The hosted test (codex-path-smoke) runs a hostile codex stand-in that:
-  - plants `core.fsmonitor` and a hook in the workspace `.git` config,
-    each writing a marker file;
-  - plants a symlink inside `.git` aimed at a runner file;
-  - leaves a respawning process;
-  - tries a crontab.
+- The proxy reads the key **once**, from stdin at start, into a fixed
+  1,024-byte buffer.
+- It sends it as a static `Authorization: Bearer <key>` header.
+- It accepts only ASCII letters, digits, `-` and `_`
+  (`validate_auth_header_bytes`).
 
-  The stand-in is launched **through the real codex-action step** at
-  f367b1e, with a dummy API key: a root-owned test `codex` first on PATH
-  is what the action's `which codex` finds, so the action's own `sudo -u
-  codex --` launch path is exercised. The stand-in records
-  `/proc/self/cgroup` for itself and a forked child, then keeps
-  respawning. The test also records the proxy's cgroup. It passes when:
-  - the stand-in and its child are in the jail, and the proxy is not;
-  - the provisioning recipe's process is in the jail too;
-  - the reclaim either empties the jail or fails;
-  - the guard, commit and emit steps run, or are skipped, without writing
-    either marker;
-  - the runner file is untouched;
-  - the job's last `always()` step finds neither marker.
+So an exchanged token cannot simply be passed as `openai-api-key`. Any
+token containing `.`, as a JWT would, is refused at start, and a token that
+does start expires within minutes, with no way to renew it. The design
+therefore keeps codex-action's proxy and gives it a dummy key. It points the
+proxy's `responses-api-endpoint` at a renewing forwarder of our own:
 
-  The unit test in point 2 covers the post actions, which run after that
-  last step. A second case forces the reclaim to fail and asserts that
-  every git-running step was skipped. A third case makes `jail-exec`'s
-  attachment fail, by pointing it at a missing cgroup, and asserts that
-  the action step failed with no process of uid `codex` ever started.
+- **New composite `openai-wif-proxy`**, with its script at
+  `.github/actions/openai-wif-proxy/openai_wif_proxy.py` (stdlib only).
+  - **Where it runs.** It runs as `runner`, started in a step before
+    `Create codex user`, as a background process in the runner's session.
+    It gets the step's `ACTIONS_ID_TOKEN_REQUEST_*` environment. The codex
+    user never shares its uid, environment or memory: the launcher's
+    and `create-codex-user`'s process-isolation checks already cover
+    `/proc/<pid>/environ` and memory.
+  - **Inputs.** Identifiers, not secrets, like the Anthropic WIF IDs:
+    `identity-provider-id`, `service-account-id` and `audience`. They are
+    fixed values in the reusable workflows.
+  - **Start-up.** It performs the first exchange synchronously. It
+    requests a GitHub OIDC token for `audience` and exchanges it with the
+    fields above. The step fails with the exchange's error (never the
+    token) if that fails, and the Surface step names it, so codex never
+    starts without a credential.
+  - **Listening.** It binds `127.0.0.1` on an ephemeral port and writes
+    the port to a runner-only file. The step outputs
+    `endpoint=http://127.0.0.1:<port>/v1/responses`.
+  - **Forwarding.** It forwards only `POST /v1/responses`, the one route
+    codex-action's proxy itself allows (`lib.rs:170-173`), to
+    `https://api.openai.com/v1/responses`. It drops the incoming
+    `Authorization` and sets `Bearer <current token>`. It streams the
+    response through chunk by chunk, since codex uses server-sent events,
+    and caps the request body at 32 MB.
+  - **Renewal.** It re-exchanges, with a fresh GitHub OIDC token, whenever
+    the current token is within 60 seconds of `expires_at`. On an upstream
+    `401` it re-exchanges once and retries that request, whose body it
+    buffered. A failed renewal answers `502` with a fixed message. So runs
+    of any length are covered, those over an hour included, as long as
+    the job can still mint OIDC tokens. If GitHub or OpenAI refuses, codex
+    fails its step, the round fails, and with refunds gone it counts.
+  - **The token stays in memory.** It is never written to disk, never
+    logged, and never returned to a client. The script masks it
+    (`::add-mask::`) anyway.
+- **The codex-action step** gets `openai-api-key:
+  "meridian-wif-placeholder"`, a fixed non-secret value in the proxy's
+  charset, and `responses-api-endpoint: ${{ steps.openaiwif.outputs.endpoint
+  }}`. codex-action's proxy injects the placeholder, and ours replaces it.
+  codex still gets only codex-action's proxy address.
+- **What the agent can reach.** Codex, as the codex user, can reach our
+  forwarder on loopback directly. It gets model responses, the credential's
+  use, which the exception allows, and never the token itself. A runner
+  or root compromise can mint and exchange tokens itself. That yields the
+  same short-lived model credential, which is exactly the exception
+  Anthropic's WIF already makes.
 
-  Cost:
-  - a full `.git` copy per codex run (seconds to tens of seconds on
-    inspect_ai's history);
-  - a cgroup jail entered through a `sudo` shim that depends on
-    codex-action's by-name `sudo`, which ties the codex jobs to a pinned
-    action ref;
-  - a checkout step of our own;
-  - an index-evidence guard;
-  - the maintenance of all of it, for the codex jobs only.
+**The mapping** (one OpenAI project for CI agents, one service account,
+exactly one enabled mapping):
 
-  Each of these adds to the case for option (a).
+- **Conditions, ANDed:**
+  - `iss == "https://token.actions.githubusercontent.com"`;
+  - `aud ==` a Meridian-specific audience (for example
+    `openai-wif:meridianlabs-ai`), so a token minted for Anthropic's WIF
+    or PyPI cannot be replayed here;
+  - `repository_owner == "meridianlabs-ai"`, plus `repository_owner_id`,
+    so a renamed or recreated organization does not match;
+  - `job_workflow_ref` is one of
+    `meridianlabs-ai/agents/.github/workflows/{claude,claude-review,claude-auto,claude-auto-review}.yml@refs/heads/main`;
+  - `event_name` is one of the events the stubs use (`issue_comment`,
+    `issues`, `pull_request_review`, `pull_request_review_comment`,
+    `workflow_run`, `pull_request`), as depth.
+- **`job_workflow_ref` has to be reachable.** The GitHub guide does not
+  list it among the claims, so step 7 first confirms that a CEL
+  attribute can read it (`openai.job_workflow_ref =
+  assertion.job_workflow_ref`, or whatever the provider's CEL context
+  exposes).
+  - If it cannot, the fallback is GitHub's OIDC subject customization for
+    the organization (`include_claim_keys: ["repo", "context",
+    "job_workflow_ref"]`), matched as a `sub` prefix.
+  - That changes `sub` for every Meridian repository's OIDC tokens. So
+    before switching, step 7 checks that no other relying party keys on
+    `sub`: Anthropic's rule keys on `repository_owner`, and the PyPI and
+    npm trusted publishers from step 5 on their own claims.
+  - If neither route works, step 7 stops and goes back to Ransom, because
+    a mapping on `repository_owner` alone would let any Meridian workflow
+    with `id-token: write` spend on the project.
+- **Callers need no mapping of their own.** The exchange runs in the
+  caller repository's job, so the token's `repository` is the caller's.
+  Its `repository_owner` is `meridianlabs-ai` and its `job_workflow_ref`
+  names this repository's reusable workflow at `main`, which is what the
+  mapping matches.
+  - A caller's own workflow cannot exchange: its `job_workflow_ref` is its
+    own file.
+  - A workflow that calls one of the four reusable workflows can. That is
+    the stubs' design, and the gate decides whether the codex job runs at
+    all.
+  - Fork pull requests do not reach a codex job: the gates refuse fork
+    heads before the engine is chosen. GitHub also caps a fork pull
+    request's token permissions. The negative canary in step 7 checks
+    that a job outside the mapping is refused.
 
-**Recommendation: (a).** It gives both engines one boundary, and it
-retires the code the five findings live in rather than patching it. The
-key's longer exposure window is the price. It is bounded by the project's
-hard budget and scope, and it is Ransom's to accept. OpenAI documents
-enforced project spend limits, with a short enforcement delay
-(developers.openai.com/api/docs/guides/spend-limits). Deployment still
-has to confirm the limit is set to enforce on the project the key belongs
-to. If he declines (a), step 7 below is (b).
+**`id-token: write` on the codex jobs.** Step 1 removes it, because until
+the App is uninstalled it lets a runner compromise in a codex job mint the
+App token. Step 7 restores it, for the federation, only after step 6 has
+removed the App. No job then references `OPENAI_API_KEY`, the org secret
+is deleted, and the stubs stop passing it.
+
+**What this removes.** The option (b) machinery from the earlier rounds
+is not built: the cgroup jail, `jail-exec`, the `sudo` shim, the
+codex-action pin, the runner-private git dir, the self-made checkout and
+the index-evidence guard. 4773876 (no reclaim in `review-codex`), 4773887
+(refusal exits before the restore) and 4773888 (symlinks inside `.git`)
+close with the boundary. A runner compromise they enable in a codex job
+now reaches the read-only job token, a runtime token whose cache access is
+read-only, and the exchangeable model credential, all of which the agent
+may have. The App token is gone after step 6, and no key is left to steal.
+The existing codex uid machinery stays as hygiene, as on the Claude jobs.
 
 ### What changes in SECURITY.md
 
@@ -1037,8 +945,13 @@ makes it true):
 - **Guarantees, provisioning/agent-user bullet and "no root for the agent
   uid"**: kept, reworded as defence in depth. They are no longer the
   reason a runner compromise is harmless.
-- **Guarantees, the codex PATH bullet**: hygiene under open question 1
-  (a), unchanged under (b).
+- **Guarantees, the codex PATH bullet**: kept, reworded as hygiene
+  (step 7).
+- **Guarantees, the OpenAI-key bullet** ("A job that runs the Claude agent
+  references no `OPENAI_API_KEY`") becomes "no job references
+  `OPENAI_API_KEY`". The codex jobs federate (step 7). The engine split
+  stays for its other reasons (one agent user and one boundary shape per
+  job).
 - **Guarantees, manifest bullet**: adds that on the reusable workflows'
   land jobs every post lands on the run's own issue or PR. That covers
   `comments[]`, `pr.issue`, `replies[]` (own-PR review comments only) and
@@ -1057,9 +970,17 @@ makes it true):
   `allowed-issue-repos: ""`), leaving the stage move as the one board
   write a forged review manifest can make.
 - **Adding or changing a workflow, first bullet**: the exceptions list
-  loses "the Claude action's own token". Every claude-code-action step
-  passes `github_token: ${{ github.token }}`. A job requests
-  `id-token: write` only where it uses WIF.
+  loses "the Claude action's own token". The model-credential exception
+  reads: "the model credential, which is workload identity federation
+  only: Anthropic's, and OpenAI API Platform's for the codex jobs (a
+  project service-account token exchanged from the job's OIDC token, at
+  most an hour and never beyond it, held by the `openai-wif-proxy`
+  forwarder). No long-lived model key is referenced by any job." Every
+  claude-code-action step passes `github_token: ${{ github.token }}`. A
+  job requests `id-token: write` only where it uses WIF. A new OIDC trust,
+  whether a cloud role, a publisher or a model provider, pins
+  `job_workflow_ref` or its own workflow file and never matches on
+  `repository_owner` alone.
 - **Build and dependency configuration** (tier 2), below.
 
 ### The tier-2 opt-in's premise
@@ -1089,11 +1010,37 @@ text is updated to name the job-level premise.
 ## Alternatives considered
 
 - **Patch the uid boundary instead** (fix the five findings in place).
-  That is open question 1 (b), applied to both engines. It keeps the App
-  token one uid away from every agent-written file, the argument that has
-  needed a patch every few days since 2026-09-22, and it leaves
-  `claude[bot]` trusted. Rejected for the Claude jobs, where the other
-  route is cheap. It is still an option for codex.
+  It keeps the App token one uid away from every agent-written file, the
+  argument that has needed a patch every few days since 2026-09-22, and it
+  leaves `claude[bot]` trusted. Rejected.
+- **Codex: a project-scoped, spend-capped long-lived OpenAI key** under an
+  extended exception (earlier rounds' recommended option (a)). It is
+  simpler, since codex-action's proxy takes the key as it is. But a key
+  taken from a compromised job stays usable until rotation or the budget,
+  where the federated token dies with the job. Superseded by federation
+  (decision: Ransom, 2026-09-29).
+- **Codex: keep the uid boundary with a fail-closed teardown** (earlier
+  rounds' option (b), reviewed in rounds 2-4). It keeps the key out of
+  reach of every codex-uid process, so no exception has to be extended.
+  It needs all of the following, for the codex jobs only:
+  - a runner-private copy of `.git` for all post-codex git;
+  - a `run:` checkout, so no post action runs git;
+  - a root-owned cgroup, entered through `jail-exec` and a `sudo` shim
+    that relies on codex-action's by-name `sudo`, which pins the action;
+  - cron and at denial;
+  - a mode-aware conflict guard that reads codex's index as imported
+    data.
+
+  Not chosen (decision: Ransom, 2026-09-29). Federation removes the
+  credential that machinery protected.
+- **Pass the exchanged token straight to codex-action as `openai-api-key`.**
+  That fails twice. The proxy refuses any character outside
+  `[A-Za-z0-9_-]`, and it reads the key once, so a token that lives
+  minutes cannot be renewed (Design → Codex jobs). Hence the forwarder.
+- **Give codex the token directly** (codex's own config, no proxy). The
+  exception would allow it, but codex cannot renew the token either, and
+  that would put the credential on disk in the codex home. The forwarder
+  keeps it in one runner process.
 - **Move the composers whole into a new trusted `compose` job** (or into
   the land job). The composers read the agent's repository (`rev-parse`,
   `merge-base`, `log`, the local branch name), step outcomes and the
@@ -1129,7 +1076,10 @@ text is updated to name the job-level premise.
   the job's `runner_id` are either reported by the same runner or, for a
   job that never got a runner, cover a case that already keeps its round
   (a pending job cancelled before start). There is no trusted "never
-  entered" signal. Open question 2 keeps a bounded variant open.
+  entered" signal. A bounded refund budget (one refund per engagement,
+  recorded by land as `refunds: 0/1` in the counter comment) was offered
+  and declined: refunds go, and every round counts (decision: Ransom,
+  2026-09-29).
 
 ## Compatibility and migration
 
@@ -1156,7 +1106,17 @@ text is updated to name the job-level premise.
 - **Loop behaviour.** Removing the refunds means an infra failure before
   the agent step spends a round. `fix_attempt_cap` defaults to 3
   (claude-auto.yml:99-106), so a flaky provisioning costs one attempt in
-  three and escalates to a human sooner. Open question 2.
+  three and escalates to a human sooner. Accepted (decision: Ransom,
+  2026-09-29).
+- **Codex credential** (step 7).
+  - Ransom creates the OpenAI project, service account, identity provider
+    and mapping. The four reusable workflows name their IDs (identifiers,
+    like the Anthropic WIF IDs) and restore `id-token: write` on the codex
+    jobs.
+  - The stubs keep granting `id-token: write`, which they already do, and
+    stop passing `OPENAI_API_KEY`. A stub still passing it is harmless:
+    no job references it. The org secret is deleted afterwards.
+  - Callers need no OpenAI configuration.
 - **claude.yml users.**
   - The status comment is posted by the machine account, not
     `claude[bot]`, and is top-level on review-comment triggers.
@@ -1217,6 +1177,12 @@ Untrusted input reaching the new or moved code:
 - **The settings path** (4773338). It comes from a trusted stub input,
   but the file is the checkout's. The helper refuses symlinks and
   out-of-tree paths.
+- **The OpenAI forwarder** (step 7). It parses the token endpoint's JSON
+  and relays codex's requests and OpenAI's responses as bytes. It never
+  interprets a response body, and never follows a redirect off
+  `api.openai.com`. Its only client-facing route is `POST /v1/responses`
+  on loopback. Error messages it returns or logs never include the token,
+  the subject token or the exchange response.
 - **OIDC.** After step 6 the job can still mint JWTs for any audience.
   Step 5's audit is what makes "no relying party grants more" true, and
   it has to stay true. A new OIDC trust (a cloud role, a publisher) that
@@ -1330,57 +1296,35 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
 - **The settings helper.** A new test lifts it and covers a regular file,
   a symlinked file, a symlinked directory component, `..` out of the
   workspace, a FIFO and an oversize file.
-- **Codex, under option (b) only.**
-  - No codex job uses `actions/checkout`, or any action outside the
-    allow-list of actions known to register no git-running post step.
-  - Every post-codex git step sets `GIT_DIR`/`GIT_COMMON_DIR` to
-    `$RUNNER_TEMP/runner-git`, and is gated on the reclaim's `== success`.
-  - The guard and commit step, lifted and run against a local repository
-    with a conflicted `MERGE_HEAD` snapshot and a separately staged
-    "codex" index copy.
-    - Refused:
-      - an untouched text conflict (markers), binary conflict or
-        modify/delete conflict;
-      - a staged file edited again after staging;
-      - a staged symlink replaced by a regular file;
-      - a submodule conflict left unstaged (stages 1-3 still in codex's
-        index);
-      - a missing or corrupt index copy when the snapshot has a conflict.
-    - Accepted:
-      - a staged text resolution and a staged binary choice;
-      - a `git rm` of a modify/delete path;
-      - a staged "ours unchanged";
-      - a staged symlink resolution, with its link text as the blob;
-      - an executable-bit resolution;
-      - a real submodule conflict, in a repository with a `.gitmodules`
-        like inspect_ai's and inspect_scout's ts-mono, resolved three ways
-        with `git add <submodule>`: to theirs, to a new merge commit of
-        ours and theirs made in the nested checkout, and to an existing
-        descendant of both, beyond the three commits sync offered. No
-        runner-side git process is ever started inside the submodule
-        (asserted with a planted `core.fsmonitor` in the nested
-        repository's config).
-
-      Each commits a two-parent merge whose tree equals the staged
-      resolution, mode and oid for mode.
-    - With no conflict and no submodule, the index is never imported:
-      - an ordinary unstaged edit, with the runner-owned index untouched,
-        commits;
-      - a no-change answer lands nothing and raises no error;
-      - a codex-owned replacement index is not read.
-    - With a submodule and no conflict, an index owned by `runner` and one
-      owned by `codex` are both imported. A staged submodule bump lands,
-      and an unstaged one is ignored.
-  - `jail-exec`, lifted: it refuses every argv but `-u codex [--] …`, and
-    exits non-zero before dropping privileges when the cgroup write or
-    the read-back fails. The `sudo` shim routes `-u codex -- …` and `-u
-    codex cat <file>` (the finalizer's form) through it, and passes every
-    other argv through unchanged.
-  - Structurally: every codex-uid launch (`sudo`, `runuser`, `su`,
-    `setpriv`) in the workflows and composites goes through `jail-exec`;
-    `/opt/meridian-codex/bin` is the only `GITHUB_PATH` entry in the codex
-    jobs; codex-action is pinned to f367b1e.
-  - `review-codex` runs the reclaim and the import.
+- **test_openai_wif_proxy.py** (new), with the forwarder's script run
+  against local stub servers for GitHub's OIDC endpoint, OpenAI's token
+  endpoint and the upstream:
+  - The first exchange sends exactly `grant_type`, `identity_provider_id`,
+    `service_account_id`, `subject_token_type` and `subject_token`, the
+    subject token having been requested for the configured audience. A
+    failed first exchange fails start-up, with no token in the output.
+  - Renewal happens before `expires_at - 60s`, with a fresh subject token
+    each time. The stub's tokens live 90 seconds and the stub run lasts
+    several minutes.
+  - An upstream `401` triggers exactly one re-exchange and a retry of the
+    buffered body.
+  - A failed renewal answers `502` with the fixed message.
+  - Only `POST /v1/responses` on loopback is forwarded. Any other method,
+    path or query is refused, and so is a body over the cap.
+  - The incoming `Authorization` is replaced, never forwarded.
+  - A server-sent-events response is relayed chunk by chunk, with no
+    buffering until the end.
+  - The token appears in no file under the runner's temp or home, in no
+    log line and in no response to a client (grep of every artifact of
+    the test).
+- **test_engine_job_isolation.py**, for the codex credential:
+  - No job references `OPENAI_API_KEY`.
+  - Every codex-action step passes the fixed placeholder as
+    `openai-api-key` and `steps.openaiwif.outputs.endpoint` as
+    `responses-api-endpoint`.
+  - The `openai-wif-proxy` step precedes `Create codex user`.
+  - The codex jobs request `id-token: write` from step 7 on, and do not
+    before it (the step-1 assertion is flipped by step 7's PR).
 
 Hosted canaries and smoke runs (these need real runners; none needs a
 model or a real secret):
@@ -1395,15 +1339,23 @@ model or a real secret):
     prints nothing from it.
   - After step 6 it must fail, and that failure is the proof of step 6.
   - Add the same probe to a codex job, where it must fail after step 1
-    because the job has no `id-token: write`.
+    because the job has no `id-token: write`, and again after step 7
+    because the App is gone.
+  - The secret-delivery probe drops its OpenAI-key sentinel role: no job
+    references the key any more.
 - **root-boundary-smoke.yml.** Unchanged (the uid depth).
-- **codex-path-smoke.yml.**
-  - Under (a), unchanged, as hygiene.
-  - Under (b), extended with the hostile stand-in described under Design
-    → Codex jobs (b), run with the real codex user, cgroup and sudo: the
-    planted fsmonitor and hook never fire, the planted `.git` symlink's
-    target is untouched, and the respawning process is killed or the
-    reclaim fails with every git step skipped.
+- **codex-path-smoke.yml.** Unchanged, as hygiene.
+- **The OpenAI mapping** (step 7), on hosted runners:
+  - Positive: a codex job of each reusable workflow exchanges, and a live
+    codex round runs past at least two renewals. The job summary records
+    the measured `expires_in` and the GitHub OIDC `exp - iat`, which
+    settles the lifetime assumption.
+  - Negative: a canary workflow in this repository, whose
+    `job_workflow_ref` is not in the mapping, requests a token with the
+    right audience and is refused, as is a request with another
+    audience.
+  - Usage from the canary appears on the CI project's usage page, under
+    its spend limit. That is the spend-limit verification.
 - **A private test repository** (step 4). A `@claude` run on an issue
   with an uploaded image checks that the job token resolves the
   attachment and that the agent sees the file.
@@ -1488,49 +1440,40 @@ SECURITY.md text that its change makes true.
    - Then land the SECURITY.md rewrite (What changes in SECURITY.md), the
      tier-2 premise text, credential-separation.md's I1 and I5, and
      AGENTS.md's paragraphs that describe the reclaim as the boundary.
-7. **Codex, per open question 1.**
-   - (a): Ransom creates the project-scoped, capped key and replaces
-     `OPENAI_API_KEY`. This repository's PR updates the exception text and
-     reclassifies the codex rows as hygiene in AGENTS.md and
-     codex-engine.md.
-   - (b): the fail-closed teardown under Design → Codex jobs (b).
-     - The runner-private git dir copy (create-codex-user).
-     - The codex jobs' own checkout step.
-     - The jail cgroup, `jail-exec` and the `sudo` shim
-       (create-codex-user, a new `/opt/meridian-codex/bin`), the
-       provision-fallback launch through `jail-exec`, codex-action pinned
-       to f367b1e, and the reclaim's `cgroup.kill`
-       (reclaim-codex-workspace).
-     - The reclaim's conditional index import, with the `runner`/`codex`
-       owner list in `import_codex_final.py`.
-     - The guard's mode-aware evidence check, the gitlink staging through
-       `update-index --cacheinfo`, and the final-tree comparison
-       (unresolved-merge-guard and the three commit steps).
-     - `codex-home.sh` and `assert-runner-only-path` routed through
-       `jail-exec`.
-     - The reclaim reduced to checks plus revocation.
-     - The post-codex steps' `GIT_DIR` pins.
-     - `review-codex`'s reclaim and import.
-     - The cron and at denial.
-     - codex-path-smoke's hostile stand-in.
-
-   It is independent of steps 3 to 6 and can go in parallel.
+7. **Codex to OpenAI workload identity federation** (after step 6).
+   - Ransom:
+     - creates the CI project and its service account, with a hard spend
+       limit set;
+     - creates the GitHub identity provider (issuer
+       `https://token.actions.githubusercontent.com`, the Meridian
+       audience);
+     - creates the one mapping (Design → Codex jobs). The first thing done
+       is confirming that `job_workflow_ref` is reachable through CEL; if
+       it is not, the `sub` customization fallback, with its relying-party
+       check; if neither works, stop and ask.
+   - This repository:
+     - the `openai-wif-proxy` composite and its test;
+     - the four codex jobs: the forwarder step before `Create codex user`,
+       the codex-action inputs, `id-token: write` restored and every
+       `OPENAI_API_KEY` reference removed;
+     - the negative canary;
+     - SECURITY.md's exception and OpenAI-key bullet, AGENTS.md's
+       codex-key and PATH-boundary paragraphs, codex-engine.md and
+       credential-separation.md (3.1, 3.5, I1) rewritten to match.
+   - Companion PRs in the caller repositories drop `OPENAI_API_KEY` from
+     their stubs. The org secret is deleted once no stub passes it.
 
 ## Open questions
 
-1. **Codex key: (a) extend the model-credential exception to a
-   project-scoped, spend-capped OpenAI key, or (b) keep the codex jobs on
-   the uid boundary with the fail-closed teardown?** Recommendation: (a),
-   with the project's spend limit confirmed as enforcing (OpenAI documents
-   enforced project limits, with a short delay). Design → Codex jobs has the
-   trade-off.
-2. **Refunds: drop them, or keep a bounded refund budget?** Recommendation:
-   drop them. With them gone every round counts, and nothing the agent job
-   reports decides the count. The alternative is one refund per loop
-   engagement, recorded by the land job in the trusted counter comment
-   (`refunds: 0/1`). It is bounded whatever the job forges, but it adds a
-   field to two counter formats and to the reset composite for a blip that
-   costs one attempt.
+None. The two left for Ransom were decided on 2026-09-29:
+
+- **The codex credential:** OpenAI API Platform workload identity
+  federation ("let's go with API Platform WIF"). Design → Codex jobs.
+- **Loop refunds:** dropped, with no bounded refund budget. Design → The
+  boundary.
+
+Step 7 can still stop for a decision if the mapping cannot be pinned to
+`job_workflow_ref` (Design → Codex jobs).
 
 ## Not this design
 
@@ -1552,15 +1495,17 @@ SECURITY.md text that its change makes true.
 - **Engine labels on PRs are unverified** (4773334, 4774318). A PR's
   `engine:codex` label is read without a labeller check
   (claude-review.yml:634-656, claude.yml:787-896, claude-auto.yml:538-540,
-  claude-auto-review.yml:584-586). Under open question 1 (a) this routes
-  to a job that holds nothing more. Under (b) it routes to the job step 7
-  fixes.
+  claude-auto-review.yml:584-586). After step 7 this routes to a job
+  that holds nothing more than the Claude job.
 - **Pinning claude-code-action** (from executed-paths-residual.md). Still
   worth doing. It is less urgent once the action holds no App token.
 - **Retiring the uid machinery outright.** Once the job is the boundary,
   the reclaims, PATH walks and env pins could go, simplifying every agent
-  job. This design keeps them (cheap, shared with codex, and required
-  under (b)). Whether to remove them is a later cleanup.
+  job. This design keeps them (cheap, and shared by both engines).
+  Whether to remove them is a later cleanup.
+- **Native federation in codex-action** (a renewing credential source
+  for its proxy, upstream) would make `openai-wif-proxy` unnecessary. It is
+  worth asking for, but not this design.
 - **`Verify a review landed`** still trusts `claude_outcome` and
   `agent_launched` for a nudge. Deriving it from the manifest in land
   (verdict present or not) would drop two more outputs. It is harmless as
