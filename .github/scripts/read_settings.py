@@ -23,7 +23,11 @@ import os
 import stat
 import sys
 
-MAX_BYTES = 256 * 1024
+# The file's text travels as one environment string twice: as SETTINGS
+# when the composite starts jq, and, merged, as the action's settings input.
+# Linux refuses a single string over 128 KiB (MAX_ARG_STRLEN), so the cap
+# leaves room for the deny overlay.
+MAX_BYTES = 64 * 1024
 
 
 class Refused(Exception):

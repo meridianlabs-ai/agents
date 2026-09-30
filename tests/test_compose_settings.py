@@ -13,6 +13,7 @@ output), a valid in-tree path and inline JSON. A structural check pins
 the three workflows to the composite and their deny lists.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -31,6 +32,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import job_block, lift_run, step_block  # noqa: E402
 
 STEP = lift_run(ACTION.read_text(), "    - id: compose")
+
+
+def _max_bytes() -> int:
+    spec = importlib.util.spec_from_file_location("read_settings", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.MAX_BYTES
+
+
+MAX_BYTES = _max_bytes()
 
 LOOP_DENY = ["Bash(git push:*)", "Bash(gh pr comment:*)", "Bash(gh issue comment:*)", "Bash(gh pr review:*)",
              "Bash(gh pr create:*)", "Bash(gh pr merge:*)", "Bash(gh issue create:*)"]
@@ -111,18 +122,19 @@ def test_valid_in_tree_path_is_read_and_merged(ws, form):
     assert f"reading {path}" in r.stdout
 
 
-def test_file_at_the_size_cap_is_read(ws):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("read_settings", SCRIPT)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+def test_file_at_the_size_cap_is_read_and_fits_the_action_input(ws):
     body = json.dumps({"pad": ""})
-    body = json.dumps({"pad": "x" * (mod.MAX_BYTES - len(body))})
-    assert len(body) == mod.MAX_BYTES
+    body = json.dumps({"pad": "x" * (MAX_BYTES - len(body))})
+    assert len(body) == MAX_BYTES
     (ws["ws"] / "s.json").write_text(body)
-    r, out = compose(ws, "s.json")
-    assert r.returncode == 0, r.stderr
-    assert len(value(out)["pad"]) > 0
+    r, out = compose(ws, "s.json", deny=DEV_DENY)
+    assert r.returncode == 0, r.stdout + r.stderr
+    composed = out.splitlines()[1]
+    assert len(value(out)["pad"]) == MAX_BYTES - len('{"pad": ""}')
+    # The runner hands the composed value to claude-code-action as one
+    # environment string, which Linux caps at 128 KiB (MAX_ARG_STRLEN).
+    assert len(f"INPUT_SETTINGS={composed}".encode()) < 128 * 1024
+    subprocess.run(["true"], env={"INPUT_SETTINGS": composed}, check=True)
 
 
 # --- refused -----------------------------------------------------------------
@@ -185,9 +197,9 @@ def test_the_workspace_itself_is_refused(ws):
 
 
 def test_oversized_file_is_refused(ws):
-    (ws["ws"] / "big.json").write_text(json.dumps({"pad": "x" * (256 * 1024)}))
+    (ws["ws"] / "big.json").write_text(json.dumps({"pad": "x" * MAX_BYTES}))
     r, out = compose(ws, "big.json")
-    refused(r, out, "larger than 262144 bytes")
+    refused(r, out, f"larger than {MAX_BYTES} bytes")
 
 
 def test_non_utf8_file_is_refused(ws):

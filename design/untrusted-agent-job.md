@@ -1429,8 +1429,10 @@ SECURITY.md text that its change makes true.
      are unchanged.
    - The helper is `.github/scripts/read_settings.py`. It refuses a `..`
      component, an absolute path outside the workspace, a symlink at any
-     step of the path, a file that is not regular, one over 256 KiB and
-     one that is not UTF-8. It walks the path one directory at a time with
+     step of the path, a file that is not regular, one over 64 KiB and
+     one that is not UTF-8. The cap leaves room under Linux's 128 KiB
+     limit on one environment string, which the value passes through
+     twice (`jq`'s environment, then the action's `settings` input). It walks the path one directory at a time with
      `O_NOFOLLOW`. A refusal fails the step with no output, so the agent
      step is skipped and the Surface step reports it.
    - `tests/test_compose_settings.py` runs the composite's step against

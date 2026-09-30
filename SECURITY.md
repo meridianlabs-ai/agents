@@ -106,7 +106,7 @@ text are checked by the tests under `tests/`.
   Claude agent's namespace is left to Claude Security scans (decision:
   Ransom, 2026-09-24).
 - A `settings` input that names a file is read only from inside the
-  workspace, as a regular file of at most 256 KiB with no `..` and no
+  workspace, as a regular file of at most 64 KiB with no `..` and no
   symlink anywhere on its path, opened `O_NOFOLLOW`. Anything else fails
   the compose step and the agent does not start. So a symlink committed in
   the checkout cannot make a runner file outside it the agent's settings

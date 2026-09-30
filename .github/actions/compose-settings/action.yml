@@ -14,9 +14,10 @@ description: >-
   `{}`. A value that is not a JSON object is read as a path by
   `.github/scripts/read_settings.py` (Claude Security finding 4773338): the
   path must name a regular UTF-8 file inside `$GITHUB_WORKSPACE`, of at most
-  256 KiB, with no `..` component and no symlink at any step, so a symlink
-  committed in the checkout cannot redirect the read to a runner file
-  outside it. The result must be a JSON object. The overlay's rules are
+  64 KiB (the value is passed on as one environment string, which Linux
+  caps at 128 KiB), with no `..` component and no symlink at any step, so
+  a symlink committed in the checkout cannot redirect the read to a runner
+  file outside it. The result must be a JSON object. The overlay's rules are
   removed from `permissions.allow` and added to `permissions.deny`, so a
   caller's settings cannot re-enable them.
 
