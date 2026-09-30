@@ -1492,10 +1492,30 @@ SECURITY.md text that its change makes true.
        identity (earlier loop commits on `main` carry it too), not the
        push actor, so it does not fail this check, which is about who
        pushed and posted.
-     - Review-fix round (codex): pending. `engine:codex` was added to
-       #180 after its first review round, so that round and its fix
-       round ran on the Claude engine; the codex review and the fix
-       round anchored on it are still to run on this PR.
+     - Review-fix round, Claude engine: the Claude review of #180
+       ([run 36733173930](https://github.com/meridianlabs-ai/agents/actions/runs/36733173930))
+       had suggestions; its fix round
+       ([run 36733648937](https://github.com/meridianlabs-ai/agents/actions/runs/36733648937))
+       ran on the job token, the land job pushed a8b35e2, and the round
+       handed off as `meridian-marvin[bot]` (documentation-only nits).
+     - Review-fix round, codex engine: with `engine:codex` on #180, the
+       codex review
+       ([run 36738095760](https://github.com/meridianlabs-ai/agents/actions/runs/36738095760))
+       ran as `review-codex` and landed as `meridian-marvin[bot]` with
+       suggestions. The `fix-codex` round
+       ([run 36738559681](https://github.com/meridianlabs-ai/agents/actions/runs/36738559681))
+       built its prompt from that review, and codex ran, but the
+       post-codex reclaim refused: `job PATH entry
+       '/opt/hostedtoolcache/node/24.21.0/x64/bin' is writable by the
+       codex user`. codex-action's own `actions/setup-node` step adds that
+       directory to the job PATH inside the codex step, after
+       `create-codex-user` has checked and repaired the PATH, and the
+       post-codex check does not repair. Nothing landed, and land posted
+       the error as `meridian-marvin[bot]`. This is not caused by step 1
+       (#179 removed only `id-token: write` from the codex jobs), so step 1
+       stands; codex fix and dev rounds need the PATH fix before they can
+       land.
+
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
    maintainer's machine. It can merge before or after step 1.
