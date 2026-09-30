@@ -209,6 +209,31 @@ def test_the_land_job_waits_for_both_agent_jobs(name):
                 assert f"needs.{claude_job}." not in line and f"needs.{codex_job}." not in line, line
 
 
+
+# --- the land job's use of the untrusted job's word (design/untrusted-agent-
+# job.md → The boundary): only outputs whose every value is safe. The job
+# writes its own outputs, so `mention` (a login the review job derived after
+# its agent ran) and `agent_skipped` (the loops' refund) went in step 3. ----
+
+LAND_MAY_READ = {"claude_outcome", "agent_launched", "agent_outcome"}
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_no_agent_job_outputs_a_mention_or_a_skip(name):
+    for job in AGENT_JOBS[name]:
+        block = jobs(workflow_text(name))[job]
+        head = block[:block.index("    steps:\n")]
+        assert not re.search(r"^      (mention|agent_skipped):", head, re.M), (name, job)
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_land_job_reads_only_the_safe_agent_job_outputs(name):
+    land = jobs(workflow_text(name))["land"]
+    read = set()
+    for job in AGENT_JOBS[name]:
+        read |= set(re.findall(rf"needs\.{re.escape(job)}\.outputs\.([A-Za-z0-9_]+)", "\n".join(code_lines(land))))
+    assert read <= LAND_MAY_READ, (name, read - LAND_MAY_READ)
+
 # --- 4628446: nothing from the tree runs as the runner in the codex job -------
 
 

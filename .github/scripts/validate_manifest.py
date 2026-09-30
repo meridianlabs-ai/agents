@@ -26,7 +26,9 @@ manifest. Usage:
         [--allowed-issue-labels ""] [--allowed-issue-assignees ransomr] \
         [--max-issues 1] [--refuse-pr] [--allow-review] \
         [--allowed-pr-labels '["auto","engine:codex"]'] \
-        [--pr-draft true] [--pr-assignees ransomr]
+        [--pr-draft true] [--pr-assignees ransomr] \
+        [--comment-numbers event] [--max-comments 5] [--max-review-comments 50] \
+        [--stage-override Review]
 
 `--refuse-bundle` is for callers whose agent never commits (the reviewer):
 a manifest that carries commits, claims HEAD moved, or ships a
@@ -149,6 +151,21 @@ manifest on the dev agent's or a loop's PR-run land job would otherwise
 converge the @auto loop or feed it a fix round with no review having run
 (Claude Security finding 4628442, 2026-09-22). Like the other flags it is
 caller policy from the land job's trusted inputs; it relaxes no other rule.
+
+`--comment-numbers`, `--max-comments` and `--max-review-comments` bound
+where the land job posts and how much (design/untrusted-agent-job.md → Land
+enforces what the composers enforced). Under `--comment-numbers event`
+every `comments[].number` must be the `--event-pr-number` or
+`--event-issue-number`, and `pr.issue` (where the land job posts the
+"opened a pull request" note) must be the `--event-issue-number`: the
+dev agent's composer drops other numbers, but it runs in the agent job, so
+without this a forged manifest could post as the machine account on any
+issue or PR of the repository. `*` (the default) keeps today's rule, a
+positive number anywhere. The two caps count `comments[]` and
+`review_comments[]` (the reviewer's inline comments; Claude Security
+4773341); empty (the default) is no cap. `--stage-override` is checked
+here only for its shape (empty, `none` or an Atlas stage); the land job's
+plan step applies it.
 
 The schema is documented in .github/actions/emit-landing/README.md; keep
 the two in step (an added field must be added to KNOWN_TOP_LEVEL here and
@@ -287,6 +304,9 @@ class Validator:
         allowed_issue_assignees=None,
         max_issues: int | None = None,
         allowed_pr_labels=None,
+        comment_numbers: str = "*",
+        max_comments: int | None = None,
+        max_review_comments: int | None = None,
     ) -> None:
         self.m = manifest
         self.dir = Path(artifact_dir)
@@ -315,6 +335,12 @@ class Validator:
         # The same shape for `pr.labels`: None unrestricted, a set (possibly
         # empty) the only labels the land job may apply to the PR.
         self.allowed_pr_labels = None if allowed_pr_labels is None else {x.lower() for x in allowed_pr_labels}
+        # `event`: every comment lands on the run's own issue or PR. `*`:
+        # any positive number (the rule before step 3 of
+        # design/untrusted-agent-job.md).
+        self.comment_numbers = comment_numbers
+        self.max_comments = max_comments
+        self.max_review_comments = max_review_comments
         self.errors: list[str] = []
 
     def err(self, msg: str) -> None:
@@ -658,20 +684,29 @@ class Validator:
             # grew after the composer ran is refused here, not applied by
             # the machine account.
             self._labels(pr, "pr", self.allowed_pr_labels, what="pull-request")
-            self._positive_int(pr, "issue", "pr", required=False)
+            pr_issue = self._positive_int(pr, "issue", "pr", required=False)
+            # The land job posts the "opened a pull request" note on
+            # `pr.issue`: under `event` only on the run's own issue.
+            if pr_issue is not None and self.comment_numbers == "event" and str(pr_issue) != self.event_issue_number:
+                self.err(f"pr: issue {pr_issue} is not the issue this run's event names ({'#' + self.event_issue_number if self.event_issue_number else 'none'}; --comment-numbers event)")
 
         comments = m.get("comments")
         if comments is not None:
             if not isinstance(comments, list):
                 self.err("manifest: comments must be a list")
             else:
+                if self.max_comments is not None and len(comments) > self.max_comments:
+                    self.err(f"manifest: comments lists {len(comments)} entries; this land job allows at most {self.max_comments} (--max-comments)")
+                own = {n for n in (self.event_pr_number, self.event_issue_number) if n}
                 for i, c in enumerate(comments):
                     where = f"comments[{i}]"
                     if not isinstance(c, dict):
                         self.err(f"{where}: must be an object")
                         continue
                     self._unknown_keys(c, KNOWN_COMMENT, where)
-                    self._positive_int(c, "number", where, required=True)
+                    number = self._positive_int(c, "number", where, required=True)
+                    if number is not None and self.comment_numbers == "event" and str(number) not in own:
+                        self.err(f"{where}: number {number} is not this run's issue or PR ({', '.join('#' + n for n in sorted(own)) or 'none'}; --comment-numbers event)")
                     self._file_ref(c, "body_file", where, required=True)
                     review = self._bool(c, "review", where, required=False)
                     if review is True and not self.allow_review:
@@ -700,6 +735,8 @@ class Validator:
             if not isinstance(review_comments, list):
                 self.err("manifest: review_comments must be a list")
             else:
+                if self.max_review_comments is not None and len(review_comments) > self.max_review_comments:
+                    self.err(f"manifest: review_comments lists {len(review_comments)} entries; this land job allows at most {self.max_review_comments} (--max-review-comments)")
                 for i, rc in enumerate(review_comments):
                     where = f"review_comments[{i}]"
                     if not isinstance(rc, dict):
@@ -896,6 +933,26 @@ def main(argv=None) -> int:
         help="the land job's `pr-assignees` input: empty, or comma-separated GitHub logins (no spaces, no repeats, at most 10); anything else is a usage error. Not compared against the manifest",
     )
     ap.add_argument(
+        "--comment-numbers",
+        default="*",
+        help="`event`: every comments[].number must be --event-pr-number or --event-issue-number, and pr.issue must be --event-issue-number; `*` (the default) allows any positive number. Anything else is a usage error",
+    )
+    ap.add_argument(
+        "--max-comments",
+        default="",
+        help="most comments[] entries the manifest may carry; empty (the default) is no cap",
+    )
+    ap.add_argument(
+        "--max-review-comments",
+        default="",
+        help="most review_comments[] entries the manifest may carry; empty (the default) is no cap",
+    )
+    ap.add_argument(
+        "--stage-override",
+        default="",
+        help="the land job's `stage-override` input, checked for shape only: empty, `none`, or one of the Atlas stages; anything else is a usage error",
+    )
+    ap.add_argument(
         "--refuse-pr",
         action="store_true",
         help="refuse a manifest that carries `pr` (open/adopt/label a PR) or `handback: true` (the caller's agent may not touch pull requests — the triage workflow); a `pr.open` needs no bundle, so --refuse-bundle alone does not close it",
@@ -932,11 +989,21 @@ def main(argv=None) -> int:
             ap.error(f"{flag} must be `*` or a JSON array of strings, not {value!r}")
         return parsed
 
-    max_issues = None
-    if args.max_issues.strip():
-        if not args.max_issues.strip().isdigit():
-            ap.error(f"--max-issues must be a non-negative integer, not {args.max_issues!r}")
-        max_issues = int(args.max_issues)
+    def cap(value: str, flag: str):
+        # Empty is no cap; anything else must be a non-negative integer.
+        if not value.strip():
+            return None
+        if not value.strip().isdigit():
+            ap.error(f"{flag} must be a non-negative integer, not {value!r}")
+        return int(value)
+
+    max_issues = cap(args.max_issues, "--max-issues")
+    max_comments = cap(args.max_comments, "--max-comments")
+    max_review_comments = cap(args.max_review_comments, "--max-review-comments")
+    if args.comment_numbers not in ("*", "event"):
+        ap.error(f"--comment-numbers must be `*` or `event`, not {args.comment_numbers!r}")
+    if args.stage_override not in ("", "none") + STAGES:
+        ap.error(f"--stage-override must be empty, `none` or one of {', '.join(STAGES)}, not {args.stage_override!r}")
 
     # The land job's own PR policy inputs, not manifest fields: checked so a
     # malformed value refuses the landing rather than reach `gh`.
@@ -976,6 +1043,9 @@ def main(argv=None) -> int:
             allowed_issue_assignees=allow_list(args.allowed_issue_assignees),
             max_issues=max_issues,
             allowed_pr_labels=json_allow_list(args.allowed_pr_labels, "--allowed-pr-labels"),
+            comment_numbers=args.comment_numbers,
+            max_comments=max_comments,
+            max_review_comments=max_review_comments,
         )
     for line in errors:
         print(f"manifest violation: {line}")

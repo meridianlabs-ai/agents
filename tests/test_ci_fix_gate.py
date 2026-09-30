@@ -1,8 +1,8 @@
-"""Tests for claude-auto.yml's gate and the land job's attempt refund.
+"""Tests for claude-auto.yml's gate, and that every attempt counts.
 
 The CI-fix loop's gate decides, in shell, whether the agent runs and on
-which PR — so its `run:` scripts (`Resolve PR and check the auto label`,
-`Gate and count`, and the land job's `Refund infra-crashed attempt`), and
+which PR — so its `run:` scripts (`Resolve PR and check the auto label`
+and `Gate and count`), and
 the escalation's reset (the `reset-auto-counters` composite's step, given
 the gate's `cid` as `comment-id`), are lifted out of the workflow and the
 action the way the composer tests lift theirs and run here against a stub `gh`,
@@ -14,14 +14,19 @@ one case per rule from the 2026-09-04 Claude Security scan:
 - 4121987: the attempt counter is read only from a marker comment whose
   author is one of `TRUSTED_LOGINS` (preferred) or holds write access;
   permission lookups are cached per login and fail closed, `[bot]` logins
-  are never looked up, the count is parsed strictly, and the refund and
-  the escalation's reset PATCH only that comment.
+  are never looked up, the count is parsed strictly, and the escalation's
+  reset PATCHes only that comment.
+
+The land job's attempt refund is gone (design/untrusted-agent-job.md →
+Refunds go; decision: Ransom, 2026-09-29): an attempt whose agent step never
+ran keeps its count.
 
 `verify-auto-labeler`'s `trusted-logins` input is covered the same way.
 """
 
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -33,7 +38,7 @@ RESET_ACTION = ROOT / ".github" / "actions" / "reset-auto-counters" / "action.ym
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_land_helpers import sh  # noqa: E402
-from test_review_fix_gate import MARVIN, MARVIN_BOT, workflow_env, step_if, ghx, REFUND_CASES, refund_ctx, refund_ctx_split  # noqa: E402
+from test_review_fix_gate import MARVIN, MARVIN_BOT, workflow_env  # noqa: E402
 
 TRUSTED_LOGINS = workflow_env(WORKFLOW, "TRUSTED_LOGINS")
 
@@ -61,7 +66,6 @@ def step_script(path: Path, anchor: str, indent: int) -> str:
 RESOLVE = step_script(WORKFLOW, "        id: resolve", 10)
 GATE = step_script(WORKFLOW, "        id: gate", 10)
 RESET = step_script(RESET_ACTION, "    - id: reset", 8)
-REFUND = step_script(WORKFLOW, "      - name: Refund infra-crashed attempt", 10)
 VERIFY = step_script(LABELER, "    - id: verify", 8)
 
 # A stub `gh` answering from fixture files in $STUB and appending every call
@@ -379,105 +383,47 @@ def test_gate_skips_before_reading_comments_when_unresolved_or_unverified(tmp_pa
         assert res.returncode == 0 and out["act"] == "skip" and calls == []
 
 
-# --- Refund infra-crashed attempt (4121987, land side) ----------------------
+# --- every attempt counts (design/untrusted-agent-job.md → Refunds go) ------
 
 
-def refund(tmp_path, comments, *, attempt="2", perms=None):
-    env = {"PR": "7", "ATTEMPT": attempt, "CAP": "3", "MARKER": MARKER}
-    fixtures = {"comments": json.dumps(comments)}
-    for login, perm in (perms or {}).items():
-        fixtures[f"perm.{login}"] = perm
-    return run_step(REFUND, tmp_path, env, fixtures)
-
-
-def test_refund_patches_only_the_loops_own_comment(tmp_path):
-    res, _, _, stub = refund(tmp_path, [counter(10, "i-am-marvin", 2), counter(11, "outsider", 99)],
-                             perms={"outsider": "read"})
-    assert res.returncode == 0, res.stderr
-    assert (stub / "patched.10").exists() and not (stub / "patched.11").exists()
-    assert "attempts: 1 (cap 3)" in (stub / "patched.10").read_text()
-    assert "Refunded attempt: counter 2 -> 1" in res.stdout
-
-
-def test_refund_does_nothing_without_a_trusted_counter(tmp_path):
-    res, _, _, stub = refund(tmp_path, [counter(11, "outsider", 99)], perms={"outsider": "read"})
-    assert res.returncode == 0, res.stderr
-    assert not list(stub.glob("patched.*"))
-    assert "nothing to refund" in res.stdout
-
-
-def test_refund_reads_an_unparsable_or_reset_body_as_zero(tmp_path):
-    # As in the gate. The old fallback to this run's ATTEMPT would have undone
-    # an escalation's reset that landed between this run's gate and its refund.
-    reset_body = comment(10, "i-am-marvin", f"{MARKER}\n🤖 auto CI-fix attempts reset (on escalation) — the next attempt starts at 1 with the full cap.")
-    res, _, _, stub = refund(tmp_path, [reset_body], attempt="3")
-    assert res.returncode == 0, res.stderr
-    assert "attempts: 0 (cap 3)" in (stub / "patched.10").read_text()
-    assert "treating the count as 0" in res.stdout
-    doubled = comment(10, "i-am-marvin", f"{MARKER}\nattempts: 2\nattempts: 7")
-    res, _, _, stub = refund(tmp_path, [doubled], attempt="3")
-    assert res.returncode == 0 and "attempts: 0 (cap 3)" in (stub / "patched.10").read_text()
-    octal = comment(10, "i-am-marvin", f"{MARKER}\nattempts: 08 (cap 3).")
-    res, _, _, stub = refund(tmp_path, [octal], attempt="3")
-    assert res.returncode == 0 and "attempts: 7 (cap 3)" in (stub / "patched.10").read_text()
-
-
-def test_a_refunded_attempt_is_counted_from_where_the_refund_left_it_and_the_cap_holds(tmp_path):
-    # gate (attempt 1 recorded) → refund → gate: the next round is attempt 1
-    # again — the CI-fix loop has no head marker, so its only bound is the
-    # cap, and a refund never takes the count below 0. From the cap the
-    # refund gives one attempt back and the gate escalates on the one after.
-    res, _, _, stub = refund(tmp_path, [counter(10, "i-am-marvin", 1)], attempt="1")
-    assert res.returncode == 0 and "attempts: 0 (cap 3)" in (stub / "patched.10").read_text()
-    res, out, _, _ = gate(tmp_path, [comment(10, "i-am-marvin", (stub / "patched.10").read_text())])
-    assert res.returncode == 0 and out["act"] == "fix" and out["attempt"] == "1"
-    res, _, _, stub = refund(tmp_path, [counter(10, "i-am-marvin", 3)], attempt="3")
-    assert "attempts: 2 (cap 3)" in (stub / "patched.10").read_text()
-    res, out, _, _ = gate(tmp_path, [comment(10, "i-am-marvin", (stub / "patched.10").read_text())])
+def test_a_skipped_agent_step_keeps_its_attempt_and_the_cap_holds(tmp_path):
+    # gate (attempt N recorded) → a fix job whose agent step never ran
+    # (nothing pushed, nothing refunded) → the next red CI run's gate: the
+    # count the gate recorded stands, so the next round is attempt N + 1 and
+    # the one past the cap escalates. The CI-fix loop has no head marker; the
+    # cap is its only bound, and it now holds whatever the fix job reports.
+    res, out, _, _ = gate(tmp_path, [counter(10, "i-am-marvin", 1)])
+    assert res.returncode == 0 and out["act"] == "fix" and out["attempt"] == "2"
+    res, out, _, _ = gate(tmp_path, [counter(10, "i-am-marvin", 2)])
     assert out["act"] == "fix" and out["attempt"] == "3"
     res, out, _, _ = gate(tmp_path, [counter(10, "i-am-marvin", 3)])
     assert out["act"] == "escalate" and out["attempt"] == "4"
 
 
-def test_the_refund_fires_only_on_a_step_the_runner_never_entered():
-    """The refund's gating inputs, not only its comment selection (Claude
-    Security 4628735): the fix job's `agent_skipped` output — both engines'
-    agent steps `skipped`, a step outcome the runner settled before any
-    agent code ran — plus nothing pushed. Never `agent_outcome`, which the
-    agent decides by how it ends its own step; never the job's RESULT (a job
-    cancelled after the agent step started ran the agent, and a pending job
-    cancelled before it started delivers no outputs — unknown keeps its
-    attempt); never an execution file. The condition is evaluated over the
-    same case table as the review loop's (REFUND_CASES): the two refunds
-    read identically. The Land step admits a bundle-less hand-back only on
-    the agent step's success, the direction the agent cannot push, so a
-    refunded round never posts the `@review` that would re-arm the loop."""
+def test_the_refund_is_gone_and_the_land_job_reads_only_the_agent_outcome():
+    """No refund step, no skipped-step output on either engine's fix job
+    (the untrusted job wrote it, so a compromised runner could report every
+    round as never run), and the land job reads nothing from the fix jobs'
+    outputs but `agent_outcome`, which only chooses whether a bundle-less
+    hand-back may post: every value it can take is safe. The Land step also
+    carries the composers' comment rules (`comment-numbers: event`,
+    `max-comments: "5"`), enforced on the trusted runner."""
     text = WORKFLOW.read_text()
+    assert "- name: Refund" not in text and "agent_skipped" not in text and "AGENT_SKIPPED" not in text
+    assert "attempts: $prev" not in text  # the refund's PATCH of the counter
     assert "id: launched" not in text and "agent_started" not in text
-    # One job per engine: each job's `agent_skipped` reads its own agent
-    # step, and the land job selects the engine's.
     claude_job = text[text.index("\n  fix:\n"):text.index("\n  fix-codex:\n")]
     codex_job = text[text.index("\n  fix-codex:\n"):text.index("\n  land:\n")]
     land_job = text[text.index("\n  land:\n"):]
-    assert "      agent_skipped: ${{ steps.claude.outcome == 'skipped' && 'true' || 'false' }}\n" in claude_job
-    assert "      agent_skipped: ${{ steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}\n" in codex_job
+    for job in (claude_job, codex_job):
+        outputs = job[job.index("    outputs:\n"):job.index("    steps:\n")]
+        assert re.findall(r"^      ([a-z_]+):", outputs, re.M) == ["agent_outcome"]
     assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
-    assert ("      AGENT_SKIPPED: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_skipped "
-            "|| needs.fix.outputs.agent_skipped }}\n") in land_job
-    refund_step = text[text.index("      - name: Refund infra-crashed attempt"):]
-    refund_step = refund_step[:refund_step.index("        run: |")]
-    condition = step_if(WORKFLOW, "      - name: Refund infra-crashed attempt")
-    assert condition == ("always() && needs.gate.outputs.act == 'fix' && "
-                         "env.AGENT_SKIPPED == 'true' && "
-                         "steps.land.outputs.pushed != '1'")
-    assert "agent_outcome" not in condition and "AGENT_OUTCOME" not in condition and "needs.fix.result" not in condition
-    assert "execution" not in refund_step
-    for engine in ("claude", "codex"):
-        for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
-            assert ghx(condition, refund_ctx_split(fix_result, skipped, pushed, engine)) is refunded, (engine, why)
-        assert ghx(condition, refund_ctx_split("failure", "true", "", engine, act="escalate")) is False
+    assert set(re.findall(r"needs\.fix(?:-codex)?\.outputs\.([a-z_]+)", land_job)) == {"agent_outcome"}
     land = text[text.index("      - name: Land\n"):text.index("      # The revalidation refused")]
     assert "allow-no-change-handback: ${{ env.AGENT_OUTCOME == 'success' && 'true' || 'false' }}" in land
+    assert "\n          comment-numbers: event\n" in land
+    assert '\n          max-comments: "5"\n' in land
 
 
 # --- Reset the attempt counter (escalation) -----------------------------------
@@ -682,7 +628,7 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_composite():
     # No trust decision names the login itself: the remaining literals are
     # the env value and the commit identity (the cc-target exclusion reads
     # the env too).
-    for script in (RESOLVE, GATE, RESET, REFUND):
+    for script in (RESOLVE, GATE, RESET):
         assert "i-am-marvin" not in script
     # The fix agents' bot allow-lists carry the value: workflow_run's actor
     # is the pusher, the App's bot login under Phase 2.

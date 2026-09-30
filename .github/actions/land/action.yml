@@ -376,6 +376,52 @@ inputs:
       validator: the manifest's error and comments still land.
     required: false
     default: "true"
+  comment-numbers:
+    description: >-
+      Where `comments[]` may post. `event`: only on the run's own issue or
+      PR (the `pr-number` or `issue-number` input), and the "opened a pull
+      request" note only on the `issue-number` input's issue (`pr.issue`);
+      the validator refuses a manifest naming any other number. `*` (the
+      default) allows any number, as before. The reusable workflows pass
+      `event`: their composers already drop other numbers, but they run in
+      the agent job, whose runner this action assumes may be compromised
+      (design/untrusted-agent-job.md → Land enforces what the composers
+      enforced).
+    required: false
+    default: "*"
+  max-comments:
+    description: >-
+      Most `comments[]` entries a manifest may carry; empty (the default) is
+      no cap. The reusable workflows pass 5, their composers' cap.
+    required: false
+    default: ""
+  max-review-comments:
+    description: >-
+      Most `review_comments[]` (inline review comments) a manifest may carry;
+      empty (the default) is no cap. The reviewer passes 50 (Claude Security
+      4773341).
+    required: false
+    default: ""
+  allow-handback:
+    description: >-
+      Whether this run may post the `@review` hand-back at all. "true" (the
+      default) keeps every caller's behaviour. Anything else and the `plan`
+      step drops the manifest's `handback`, with a warning, as it drops a
+      no-bundle one under `allow-no-change-handback`. claude.yml sets it
+      from its gate: a hand-back is owed only on a run in the loop's hands
+      or one whose caller asked for a review after the PR opens.
+    required: false
+    default: "true"
+  stage-override:
+    description: >-
+      The Atlas stage to move to in place of the manifest's `stage`: empty
+      (the default) uses the manifest's, `none` moves nothing, and an Atlas
+      stage (Contributor, Agent, Review, Sign-off, Merge) moves there. The
+      reviewer sets it from its land job's own read of the `auto` label, so
+      the stage no longer rests on a read made in the agent job. Any other
+      value refuses the landing.
+    required: false
+    default: ""
   allow-build-config:
     description: >-
       "true" lets a bundle change build and dependency configuration (tier 2
@@ -503,6 +549,10 @@ runs:
         ALLOWED_PR_LABELS: ${{ inputs.allowed-pr-labels }}
         PR_DRAFT: ${{ inputs.pr-draft }}
         PR_ASSIGNEES: ${{ inputs.pr-assignees }}
+        COMMENT_NUMBERS: ${{ inputs.comment-numbers }}
+        MAX_COMMENTS: ${{ inputs.max-comments }}
+        MAX_REVIEW_COMMENTS: ${{ inputs.max-review-comments }}
+        STAGE_OVERRIDE: ${{ inputs.stage-override }}
         VALIDATOR: ${{ github.action_path }}/../../scripts/validate_manifest.py
       run: |
         set -uo pipefail
@@ -514,25 +564,33 @@ runs:
           --allowed-issue-labels "$ALLOWED_LABELS" --allowed-issue-assignees "$ALLOWED_ASSIGNEES" \
           --max-issues "$MAX_ISSUES" --allowed-pr-labels "$ALLOWED_PR_LABELS" \
           --pr-draft "$PR_DRAFT" --pr-assignees "$PR_ASSIGNEES" \
+          --comment-numbers "$COMMENT_NUMBERS" --max-comments "$MAX_COMMENTS" \
+          --max-review-comments "$MAX_REVIEW_COMMENTS" --stage-override "$STAGE_OVERRIDE" \
           || { echo "::error::land: the landing manifest failed validation (see the lines above); nothing was pushed or posted."; exit 1; }
 
     # Fields the later steps gate on — read only AFTER validation passed.
-    # The one field decided here rather than read: a `handback` on a
-    # manifest with no bundle is dropped when the caller's
-    # `allow-no-change-handback` is not "true" (the loops pass the agent
-    # step's success) — see the input.
+    # Decided here rather than read: a `handback` is dropped when the
+    # caller's `allow-handback` is not "true", or when the manifest has no
+    # bundle and `allow-no-change-handback` is not "true" (the loops pass
+    # the agent step's success) — see the inputs; and a non-empty
+    # `stage-override` replaces the manifest's `stage` (`none`: no move).
     - id: plan
       shell: bash
       env:
         DIR: ${{ runner.temp }}/landing
         ALLOW_NO_CHANGE_HANDBACK: ${{ inputs.allow-no-change-handback }}
+        ALLOW_HANDBACK: ${{ inputs.allow-handback }}
+        STAGE_OVERRIDE: ${{ inputs.stage-override }}
       run: |
         set -euo pipefail
         m="$DIR/manifest.json"
         has_bundle=$(jq -r '.has_bundle' "$m")
         handback=$(jq -r '.handback // false' "$m")
         handback_dropped=false
-        if [ "$handback" = "true" ] && [ "$has_bundle" != "true" ] && [ "$ALLOW_NO_CHANGE_HANDBACK" != "true" ]; then
+        if [ "$handback" = "true" ] && [ "$ALLOW_HANDBACK" != "true" ]; then
+          handback=false
+          echo "::warning::land: the manifest asks for a re-review but this run owes none (allow-handback=${ALLOW_HANDBACK:-unset}: the caller's trusted context did not put it in the loop's hands); not posting it."
+        elif [ "$handback" = "true" ] && [ "$has_bundle" != "true" ] && [ "$ALLOW_NO_CHANGE_HANDBACK" != "true" ]; then
           handback=false
           handback_dropped=true
           echo "::warning::land: the manifest asks for a re-review but carries no bundle and the caller reports the agent step did not succeed (allow-no-change-handback=${ALLOW_NO_CHANGE_HANDBACK:-unset}); no hand-back is owed by a round that landed nothing and did not complete — not posting it."
@@ -548,7 +606,11 @@ runs:
           echo "handback=$handback"
           echo "handback_dropped=$handback_dropped"
           echo "handoff=$(jq -r 'if .handoff_body_file then "true" else "false" end' "$m")"
-          echo "stage=$(jq -r '.stage // ""' "$m")"
+          case "$STAGE_OVERRIDE" in
+            "") echo "stage=$(jq -r '.stage // ""' "$m")" ;;
+            none) echo "stage=" ;;
+            *) echo "stage=$STAGE_OVERRIDE" ;;
+          esac
           echo "provenance=$(jq -r 'if .provenance_comment_file then "true" else "false" end' "$m")"
           echo "verdict=$(jq -r '.review_verdict // ""' "$m")"
           echo "has_error=$(jq -r 'if .error then "true" else "false" end' "$m")"
@@ -681,7 +743,8 @@ runs:
     # Ransom, 2026-09-18): the runner merges the base branch into the branch
     # before the agent starts (sync-branch), and a workflow change that
     # merge brought in is already on origin. A listed path is exempt when
-    # its blob at head_sha equals its blob at a trusted reference: the base
+    # its entry (mode, type and blob) at head_sha equals its entry at a
+    # trusted reference: the base
     # branch's tip on origin (refs/land/base, fetched by the fetch step from
     # trusted context), or — on a branch that IS on origin — the EFFECTIVE
     # base: the merge base(s) of head_sha and that tip, i.e. the newest base
@@ -791,16 +854,21 @@ runs:
           fi
           [ -z "$bases" ] || while IFS= read -r c; do trusted+=("$c"); done <<<"$bases"
         fi
-        # entry REV PATH — sets ENTRY to the object id at PATH in REV's tree,
-        # empty when absent. Absence is evidence; a failed read is not, so a
-        # failing ls-tree refuses the bundle unchecked (in the main shell,
-        # not a subshell: an exit inside $(…) would not stop the step).
+        # entry REV PATH — sets ENTRY to the mode, type and object id at PATH
+        # in REV's tree (`100644 blob <oid>`), empty when absent: the same
+        # blob as a symlink or with the executable bit is a different entry
+        # (Claude Security 4773337). PATH is agent-chosen, so it is passed
+        # as a literal pathspec, never read as pathspec magic (a name
+        # starting with `:`; 4773336). Absence is evidence; a failed read is
+        # not, so a failing ls-tree refuses the bundle unchecked (in the
+        # main shell, not a subshell: an exit inside $(…) would not stop
+        # the step).
         entry() {
           local out
-          out=$(git ls-tree "$1" -- "$2") \
+          out=$(git ls-tree "$1" -- ":(literal)$2") \
             || { echo "::error::land: could not read $(printf '%q' "$2") at $1 (git ls-tree failed, see above); refusing the bundle unchecked."; exit 1; }
           ENTRY=""
-          if [ -n "$out" ]; then out="${out%%$'\t'*}"; ENTRY="${out##* }"; fi
+          if [ -n "$out" ]; then ENTRY="${out%%$'\t'*}"; fi
         }
         agent=()
         for p in "${paths[@]}"; do
@@ -1172,9 +1240,31 @@ runs:
           echo "land: posted $posted of $n inline review comment(s) on #$PR_NUMBER."
           flush_unanchored
         fi
-        # -- review-comment replies (need the PR)
+        # -- review-comment replies (need the PR): only to the PR's OWN
+        #    review comments, listed first, the way thread IDs are checked
+        #    below, so a reply lands on this PR whatever the reply endpoint
+        #    does with a foreign id. An id not on the PR is skipped and
+        #    recorded; a repeat is dropped.
         i=0
+        own_rc=""
+        listed=""
+        if [ "$(jq -r '.replies // [] | length' "$m")" -gt 0 ]; then
+          if own_rc=$(retry_read 3 "review comment list for #$PR_NUMBER" \
+                        gh api "repos/$REPO/pulls/$PR_NUMBER/comments?per_page=100" --paginate --jq '.[].id'); then
+            listed=1
+          else
+            note "could not list #$PR_NUMBER's review comments; posted no replies"
+          fi
+        fi
+        replied=""
         while IFS= read -r id && IFS= read -r file; do
+          [ -n "$listed" ] || continue
+          if ! grep -qxF "$id" <<<"$own_rc"; then
+            note "reply to review comment $id skipped: it is not a review comment on #$PR_NUMBER"
+            continue
+          fi
+          case " $replied " in *" $id "*) echo "::warning::land: a second reply to review comment $id; dropped."; continue ;; esac
+          replied="$replied $id"
           defang "$DIR/$file" "$RUNNER_TEMP/reply-$i.md"
           if retry 3 "reply to review comment $id" \
                gh api "repos/$REPO/pulls/$PR_NUMBER/comments/$id/replies" -F body=@"$RUNNER_TEMP/reply-$i.md" --silent; then

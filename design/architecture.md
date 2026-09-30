@@ -152,8 +152,8 @@ every file the agent read. Three of the four workflows hand the agent
 transcript put a write-access token in an artifact GitHub does not mask and
 anyone can download on a public caller repo. Nothing automated consumed the
 artifact — every in-job consumer (`model-provenance`, `Surface agent errors`,
-the `Refund` steps, `push-base-merge`'s `require-file`) reads the local file on
-the runner — and no reduced, scrubbed, or opt-in form was judged both safe and
+the loops' `Refund` steps, since removed, `push-base-merge`'s
+`require-file`) reads the local file on the runner — and no reduced, scrubbed, or opt-in form was judged both safe and
 useful, so none was added. The human uses it had are covered elsewhere:
 failures by the `Surface agent errors` comment and the job log, cost and
 served-model by the `model-provenance` job summary. Anything more is a
@@ -484,10 +484,11 @@ Three rules define the shape:
   comment can pose as a review; since 2026-09-22 `review_verdict` and
   `review_comments[]` are refused on every other caller the same way,
   Claude Security finding 4628442).
-  The codex reviewer's `engine: codex` anchor footer is deliberately NOT
-  on `land`'s list: the reviewer posts its real footer through this same
-  composite, so workflows whose bodies must not pose as a review (the
-  CI-fix loop's summaries) split it themselves before handing the file over.
+  Since step 3 of design/untrusted-agent-job.md (2026-09-30) the codex
+  reviewer's old `engine: codex` footer and atlas_sync's `Reopened —
+  upstream PR` record are on `land`'s list too: the codex review lands
+  flagged `review` like the Claude review, with a plain attribution line,
+  so no new comment carries the footer (Claude Security 4773878, 4773875).
 
 Phase 1 (#79) adds the plumbing only — the two composites, the validator and
 its tests — and changes no workflow. Six follow-on issues convert one
@@ -574,8 +575,8 @@ the model for the review-fix loop and the dev agent:
   guard is itself gated on the codex step and the reclaim, and those on the
   user setup, so that one condition withholds the push on every codex-path
   failure, a failed prep or user-setup step included (no codex process ran,
-  the base merge stays unpushed, and the round is refunded — as the Surface
-  strings say and as before the split). It has to be the
+  the base merge stays unpushed, and the round counts — as the Surface
+  strings say). It has to be the
   guard, not ancestry: codex may commit locally, and a `git commit` over
   staged-but-still-marked paths completes the base merge and moves HEAD
   past the start SHA, so keying on ancestry alone (as the Claude path does)
@@ -594,9 +595,8 @@ the model for the review-fix loop and the dev agent:
   but carries no agent commit; the relay's first line says so) the
   workflow relays its final message as a `comments[]` entry (de-fanged in
   the fix job with the codex summary's sed, footer rule included, so the
-  relay cannot become a false review anchor; `land` de-fangs triggers and
-  markers again but leaves the footer alone, since the codex reviewer's
-  real footer lands through it) — the Claude analogue
+  relay cannot become a false review anchor; `land` de-fangs triggers,
+  markers and, since 2026-09-30, the footer again) — the Claude analogue
   of the codex summary that has always posted. Its first line, like the
   codex summary's, says "committed" / "base merge only", never "pushed":
   the fix job composes it before `emit-landing` runs, and a `git bundle`
@@ -607,14 +607,15 @@ the model for the review-fix loop and the dev agent:
   that gave up leaves a trace beyond the counter bump.)
 - **`Record attempt` moved before the sync and provisioning steps** (it is a
   marvin write, so it lives in `gate`), which would have burned an attempt
-  on every sync or provisioning failure; the land job's refund therefore
-  broadened from "the agent step failed with no execution output" to "the
-  agent step did not succeed, produced no execution output, and the landing
-  pushed nothing" — a skipped agent is refunded whatever skipped it *unless
+  on every sync or provisioning failure; the land job's refund (removed
+  since: see the end of this bullet) therefore broadened from "the agent
+  step failed with no execution output" to "the agent step did not
+  succeed, produced no execution output, and the landing pushed nothing" —
+  a skipped agent was refunded whatever skipped it *unless
   a base merge landed*, and a round whose commits landed is not, whatever
   the agent step's outcome. Since 2026-09-22 (Claude Security 4628735; the
-  review loop's 4628734 is the same shape) the rule is narrower again: a
-  round is refunded only when the fix job's `agent_skipped` output is true
+  review loop's 4628734 is the same shape) the rule was narrower again: a
+  round was refunded only when the fix job's `agent_skipped` output is true
   — the engine's agent step `skipped` (each engine runs in its own fix job
   since the engine split, and the land job reads the gate's engine's
   output), a step outcome the runner settled before any agent code ran — and nothing was pushed; a step that was
@@ -628,14 +629,16 @@ the model for the review-fix loop and the dev agent:
   round owes its `@review`), `pushed` is true and the attempt is kept, where
   before the split — `Record attempt` after provisioning, the backstop
   pushing the merge — that round burned none. Bounded to one attempt: the
-  next round has nothing to merge, pushes nothing, and is refunded. The
-  refund is the one marvin write outside the per-PR group (next bullet), so
-  it is not serialized against the next run's gate: it decrements the
-  sticky comment's *current* count rather than the gate's stale value,
-  which keeps a record the next gate made in between; only the two
-  read-modify-writes crossing inside one window still leaves the count one
-  off — accepted (rare trigger, one attempt of slack in either direction,
-  and an escalation still drops the label and posts).
+  next round had nothing to merge, pushed nothing, and was refunded. The
+  refund was the one marvin write outside the per-PR group (next bullet),
+  and decremented the sticky comment's *current* count rather than the
+  gate's stale value. **The refund is gone** since step 3 of
+  [untrusted-agent-job.md](untrusted-agent-job.md) (decision: Ransom,
+  2026-09-29): `agent_skipped` was the fix job's own output, which a
+  compromised runner could set on every round, and no evidence of "the
+  agent step was never entered" is out of that job's reach. Every attempt
+  counts now, one whose agent never ran included: an infra failure before
+  the agent spends one attempt of the cap.
 - **Concurrency covers `gate` and `fix`, not `land`.** Ordering inside a
   concurrency group is arbitrary and at most one job pends, so a land job
   that had to wait behind the next run's gate could be cancelled as the
@@ -649,20 +652,13 @@ the model for the review-fix loop and the dev agent:
   run's `fix` queued), so the land job's `Land` step is skipped when the
   fix job's result is `cancelled` — as `claude-review.yml`'s land job is —
   rather than failing its artifact download and reporting "Landing failed"
-  on the PR for a round whose agent never started; the refund step still
-  runs, on the job's own `agent_skipped` output like every round's — a
-  pending job cancelled before it started delivers no outputs and keeps its
-  attempt (unknown is not evidence; one attempt of slack, since 2026-09-22),
-  a job cancelled during sync or provisioning is refunded, and one cancelled
-  after the agent step started keeps it. A run cancelled by hand mid-agent
+  on the PR for a round whose agent never started; the attempt counts
+  either way (no round is refunded). A run cancelled by hand mid-agent
   lands nothing either. The land
   job as a whole is additionally gated on the gate job's *success*, not only
   on its `act` output: a gate that failed after deciding `fix` (a
   `Record attempt` API write that did not go through) skips the fix job,
-  leaving the same no-artifact shape — and whether the attempt was ever
-  recorded is then unknown, so the refund must not run either (an
-  unrecorded attempt refunded would put the count one below the truth).
-  That case ends as it did before the split: a red gate job with nothing on
+  leaving the same no-artifact shape. That case ends as it did before the split: a red gate job with nothing on
   the PR.
 
 What the review-fix conversion (#83) added on top of that model — the
@@ -730,24 +726,23 @@ agent posts nothing and resolves nothing in-run):
   job token, its new `ids` output) — the fix job holds no write token, so
   the resolution is the land job's, from the manifest.
 - **`Record round` moved into `gate`** (a marvin write), before the sync and
-  provisioning steps it used to follow; the land job's refund therefore
-  broadened exactly as #82's did (agent step did not succeed, no execution
+  provisioning steps it used to follow; the land job's refund (removed
+  since, like the CI-fix loop's) therefore broadened exactly as #82's did (agent step did not succeed, no execution
   output, nothing pushed), with the same one-round regression on a
   provisioning failure over a stale branch, and narrowed again with it on
-  2026-09-22 (Claude Security 4628734): the round is refunded only when the
-  agent step was never entered (`agent_skipped`, the fix job's own output;
-  a cancelled job is refunded on that evidence alone) and nothing was
-  pushed. The refund re-reads the sticky
-  comment's current count *and* head marker rather than writing the gate's
-  values, since the land job is outside the per-PR concurrency group. Two
+  2026-09-22 (Claude Security 4628734): the round was refunded only when the
+  agent step was never entered (`agent_skipped`, the fix job's own output)
+  and nothing was pushed. Since step 3 of
+  [untrusted-agent-job.md](untrusted-agent-job.md) no round is refunded:
+  that output was the untrusted job's word, and every round counts. Two
   companions close the loop the finding described (a steered agent killing
-  its own step with `handback: true` in its manifest, the round refunded to
-  0 and the bare `@review` posted, without bound): a hand-back on a
+  its own step with `handback: true` in its manifest, the round then
+  refunded to 0 and the bare `@review` posted, without bound): a hand-back on a
   manifest with no bundle is honored only when the agent step succeeded —
   in the fix job's composer, and again in `land` through its
   `allow-no-change-handback` input, the trusted copy — and the gate's
   no-progress check keys on the recorded head marker alone, since a refund
-  keeps the marker while it may take the count to 0, where a `prev >= 1`
+  kept the marker while it could take the count to 0, where a `prev >= 1`
   guard skipped the check.
 - **Verification** (issue #83): `grep -n MARVIN_TOKEN` over the workflow
   names only `gate` and `land`; on a caller, a review with two inline
@@ -872,10 +867,11 @@ the agent push mid-run:
   would be a posting channel onto other threads), requires a plain,
   non-dot file name that is a regular file (no symlink) under the landing
   directory, de-fangs it in place with the codex summary's sed (footer rule
-  included: `land` leaves the codex reviewer's `engine: codex` footer alone,
-  and a marvin-posted body quoting it after a review verdict would be
-  `pr-feedback-context`'s newest review anchor for the next codex fix
-  round — review round 1 of #84 reproduced it), truncates it under the size
+  included: until 2026-09-30 `land` left the codex reviewer's `engine:
+  codex` footer alone, and a marvin-posted body quoting it after a review
+  verdict would be `pr-feedback-context`'s newest review anchor for the
+  next codex fix round — review round 1 of #84 reproduced it; `land`
+  splits it too now), truncates it under the size
   caps and keeps at most five — each dropped entry a warning, never a
   validator refusal that would take the commits with it. A Claude run that
   succeeded, committed nothing and
@@ -1365,7 +1361,7 @@ out different things on the inspect_ai fork:
   job still pushes it and CI re-runs — the branch stays current (in the
   CI-fix loop that merge-only push also owes its `@review`; in the review
   loop the composer sets no hand-back on a failed round, and the recorded
-  round is refunded), and a re-triggered round finds nothing left
+  round counts), and a re-triggered round finds nothing left
   to merge, so a deterministic failure repeats the error comment at most once
   more and stops. And the failure *can* be deterministic without a conflict:
   the PR's own dependency change (a `pyproject.toml` that no longer installs)

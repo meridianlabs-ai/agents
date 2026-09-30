@@ -635,8 +635,8 @@ nothing, the runner's base merge and any commit of the run included, as the
 codex failure path does. The land job derives the run's context again
 (`bind-ci-run` with `revalidate`) and pushes only when the gate's PR, head
 SHA, base ref and run attempt are reproduced, posts exactly
-`@review`, and refunds the attempt when the agent did not run and nothing was
-pushed, PATCHing only the loop's own counter comment.
+`@review`. It no longer refunds an attempt whose agent did not run (step 3 of
+[untrusted-agent-job.md](untrusted-agent-job.md)): every attempt counts.
 
 **`claude-auto-review.yml`, the review-fix loop** (`gate` → `fix` → `land`).
 The gate recovers the loop's state from PR comments and believes each read

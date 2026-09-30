@@ -20,7 +20,13 @@ Testing a change).
   `handback`) refused under `refuse-bundle`, each against the forged manifest
   its finding describes; and the land job's `pr-draft` / `pr-assignees`
   inputs, shape-checked as `--pr-draft` / `--pr-assignees` (a malformed
-  value is a usage error) and refused as `pr` manifest keys.
+  value is a usage error) and refused as `pr` manifest keys. The posting
+  bounds of step 3 of design/untrusted-agent-job.md: `--comment-numbers
+  event` (a comment or `pr.issue` on another number), `--max-comments` and
+  `--max-review-comments` (4773341), the reviewer's land inputs against
+  the design review's probe manifest (one review plus 51 `issues[]`
+  comments on another issue), the defaults keeping today's acceptance, and
+  the four reusable land jobs passing the strict values.
 - `test_import_codex_final.py` — the `import-codex-final` composite's
   script (`.github/scripts/import_codex_final.py`): a regular file owned by
   the expected user is copied byte for byte; a symlink (to a runner file, or
@@ -97,13 +103,24 @@ Testing a change).
   paths that land nothing — a failed Claude step, whatever the execution
   file says (the base merge and a commit of the run included; 4628657) and a
   codex round whose guard did not succeed. The failed step's attempt is
-  kept: `test_ci_fix_gate.py` pins the refund to a step the runner never
-  entered, and runs the refund → gate sequence against the cap (4628735).
+  kept, like every attempt: `test_ci_fix_gate.py` checks that the refund is
+  gone and that the gate's count reaches the cap (4628735;
+  design/untrusted-agent-job.md → Refunds go).
 - `test_land_helpers.py` also runs the `land` composite's `plan` step: a
   `handback` on a manifest with no bundle is dropped unless the caller's
   `allow-no-change-handback` is "true" (the loops pass the agent step's
   success), a bundled one is never touched, and the drop reaches the final
-  report (4628734).
+  report (4628734); every hand-back is dropped under `allow-handback`
+  "false", and `stage-override` replaces or removes the manifest's
+  `stage`. The Post step replies only to the PR's own review comments
+  (a foreign id skipped and recorded, a repeat dropped), and a codex
+  review flagged `review` gets the review marker after the de-fang. The
+  de-fang registry test extracts every marker pr-feedback-context,
+  atlas_sync and the loop gates key on and requires each to be broken by
+  `defang` or appended by `land` (4773878 and its siblings, 4773875). The
+  `workflows` step refuses a mode or type change with the same blob
+  (4773337) and reads a path starting with `:` literally (4773336), and
+  `import_candidates` follows the CLI's import rule (4774319).
 - `test_review_fix_composer.py` — `claude-auto-review.yml`'s `Compose
   landing manifest` step, lifted from the workflow the same way: the
   review loop's ending contract (exactly one hand-back), the agent-field
@@ -116,9 +133,13 @@ Testing a change).
   (issue #114): the reviewer's summary / verdict / inline.json files become
   the manifest's `comments` (flagged `review`), `review_verdict` and
   `review_comments` — the lenient verdict read, the malformed-inline
-  fallbacks, external mode's single comment, the codex branch untouched —
-  with the pr-mode and external results run on through `emit-landing` and
-  the validator under the land job's `refuse-bundle`. Also the `Compose
+  fallbacks and the 50-comment cap, external mode's single comment, the
+  codex review flagged `review` with no footer — with the pr-mode and
+  external results run on through `emit-landing` and the validator under
+  the land job's own inputs. The reads that moved out of the review jobs
+  in step 3: the responsible-human lookup, lifted from the gate, and the
+  loop-ownership read, lifted from the land job, against a stub `gh`, and
+  the land job's `stage-override` from it. Also the `Compose
   settings` step: the review-dir allow and posting denies, and on the
   sandboxed paths the overlay — the checkout and the review dir on
   `denyWrite`, the scratch copy the one `allowWrite`, `claudeMdExcludes`
@@ -209,7 +230,7 @@ Testing a change).
   and before the merge), the base tip read from the branch and emitted (an
   unreadable one refuses), and that the fix job carries no launch signal at
   all (the action's `execution_file` output is published by its error
-  handler from a pre-existing file; landing and refund key on step outcomes).
+  handler from a pre-existing file; landing keys on step outcomes).
   Every
   fixture is synthetic — GitHub's event generation and association ordering
   are not reproduced. Also the workflow's wiring (the event's own run id and
@@ -220,8 +241,7 @@ Testing a change).
   forwarding of the event's own fields.
 - `test_ci_fix_gate.py` — `claude-auto.yml`'s gate (`Resolve PR and check
   the auto label`, `Gate and count`), the escalation's reset (the
-  `reset-auto-counters` composite's step, given the gate's `cid`) and the
-  land job's `Refund infra-crashed attempt` step, lifted
+  `reset-auto-counters` composite's step, given the gate's `cid`), lifted
   the same way and run against a stub
   `gh`: the PR is the bind step's bound PR (an unbound run skips with the
   bind step's reason and reads nothing), viewed by number and refused when
@@ -233,10 +253,14 @@ Testing a change).
   own first — the machine account under either of its logins — else a
   write-access account's; permission lookups cached and fail-closed; other
   `[bot]` logins never looked up) and parsed strictly; the
-  reset and the refund PATCH only that comment, and re-engagement's no-id
+  reset PATCHes only that comment, and re-engagement's no-id
   reset follows the gate's rule (a maintainer's counter the gate counts
   from is reset; outsiders' and Apps' never). Also `verify-auto-labeler`'s
-  `trusted-logins` input.
+  `trusted-logins` input. Every attempt counts (the refund is gone): a
+  skipped agent step keeps its attempt and the next gate reaches the cap;
+  neither engine's fix job outputs a skipped-step flag, the land job reads
+  only `agent_outcome` from them, and the Land step passes
+  `comment-numbers: event` and `max-comments: "5"`.
 - `test_approval_at_head.py` — the merge queue's approval-to-head binding
   (`skills/merge-approved-prs/approval_at_head.py`): the decision on canned
   review/commit payloads (approved at head; approved then pushed; no
@@ -346,8 +370,8 @@ Testing a change).
   no marker, no substitution run, the worktree gone and pruned, unrelated
   sibling files intact; the plain in-worktree status the skill no longer
   recommends does run the clean filter. Promotions keep `gh pr checkout`.
-- `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`,
-  `Converged handoff` and `Refund infra-crashed round` steps, lifted the
+- `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`
+  and `Converged handoff` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
   PR comments (verdict, round counter and head SHA, re-review requests,
   hand-off marker) counts only from `REVIEWER_LOGINS` / `TRUSTED_LOGINS` or
@@ -364,17 +388,14 @@ Testing a change).
   marker or nothing) and is covered too, as is the composite's
   `trusted-logins` default (both machine-account logins; an explicit empty
   string resets nothing). Since Claude Security 4628734: the no-progress
-  check escalates on the recorded tip whatever the count reads (a refunded
-  round 1 leaves `rounds: 0` with its head marker), the refund → gate
-  sequence on an unchanged tip escalates, and the refund's `if:` is pinned
-  to `env.AGENT_SKIPPED == 'true'` (the engine's fix job's `agent_skipped`:
-  its agent step was never entered; evaluated for both engines) plus
-  nothing pushed — never the agent step's own outcome, the job's result or
-  an execution file; a cancellation alone, or missing outputs, keeps the
-  recorded count — evaluated over a shared case table (`REFUND_CASES`)
-  that `test_ci_fix_gate.py` runs against the CI-fix refund too, with the
-  Land step admitting a bundle-less hand-back only on the agent step's
-  success.
+  check escalates on the recorded tip whatever the count reads (`rounds: 0`
+  with a head marker included). Every round counts (the refund is gone,
+  design/untrusted-agent-job.md → Refunds go): a skipped agent step keeps
+  its round, so the next verdict on the unchanged tip escalates, a moved
+  tip runs the next round and the cap escalates; neither engine's fix job
+  outputs a skipped-step flag, the land job reads only `agent_outcome` from
+  them (a bundle-less hand-back only on the agent step's success), and the
+  Land step passes `comment-numbers: event` and `max-comments: "5"`.
 - `test_review_trig.py` — `claude-review.yml`'s `Check trigger` step on
   comment-triggered reviews: every `@review` needs a trusted commenter
   whatever the head repo — write access, `TRUSTED_LOGINS` (the machine
@@ -507,7 +528,9 @@ Testing a change).
   Claude job references no `OPENAI_API_KEY` and runs no codex, the codex
   job references it only at its codex-action step, the two are selected by
   the gate's `engine` output at the job level and gate no step on it, the
-  land job waits for both; the codex job `uses:` no action from the
+  land job waits for both and reads no agent-job output but
+  `claude_outcome`, `agent_launched` and `agent_outcome` (no agent job
+  outputs `mention` or `agent_skipped` since step 3); the codex job `uses:` no action from the
   checkout, provisions with `provision-fallback` `user: codex` (and the
   caller's `provision`, else `codex_provision`, as `recipe`) after
   `Create codex user`, runs `Reset codex home` (`create-codex-user`

@@ -37,8 +37,8 @@ The fix job has no launch signal at all: the Claude action's own
 file sits at the default path (which the PR's provisioning step can
 pre-create), so a failed Claude step lands nothing on the step's outcome
 alone — checked structurally here, behaviourally in test_ci_fix_composer.py.
-Its attempt is kept: the refund fires only for a step the runner never
-entered (test_ci_fix_gate.py pins that condition; Claude Security 4628735).
+Its attempt is kept, like every attempt: the refund is gone
+(test_ci_fix_gate.py pins that; design/untrusted-agent-job.md → Refunds go).
 
 Every fixture is synthetic: no case here reproduces GitHub's event
 generation, the contents or order of a real completed-event association
@@ -618,17 +618,15 @@ def test_revalidation_refuses_a_gate_head_sha_the_run_does_not_carry(tmp_path):
 # --- the fix job has no launch signal (B2: nothing it can observe proves one) -----
 
 
-def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_files():
+def test_the_fix_job_keys_landing_on_step_outcomes_not_on_execution_files():
     """The action's `execution_file` output is published by its own error
     handler from whatever file sits at the default path (review round 2:
     `setExecutionFileOutputIfPresent()` runs in the catch block), which the
     PR's provisioning step can pre-create — so no "did the agent launch"
     signal exists that the fix job could trust. The landing composer and
-    emit-landing withhold on the Claude step's OUTCOME being `failure`, and
-    the refund reads no execution file either (its exact condition —
-    `agent_skipped == 'true'` and nothing pushed; a cancellation alone or
-    missing outputs keeps the recorded count — is pinned in
-    test_ci_fix_gate.py)."""
+    emit-landing withhold on the Claude step's OUTCOME being `failure`. No
+    attempt is refunded (test_ci_fix_gate.py), so nothing else reads the
+    agent step's outcome."""
     text = WORKFLOW.read_text()
     assert "id: launched" not in text and "agent_started" not in text and "AGENT_STARTED" not in text
     # One job per engine since 2026-09-22: the Claude job's composer and
@@ -650,17 +648,7 @@ def test_the_fix_job_keys_landing_and_refund_on_step_outcomes_not_on_execution_f
     land = job_block(text, "land")
     assert ("      AGENT_OUTCOME: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_outcome "
             "|| needs.fix.outputs.agent_outcome }}\n") in land
-    refund = text[text.index("- name: Refund infra-crashed attempt"):]
-    refund = refund[:refund.index("run: |")]
-    # agent_skipped per engine job (each job has one agent step), selected
-    # by the gate's engine in the land job (Claude Security 4628735).
-    assert "      agent_skipped: ${{ steps.claude.outcome == 'skipped' && 'true' || 'false' }}\n" in claude_job
-    assert "      agent_skipped: ${{ steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}\n" in codex_job
-    assert ("      AGENT_SKIPPED: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_skipped "
-            "|| needs.fix.outputs.agent_skipped }}\n") in land
-    assert "env.AGENT_SKIPPED == 'true'" in refund
-    assert "steps.land.outputs.pushed != '1'" in refund
-    assert "execution" not in refund
+    assert "execution" not in land
 
 
 # --- the base tip the sync must merge (B1: pinned gate -> merge) ------------------
@@ -795,7 +783,7 @@ def test_sync_merges_the_pinned_base_when_the_pr_still_targets_it(tmp_path):
 def test_sync_refuses_a_pr_retargeted_since_the_gate_before_fetching_or_merging(tmp_path):
     # The gate bound the run to a merge into `main`; the PR now targets
     # `release`. Nothing is fetched or merged: the step fails, the agent is
-    # skipped and the attempt refunded.
+    # skipped and the attempt counts.
     res, out, work = sync(tmp_path, live_base="release", pinned_base="main")
     assert res.returncode != 0
     assert "established 'main' (the base the failed run tested); refusing to merge a base the run never saw" in res.stdout
@@ -865,7 +853,7 @@ def test_the_fix_job_requires_the_tested_head():
     base = step_block(text, "base")
     assert "TESTED_SHA: ${{ needs.gate.outputs.head_sha }}" in base
     assert 'if [ "$sha" != "$TESTED_SHA" ]; then' in base and "exit 1" in base
-    # the withholding and the refund are covered by the outcome-keyed test above
+    # the withholding is covered by the outcome-keyed test above
 
 
 def test_the_example_stub_forwards_the_events_own_fields():

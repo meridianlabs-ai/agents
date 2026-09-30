@@ -202,7 +202,7 @@ finding 4121989) that is enforced in three layers rather than assumed:
   post those substrings. Each read now also filters by author: the verdict
   to `REVIEWER_LOGINS`, the counter and the hand-off marker to
   `TRUSTED_LOGINS` (the loop's own comments — a forged marker is ignored
-  and never PATCHed, by the gate or the land job's refund), a re-review
+  and never PATCHed by the gate), a re-review
   request to whoever the reviewer would run for — a trusted login, a bot in
   the caller's `review_allowed_bots` (the reviewer's `allowed_bots`) or a
   write-access account (one cached permission lookup per login,
@@ -365,15 +365,14 @@ Claude step that **fails**, for any reason — the action's actor refusal, a
 bootstrap failure, a failure during the run — now lands nothing: not the
 runner's base merge, not a commit Claude made before failing, as the codex
 failure path always did; since Claude Security 4628735 (2026-09-22) its
-attempt is *kept*, not refunded — the refund fires only when the agent
-step was never entered (`agent_skipped`: the engine's agent step
-`skipped` — each engine has its own fix job and output, the land job
-reading the gate's engine's — a step outcome the runner settled before any agent code ran) and nothing was
-pushed, because the agent decides how its own step ends and a refund keyed
-on that let a steered agent make a completed round read as an infra crash,
-so the cap bounded only rounds that landed; a cancellation alone, or a job
-that delivered no outputs (a pending fix job cancelled before it started),
-keeps the recorded count. The three causes cannot
+attempt is *kept*, not refunded, because the agent decides how its own step
+ends and a refund keyed on that let a steered agent make a completed round
+read as an infra crash, so the cap bounded only rounds that landed. Until
+step 3 of [untrusted-agent-job.md](untrusted-agent-job.md) the refund still
+fired when the agent step was never entered (the fix job's own
+`agent_skipped` output) and nothing was pushed; that output was the
+untrusted job's word, so the refund is gone and every attempt counts
+(decision: Ransom, 2026-09-29). The three causes cannot
 be told apart from outside the action, and nothing the fix job can observe
 proves Claude launched: a file at the action's default path is one the
 PR's provisioning step can pre-create (review round 1), and the action's
@@ -773,8 +772,9 @@ The simple case ships first and is independently useful:
   is three jobs — `gate` (the label gate, the attempt counter, stage → Agent,
   escalation; marvin), `fix` (checkout + agent with the job token only;
   commits locally) and `land` (a fresh runner that pushes the commits as
-  marvin, posts the `@review` hand-back and the error/summary comments, and
-  refunds the attempt when the agent never ran) — see architecture.md →
+  marvin and posts the `@review` hand-back and the error/summary comments;
+  until step 3 of untrusted-agent-job.md it also refunded the attempt when
+  the agent never ran) — see architecture.md →
   Landing job. The push still goes out as marvin, so CI still re-triggers.
   **Since 2026-09-15 the gate trusts only what the run and the loop
   established** (Claude Security findings 4122320 and 4121987): the PR is
@@ -786,8 +786,9 @@ The simple case ships first and is independently useful:
   resolved); since 2026-09-22 that number is first BOUND to the failed run
   by the gate itself (Binding the failed run to its PR, above: the one
   same-repo PR from the branch open when the run was created, at the run's
-  head SHA; finding 4628657); and the attempt counter is read, in the gate and in the land
-  job's refund, only from a marker comment whose author is one of the
+  head SHA; finding 4628657); and the attempt counter is read, in the gate
+  (and, while it existed, in the land job's refund), only from a marker
+  comment whose author is one of the
   workflow's `TRUSTED_LOGINS` (the loop's own comment, preferred) or holds
   write access — an outsider's marker comment is ignored and never edited,
   and a count that is not exactly one `attempts: N` reads as 0. The

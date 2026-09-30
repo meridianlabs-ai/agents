@@ -342,6 +342,8 @@ jobs:
       up_num: ${{ steps.trig.outputs.up_num }}
       started: ${{ steps.trig.outputs.started }}
       engine: ${{ steps.engine.outputs.engine }}
+      # The responsible human the failure comments cc (the `who` step).
+      mention: ${{ steps.who.outputs.mention }}
     steps:
       # The machine account's token for this job (Phase 2, design/
       # architecture.md → Landing job): a one-hour installation token of the
@@ -657,6 +659,63 @@ jobs:
           echo "engine: $engine"
           echo "engine=$engine" >>"$GITHUB_OUTPUT"
 
+      # @-mention target for the failure comments: without one, error
+      # reports on agent/marvin-authored threads email nobody (the thread has
+      # no human participants). Same derivation as claude-auto.yml: closing
+      # ref → claude/issue-N-* branch → the issue's first assignee unless
+      # bot/machine account, else its author unless bot/machine account. On
+      # issue threads (external proxies) the issue itself is the source. Job
+      # token: reads only. Here in the gate, before any untrusted code ran,
+      # so neither the review job's error text nor the land job's nudge
+      # takes the login from a job the agent ran in
+      # (design/untrusted-agent-job.md → Land enforces what the composers
+      # enforced, item 5).
+      - name: Derive responsible human for error cc
+        id: who
+        if: steps.trig.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number }}
+          IS_PR: ${{ github.event.issue.pull_request != null && 'true' || 'false' }}
+          ANCHOR_REPO: ${{ inputs.anchor_repo }}
+        run: |
+          set -uo pipefail
+          mention=""
+          inum=""
+          issue_repo="$REPO"
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          if [ "${IS_PR:-}" = "true" ]; then
+            ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
+                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
+                    | head -1 || true)
+            if [ -n "$ref" ]; then
+              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
+              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
+                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
+                issue_repo="$ANCHOR_REPO"
+              fi
+            fi
+            if [ -z "$inum" ]; then
+              hb=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq '.headRefName // ""' 2>/dev/null || true)
+              inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
+              # companion branch numbers reference the anchor repo's tracker —
+              # only when the twin branch exists there
+              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
+                 gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
+                issue_repo="$ANCHOR_REPO"
+              fi
+            fi
+          else
+            inum="$NUM"
+          fi
+          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" 2>/dev/null \
+            | jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl | if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and (.login as $l | any($tl[]; . == $l) | not)) | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or (.user.login as $l | any($tl[]; . == $l))) then "" else .user.login end) end' 2>/dev/null || true)
+          echo "mention=$mention" >> "$GITHUB_OUTPUT"
+          echo "cc target: ${mention:-none}"
+
   # UNTRUSTED, Claude engine: checks out the PR head (or the upstream head
   # in external mode), provisions, runs the agent. Names NO secret — the
   # machine account's token is absent (the invariant at the top of this
@@ -698,14 +757,13 @@ jobs:
       actions: read
     outputs:
       # What the land job's landed-review check needs from this job: the
-      # agent step's outcome, whether it launched at all (the execution
-      # file exists only on this runner), and the cc target. The codex job
-      # publishes none of these: the landed-review check is keyed on a
-      # successful Claude step, and a codex review's landing is checked by
-      # the land composite's own posting (its verdict comment).
+      # agent step's outcome and whether it launched at all (the execution
+      # file exists only on this runner). The codex job publishes neither:
+      # the landed-review check is keyed on a successful Claude step, and a
+      # codex review's landing is checked by the land composite's own
+      # posting (its verdict comment).
       claude_outcome: ${{ steps.claude.outcome }}
       agent_launched: ${{ steps.launched.outputs.value }}
-      mention: ${{ steps.who.outputs.mention }}
     steps:
       # On an @review comment (issue_comment) the default checkout would be
       # the repo default branch, so resolve the PR head explicitly.
@@ -1832,6 +1890,15 @@ jobs:
                                             and (.side==null or .side=="LEFT" or .side=="RIGHT"))]' <<<"$all")
                 inline_count=$(jq 'length' <<<"$good")
                 dropped=$(( $(jq 'length' <<<"$all") - inline_count ))
+                # The land job refuses a manifest with more than 50 inline
+                # comments (its `max-review-comments`), so keep the first 50
+                # and say how many were cut rather than lose the review.
+                over=0
+                if [ "$inline_count" -gt 50 ]; then
+                  over=$((inline_count - 50))
+                  good=$(jq -c '.[:50]' <<<"$good")
+                  inline_count=50
+                fi
                 for ((k = 0; k < inline_count; k++)); do
                   jq -r ".[$k].body" <<<"$good" | defang_sed >"$DIR/claude-inline-$k.md"
                   cap "$DIR/claude-inline-$k.md" "an inline comment"
@@ -1848,6 +1915,10 @@ jobs:
               echo "::warning::$dropped entr(y/ies) in inline.json lacked the {path, line, side?, body} shape and were dropped."
               printf '\n\n_[%s inline comment(s) were dropped: not of the form {path, line, side?, body}]_\n' "$dropped" >>"$DIR/claude-review.md"
             fi
+            if [ "${over:-0}" -gt 0 ]; then
+              echo "::warning::inline.json has more than 50 inline comments; the last $over were dropped."
+              printf '\n\n_[%s inline comment(s) over the 50-comment cap were dropped]_\n' "$over" >>"$DIR/claude-review.md"
+            fi
           fi
           cap "$DIR/claude-review.md" "the review summary"
           {
@@ -1855,59 +1926,6 @@ jobs:
             echo "verdict=$verdict"
           } >>"$GITHUB_OUTPUT"
           echo "claude review body: $(wc -c <"$DIR/claude-review.md") bytes, verdict: ${verdict:-none (external)}, inline comments: $inline_count — posted by the land job."
-
-      # @-mention target for the failure comments: without one, error
-      # reports on agent/marvin-authored threads email nobody (the thread has
-      # no human participants). Same derivation as claude-auto.yml: closing
-      # ref → claude/issue-N-* branch → the issue's first assignee unless
-      # bot/machine account, else its author unless bot/machine account. On
-      # issue threads (external proxies) the issue itself is the source. Job
-      # token: reads only.
-      - name: Derive responsible human for error cc
-        id: who
-        if: always() && needs.gate.outputs.ok == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number }}
-          IS_PR: ${{ github.event.issue.pull_request != null && 'true' || 'false' }}
-          ANCHOR_REPO: ${{ inputs.anchor_repo }}
-        run: |
-          set -uo pipefail
-          mention=""
-          inum=""
-          issue_repo="$REPO"
-          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-          if [ "${IS_PR:-}" = "true" ]; then
-            ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
-                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
-                    | head -1 || true)
-            if [ -n "$ref" ]; then
-              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
-                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
-                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-                issue_repo="$ANCHOR_REPO"
-              fi
-            fi
-            if [ -z "$inum" ]; then
-              hb=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq '.headRefName // ""' 2>/dev/null || true)
-              inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
-              # companion branch numbers reference the anchor repo's tracker —
-              # only when the twin branch exists there
-              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
-                 gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
-                issue_repo="$ANCHOR_REPO"
-              fi
-            fi
-          else
-            inum="$NUM"
-          fi
-          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" 2>/dev/null \
-            | jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl | if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and (.login as $l | any($tl[]; . == $l) | not)) | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or (.user.login as $l | any($tl[]; . == $l))) then "" else .user.login end) end' 2>/dev/null || true)
-          echo "mention=$mention" >> "$GITHUB_OUTPUT"
-          echo "cc target: ${mention:-none}"
 
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
@@ -1961,7 +1979,7 @@ jobs:
           SCRATCH_OUTCOME: ${{ steps.scratch.outcome }}
           REPLANT_OUTCOME: ${{ steps.replant.outcome }}
           BASE_OUTCOME: ${{ steps.base.outcome }}
-          MENTION: ${{ steps.who.outputs.mention }}
+          MENTION: ${{ needs.gate.outputs.mention }}
           CLAUDEPOST_OUTCOME: ${{ steps.claudepost.outcome }}
           CLIVER_OUTCOME: ${{ steps.cliver.outcome }}
           ERROR_FILE: ${{ runner.temp }}/agent-error.md
@@ -2054,32 +2072,6 @@ jobs:
           file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
           if [ -f "$file" ]; then echo "value=true"; else echo "value=false"; fi >>"$GITHUB_OUTPUT"
 
-      # "Stage - Agent (review running)" in the gate job assumes the @auto
-      # loop follows every review — but the loop engages only on PRs carrying
-      # the `auto` label. For a review on an unlabeled PR nothing follows, so
-      # leaving the stage at Agent strands the issue (observed:
-      # inspect_ai#253 — the dev agent's hand-back set Review, the reviewer
-      # starting on its draft PR re-set Agent, and with no fix loop to hand
-      # off, the stage stuck). When the loop does NOT own the PR, the stage
-      # is handed back to Review once the review run ends — failed runs
-      # included, since their ⚠️ asks a human to re-trigger. The decision is
-      # taken here (job token, a label read) and written to the manifest;
-      # the land job makes the move.
-      - name: Check whether the auto loop owns this PR
-        id: autoloop
-        if: always() && needs.gate.outputs.ack == 'true' && needs.gate.outputs.mode != 'external'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number }}
-        run: |
-          set -uo pipefail
-          n=$(gh api "repos/$REPO/issues/$NUM/labels" \
-                --jq '[.[] | select(.name == "auto")] | length' 2>/dev/null || echo 0)
-          if [ "${n:-0}" -gt 0 ]; then engaged=true; else engaged=false; fi
-          echo "engaged=$engaged" >>"$GITHUB_OUTPUT"
-          echo "auto loop owns PR #$NUM: $engaged"
-
       # Everything the land job posts or moves, as ONE JSON object for
       # emit-landing's manifest-extra (schema: .github/actions/emit-landing/
       # README.md). Body text goes in as files under the landing directory,
@@ -2088,16 +2080,16 @@ jobs:
       #   comments        — the review body (prepared above), flagged
       #                     `review` so `land` appends the review-comment
       #                     marker after its de-fang (pr-feedback-context's
-      #                     anchor; the codex job's body carries its own
-      #                     `engine: codex` anchor instead). In external
-      #                     mode: the whole review, on the proxy issue
+      #                     anchor; the codex job's review is flagged the
+      #                     same way). In external mode: the whole review, on
+      #                     the proxy issue
       #   review_comments — the Claude reviewer's inline comments (pr mode)
       #   review_verdict  — the verdict; land posts the fixed marker line
-      #   stage           — Review, when the review run owes the board a move:
-      #                     external mode once the review posted (the proxy
-      #                     issue would otherwise sit at Agent — mirrors the
-      #                     dev agent's hand-back), or a PR the @auto loop does
-      #                     not own, whatever the outcome (see the step above)
+      #   stage           — external mode only: Review once the review posted
+      #                     (the proxy issue would otherwise sit at Agent —
+      #                     mirrors the dev agent's hand-back). A PR's stage
+      #                     is the land job's, from its own read of the
+      #                     `auto` label (its `stage-override`)
       #   provenance_comment_file — the model-provenance note, if any
       #   error           — the Surface step's message (fail_run: true)
       - name: Compose landing manifest
@@ -2108,13 +2100,11 @@ jobs:
           EXTRA: ${{ runner.temp }}/landing-extra.json
           NUM: ${{ github.event.issue.number }}
           MODE: ${{ needs.gate.outputs.mode }}
-          ACK: ${{ needs.gate.outputs.ack }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           CLAUDEPOST_OUTCOME: ${{ steps.claudepost.outcome }}
           CLAUDE_LANDED: ${{ steps.claudepost.outputs.landed }}
           CLAUDE_VERDICT: ${{ steps.claudepost.outputs.verdict }}
           CLAUDE_INLINE: ${{ runner.temp }}/claude-inline.json
-          ENGAGED: ${{ steps.autoloop.outputs.engaged }}
           PROV_NOTE: ${{ steps.provenance.outputs.note }}
           ERROR_FILE: ${{ runner.temp }}/agent-error.md
         run: |
@@ -2139,8 +2129,6 @@ jobs:
           stage=""
           if [ "$MODE" = "external" ]; then
             [ "${CLAUDE_OUTCOME:-}" = "success" ] && stage=Review
-          elif [ "${ACK:-}" = "true" ] && [ "${ENGAGED:-}" != "true" ]; then
-            stage=Review
           fi
           [ -z "$stage" ] || extra=$(jq -c --arg s "$stage" '.stage = $s' <<<"$extra")
           if [ -n "${PROV_NOTE:-}" ]; then
@@ -2693,72 +2681,22 @@ jobs:
           # cutting the de-fanged body can't resurrect a trigger or marker
           # (the seds above remove the @ / split the substrings, and
           # truncation only drops trailing bytes). 59,000, not 60,000: the
-          # land job's own de-fang re-caps at 60,000, and the footer below
-          # must fit under THAT cap or the second truncation would drop it.
+          # land job's own de-fang re-caps at 60,000, and the attribution
+          # line below must fit under THAT cap.
           if [ "$(wc -c <"$DIR/codex-review.md")" -gt 59000 ]; then
             head -c 59000 "$DIR/codex-review.md" >"$DIR/codex-review.trunc"
             printf '\n\n_[truncated: codex output exceeded the comment size cap]_\n' >>"$DIR/codex-review.trunc"
             mv "$DIR/codex-review.trunc" "$DIR/codex-review.md"
           fi
-          # The footer goes on AFTER the cap: it is the anchor the
-          # pr-feedback-context filter keys on for the next codex fix
-          # round, so a review long enough to truncate must still carry it.
-          printf '\n\n🤖 engine: codex\n' >>"$DIR/codex-review.md"
+          # A plain attribution line AFTER the cap. Not the old `engine:
+          # codex` footer: the review is flagged `review` in the manifest,
+          # so land appends the review-comment marker after its de-fang,
+          # as for the Claude review, and the de-fang splits the footer in
+          # any body (design/untrusted-agent-job.md → Land enforces what the
+          # composers enforced, item 3).
+          printf '\n\n🤖 Reviewed by Codex\n' >>"$DIR/codex-review.md"
           echo "verdict=$verdict" >>"$GITHUB_OUTPUT"
           echo "codex review body: $(wc -c <"$DIR/codex-review.md") bytes, verdict: $verdict — posted by the land job."
-
-      # @-mention target for the failure comments: without one, error
-      # reports on agent/marvin-authored threads email nobody (the thread has
-      # no human participants). Same derivation as claude-auto.yml: closing
-      # ref → claude/issue-N-* branch → the issue's first assignee unless
-      # bot/machine account, else its author unless bot/machine account. On
-      # issue threads (external proxies) the issue itself is the source. Job
-      # token: reads only.
-      - name: Derive responsible human for error cc
-        id: who
-        if: always() && needs.gate.outputs.ok == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number }}
-          IS_PR: ${{ github.event.issue.pull_request != null && 'true' || 'false' }}
-          ANCHOR_REPO: ${{ inputs.anchor_repo }}
-        run: |
-          set -uo pipefail
-          mention=""
-          inum=""
-          issue_repo="$REPO"
-          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-          if [ "${IS_PR:-}" = "true" ]; then
-            ref=$(gh pr view "$NUM" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null \
-                    | grep -ioE '(fixes|closes|resolves)[[:space:]]+([-A-Za-z0-9._]+/[-A-Za-z0-9._]+)?#[0-9]+' \
-                    | head -1 || true)
-            if [ -n "$ref" ]; then
-              refrepo=$(printf '%s' "$ref" | grep -oiE '[-A-Za-z0-9._]+/[-A-Za-z0-9._]+' || true)
-              if [ -z "$refrepo" ] || [ "$(lower "$refrepo")" = "$(lower "$REPO")" ]; then
-                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-              elif [ -n "${ANCHOR_REPO:-}" ] && [ "$(lower "$refrepo")" = "$(lower "$ANCHOR_REPO")" ]; then
-                inum=$(printf '%s' "$ref" | sed -n 's/.*#\([0-9]\{1,\}\).*/\1/p')
-                issue_repo="$ANCHOR_REPO"
-              fi
-            fi
-            if [ -z "$inum" ]; then
-              hb=$(gh pr view "$NUM" --repo "$REPO" --json headRefName --jq '.headRefName // ""' 2>/dev/null || true)
-              inum=$(printf '%s' "$hb" | sed -n 's/^claude\/issue-\([0-9]\{1,\}\)-.*/\1/p')
-              # companion branch numbers reference the anchor repo's tracker —
-              # only when the twin branch exists there
-              if [ -n "$inum" ] && [ -n "${ANCHOR_REPO:-}" ] && \
-                 gh api "repos/$ANCHOR_REPO/branches/$hb" --silent >/dev/null 2>&1; then
-                issue_repo="$ANCHOR_REPO"
-              fi
-            fi
-          else
-            inum="$NUM"
-          fi
-          [ -n "$inum" ] && mention=$(gh api "repos/$issue_repo/issues/$inum" 2>/dev/null \
-            | jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl | if .pull_request then "" else (([(.assignees // [])[] | select(.type != "Bot" and (.login as $l | any($tl[]; . == $l) | not)) | .login] | first // "") as $a | if $a != "" then $a elif (.user.type=="Bot" or (.user.login as $l | any($tl[]; . == $l))) then "" else .user.login end) end' 2>/dev/null || true)
-          echo "mention=$mention" >> "$GITHUB_OUTPUT"
-          echo "cc target: ${mention:-none}"
 
       # Surface agent errors: a failed step anywhere on the path, which would
       # otherwise leave the run red with no review posted and nothing said.
@@ -2782,7 +2720,7 @@ jobs:
         env:
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           BASE_OUTCOME: ${{ steps.base.outcome }}
-          MENTION: ${{ steps.who.outputs.mention }}
+          MENTION: ${{ needs.gate.outputs.mention }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
           CODEXHOME_OUTCOME: ${{ steps.codexhome.outcome }}
           CODEXINPUTS_OUTCOME: ${{ steps.codexinputs.outcome }}
@@ -2834,45 +2772,20 @@ jobs:
           echo "::error::Review did not complete: $err — the land job posts the note and fails the run."
           printf '⚠️ The review run did not complete — it errored before finishing:\n\n> %s\n\nUsually transient (model API capacity/overload, or a GitHub-side outage). Re-trigger by posting a top-level `@`review comment; if it persists check https://status.claude.com and https://githubstatus.com.%s\n' "$err" "$cc" >"$ERROR_FILE"
 
-      # "Stage - Agent (review running)" in the gate job assumes the @auto
-      # loop follows every review — but the loop engages only on PRs carrying
-      # the `auto` label. For a review on an unlabeled PR nothing follows, so
-      # leaving the stage at Agent strands the issue (observed:
-      # inspect_ai#253 — the dev agent's hand-back set Review, the reviewer
-      # starting on its draft PR re-set Agent, and with no fix loop to hand
-      # off, the stage stuck). When the loop does NOT own the PR, the stage
-      # is handed back to Review once the review run ends — failed runs
-      # included, since their ⚠️ asks a human to re-trigger. The decision is
-      # taken here (job token, a label read) and written to the manifest;
-      # the land job makes the move.
-      - name: Check whether the auto loop owns this PR
-        id: autoloop
-        if: always() && needs.gate.outputs.ack == 'true' && needs.gate.outputs.mode != 'external'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          NUM: ${{ github.event.issue.number }}
-        run: |
-          set -uo pipefail
-          n=$(gh api "repos/$REPO/issues/$NUM/labels" \
-                --jq '[.[] | select(.name == "auto")] | length' 2>/dev/null || echo 0)
-          if [ "${n:-0}" -gt 0 ]; then engaged=true; else engaged=false; fi
-          echo "engaged=$engaged" >>"$GITHUB_OUTPUT"
-          echo "auto loop owns PR #$NUM: $engaged"
-
       # Everything the land job posts or moves, as ONE JSON object for
       # emit-landing's manifest-extra (schema: .github/actions/emit-landing/
       # README.md). Body text goes in as files under the landing directory,
       # referenced by name; the manifest itself is DATA the land job
       # validates before acting. The fields:
-      #   comments        — the review body (prepared above; it carries its
-      #                     own `engine: codex` anchor for pr-feedback-context)
+      #   comments        — the review body (prepared above), flagged `review`
+      #                     so `land` appends the review-comment marker after
+      #                     its de-fang (pr-feedback-context's anchor), as on
+      #                     the Claude job
       #   review_verdict  — the verdict; land posts the fixed marker line
-      #   stage           — Review, when the review run owes the board a move:
-      #                     a PR the @auto loop does not own, whatever the
-      #                     outcome (see the step above); never external mode
-      #                     here (the gate keeps those on the Claude job)
       #   error           — the Surface step's message (fail_run: true)
+      # No stage: the land job decides it from its own read of the `auto`
+      # label (its `stage-override`); external mode never runs here (the
+      # gate keeps those on the Claude job).
       - name: Compose landing manifest
         id: landing
         if: always() && needs.gate.outputs.ok == 'true'
@@ -2880,10 +2793,8 @@ jobs:
           DIR: ${{ runner.temp }}/landing
           EXTRA: ${{ runner.temp }}/landing-extra.json
           NUM: ${{ github.event.issue.number }}
-          ACK: ${{ needs.gate.outputs.ack }}
           CODEXPOST_OUTCOME: ${{ steps.codexpost.outcome }}
           CODEX_VERDICT: ${{ steps.codexpost.outputs.verdict }}
-          ENGAGED: ${{ steps.autoloop.outputs.engaged }}
           ERROR_FILE: ${{ runner.temp }}/agent-error.md
         run: |
           set -euo pipefail
@@ -2891,13 +2802,8 @@ jobs:
           extra='{}'
           if [ "${CODEXPOST_OUTCOME:-}" = "success" ] && [ -s "$DIR/codex-review.md" ] && [[ "$NUM" =~ ^[0-9]+$ ]]; then
             extra=$(jq -c --argjson n "$NUM" --arg v "$CODEX_VERDICT" \
-              '.comments = [{number: $n, body_file: "codex-review.md"}] | .review_verdict = $v' <<<"$extra")
+              '.comments = [{number: $n, body_file: "codex-review.md", review: true}] | .review_verdict = $v' <<<"$extra")
           fi
-          stage=""
-          if [ "${ACK:-}" = "true" ] && [ "${ENGAGED:-}" != "true" ]; then
-            stage=Review
-          fi
-          [ -z "$stage" ] || extra=$(jq -c --arg s "$stage" '.stage = $s' <<<"$extra")
           if [ -s "$ERROR_FILE" ]; then
             extra=$(jq -c --rawfile msg "$ERROR_FILE" '.error = {message: $msg, fail_run: true}' <<<"$extra")
           fi
@@ -2976,10 +2882,10 @@ jobs:
       # The machine account's token for this job (see the gate job's mint
       # step): scoped to THIS repository and to the landing's writes — the
       # review, its inline comments and its verdict comment (pull
-      # requests), the comments on an External proxy issue, the follow-up
-      # issues the reviewer's manifest may file here (this repository is
-      # the default `allowed-issue-repos`) and the posted-review nudge
-      # (issues), the stage move (the org's Atlas project). No contents:
+      # requests), the comments on an External proxy issue and the
+      # posted-review nudge (issues), the stage move (the org's Atlas
+      # project). Follow-up issues are refused (`allowed-issue-repos: ""`
+      # below). No contents:
       # this land job refuses bundles and pushes nothing. Revoked when the
       # job ends.
       - name: Mint the machine account's token
@@ -2994,6 +2900,33 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-organization-projects: write
+
+      # "Stage - Agent (review running)" in the gate job assumes the @auto
+      # loop follows every review — but the loop engages only on PRs carrying
+      # the `auto` label. For a review on an unlabeled PR nothing follows, so
+      # leaving the stage at Agent strands the issue (observed:
+      # inspect_ai#253 — the dev agent's hand-back set Review, the reviewer
+      # starting on its draft PR re-set Agent, and with no fix loop to hand
+      # off, the stage stuck). When the loop does NOT own the PR, the stage
+      # is handed back to Review once the review run ends — failed runs
+      # included, since their ⚠️ asks a human to re-trigger. Read here, on
+      # this fresh runner with the job token, and passed to the land
+      # composite as `stage-override`, so the move never rests on a read the
+      # review job made after its agent ran.
+      - name: Check whether the auto loop owns this PR
+        id: autoloop
+        if: needs.gate.outputs.ack == 'true' && needs.gate.outputs.mode != 'external'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+          n=$(gh api "repos/$REPO/issues/$NUM/labels" \
+                --jq '[.[] | select(.name == "auto")] | length' 2>/dev/null || echo 0)
+          if [ "${n:-0}" -gt 0 ]; then engaged=true; else engaged=false; fi
+          echo "engaged=$engaged" >>"$GITHUB_OUTPUT"
+          echo "auto loop owns PR #$NUM: $engaged"
 
       - name: Land
         id: land
@@ -3036,6 +2969,19 @@ jobs:
           # External mode names no PR to pin the branch to: pin it to the
           # fixed name the review job's emit-landing used instead.
           branch-prefix: ${{ needs.gate.outputs.mode == 'external' && format('review/external-{0}', github.event.issue.number) || '' }}
+          # The composers' rules, enforced on this fresh runner too
+          # (design/untrusted-agent-job.md → Land enforces what the
+          # composers enforced): the review posts only on this run's PR or
+          # proxy issue, as at most five comments and fifty inline comments
+          # (Claude Security 4773341), and no follow-up issue at all (the
+          # composers never file one).
+          comment-numbers: event
+          max-comments: "5"
+          max-review-comments: "50"
+          allowed-issue-repos: ""
+          # A PR's stage from the read above: Review when the loop does not
+          # own it, else no move. External mode keeps the manifest's.
+          stage-override: ${{ needs.gate.outputs.mode != 'external' && ((needs.gate.outputs.ack == 'true' && steps.autoloop.outputs.engaged != 'true') && 'Review' || 'none') || '' }}
 
       # A review run that ends without WRITING its review is a silent stall
       # the error surfacing above cannot see (observed, when the agent still
@@ -3061,17 +3007,16 @@ jobs:
           REPO: ${{ github.repository }}
           MODE: ${{ needs.gate.outputs.mode }}
           NUM: ${{ github.event.issue.number }}
-          MENTION: ${{ needs.review.outputs.mention }}
+          MENTION: ${{ needs.gate.outputs.mention }}
           LAUNCHED: ${{ needs.review.outputs.agent_launched }}
           CONTINUATION: ${{ needs.gate.outputs.continuation }}
           POSTED_VERDICT: ${{ steps.land.outputs.posted_verdict }}
           POSTED_COMMENTS: ${{ steps.land.outputs.posted_comments }}
         run: |
           set -uo pipefail
-          # MENTION is the one review-job value this step interpolates into a
-          # machine-account body without the manifest's de-fang, and the
-          # review job computed it AFTER the agent ran (a $GITHUB_PATH shadow
-          # of `gh` makes it whatever the agent wants). GitHub login shape
+          # MENTION goes into a machine-account body without the manifest's
+          # de-fang. The gate derived it before any untrusted code ran, but
+          # it is still a login read from issue data: GitHub login shape
           # only, and never a trigger word — a value of review/claude/auto
           # after the `cc @` would turn a nudge into a live trigger.
           [[ "${MENTION:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] && ! [[ "${MENTION,,}" =~ ^(review|claude|auto)$ ]] || MENTION=""

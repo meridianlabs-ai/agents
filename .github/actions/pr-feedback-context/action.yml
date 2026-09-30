@@ -87,7 +87,8 @@ runs:
           # by nothing but whitespace or punctuation; a short human
           # instruction that opens with the token is an adjudication and
           # stays), find the newest review round (Claude's comments carry the
-          # claude-review-comment marker, codex's the engine footer) and keep
+          # claude-review-comment marker, and so do codex's since 2026-09-30;
+          # older codex reviews carry the engine footer) and keep
           # it plus everything after it, plus the last 5 HUMAN comments
           # before it (an adjudication that preceded the review is context;
           # older review rounds are stale by construction — their findings

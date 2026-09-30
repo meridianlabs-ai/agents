@@ -50,7 +50,8 @@ name: Claude Auto (reusable)
 # manifest (emit-landing); `land` — a fresh runner, no checkout — pushes the
 # commits as marvin (which re-runs CI), posts the codex summary / the
 # provenance note / the error report, posts exactly `@review` when a commit
-# landed, moves the stage, and refunds the attempt when the agent never ran.
+# landed, and moves the stage. Every attempt counts against the cap, one
+# whose agent never ran included: nothing the fix job reports can prove it.
 # The machine account's token (the app token `gate` and `land` mint) is
 # named in those two jobs and nowhere else: a process the
 # agent left running, or a PATH/ENV edit it made through $GITHUB_PATH /
@@ -266,8 +267,8 @@ on:
           the escalation hand-off) and the `land` job (the push of the
           agent's commits — it must come from a real identity so the re-run
           of CI actually fires; a GITHUB_TOKEN push wouldn't — recursion
-          guard — plus the `@review` hand-back, the codex summary, the stage
-          move and the attempt refund); each mints a one-hour installation
+          guard — plus the `@review` hand-back, the codex summary and the
+          stage move); each mints a one-hour installation
           token scoped to this repository and to the permissions that job's
           writes need, revoked when the job ends, and every push, comment,
           label and board move runs as the bot. NEVER present in the `fix`
@@ -605,8 +606,7 @@ jobs:
           # LAST marker comment by ANY author was the counter, so any commenter
           # on a public caller could reset the cap (unbounded rounds) or force
           # an escalation (the label removed as marvin), and their comment
-          # became the one the loop edited. The land job's refund step reads
-          # the counter the same way; keep the two helpers identical.
+          # became the one the loop edited.
           # `--paginate --jq` runs per page, so the pages are slurped and
           # flattened locally (as verify-auto-labeler does).
           cands=$(ghr gh api "repos/$REPO/issues/$number/comments?per_page=100" --paginate \
@@ -834,10 +834,11 @@ jobs:
       # agent. Until the job split this ran AFTER the fix job's sync and
       # provisioning steps, so a sync or provisioning failure — which skips
       # the agent — never burned an attempt; it cannot follow them any more
-      # (they run in the untrusted job, and this is a marvin write), so the
-      # land job's refund step now covers that case too: an attempt whose
-      # agent step did not succeed and whose landing pushed nothing is refunded,
-      # whatever skipped it.
+      # (they run in the untrusted job, and this is a marvin write), so such
+      # a failure now spends the attempt. It is not refunded: the fix job
+      # writes its own outputs, so nothing it reports can prove the agent
+      # never ran (decision: Ransom, 2026-09-29;
+      # design/untrusted-agent-job.md → Refunds go).
       - name: Record attempt
         if: steps.gate.outputs.act == 'fix'
         env:
@@ -946,29 +947,21 @@ jobs:
       id-token: write         # WIF auth
       actions: read           # the failed CI run's logs
     outputs:
-      # What the land job needs from this job, both read from STEP OUTCOMES
-      # — the runner's record of whether a step was entered and how it
-      # exited, settled for the agent step before any agent code ran and
-      # for the steps ahead of it before that — never from a file: the
-      # action's `execution_file` output is published by its own error
-      # handler from whatever file sits at the default path, which the PR's
-      # provisioning step can pre-create (finding 4628657, review round 2),
-      # and a process the agent leaves behind can write or truncate any
-      # file under RUNNER_TEMP (Claude Security 4628735), so there is
-      # deliberately no "did the agent launch" output. `agent_skipped` is
-      # `true` when this job's agent step — the Claude step; the codex job
-      # publishes its own — was never entered, which is the case exactly
-      # when the checkout, the sync or the provisioning failed ahead of it.
-      # It drives the land job's attempt refund and nothing else: a step
-      # that was entered and then FAILED, whatever failed it, is not
-      # skipped, so that round keeps its attempt — the agent cannot make its
-      # own step read as never entered, only as failed. `agent_outcome` is
-      # the Claude step's outcome; only `success` admits a re-review request
-      # on a round that landed nothing (the Land step's
-      # `allow-no-change-handback`) — a value the agent can only push toward
-      # `failure`, which withholds.
+      # What the land job needs from this job, read from a STEP OUTCOME,
+      # never from a file: the action's `execution_file` output is published
+      # by its own error handler from whatever file sits at the default
+      # path, which the PR's provisioning step can pre-create (finding
+      # 4628657, review round 2), and a process the agent leaves behind can
+      # write or truncate any file under RUNNER_TEMP (Claude Security
+      # 4628735). `agent_outcome` is the Claude step's outcome; only
+      # `success` admits a re-review request on a round that landed nothing
+      # (the Land step's `allow-no-change-handback`), and every value is
+      # safe: this job writes its own outputs, so the land job uses this one
+      # only to choose between outcomes that are all safe
+      # (design/untrusted-agent-job.md → The boundary). There is no
+      # skipped-step output any more: it drove the attempt refund, which is
+      # gone (decision: Ransom, 2026-09-29), and every attempt counts.
       agent_outcome: ${{ steps.claude.outcome }}
-      agent_skipped: ${{ steps.claude.outcome == 'skipped' && 'true' || 'false' }}
     steps:
       # Check out the PR branch so the agent fixes in place; the land job
       # pushes the result. persist-credentials:false (issue #61): checkout
@@ -1006,8 +999,8 @@ jobs:
       # failed run TESTED (the gate's `head_sha`, from the run's API record):
       # the checkout is by branch name, so a push between the gate and this
       # step would put the agent on code the failing logs do not describe.
-      # Then this step fails, nothing below runs, and the attempt is
-      # refunded; the newer push's own run drives the next round.
+      # Then this step fails, nothing below runs, and the attempt counts;
+      # the newer push's own run drives the next round.
       - name: Record base SHA
         id: base
         env:
@@ -1064,7 +1057,7 @@ jobs:
           # PR's base, with no retarget since the run was created): the
           # composite refuses to merge anything else, so a PR retargeted
           # between the gate and this step fails the sync (the agent is
-          # skipped, the attempt refunded) instead of merging a base the
+          # skipped, the attempt counted) instead of merging a base the
           # failing logs never saw.
           base: ${{ needs.gate.outputs.base_ref }}
           # ...and the base TIP the gate read: the fetched origin/<base> must
@@ -1381,9 +1374,9 @@ jobs:
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every
           # downstream step is SKIPPED, not failed, so no other branch below
-          # fires; the attempt the gate recorded is refunded by the land job
-          # (the agent never launched, nothing lands) — without this the
-          # failure is a silent stall with the board at Agent.
+          # fires; the attempt the gate recorded counts (the agent never
+          # launched, nothing lands) — without this the failure is a silent
+          # stall with the board at Agent.
           if [ -z "$err" ] && [ "${SYNC_OUTCOME:-}" = "failure" ]; then
             err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); no fix was attempted. Re-trigger to retry."
           fi
@@ -1447,9 +1440,9 @@ jobs:
             # its error handler from whatever sits at the default path), so
             # every failed step is one round: nothing lands — the composer
             # withholds the bundle, the runner's base merge and any local
-            # commits included — and the attempt is kept: the step was
-            # entered, and only a step the runner never entered is refunded
-            # (Claude Security 4628735).
+            # commits included — and the attempt counts, as every attempt
+            # does (Claude Security 4628735; the refund of a never-entered
+            # step went too, design/untrusted-agent-job.md → Refunds go).
             err="the CI-fix step failed (the action refused to run for this actor, failed to start, or failed during the run — see the job logs); nothing was landed, the runner's base merge and any commits of the run included, and the attempt counts."
           fi
           # A reclaim that did not succeed skips every later git call (the
@@ -1523,7 +1516,7 @@ jobs:
       #               bootstrap failure, max-turns or an is_error result
       #               mid-fix — indistinguishable from outside the action)
       #               lands nothing and owes nothing, its commits included,
-      #               and its attempt is refunded (finding 4628657, review
+      #               and its attempt counts (finding 4628657, review
       #               rounds 1–3; the rule and its cost are on the composer
       #               step below and in design/auto-agent.md). From #82 to
       #               2026-09-22 such a step landed its commits with the ⚠️
@@ -1554,7 +1547,7 @@ jobs:
       # `skipped`/`failure` when the prep or user-setup step failed and
       # would let those two fall through to the ancestry branch, landing
       # the runner's base merge and keeping the attempt where the Surface
-      # strings, the refund and the docs all say nothing lands) the git
+      # strings and the docs all say nothing lands) the git
       # reads are skipped (handback false) unless the unresolved-merge guard
       # SUCCEEDED — the same condition emit-landing's read-only takes, so
       # nothing above the start SHA is packaged either. The guard is itself
@@ -1562,7 +1555,7 @@ jobs:
       # of those on the user setup, so "guard did not succeed" covers every
       # codex-path failure: a failed prep or user-setup step (no codex
       # process ran; the base merge, if any, stays unpushed and the round
-      # is refunded, as before the split), a failed codex step (its partial
+      # counts, like every other), a failed codex step (its partial
       # local commits are never pushed — as before the split, when the
       # landing step was gated on the run step), a reclaim that did not
       # succeed (nothing lands from a workspace codex still owns), and a
@@ -1586,15 +1579,15 @@ jobs:
       # handler publishes whatever file sits at the default path, which the
       # PR's provisioning step can pre-create (review rounds 1 and 2 of
       # finding 4628657's fix: a preseeded file read as "launched" and let a
-      # refused round bundle the base merge and dodge its refund). So the
+      # refused round bundle the base merge). So the
       # rule is fail-closed on the step's OUTCOME, a runner fact no PR file
       # can forge: a failed Claude step lands nothing — no git, no
       # hand-back, not the runner's base merge, not a commit Claude may have
-      # made before failing — and keeps its attempt (the step was entered;
-      # only a step the runner never entered is refunded — Claude Security
-      # 4628735, which retired the refund on a failed step for the same
-      # reason the launch signal went: the agent decides how its own step
-      # ends). Before finding 4628657 such a
+      # made before failing — and keeps its attempt (Claude Security
+      # 4628735 retired the refund on a failed step for the same reason the
+      # launch signal went: the agent decides how its own step ends; the
+      # refund of a never-entered step went with step 3 of
+      # design/untrusted-agent-job.md). Before finding 4628657 such a
       # round still bundled the runner's clean base merge (and its commits),
       # so a declined authorization pushed a marvin commit, re-ran CI and
       # kept its attempt while the codex path's failure landed nothing; the
@@ -1751,19 +1744,14 @@ jobs:
       issues: read
       actions: read           # the failed CI run's logs
     outputs:
-      # What the land job's refund step needs from this job: whether the
-      # agent step ran to a result. `agent_outcome` is `failure` when any
-      # codex step that precedes or is the codex run failed, and the codex
-      # run's outcome otherwise (`skipped` on a run whose sync or
-      # provisioning failed before it started). `agent_skipped` is `true`
-      # when the codex run was never entered — `skipped`, the case exactly
-      # when the checkout, the sync, a prep step, the codex user, the
-      # provisioning or the home reset failed ahead of it — and drives the
-      # land job's refund alone (Claude Security 4628735: a run that was
-      # entered and failed keeps its attempt). Step outcomes only: nothing a
-      # PR file can forge (the Claude job's comment on the same outputs).
+      # What the land job needs from this job: whether the agent step ran
+      # to a result, for `allow-no-change-handback`. `agent_outcome` is
+      # `failure` when any codex step that precedes or is the codex run
+      # failed, and the codex run's outcome otherwise (`skipped` on a run
+      # whose sync or provisioning failed before it started). Step outcomes
+      # only: nothing a PR file can forge (the Claude job's comment on the
+      # same output). No skipped-step output: the refund it drove is gone.
       agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexhome.outcome == 'failure' || steps.codexcompose.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || steps.codexfix.outcome }}
-      agent_skipped: ${{ steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}
     steps:
       # Check out the PR branch so the agent fixes in place; the land job
       # pushes the result. persist-credentials:false (issue #61): checkout
@@ -1799,8 +1787,8 @@ jobs:
       # failed run TESTED (the gate's `head_sha`, from the run's API record):
       # the checkout is by branch name, so a push between the gate and this
       # step would put the agent on code the failing logs do not describe.
-      # Then this step fails, nothing below runs, and the attempt is
-      # refunded; the newer push's own run drives the next round.
+      # Then this step fails, nothing below runs, and the attempt counts;
+      # the newer push's own run drives the next round.
       - name: Record base SHA
         id: base
         env:
@@ -1857,7 +1845,7 @@ jobs:
           # PR's base, with no retarget since the run was created): the
           # composite refuses to merge anything else, so a PR retargeted
           # between the gate and this step fails the sync (the agent is
-          # skipped, the attempt refunded) instead of merging a base the
+          # skipped, the attempt counted) instead of merging a base the
           # failing logs never saw.
           base: ${{ needs.gate.outputs.base_ref }}
           # ...and the base TIP the gate read: the fetched origin/<base> must
@@ -1962,8 +1950,8 @@ jobs:
       # inside its sandbox, which has network (its prompt says so).
       # Placed after the base sync (so a dependency file the merge touched is
       # what gets installed). A provisioning failure SKIPS the agent; the
-      # attempt the gate already recorded is refunded by the land job (the
-      # agent never launched and nothing lands), and the Surface step
+      # attempt the gate already recorded counts (the agent never launched
+      # and nothing lands), and the Surface step
       # reports it — fatal, with ONE exception: the conflict path. sync-branch
       # hands codex the base merge still IN PROGRESS, with conflict markers
       # in the tree, and provisioning runs over that tree — so when
@@ -2042,7 +2030,7 @@ jobs:
           # silently degrades the prompt where no emptiness invariant exists
           # (the inline-comments section). Three attempts absorb blips;
           # exhaustion fails the step with gh's real stderr in the log,
-          # routing into the prep-failure surfacing and the attempt refund.
+          # routing into the prep-failure surfacing.
           fetch() { # fetch <outfile> <gh args...>
             local out="$1"; shift
             local n=0
@@ -2398,9 +2386,9 @@ jobs:
           # The base-branch sync died before the agent started (a transient
           # gh/fetch error, or its own loud non-conflict merge failure). Every
           # downstream step is SKIPPED, not failed, so no other branch below
-          # fires; the attempt the gate recorded is refunded by the land job
-          # (the agent never launched, nothing lands) — without this the
-          # failure is a silent stall with the board at Agent.
+          # fires; the attempt the gate recorded counts (the agent never
+          # launched, nothing lands) — without this the failure is a silent
+          # stall with the board at Agent.
           if [ -z "$err" ] && [ "${SYNC_OUTCOME:-}" = "failure" ]; then
             err="the base-branch sync step failed before the agent started (a transient gh/fetch error, or a base merge that failed without content conflicts — see the job logs); no fix was attempted. Re-trigger to retry."
           fi
@@ -2507,7 +2495,7 @@ jobs:
       #               bootstrap failure, max-turns or an is_error result
       #               mid-fix — indistinguishable from outside the action)
       #               lands nothing and owes nothing, its commits included,
-      #               and its attempt is refunded (finding 4628657, review
+      #               and its attempt counts (finding 4628657, review
       #               rounds 1–3; the rule and its cost are on the composer
       #               step below and in design/auto-agent.md). From #82 to
       #               2026-09-22 such a step landed its commits with the ⚠️
@@ -2538,7 +2526,7 @@ jobs:
       # `skipped`/`failure` when the prep or user-setup step failed and
       # would let those two fall through to the ancestry branch, landing
       # the runner's base merge and keeping the attempt where the Surface
-      # strings, the refund and the docs all say nothing lands) the git
+      # strings and the docs all say nothing lands) the git
       # reads are skipped (handback false) unless the unresolved-merge guard
       # SUCCEEDED — the same condition emit-landing's read-only takes, so
       # nothing above the start SHA is packaged either. The guard is itself
@@ -2546,7 +2534,7 @@ jobs:
       # of those on the user setup, so "guard did not succeed" covers every
       # codex-path failure: a failed prep or user-setup step (no codex
       # process ran; the base merge, if any, stays unpushed and the round
-      # is refunded, as before the split), a failed codex step (its partial
+      # counts, like every other), a failed codex step (its partial
       # local commits are never pushed — as before the split, when the
       # landing step was gated on the run step), a reclaim that did not
       # succeed (nothing lands from a workspace codex still owns), and a
@@ -2570,15 +2558,15 @@ jobs:
       # handler publishes whatever file sits at the default path, which the
       # PR's provisioning step can pre-create (review rounds 1 and 2 of
       # finding 4628657's fix: a preseeded file read as "launched" and let a
-      # refused round bundle the base merge and dodge its refund). So the
+      # refused round bundle the base merge). So the
       # rule is fail-closed on the step's OUTCOME, a runner fact no PR file
       # can forge: a failed Claude step lands nothing — no git, no
       # hand-back, not the runner's base merge, not a commit Claude may have
-      # made before failing — and keeps its attempt (the step was entered;
-      # only a step the runner never entered is refunded — Claude Security
-      # 4628735, which retired the refund on a failed step for the same
-      # reason the launch signal went: the agent decides how its own step
-      # ends). Before finding 4628657 such a
+      # made before failing — and keeps its attempt (Claude Security
+      # 4628735 retired the refund on a failed step for the same reason the
+      # launch signal went: the agent decides how its own step ends; the
+      # refund of a never-entered step went with step 3 of
+      # design/untrusted-agent-job.md). Before finding 4628657 such a
       # round still bundled the runner's clean base merge (and its commits),
       # so a declined authorization pushed a marvin commit, re-ran CI and
       # kept its attempt while the codex path's failure landed nothing; the
@@ -2672,12 +2660,13 @@ jobs:
   # push the bundled commits as marvin (re-running CI), post the codex or
   # no-change summary, post exactly `@review` when a commit landed, move the
   # stage to Review, post the provenance note, report the agent error and
-  # fail the run when it says so — then the attempt refund. always(): a fix
-  # job that failed still gets its error posted and its attempt refunded;
-  # with no artifact at all (runner killed mid-agent) the composite fails
-  # its download, lands nothing, and says so on the PR. A CANCELLED fix job
-  # skips the Land step; its refund follows the same evidence as every
-  # other round's (see the refund step).
+  # fail the run when it says so. always(): a fix job that failed still
+  # gets its error posted; with no artifact at all (runner killed
+  # mid-agent) the composite fails its download, lands nothing, and says so
+  # on the PR. A CANCELLED fix job skips the Land step. No round is
+  # refunded, whatever the fix job reports: every attempt counts against
+  # the cap (decision: Ransom, 2026-09-29; design/untrusted-agent-job.md →
+  # Refunds go).
   #
   # Gated on the gate job having SUCCEEDED, not only on its `act` output: a
   # gate that failed after writing act=fix — `Record attempt` is the
@@ -2685,9 +2674,8 @@ jobs:
   # fix job (`needs.fix.result` is `skipped`), so there is no artifact to
   # land, and whether the attempt was recorded is unknown; landing would
   # post "Landing failed at step(s): download" on the PR for a round that
-  # never started, and refunding might write one BELOW the true count
-  # (weakening the kill-switch). Neither runs: a red gate job with nothing
-  # on the PR, as a Record-attempt failure was before the split.
+  # never started. It does not run: a red gate job with nothing on the PR,
+  # as a Record-attempt failure was before the split.
   land:
     needs: [gate, fix, fix-codex]
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.act == 'fix'
@@ -2698,10 +2686,9 @@ jobs:
       # steps below gate on.
       AGENT_RESULT: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.result || needs.fix.result }}
       AGENT_OUTCOME: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_outcome || needs.fix.outputs.agent_outcome }}
-      AGENT_SKIPPED: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_skipped || needs.fix.outputs.agent_skipped }}
-    # Every write here is marvin's (the land composite's `token`, the refund's
-    # GH_TOKEN); the job token only reads — the artifact, the PR head ref
-    # and default branch, the start SHA fetch.
+    # Every write here is marvin's (the land composite's `token`); the job
+    # token only reads — the artifact, the PR head ref and default branch,
+    # the start SHA fetch.
     permissions:
       contents: read
       pull-requests: read
@@ -2710,8 +2697,8 @@ jobs:
     steps:
       # The machine account's token for this job (see the gate job's mint
       # step): scoped to THIS repository and to the landing's writes — the
-      # push (contents), the `@review` hand-back, the codex summary and the
-      # attempt refund (issues), the PR-side posts (pull requests), the
+      # push (contents), the `@review` hand-back and the codex summary
+      # (issues), the PR-side posts (pull requests), the
       # stage move (the org's Atlas project). Follow-up issues are refused
       # here (`allowed-issue-repos: ""`), so no other repository is in
       # scope. Revoked when the job ends.
@@ -2739,16 +2726,9 @@ jobs:
       # would fail the artifact download and post "Landing failed" on the PR
       # for nothing. A run cancelled by hand mid-agent is skipped too: its
       # partial commits are not pushed and re-reviewed on the strength of an
-      # always(). The step is gated, not the job, so the refund below still
-      # runs — and refunds only on the evidence every round needs: the job's
-      # own `agent_skipped` output. A job cancelled during checkout, sync or
-      # provisioning delivers it (the agent step is `skipped`) and is
-      # refunded; one cancelled after the agent step started delivers
-      # `false` and keeps its attempt; a PENDING job cancelled before it
-      # started delivers no outputs at all, and unknown keeps its attempt —
-      # one attempt of slack on a rare concurrency cancellation, not a
-      # refund decided by a job that may have run the agent (Claude
-      # Security 4628735, review round 1). `skipped` is
+      # always(). The attempt counts either way: no round is refunded
+      # (design/untrusted-agent-job.md → Refunds go), so a rare concurrency
+      # cancellation costs one attempt of the cap. `skipped` is
       # excluded too — the job-level gate on the gate job's success already
       # rules it out (a fix job is skipped only when its gate did not
       # succeed), so the test is belt and braces for the same "no artifact,
@@ -2765,8 +2745,7 @@ jobs:
       # fails the job); a PR opened during the round does not — created
       # after the run, it cannot be the run's origin. Nothing the agent job
       # uploaded is consulted for any of it. Same skip as the Land step: a
-      # cancelled or skipped fix job has nothing to land, and the refund
-      # below still runs (on the job's own evidence, see there).
+      # cancelled or skipped fix job has nothing to land.
       - name: Revalidate the run binding
         id: rebind
         if: env.AGENT_RESULT != 'cancelled' && env.AGENT_RESULT != 'skipped'
@@ -2823,6 +2802,13 @@ jobs:
           # machine account as the labeler. An empty list makes the
           # validator refuse any `pr.labels` a manifest carries.
           allowed-pr-labels: "[]"
+          # Every comment must name the run's own PR (the validator refuses
+          # any other number): the composer's rule, enforced on this
+          # trusted runner (design/untrusted-agent-job.md → Land enforces
+          # what the composers enforced).
+          comment-numbers: event
+          # At most five comments, the composers' cap (this one posts one).
+          max-comments: "5"
           # A re-review request on a manifest with NO bundle is honored only
           # when the agent step succeeded (`agent_outcome`, a step outcome
           # the agent can push only toward `failure`). This loop's composer
@@ -2839,10 +2825,9 @@ jobs:
       # The revalidation refused: say so where the gate bound the run (the
       # only PR this run may write to), trigger-free like every bot comment
       # here, and fail the job so the refusal is a red X, not a quiet skip.
-      # The attempt is NOT refunded here (the refund's condition is the
-      # agent never having run): the round ran; it is its landing that the
-      # changed context withheld, and the branch's own next CI run drives
-      # the next round.
+      # The attempt counts, like every attempt: the round ran; it is its
+      # landing that the changed context withheld, and the branch's own
+      # next CI run drives the next round.
       - name: Report withheld landing
         if: ${{ !cancelled() && steps.rebind.outcome == 'success' && steps.rebind.outputs.ok != '1' }}
         uses: meridianlabs-ai/agents/.github/actions/post-pr-comment@main
@@ -2860,132 +2845,3 @@ jobs:
         run: |
           echo "::error::land: the landing was withheld — $REASON"
           exit 1
-
-      # Infra crashes must not burn fix attempts: the counter increments in
-      # the gate job, BEFORE the agent runs, but a round whose agent step was
-      # NEVER ENTERED — a sync / provisioning failure that skipped it
-      # outright (before the split the attempt was recorded after those
-      # steps; it cannot be any more, so the refund covers it), a failed
-      # codex prep / user-setup step, or a job cancelled while one of those
-      # steps ran (the agent step is `skipped` then too) — landed no fix.
-      # Roll the sticky counter back one. Two conditions: the fix job's
-      # `agent_skipped` output is true (both engines' agent steps `skipped`,
-      # a step outcome the runner settled before any agent code ran), and
-      # the landing pushed nothing (a round whose commits landed keeps its
-      # attempt whatever the agent step's outcome). The job's RESULT is not
-      # evidence: a job cancelled after the agent step started ran the
-      # agent (its output reads `false` and the attempt is kept), and a
-      # pending job cancelled before it started delivers no outputs at all
-      # — unknown, so it keeps its attempt (one attempt of slack on a rare
-      # concurrency cancellation; the escalation still drops the label and
-      # posts, and the reset restores the budget). A step that was entered
-      # and then FAILED — the action's bootstrap failure (observed: "socket
-      # hang up" before the agent started), its actor refusal, a Claude or
-      # codex failure during the run, the codex step failing on a missing
-      # OPENAI_API_KEY (which used to be refunded; the sandboxed agent can
-      # fail its own step too, so the step's outcome cannot decide) — is an
-      # attempt: nothing lands, the Surface error posts, and the count
-      # stays, so a persistent cause reaches the cap and a human, not a
-      # silent refund loop. Until Claude Security
-      # 4628735 (2026-09-22) the condition was `agent_outcome != success`
-      # (and, until finding 4628657, an empty execution file), decided
-      # inside the untrusted job after the agent had run: a steered agent
-      # that killed the action's process from its own shell made a completed
-      # round read as an infra crash and was refunded, so the cap bounded
-      # only rounds that landed. The cost of the narrower rule is that a
-      # transient bootstrap failure now spends an attempt — the blips that
-      # motivated the refund; the cap still bounds spend, and a refunded
-      # round never self-retriggers (nothing pushed means no CI re-run, and
-      # the Land step posts no hand-back for it). Never on a FAILED gate
-      # (the job gate above): whether `Record attempt` ever incremented is
-      # then unknown, and an unrecorded attempt refunded would put the count
-      # one below the truth — not refunding is the conservative side.
-      #
-      # NOT serialized: this job is outside the per-PR concurrency group (the
-      # gate's comment says why), so this write can interleave with the next
-      # run's gate re-recording the same sticky comment — two workflow_run
-      # completions for one PR close together (several named CI workflows)
-      # plus an infra-crashed agent. Narrowed, not closed: the step
-      # decrements the comment's CURRENT count instead of writing the gate's
-      # stale `attempt - 1`, so a record the next gate made in between
-      # survives in either order (refund after gate: k+1 → k, the live
-      # attempt still counted; gate after refund: it reads k-1 and records
-      # k). Only the two read-modify-writes crossing inside one window still
-      # leaves the count one off. Accepted: the trigger is rare, the cost is
-      # one attempt of slack in either direction, and an escalation still
-      # drops the label and posts — never a silent stall.
-      - name: Refund infra-crashed attempt
-        if: >-
-          always() && needs.gate.outputs.act == 'fix' &&
-          env.AGENT_SKIPPED == 'true' &&
-          steps.land.outputs.pushed != '1'
-        env:
-          GH_TOKEN: ${{ steps.mint.outputs.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ needs.gate.outputs.pr }}
-          ATTEMPT: ${{ needs.gate.outputs.attempt }}
-          CAP: ${{ inputs.fix_attempt_cap }}
-          MARKER: "<!-- auto-fix-attempts -->"
-        run: |
-          set -uo pipefail
-          # Same trusted read as the gate's (finding 4121987; the helpers are
-          # copies of the gate's — keep them identical): the newest marker
-          # comment by one of TRUSTED_LOGINS, else the newest by a
-          # write-access account; any other login's is never PATCHed.
-          # Best-effort throughout, like the rest of this step.
-          ghr() {
-            local n=0 out
-            until out=$("$@"); do
-              n=$((n+1))
-              if [ "$n" -ge 4 ]; then return 1; fi
-              sleep $((n*3))
-            done
-            printf '%s' "$out"
-          }
-          perms=""
-          trusted_author() {
-            local login="$1" perm
-            [ -n "$login" ] || return 1
-            case ",${TRUSTED_LOGINS// /}," in *",$login,"*) return 0 ;; esac
-            case "$login" in *"[bot]") return 1 ;; esac
-            case "$perms" in
-              *"|$login="*) perm=${perms##*"|$login="}; perm=${perm%%"|"*} ;;
-              *) perm=$(ghr gh api "repos/$REPO/collaborators/$login/permission" --jq '.permission') || perm=""
-                 perms="$perms|$login=$perm|" ;;
-            esac
-            case "$perm" in admin|maintain|write) return 0 ;; *) return 1 ;; esac
-          }
-          parse_attempts() {
-            local n
-            [ "$(printf '%s' "$1" | grep -o 'attempts:' | wc -l | tr -d ' ')" = 1 ] || return 0
-            n=$(printf '%s' "$1" | sed -n 's/.*attempts:[[:space:]]*\([^[:space:]]*\).*/\1/p')
-            [[ "$n" =~ ^[0-9]{1,9}$ ]] && printf '%s' "$((10#$n))"
-            return 0
-          }
-          cands=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate 2>/dev/null \
-                    | jq -cs --arg m "$MARKER" '[.[][] | select(.body|contains($m)) | {id, login: (.user.login // ""), body}]' 2>/dev/null) || cands=""
-          [ -n "$cands" ] || cands="[]"
-          cid=$(jq -r --arg t "${TRUSTED_LOGINS// /}" '($t | split(",")) as $tl
-                  | map(select(.login as $l | any($tl[]; . == $l))) | last | .id // empty' <<<"$cands")
-          if [ -z "$cid" ]; then
-            while IFS=$'\t' read -r id login; do
-              [ -n "$id" ] || continue
-              if trusted_author "$login"; then cid="$id"; break; fi
-            done < <(jq -r 'reverse | .[] | [.id, .login] | @tsv' <<<"$cands")
-          fi
-          [ -z "$cid" ] && { echo "No counter comment from a trusted author found; nothing to refund."; exit 0; }
-          # Re-read the count (same parse as the gate's) rather than trusting
-          # the gate's value: the next run's gate may have re-recorded since,
-          # and an escalation's reset may have zeroed it — a body without a
-          # valid count reads as 0, as in the gate (the old fallback to this
-          # run's ATTEMPT would have undone such a reset); never below zero.
-          cur=$(parse_attempts "$(jq -r --argjson id "$cid" 'map(select(.id == $id)) | first | .body' <<<"$cands")")
-          if [ -z "$cur" ]; then
-            echo "Counter comment $cid carries no single valid 'attempts: N'; treating the count as 0."
-            cur=0
-          fi
-          prev=$(( cur > 0 ? cur - 1 : 0 ))
-          body="$MARKER
-          🤖 auto CI-fix attempts: $prev (cap $CAP). (one attempt refunded — the fix agent never ran and nothing landed: infrastructure, not the fix)"
-          gh api -X PATCH "repos/$REPO/issues/comments/$cid" -f body="$body" --silent || true
-          echo "Refunded attempt: counter $cur -> $prev (this run was attempt $ATTEMPT)."

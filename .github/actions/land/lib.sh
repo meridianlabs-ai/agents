@@ -10,21 +10,27 @@
 # markers with plain substring contains(). Case-insensitive (GNU sed `I`)
 # because the stubs gate on GitHub's contains(), which ignores case. Same
 # sed the codex landing steps and model-provenance use; keep the marker list
-# in step with the `<!-- … -->` comments the workflows read. The codex
-# reviewer's `engine: codex` footer is deliberately NOT in this list:
-# claude-review.yml lands the codex review itself through this composite,
-# and that footer is the anchor pr-feedback-context keys the next codex fix
-# round on — splitting it here would blind every codex review-fix round.
-# Callers whose bodies must not pose as a review (the CI-fix summaries in
-# claude-auto.yml) sed the footer themselves before handing the file over.
-# Truncation only drops trailing bytes, so it cannot resurrect a trigger the
-# sed removed.
+# in step with the `<!-- … -->` comments the workflows read (a test pins
+# it: every marker a consumer keys on in a machine-account comment is
+# broken here or appended by this composite after the de-fang). Two more
+# since step 3 of design/untrusted-agent-job.md, so no agent body can pose
+# as what they mark: the codex reviewer's old `engine: codex` footer, which
+# pr-feedback-context still anchors a review-fix round on (Claude Security
+# 4773878 and its siblings; the codex review now lands flagged `review`
+# and gets the `claude-review-comment` marker after this de-fang, like the
+# Claude review), and atlas_sync's `Reopened — upstream PR` reopen record
+# (4773875). Truncation only drops trailing bytes, so it cannot resurrect a
+# trigger the sed removed.
+DEFANG_SED=(
+  -e 's/@(review|claude|auto)/`\1`/gI'
+  -e 's/claude-review-(summary|verdict|comment|nudge)/claude-review \1/gI'
+  -e 's/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/gI'
+  -e 's/engine: codex/engine  codex/gI'
+  -e 's/Reopened — upstream PR/Reopened — upstream  PR/gI'
+)
 defang() {
   local src="$1" dst="$2"
-  sed -E -e 's/@(review|claude|auto)/`\1`/gI' \
-         -e 's/claude-review-(summary|verdict|comment|nudge)/claude-review \1/gI' \
-         -e 's/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/gI' \
-         "$src" >"$dst"
+  sed -E "${DEFANG_SED[@]}" "$src" >"$dst"
   if [ "$(wc -c <"$dst")" -gt 60000 ]; then
     head -c 60000 "$dst" >"$dst.trunc"
     printf '\n\n_[truncated: the body exceeded the comment size cap]_\n' >>"$dst.trunc"
@@ -34,9 +40,7 @@ defang() {
 
 # defang_str STRING — the same, for a scalar (a title); prints the result.
 defang_str() {
-  printf '%s' "$1" | tr -d '\n' | sed -E -e 's/@(review|claude|auto)/`\1`/gI' \
-    -e 's/claude-review-(summary|verdict|comment|nudge)/claude-review \1/gI' \
-    -e 's/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/gI'
+  printf '%s' "$1" | tr -d '\n' | sed -E "${DEFANG_SED[@]}"
 }
 
 # retry N WHAT CMD... — run CMD up to N times with 15/30/45… s backoff (the
@@ -367,6 +371,53 @@ logical_names() {
   done
 }
 
+# import_candidates — read an instruction file on stdin and print,
+# NUL-terminated, every path an `@` import in it may name. Claude Code (read
+# at 2.1.285) skips code spans and code blocks, scans each markdown text
+# token with /(?:^|\s)@((?:[^\s\\]|\\ )+)/g, cuts the match at `#`, and
+# turns `\ ` into a space; JavaScript's \s is Unicode whitespace, not just
+# the ASCII space the grep here used to split on, and `\ ` was not
+# unescaped (Claude Security 4774319). This takes the same tokens and errs
+# towards more, never fewer: code spans are dropped per paragraph (a lone
+# backtick stays literal), but fenced blocks are kept; any `@` not right
+# after a letter or digit starts a token (a text token also starts after
+# inline markup, as in `**@x**`); and each token is also tried cut at the
+# first markup character (*~`[]<>!()) and with trailing markup and
+# punctuation removed. A candidate that names no file protects nothing.
+# Python for the Unicode classes (the land job and the tests have it);
+# returns non-zero when it fails, so the caller can refuse unchecked.
+import_candidates() {
+  python3 -c '
+import re, sys
+ws = "\t\n\v\f\r    -     　﻿"
+
+def no_code_spans(block):
+    # A run of n backticks up to the next run of exactly n is a code span.
+    runs = [m.span() for m in re.finditer("`+", block)]
+    out, pos, k = [], 0, 0
+    while k < len(runs):
+        n = runs[k][1] - runs[k][0]
+        j = next((j for j in range(k + 1, len(runs)) if runs[j][1] - runs[j][0] == n), None)
+        if j is None:
+            k += 1
+            continue
+        out += [block[pos:runs[k][0]], " "]
+        pos, k = runs[j][1], j + 1
+    return "".join(out) + block[pos:]
+
+text = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+text = "\n\n".join(no_code_spans(b) for b in re.split("\n[ \t]*\n", text))
+seen = []
+for m in re.finditer("(?<![A-Za-z0-9])@((?:[^" + ws + "\\\\]|\\\\ )+)", text):
+    tok = m.group(1)
+    for cand in (tok, re.split("[*~`\\[\\]<>!()]", tok)[0], tok.rstrip("*_~`[](){}<>!?.,;:\"\x27")):
+        cand = cand.split("#", 1)[0].replace("\\ ", " ")
+        if cand and cand not in seen:
+            seen.append(cand)
+sys.stdout.buffer.write(b"".join(c.encode("utf-8", "surrogateescape") + b"\0" for c in seen))
+'
+}
+
 # protected_reach REV PATHSPEC... — the in-tree paths REV's entries under
 # PATHSPEC reach beyond the pathspecs themselves, NUL-terminated: every
 # symlink's resolution (resolve_tree_path: the links passed through and the
@@ -381,29 +432,30 @@ logical_names() {
 # a link inside a linked directory or an import of an import is followed;
 # more than 20 rounds fails, and so does a file with too many names
 # (logical_names). Reaching the root (`.`) ends the walk: the whole tree is
-# then protected. Over-matching is the safe direction: an `@` word
-# that is not an import (a mention) names a path that is normally absent,
-# and the imports of code spans are taken too. Returns 1 on a failed read.
+# then protected. Over-matching is the safe direction (import_candidates):
+# an `@` word that is not an import (a mention, an e-mail address) names a
+# path that is normally absent, and the imports of code spans are taken
+# too. Returns 1 on a failed read.
 protected_reach() {
-  local rev="$1" empty meta path mode oid content round=0 added imp seen f g x y d n rooted="" _
+  local rev="$1" empty meta path mode oid content round=0 added imp seen f g h x y d n rooted="" _
   shift
   local -a specs=("$@") found=() imported=() cands=() dirs=()
   LINK_ENDS=() LINK_AT=()
   empty=$(git hash-object -t tree /dev/null) || return 1
-  f=$(mktemp) && g=$(mktemp) || return 1
+  f=$(mktemp) && g=$(mktemp) && h=$(mktemp) || return 1
   while :; do
     round=$((round + 1))
     if [ "$round" -gt 20 ]; then
       echo "::error::land: the protected paths' links and imports did not settle in 20 rounds." >&2
-      rm -f "$f" "$g"; return 1
+      rm -f "$f" "$g" "$h"; return 1
     fi
     git diff --raw -z --no-renames --no-abbrev "$empty" "$rev" -- "${specs[@]}" ${found[@]+"${found[@]/#/:(literal)}"} >"$f" \
-      || { rm -f "$f" "$g"; return 1; }
+      || { rm -f "$f" "$g" "$h"; return 1; }
     added=""
     # shellcheck disable=SC2094  # the loop removes its input only on the way out (return 1)
     while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
       read -r _ mode _ oid _ <<<"$meta"
-      logical_names "$path" || { rm -f "$f" "$g"; return 1; }
+      logical_names "$path" || { rm -f "$f" "$g" "$h"; return 1; }
       imp=""
       for n in "${LN_NAMES[@]}"; do
         case "/$n" in */CLAUDE.md | */CLAUDE.local.md | */AGENTS.md | */.claude/rules/*) imp=1; break ;; esac
@@ -414,7 +466,7 @@ protected_reach() {
         # A link's resolution; an instruction file's link target is read
         # for imports like the file it stands in for, and what lies under a
         # directory link is known by the link's name too.
-        resolve_tree_path "$rev" "$path" >"$g" || { rm -f "$f" "$g"; return 1; }
+        resolve_tree_path "$rev" "$path" >"$g" || { rm -f "$f" "$g" "$h"; return 1; }
         if [ -n "$RTP_END" ]; then
           seen=""
           for x in ${LINK_AT[@]+"${LINK_AT[@]}"}; do [ "$x" != "$path" ] || { seen=1; break; }; done
@@ -427,7 +479,7 @@ protected_reach() {
           [ -z "$imp" ] || imported+=("$x")
         done <"$g"
       elif [ -n "$imp" ]; then
-        content=$(git cat-file blob "$oid") || { rm -f "$f" "$g"; return 1; }
+        content=$(git cat-file blob "$oid") || { rm -f "$f" "$g" "$h"; return 1; }
         dirs=()
         for n in "${LN_NAMES[@]}"; do
           case "$n" in */*) d="${n%/*}/" ;; *) d="" ;; esac
@@ -435,15 +487,16 @@ protected_reach() {
           for x in ${dirs[@]+"${dirs[@]}"}; do [ "$x" != "$d" ] || { seen=1; break; }; done
           [ -n "$seen" ] || dirs+=("$d")
         done
-        while IFS= read -r y; do
-          y="${y#"${y%%[![:space:]]*}"}"
-          y="${y#@}"
-          case "$y" in "" | /* | "~"*) continue ;; esac
+        # A file, not a process substitution, so a failed tokenizer fails
+        # the walk instead of reading as "no imports".
+        printf '%s\n' "$content" | import_candidates >"$h" || { rm -f "$f" "$g" "$h"; return 1; }
+        while IFS= read -r -d '' y; do
+          case "$y" in /* | "~"*) continue ;; esac
           for d in "${dirs[@]}"; do
-            resolve_tree_path "$rev" "$d$y" >"$g" || { rm -f "$f" "$g"; return 1; }
+            resolve_tree_path "$rev" "$d$y" >"$g" || { rm -f "$f" "$g" "$h"; return 1; }
             while IFS= read -r -d '' x; do cands+=("$x"); imported+=("$x"); done <"$g"
           done
-        done < <(printf '%s\n' "$content" | grep -oE '(^|[[:space:]])@[^[:space:]]+' || true)
+        done <"$h"
       fi
       for x in ${cands[@]+"${cands[@]}"}; do
         seen=""
@@ -458,7 +511,7 @@ protected_reach() {
     [ -z "$rooted" ] || break
     [ -n "$added" ] || break
   done
-  rm -f "$f" "$g"
+  rm -f "$f" "$g" "$h"
   for x in ${found[@]+"${found[@]}"}; do printf '%s\0' "$x"; done
 }
 

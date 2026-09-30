@@ -150,6 +150,7 @@ def test_defang_breaks_triggers_and_markers_case_insensitively(tmp_path):
         "<!-- claude-review-verdict --> <!-- Claude-Review-Summary --> claude-review-comment claude-review-nudge\n"
         "<!-- AUTO-HANDOFF --> auto-converged auto-review-rounds auto-review-head auto-fix-attempts\n"
         "🤖 engine: codex · Engine: Codex\n"
+        "Reopened — upstream PR https://x/1 · reopened — Upstream pr\n"
     )
     dst = tmp_path / "out.md"
     r = bash_lib(f"defang '{src}' '{dst}'")
@@ -161,10 +162,13 @@ def test_defang_breaks_triggers_and_markers_case_insensitively(tmp_path):
     assert "`review`" in out and "`Claude`" in out and "`AUTO`" in out
     # The replacement text is literal (lowercase); the captured suffix keeps its case.
     assert "claude-review verdict" in out and "auto HANDOFF" in out
-    # The codex reviewer's footer SURVIVES: claude-review.yml lands the codex review
-    # through this composite, and the footer is pr-feedback-context's anchor for the
-    # next codex fix round. Callers that must not pose as a review sed it themselves.
-    assert "🤖 engine: codex · Engine: Codex" in out
+    # Since step 3 of design/untrusted-agent-job.md the codex reviewer's old
+    # footer (pr-feedback-context's anchor for reviews posted before it;
+    # Claude Security 4773878) and atlas_sync's reopen record (4773875) are
+    # split too, in any case.
+    assert "engine: codex" not in out.lower() and "🤖 engine  codex · engine  codex" in out
+    assert "reopened — upstream pr" not in out.lower()
+    assert "Reopened — upstream  PR https://x/1 · Reopened — upstream  PR" in out
 
 
 def test_defang_caps_oversized_bodies(tmp_path):
@@ -181,6 +185,65 @@ def test_defang_str_strips_newlines_and_triggers():
     r = bash_lib("defang_str 'Fix @auto loop\nclaude-review-summary'")
     assert r.returncode == 0
     assert r.stdout == "Fix `auto` loopclaude-review summary"
+    r = bash_lib("defang_str 'Reopened — upstream PR x 🤖 Engine: codex'")
+    assert r.stdout == "Reopened — upstream  PR x 🤖 engine  codex"
+
+
+# --- the de-fang registry (step 3 of design/untrusted-agent-job.md) ---------
+#
+# Every string a consumer keys on in a machine-account comment must be broken
+# by `defang` or be text land itself appends after it — otherwise an agent
+# body, posted verbatim as the machine account, can pose as it. The consumers:
+# pr-feedback-context's anchors and filter, atlas_sync's reopen record, and
+# the loop gates (the two loop workflows and the stubs that start them). A
+# consumer that adds a marker the de-fang misses fails here.
+
+PR_FEEDBACK_CONTEXT = ROOT / ".github" / "actions" / "pr-feedback-context" / "action.yml"
+CONSUMERS = [PR_FEEDBACK_CONTEXT,
+             ROOT / ".github" / "workflows" / "claude-auto.yml",
+             ROOT / ".github" / "workflows" / "claude-auto-review.yml",
+             *sorted((ROOT / ".github" / "workflows").glob("*-stub.yml")),
+             *sorted((ROOT / "examples").glob("*.yml"))]
+# Markers land writes itself around the de-fanged body, and where it does.
+LAND_APPENDED = {"model-provenance": "{ printf '<!-- model-provenance -->\\n'; cat \"$RUNNER_TEMP/prov-body.md\"; }"}
+
+
+def consumer_markers() -> set:
+    found = set()
+    for f in CONSUMERS:
+        text = f.read_text()
+        found |= set(re.findall(r"<!--\s*([A-Za-z][A-Za-z0-9:_-]*)", text))
+        # Alternations inside one marker regex: `<!-- (a|b|c[^>]*) -->`.
+        for alt in re.findall(r"<!-- \(([^)]*)\) -->", text):
+            found |= {a.split("[")[0] for a in alt.split("|")}
+        # Markers matched without their comment delimiters (the review-fix
+        # gate's `sed -n 's/.*claude-review-verdict:…`).
+        found |= set(re.findall(r"claude-review-[a-z]+:", text))
+    # pr-feedback-context's anchor regex: its non-HTML alternatives.
+    for pattern in re.findall(r'test\("([^"]*<!--[^"]*)"\)', PR_FEEDBACK_CONTEXT.read_text()):
+        found |= {a for a in pattern.split("|") if a and not a.startswith("<!--") and not set(a) & set("()[]")}
+    src = (ROOT / ".github" / "scripts" / "atlas_sync.py").read_text()
+    found.add(re.search(r'return f"(Reopened[^{]*)\{url\}', src).group(1).strip())
+    return found
+
+
+def test_every_consumer_marker_is_broken_by_the_defang_or_appended_by_land(tmp_path):
+    markers = consumer_markers()
+    # The extraction finds what it must, so an empty list cannot pass.
+    for must in ("claude-review-comment", "claude-review-summary", "claude-review-verdict:", "auto-handoff",
+                 "auto-review-rounds", "auto-fix-attempts", "auto-review-head:", "auto-converged", "model-provenance",
+                 "🤖 engine: codex", "Reopened — upstream PR"):
+        assert must in markers, (must, sorted(markers))
+    land = LAND.read_text()
+    for m in sorted(markers):
+        src = tmp_path / "in.md"
+        src.write_text(f"{m}\nquote: <!-- {m} --> and {m.upper()}\n")
+        r = bash_lib(f"defang '{src}' '{tmp_path / 'out.md'}'")
+        assert r.returncode == 0, r.stderr
+        out = (tmp_path / "out.md").read_text().lower()
+        if m.lower() in out:
+            assert m in LAND_APPENDED, f"{m!r} survives the de-fang and is not appended by land"
+            assert LAND_APPENDED[m] in land, m
 
 
 def test_retry_returns_last_status_and_keeps_stdout_clean():
@@ -604,6 +667,10 @@ record_body() { for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >>"$ST
 gh() {
   echo "$*" >>"$STATE/calls"
   case "$*" in
+    "api repos/"*"/pulls/"*"/comments?per_page=100 --paginate --jq .[].id")
+      case "$SCENARIO" in rc-list-fails) echo '{"message": "Server Error"}'; return 1 ;; esac
+      printf '%s\n' ${RC_IDS:-} ;;
+    "api repos/"*"/pulls/"*"/comments/"*"/replies "*) record_body "$@"; return 0 ;;
     "pr view "*"--json headRefOid"*)
       case "$SCENARIO" in
         head-fails) echo '{"message": "Server Error"}'; return 1 ;;
@@ -645,7 +712,7 @@ curl() {
 """
 
 
-def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None, pr_number="", refused=False):
+def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=None, pr_number="", refused=False, rc_ids=""):
     state = tmp_path / "state"
     state.mkdir()
     landing = tmp_path / "landing"
@@ -660,6 +727,7 @@ def run_post(tmp_path, manifest: dict, files: dict, *, scenario="", slack_env=No
         "RUNNER_TEMP": str(tmp_path), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "PR_NUMBER": pr_number,
         "SLACK_TOKEN": "", "SLACK_CHANNEL": "", "SLACK_THREAD_TS": "",
         "REFUSED": "1" if refused else "",
+        "RC_IDS": rc_ids,
         **(slack_env or {}),
     }
     # `-eo pipefail`, as GitHub invokes `shell: bash` (`bash --noprofile
@@ -816,6 +884,51 @@ def test_post_appends_the_review_marker_after_the_defang(tmp_path):
         review_comments=[], comments=[{"number": 5, "body_file": "review.md"}]), REVIEW_FILES, pr_number="5")
     (body,) = posted_bodies(tmp_path / "plain")
     assert "<!-- claude-review-comment -->" not in body
+
+
+def test_post_appends_the_review_marker_to_a_codex_review_too(tmp_path):
+    # The codex review is flagged `review` since step 3: land splits a quoted
+    # old footer and appends the one live anchor, as for the Claude review.
+    files = {"codex-review.md": "Two findings. Quoting: 🤖 engine: codex\n\n🤖 Reviewed by Codex\n"}
+    m = review_landing(review_comments=[], comments=[{"number": 5, "body_file": "codex-review.md", "review": True}])
+    r, calls, writes, failed = run_post(tmp_path, m, files, pr_number="5")
+    assert r.returncode == 0 and failed == "", r.stderr
+    (body,) = posted_bodies(tmp_path)
+    assert "engine: codex" not in body and "engine  codex" in body
+    assert body.endswith("🤖 Reviewed by Codex\n\n<!-- claude-review-comment -->\n")
+
+
+def reply_landing(*ids):
+    return {"schema": 1, "repo": "o/r", "run_id": 123, "branch": "b", "start_sha": "a" * 40, "head_sha": "a" * 40,
+            "has_bundle": False, "pr_number": 5,
+            "replies": [{"review_comment_id": i, "body_file": "r.md"} for i in ids]}
+
+
+def test_post_replies_only_to_the_prs_own_review_comments(tmp_path):
+    # 11 and 12 are review comments on #5; 999 is not (another PR's, or no
+    # comment at all). The foreign id is skipped and recorded, a repeat is
+    # dropped, and each own id gets one reply.
+    r, calls, writes, failed = run_post(tmp_path, reply_landing(11, 999, 12, 11), {"r.md": "Declined: @review later.\n"},
+                                        pr_number="5", rc_ids="11 12 13")
+    assert r.returncode == 0, r.stderr
+    replies = [c for c in calls if "/replies " in c]
+    assert [c.split()[1] for c in replies] == ["repos/o/r/pulls/5/comments/11/replies", "repos/o/r/pulls/5/comments/12/replies"]
+    assert failed == "reply to review comment 999 skipped: it is not a review comment on #5"
+    assert "a second reply to review comment 11; dropped" in r.stdout
+    assert all("`review`" in b for b in posted_bodies(tmp_path))
+
+
+def test_post_posts_no_reply_when_the_review_comments_cannot_be_listed(tmp_path):
+    r, calls, writes, failed = run_post(tmp_path, reply_landing(11), {"r.md": "x\n"}, pr_number="5",
+                                        scenario="rc-list-fails", rc_ids="11")
+    assert r.returncode == 0, r.stderr
+    assert not [c for c in calls if "/replies " in c]
+    assert failed == "could not list #5's review comments; posted no replies"
+    # A PR with no review comments at all: every reply is foreign.
+    (tmp_path / "b").mkdir()
+    r, calls, writes, failed = run_post(tmp_path / "b", reply_landing(11), {"r.md": "x\n"}, pr_number="5")
+    assert not [c for c in calls if "/replies " in c]
+    assert failed == "reply to review comment 11 skipped: it is not a review comment on #5"
 
 
 def test_post_anchors_inline_review_comments_to_the_prs_head(tmp_path):
@@ -1286,13 +1399,14 @@ gh() { echo "$*" >>"$STATE/calls"; for a in "$@"; do case "$a" in body=@*) cat "
 # --- the plan step's no-change hand-back rule (Claude Security 4628734) ------
 
 
-def run_plan(tmp_path, manifest: dict, *, allow="true"):
+def run_plan(tmp_path, manifest: dict, *, allow="true", allow_handback="true", stage_override=""):
     landing = tmp_path / "landing"
     landing.mkdir(exist_ok=True)
     (landing / "manifest.json").write_text(json.dumps(manifest))
     out = tmp_path / "plan-out"
     out.write_text("")
-    env = {"DIR": str(landing), "GITHUB_OUTPUT": str(out), "ALLOW_NO_CHANGE_HANDBACK": allow}
+    env = {"DIR": str(landing), "GITHUB_OUTPUT": str(out), "ALLOW_NO_CHANGE_HANDBACK": allow,
+           "ALLOW_HANDBACK": allow_handback, "STAGE_OVERRIDE": stage_override}
     r = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step_script("plan"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     return r, dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
@@ -1332,12 +1446,36 @@ def test_plan_never_touches_a_bundled_handback(tmp_path):
     assert o["handback"] == "true" and o["handback_dropped"] == "false"
 
 
+@pytest.mark.parametrize("allow", ["false", "", "FALSE"])
+def test_plan_drops_every_handback_the_caller_does_not_allow(tmp_path, allow):
+    # claude.yml's `allow-handback`: only a run its gate put in the loop's
+    # hands (or whose caller asked for a review after the PR opens) may
+    # post the `@review`, bundle or not.
+    for manifest in (PLAN_BASE, {**PLAN_BASE, "has_bundle": True, "head_sha": "b" * 40}):
+        r, o = run_plan(tmp_path, manifest, allow_handback=allow)
+        assert o["handback"] == "false" and o["handback_dropped"] == "false", manifest
+        assert "this run owes none (allow-handback=" in r.stdout
+    _, o = run_plan(tmp_path, {**PLAN_BASE, "has_bundle": True, "head_sha": "b" * 40}, allow_handback="true")
+    assert o["handback"] == "true"
+
+
+@pytest.mark.parametrize("override,manifest_stage,expected", [
+    ("", "Review", "Review"), ("", None, ""), ("none", "Review", ""), ("Review", None, "Review"), ("Review", "Agent", "Review"),
+])
+def test_plan_stage_override_replaces_or_removes_the_manifests_stage(tmp_path, override, manifest_stage, expected):
+    m = {**PLAN_BASE, **({"stage": manifest_stage} if manifest_stage else {})}
+    _, o = run_plan(tmp_path, m, stage_override=override)
+    assert o["stage"] == expected
+
+
 def test_the_land_input_defaults_open_and_the_drop_reaches_the_hand_back_step_and_the_report():
     text = LAND.read_text()
     inp = text[text.index("  allow-no-change-handback:\n"):text.index("\noutputs:\n")]
     assert 'default: "true"' in inp
     plan = step_block(text, "plan", indent=4)
     assert "ALLOW_NO_CHANGE_HANDBACK: ${{ inputs.allow-no-change-handback }}" in plan
+    assert "ALLOW_HANDBACK: ${{ inputs.allow-handback }}" in plan
+    assert "STAGE_OVERRIDE: ${{ inputs.stage-override }}" in plan
     handback = step_block(text, "handback", indent=4)
     assert handback.splitlines()[1].strip() == "if: steps.plan.outputs.handback == 'true'"
     report = step_block(text, "report", indent=4)
@@ -2207,6 +2345,104 @@ def test_unimported_docs_and_mentions_in_code_do_not_protect_ordinary_files(repo
     assert res.returncode == 0, res.stdout + res.stderr
     assert "files" not in outputs
 
+
+
+@pytest.mark.parametrize("line,path", [
+    ("See @my\\ notes.md for more.\n", "my notes.md"),              # `\ ` is an escaped space to the CLI
+    ("See @nbsp.md for more.\n", "nbsp.md"),                   # Unicode whitespace before the `@`
+    ("See @split.md and more.\n", "split.md"),                 # and after the token
+    ("**@bold.md** is loaded too.\n", "bold.md"),                   # a text token after inline markup
+    ("Read @frag.md#usage first.\n", "frag.md"),                    # the CLI cuts the token at `#`
+])
+def test_imports_the_cli_reads_are_protected(repos, line, path):
+    # Claude Security 4774319: the old tokenizer split on ASCII space only
+    # and kept `\ ` escapes, so these imports were unprotected.
+    r = repos
+    commit_path(r, "CLAUDE.md", line)
+    on_base(r)
+    commit_path(r, path, "hostile instructions\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`" + path.replace(" ", "\\ ") + "`"
+
+
+def test_import_candidates(tmp_path):
+    src = ("see @a.md and @my\\ file.md#sec\n**@b.md** x@c.md ransom@example.com\n"
+           "@d rest @e\\x.md `@g.md` `code`@h.md\n\nlone ` tick\n\n@i.md\n")
+    (tmp_path / "in.md").write_text(src)
+    r = bash_lib(f"import_candidates <'{tmp_path / 'in.md'}'")
+    assert r.returncode == 0, r.stderr
+    cands = r.stdout.split("\0")[:-1]
+    for want in ("a.md", "my file.md", "b.md", "d", "e", "h.md", "i.md"):
+        assert want in cands, (want, cands)
+    # Code spans and e-mail addresses are not imports (as to the CLI).
+    for not_one in ("g.md", "c.md", "example.com"):
+        assert not_one not in cands, (not_one, cands)
+
+
+def test_a_failed_import_tokenizer_refuses_the_bundle_unchecked(repos):
+    r = repos
+    commit_path(r, "CLAUDE.md", "See @x.md\n")
+    on_base(r)
+    commit_path(r, "CLAUDE.md", "See @y.md\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, _ = run_workflows_step(r, repo, stub="python3() { return 1; }\n")
+    assert res.returncode != 0
+    assert "could not follow the symlinks and imports of the protected paths" in res.stdout
+
+
+def test_a_mode_change_with_the_same_blob_is_refused(repos):
+    # Claude Security 4773337: the exemption compared object ids only, so
+    # the executable bit on a protected file the base already had, with the
+    # same content, read as the base's version and landed.
+    r = repos
+    commit_path(r, ".husky/pre-commit", "echo hi\n")
+    on_base(r)
+    (r["work"] / ".husky/pre-commit").chmod(0o755)
+    git("commit", "-qam", "chmod", cwd=r["work"])
+    r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`.husky/pre-commit`"
+
+
+def test_a_type_change_with_the_same_blob_is_refused(repos):
+    # A regular CLAUDE.md whose text is `AGENTS.md`, turned into a symlink to
+    # AGENTS.md: the same blob, a different entry (the link is followed).
+    r = repos
+    commit_path(r, "AGENTS.md", "instructions\n")
+    f = r["work"] / "CLAUDE.md"
+    f.write_bytes(b"AGENTS.md")
+    git("add", "CLAUDE.md", cwd=r["work"])
+    git("commit", "-qm", "claude", cwd=r["work"])
+    r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
+    on_base(r)
+    commit_link(r, "CLAUDE.md", "AGENTS.md")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == "`CLAUDE.md`"
+
+
+@pytest.mark.parametrize("path", [":x/CLAUDE.md", ":(glob)y/AGENTS.md", ":/z/CLAUDE.md"])
+def test_a_protected_path_named_like_pathspec_magic_is_read_literally(repos, path):
+    # Claude Security 4773336: `entry` passed the agent's path to ls-tree as
+    # a pathspec, so a name starting with `:` read another path (absent at
+    # both revisions: "unchanged", exempt) or failed the read.
+    r = repos
+    commit_path(r, path, "hostile instructions\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert "files" in outputs, res.stdout
+    assert "CLAUDE.md" in outputs["files"] or "AGENTS.md" in outputs["files"]
 
 def test_failed_link_walk_refuses_the_bundle_unchecked(repos):
     r = repos
