@@ -37,6 +37,8 @@ are pushed by a separate job after its run ends.
 
 `skills/` holds the six shared skills. Both `.agents/skills` and `.claude/skills` link to it, so Codex and Claude Code discover the same files when working in this repo. Use `$skill-name` in Codex or `/skill-name` in Claude Code.
 
+The skills act with your `gh` login on text and branches outsiders control. [skills/THREAT_MODEL.md](skills/THREAT_MODEL.md) says what they trust and the rules they follow. `skills/lib/` holds the helpers the skills' scripts share; it is not a skill and needs no link. The scripts find it through their real path, so link whole skill directories as below rather than copying them.
+
 For use from other repos, link each desired skill into both user skill directories. For example, from this checkout:
 
 ```sh

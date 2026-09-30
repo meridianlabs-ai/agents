@@ -277,7 +277,8 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   apply — Meridian maintains upstream, so its standards do too; only the
   mechanics are overridden), and posts ONE findings comment on the **proxy
   issue** — never anything on the contributor's upstream PR (the maintainer
-  decides what to relay) and never the `claude-review-summary` marker (it's
+  decides what to relay; the post-upstream-review skill relays only a
+  findings comment by the machine account or a write-access author) and never the `claude-review-summary` marker (it's
   for the human, not the `@auto` loop). Eyes ack + `Agent` while
   running; back to `Review` when the findings post.
 - **Auto-requested reviews — retired 2026-09-11.** Discovery used to post
@@ -299,7 +300,11 @@ tracked by a **proxy issue in the fork** (`meridianlabs-ai/inspect_ai`):
   for promotions. The skill's external mode drives the contributor's branch
   home (conflict-merge + push via `maintainerCanModify` — its prereq; PRs
   without it are skipped and reported; never rebase/force-push a contributor
-  branch). Before it checks any queued PR out, external or promotion, the
+  branch). Its `external.sh` checks the approved commit out detached, runs
+  every git command on the contributor's tree with hooks, fsmonitor, filter
+  drivers and submodule recursion pinned off, and pushes with an explicit
+  `HEAD:refs/heads/<branch>`, creating no local branch and no `branch.*`
+  config (2026-09-30, findings 4773883 and 4773882; skills/THREAT_MODEL.md). Before it checks any queued PR out, external or promotion, the
   skill binds the approval to the commit (`approval_at_head.py` next to it,
   2026-09-15, finding 4122327): a reviewer with write access must have an
   APPROVED review naming the current head, with no later changes-requested

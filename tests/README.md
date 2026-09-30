@@ -269,24 +269,38 @@ Testing a change).
   SHA, not commit dates, is the binding) and the command line end to end
   against a stub `gh` on PATH (GETs only, `--paginate` on the lists, the
   exit codes, a head that moves during the check). Also lifts the skill's
-  approval-bound checkout blocks from `SKILL.md` and runs them against local
-  repos — promotions (the approved commit is checked out and merged; a tip
-  moved after the check stops it before anything is checked out) and
-  External PRs (the PR head is fetched without checkout and a moved head
-  carrying a `post-checkout` hook is refused without the hook running; on
-  the approved head the fork wiring makes a plain push land on the
-  contributor's branch) — and checks that every upstream merge request and
+  promotion checkout block from `SKILL.md` and runs it against local repos
+  (the approved commit is checked out and merged; a tip moved after the
+  check stops it before anything is checked out; the External path is
+  `test_merge_external.py`) — and checks that every upstream merge request and
   re-approval in the skill names the pushed commit, that the External path
   runs `checks_at_head.py` before its checkout, and — lifting the ts-mono
   step 3 block with the helper and `gh` stubbed — that the companion merge
   happens only after `companion_mergeable.py` passes on the head as it is
   then, pinned to the SHA it returned, and never after a failed recheck.
-  Also lifts the CHANGELOG-section check and the conflicted-paths block
-  (finding 4628737): entries carrying apostrophes, backticks, `$(…)`, quotes
+  Also runs the CHANGELOG-section check (`changelog_check.sh`) and the
+  conflicted-paths script (`conflicts.sh`) SKILL.md points at (finding
+  4628737): entries carrying apostrophes, backticks, `$(…)`, quotes
   and regex specials are each reported with their heading and none of them
-  runs (the block fails on an entry under a released heading, a dropped
+  runs (the check fails on an entry under a released heading, a dropped
   entry, or a copy under both), and a conflicted file name with spaces,
   quotes and `$(…)` is inspected without reaching the shell's parser.
+- `test_merge_external.py` — the merge queue's External path
+  (`skills/merge-approved-prs/external.sh`, Claude Security 4773883 and
+  4773882), run for real in a linked worktree of a local clone whose
+  config points `core.hooksPath`, `core.fsmonitor` and a required filter
+  driver at relative paths the contributor's tree supplies (plain git on
+  that tree runs them all): `start`, `commit` and `push` run none of them;
+  the approved commit is checked out detached and a moved head is refused
+  before any checkout; with the contributor's head named `main` and named
+  after an existing local branch, the clone's branches, HEAD and
+  `.git/config` are unchanged and the merge lands on their fork through
+  `HEAD:refs/heads/<branch>`; conflicts (a hostile file name among them)
+  are listed and the commit waits for their markers to go; a CHANGELOG
+  entry under a release fails the commit and the push; a rejected push is
+  reported, never forced; the push needs `maintainerCanModify` and a HEAD
+  built on the approved commit; the primary clone and a branch worktree
+  are refused.
 - `test_checks_at_head.py` — the merge queue's deferral of External PR
   trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
   Claude Security 4122327 criterion 2): the decision on canned payloads
@@ -312,6 +326,30 @@ Testing a change).
   access (`approval_at_head.TRUSTED_LOGINS` stays empty: it may not approve,
   Ransom 2026-09-16); the command line against a stub `gh` (GETs only, the
   head re-read, cached lookups).
+- `test_skills_lib.py` — `skills/lib`, the helpers the local skills share
+  (`skills/THREAT_MODEL.md`): `trusted_login` (the machine account by name,
+  other logins by a write-access lookup that fails closed and is cached per
+  repository; no other App, and no value not shaped like a login, is ever
+  looked up), `check_pr`, `genuine_proxy`, `proxy_upstream_pr`,
+  `pin_git_config` against a clone whose hooks, fsmonitor and filter
+  drivers (one defined only in the worktree's own config) resolve into the
+  tree, `rendered_refs`, and `outbound.py`'s `defang`, `defang-review` and
+  plain-text commit-message scan (complete listings only). Also fails when
+  a skill script defines its own copy of a shared helper.
+- `test_post_upstream_review.py` — `skills/post-upstream-review/gather.sh`
+  and `post.sh` against a stub `gh` (Claude Security 4773885, 4773877): the
+  findings comment is chosen only from the machine account or a
+  write-access author, an outsider's newer findings-shaped comment stops
+  the run naming them, other Apps are never looked up, the proxy must be
+  genuine and its `Upstream PR:` line under upstream, a review of yours
+  newer than the trusted comment is a double relay; the review is sent as
+  a file with `gh api --input` (no `-f` fields), rebuilt from the checked
+  fields, defanged, with the footer and the head it was mapped against;
+  `APPROVE` and malformed reviews are refused; a reference to another
+  upstream issue or PR (by a stand-in for GitHub's renderer) is refused
+  unless allowed; a changed findings comment, a moved head or a closed PR
+  refuses the post; the audit comment names both the review and the
+  findings comment.
 - `test_skill_resolution.py` — the trust rule in `skills/checkout/checkout.sh`
   and `skills/promote/promote.sh`, run against a stub `gh` that answers from
   fixtures and logs every call: a chip from a personal fork or an untrusted
@@ -370,6 +408,14 @@ Testing a change).
   no marker, no substitution run, the worktree gone and pruned, unrelated
   sibling files intact; the plain in-worktree status the skill no longer
   recommends does run the clean filter. Promotions keep `gh pr checkout`.
+  promote's ts-mono companion counts only from `meridianlabs-ai/ts-mono` by
+  a trusted author, looked up on ts-mono (a same-named PR from a personal
+  fork, or by an untrusted author, is refused and noted; two that qualify
+  are exit 6 before any write), and on the create path the branch's commit
+  messages (upstream `main...<branch tip>`, compared in the fork) are
+  refused with exit 5 before any write when one references an upstream
+  issue or PR other than the import's, or when the listing fails or is
+  incomplete; the adopt path lists none.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`
   and `Converged handoff` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from

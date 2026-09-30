@@ -8,6 +8,8 @@ description: Check out the PR branch for an issue — /checkout <issue-number> f
 Given an issue number (`/checkout 97`), find the right PR for that issue and
 check out its branch. This is a mechanical skill: the common case is ONE
 command — run it without narration and report its `OK` line at the end.
+The rules it follows for untrusted PRs and trees are in
+[the skills' trust model](../THREAT_MODEL.md).
 
 ## Fast path (usual case: issue has a linked-PR chip)
 
@@ -93,9 +95,9 @@ and 4629155.
 
 **Trust rule, applied before any PR text is read.** A linked PR (chip)
 qualifies only when its head repository is the org repo itself AND its
-author is in the script's `TRUSTED_LOGINS` (`i-am-marvin`, and its Phase 2
-GitHub App login `meridian-marvin[bot]`; one variable at the top of the
-script, compared after normalising GraphQL's bare Bot logins and `gh`'s
+author is in `TRUSTED_LOGINS` (`i-am-marvin`, and its Phase 2
+GitHub App login `meridian-marvin[bot]`; one variable in
+`skills/lib/common.sh`, shared by the skills, compared after normalising GraphQL's bare Bot logins and `gh`'s
 `app/` prefix to the REST form) or holds write access there (admin/maintain/write via the
 collaborator permission API; a failed lookup is untrusted). GitHub creates a
 chip natively for any `Fixes #N` PR into the default branch, from anyone's

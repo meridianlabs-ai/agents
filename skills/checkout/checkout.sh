@@ -42,18 +42,10 @@
 # nothing was checked out, rerun.
 set -euo pipefail
 
-# Trusted identities (comma-separated), in REST form: the machine account's
-# User login (the PAT, today) and its GitHub App login (Phase 2; trusted by
-# name — the collaborators endpoint answers `none` for an App). The User
-# leaves this ONE value when the PAT is retired. Author logins are normalised
-# to this form by NORM_LOGIN before comparison.
-TRUSTED_LOGINS="i-am-marvin,meridian-marvin[bot]"
-# NORM_LOGIN: jq filter over an author object → its login in REST form. A
-# GraphQL Bot author (`__typename: Bot`) arrives bare (`meridian-marvin`) and
-# gets the `[bot]` suffix; `gh pr list/view --json author` renders an App as
-# `app/<slug>`. A deleted author (null) is "". A User's login is never
-# rewritten, so a User who registers an App's slug is not the App.
-NORM_LOGIN='if . == null then "" elif (.__typename // "") == "Bot" then "\(.login // "")[bot]" elif ((.login // "") | startswith("app/")) then "\(.login[4:])[bot]" else (.login // "") end'
+# TRUSTED_LOGINS, NORM_LOGIN and the trust helpers (trusted_login,
+# check_pr, genuine_proxy, proxy_upstream_pr) and pin_git_config are the
+# skills' shared copies (skills/THREAT_MODEL.md).
+. "$(dirname "$(realpath "$0")")/../lib/common.sh"
 # The only repo an External proxy's upstream PR may live in.
 UPSTREAM=UKGovernmentBEIS/inspect_ai
 
@@ -79,39 +71,6 @@ fi
 REPO=$(git remote -v | grep -om1 'meridianlabs-ai/[A-Za-z0-9._-]*' | head -1 | sed 's/\.git$//' || true)
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner) ||
   { echo "no meridianlabs-ai remote and no gh default repo" >&2; exit 4; }
-
-# trusted_login <login>: 0 when <login> is in TRUSTED_LOGINS or has write
-# access on $REPO (admin/maintain/write from the collaborator permission
-# API — a public repo answers `read` for everyone else). A failed or
-# unexpected lookup is untrusted (fail closed). Cached per login for the
-# run; call it in the main shell, not inside $(...), or the cache is lost.
-PERM_CACHE=""
-trusted_login() {
-  local login perm
-  login=$(tr 'A-Z' 'a-z' <<<"$1")
-  [ -n "$login" ] || return 1
-  case ",$(tr 'A-Z' 'a-z' <<<"$TRUSTED_LOGINS")," in *",$login,"*) return 0 ;; esac
-  case "$PERM_CACHE" in *"|$login=ok|"*) return 0 ;; *"|$login=no|"*) return 1 ;; esac
-  perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>/dev/null || true)
-  case "$perm" in
-    admin|maintain|write) PERM_CACHE="$PERM_CACHE|$login=ok|"; return 0 ;;
-    *) PERM_CACHE="$PERM_CACHE|$login=no|"; return 1 ;;
-  esac
-}
-# check_pr <pr-json>: applies the trust rule; sets REASON to "" when the PR
-# qualifies, else to why it was refused. Reads only headRepository and
-# author — never the PR's title, body or branch name.
-check_pr() {
-  local head login
-  head=$(jq -r '.headRepository.nameWithOwner // ""' <<<"$1")
-  login=$(jq -r ".author | $NORM_LOGIN" <<<"$1")
-  REASON=""
-  if [ "$head" != "$REPO" ]; then
-    REASON="head repository is '${head:-unknown}', not $REPO"
-  elif ! trusted_login "$login"; then
-    REASON="author '${login:-unknown}' is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $REPO"
-  fi
-}
 
 # phys_dir <dir>: sets PHYS to the physical path of the existing directory
 # <dir> (symlinks resolved). Set, not printed: `$(…)` strips every trailing
@@ -156,10 +115,7 @@ ISSUE_LABELS=$(jq -r '[.data.repository.issue.labels.nodes[].name] | join(",")' 
 # AND labelled External. Membership in TRUSTED_LOGINS only — write access
 # is not enough here, a collaborator's own issue is not a proxy.
 PROXY=""
-case ",$(tr 'A-Z' 'a-z' <<<"$TRUSTED_LOGINS")," in
-  *",$(tr 'A-Z' 'a-z' <<<"$ISSUE_AUTHOR"),"*)
-    case ",$ISSUE_LABELS," in *",External,"*) PROXY=1 ;; esac ;;
-esac
+genuine_proxy "$ISSUE_AUTHOR" "$ISSUE_LABELS" && PROXY=1
 
 # Classify every chip. SAME_OK / CROSS_OK collect qualifying OPEN chips
 # (one compact JSON object per line); LISTING is the human record of every
@@ -174,7 +130,7 @@ while IFS= read -r chip; do
     LISTING="$LISTING$line — not open"$'\n'
     continue
   fi
-  check_pr "$chip"
+  check_pr "$REPO" "$chip"
   if [ "$(jq -r .repository.nameWithOwner <<<"$chip")" = "$REPO" ]; then
     if [ -z "$REASON" ]; then
       SAME_OK="$SAME_OK$chip"$'\n'
@@ -217,16 +173,13 @@ if [ -z "$PICK" ]; then
   # chip. Honoured ONLY for a genuine proxy (trusted author + External
   # label) and ONLY for a URL under $UPSTREAM: the line is free text on any
   # other issue. Same shape as a cross-repo chip pick.
-  UP_LINE=$(jq -r '.data.repository.issue.body // ""' <<<"$JSON" \
-    | grep -ioE 'Upstream PR:[[:space:]]*https://github\.com/[^[:space:]]+/pull/[0-9]+' | head -1 || true)
+  proxy_upstream_pr "$(jq -r '.data.repository.issue.body // ""' <<<"$JSON")" "$UPSTREAM"
   if [ -n "$UP_LINE" ]; then
-    UP_URL=$(grep -oE 'https://[^[:space:]]+' <<<"$UP_LINE")
     if [ -z "$PROXY" ]; then
       LISTING="$LISTING  body line '$UP_LINE' — REFUSED: issue is not an External proxy (author=${ISSUE_AUTHOR:-?} labels=${ISSUE_LABELS:-none})"$'\n'
-    elif ! grep -qE "^https://github\.com/$UPSTREAM/pull/[0-9]+$" <<<"$UP_URL"; then
+    elif [ -z "$UP_NUM" ]; then
       LISTING="$LISTING  body line '$UP_LINE' — REFUSED: not under $UPSTREAM"$'\n'
     else
-      UP_NUM=$(grep -oE '[0-9]+$' <<<"$UP_URL")
       # Always External: a proxy's Upstream PR is the contributor's PR, and
       # this read carries no author/head repository to prove otherwise.
       PICK=$(gh pr view "$UP_NUM" --repo "$UPSTREAM" \
@@ -367,34 +320,7 @@ if [ -n "$EXTERNAL" ]; then
   # config file.
   NOHOOKS=$(mktemp -d)
   trap 'rm -rf "$NOHOOKS"' EXIT
-  # pin_git_config: export the pins for every later git call. Filter drivers
-  # are enumerated from the clone AND, once it exists, from inside the
-  # worktree: an includeIf gitdir:… condition in the operator's config can
-  # define a driver that is active only in the linked worktree (review
-  # round 2 of #130), so this runs again after `worktree add --no-checkout`
-  # and before the first checkout. GIT_CONFIG_* entries are cleared first;
-  # a config key cannot contain a newline, so a line per pin is safe.
-  pin_git_config() {
-    local pins drivers key name pin i
-    pins="fetch.recurseSubmodules=false"$'\n'"submodule.recurse=false"$'\n'"core.hooksPath=$NOHOOKS"$'\n'"core.fsmonitor=false"$'\n'
-    drivers=$'\n'
-    while IFS= read -r key; do
-      [ -n "$key" ] || continue
-      name=${key#filter.}; name=${name%.*}
-      case "$drivers" in *$'\n'"$name"$'\n'*) continue ;; esac
-      drivers="$drivers$name"$'\n'
-      pins="${pins}filter.$name.smudge="$'\n'"filter.$name.clean="$'\n'"filter.$name.process="$'\n'"filter.$name.required=false"$'\n'
-    done <<<"$( { env -u GIT_CONFIG_COUNT git config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null;
-                  [ -d "$WT" ] && env -u GIT_CONFIG_COUNT git -C "$WT" config --name-only --get-regexp '^filter\..*\.(smudge|clean|process|required)$' 2>/dev/null; } || true)"
-    i=0
-    while IFS= read -r pin; do
-      [ -n "$pin" ] || continue
-      export "GIT_CONFIG_KEY_$i=${pin%%=*}" "GIT_CONFIG_VALUE_$i=${pin#*=}"
-      i=$((i + 1))
-    done <<<"$pins"
-    export GIT_CONFIG_COUNT=$i
-  }
-  pin_git_config
+  pin_git_config "$NOHOOKS" "$WT"
   git fetch -q --no-tags --no-recurse-submodules "$FETCH_FROM" "refs/pull/$M/head"
   GOT=$(git rev-parse FETCH_HEAD)
   if [ "$GOT" != "$SHA" ]; then
@@ -426,7 +352,7 @@ if [ -n "$EXTERNAL" ]; then
   else
     mkdir -p "$(dirname "$WT")"
     git worktree add -q --detach --no-checkout "$WT" "$SHA"
-    pin_git_config  # now with the drivers the worktree's own config activates
+    pin_git_config "$NOHOOKS" "$WT"  # now with the drivers the worktree's own config activates
     git -C "$WT" checkout -q --detach "$SHA"
   fi
   echo "OK worktree=$WT detached=$SHA pr=$PR_REPO#$M issue=#$N ($TITLE) [UNTRUSTED external tree: contributor head '$BRANCH', checked out OUTSIDE this clone (HEAD and local branches untouched); nothing from it runs here — do not start an agent session, install or run tests inside it]"

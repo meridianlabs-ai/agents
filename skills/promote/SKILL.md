@@ -8,7 +8,8 @@ description: Promote a reviewed inspect_ai fork branch upstream — open the UKG
 Promote work from `meridianlabs-ai/inspect_ai` (the fork) to
 `UKGovernmentBEIS/inspect_ai` (upstream), per the tracking contract in
 `meridianlabs-ai/agents` design/atlas-tracking.md → "The fork: promotion and
-the terminal sync".
+the terminal sync". What it trusts, and the rules for the text it publishes
+upstream under your name, are in [the skills' trust model](../THREAT_MODEL.md).
 
 ## Fast path (issue number in hand)
 
@@ -29,9 +30,9 @@ happen; nothing is written.
 
 **Trust rule, applied before any PR text is read.** A fork PR qualifies only
 when its head repository is `meridianlabs-ai/inspect_ai` itself AND its
-author is in the script's `TRUSTED_LOGINS` (`i-am-marvin`, and its Phase 2
-GitHub App login `meridian-marvin[bot]`; one variable at the top of the
-script, compared after normalising GraphQL's bare Bot logins and `gh`'s
+author is in `TRUSTED_LOGINS` (`i-am-marvin`, and its Phase 2
+GitHub App login `meridian-marvin[bot]`; one variable in
+`skills/lib/common.sh`, shared by the skills, compared after normalising GraphQL's bare Bot logins and `gh`'s
 `app/` prefix to the REST form) or holds write access on the fork (admin/maintain/write via the
 collaborator permission API; a failed lookup is untrusted). Anyone can open
 a `Fixes #N` PR from a personal fork into the fork's default branch and
@@ -105,7 +106,17 @@ rewrite hit a `#M` that is code (`echo #1`), a link destination
 (`[r]( #1-x )`, `[r]: #1-x`) or a number with no fork issue behind it. The
 `ABORT:` line prints the rendered lines that change: reword each in the fork
 PR body so no `#M` follows whitespace there, and re-run. A failed render
-also exits 5. That
+also exits 5. The branch's commit messages get the same rule, since
+upstream squash-merges with the commit messages as the squash body: before
+any write, promote lists the commits in upstream `main..<branch>` and
+**refuses with exit 5**, naming each commit, when a message references an
+upstream issue or PR other than `<up>` — a bare `#M` (a dev agent's
+"from issue #514" included), `(#M)`, `GH-M`, a qualified
+`UKGovernmentBEIS/inspect_ai#M` or an upstream URL. Commit messages are not
+Markdown, so this scan is textual and counts a ref in backticks too. Reword
+the named commits on the fork branch (qualify a fork ref as
+`meridianlabs-ai/inspect_ai#M`) and re-run. A listing that fails or comes
+back incomplete also exits 5. That
 `Upstream issue:` line is believed ONLY as /import's machine-written header
 — the body's literal first line, with the `---` rule below it and the
 upstream author's snapshot under that — and ONLY when the fork issue's author passes the same trust rule
@@ -141,11 +152,15 @@ resolved PR's head (re-run — the PR data was stale, or someone pushed); a
 companion's repo; the upstream PR body references an upstream issue or PR
 other than the import's, qualifying its bare refs would change text that
 is not a reference, or it could not be rendered to check (edit the named
-refs or text in the fork PR body and re-run); or a conflict merging upstream
+refs or text in the fork PR body and re-run); a commit message on the
+branch references an upstream issue or PR, or the commits could not be
+listed (reword the named commits and re-run); or a conflict merging upstream
 main into the branch (resolve on the branch and re-run). No upstream PR was opened in any of
 these; **6** ambiguous — more
 than one fork PR qualifies at the same step (stderr lists them): ask the
-user which one and re-run with `--pr <number>`. Never guess — the
+user which one and re-run with `--pr <number>`; or more than one open
+ts-mono PR on the branch passes the trust rule (close the stray one, or
+request the companion review by hand). Never guess — the
 2026-08-27 incident (agents #32) promoted the wrong PR and closed a live one
 as superseded.
 
@@ -164,7 +179,13 @@ companion, and (after promotion) the upstream PR. Resolution filters by
 repo, so extra chips never confuse it. A ts-mono companion (same branch
 name, open) additionally gets the SAME reviewer assigned and
 review-requested at promotion time — ts-mono has no promotion step of
-its own, so this is where the viewer half enters human sign-off.
+its own, so this is where the viewer half enters human sign-off. The
+branch name alone does not make a companion: anyone can open a ts-mono PR
+from a personal fork under the same name, so a candidate counts only when
+its head repository is `meridianlabs-ai/ts-mono` and its author is in
+`TRUSTED_LOGINS` or has write access on ts-mono (the PR rule, judged
+before anything is written). Refused candidates are noted on stderr, and
+two that qualify stop the run with exit 6.
 
 NEVER wait for GitHub to materialize a missing chip: on the fork, closing
 refs (`Fixes #N`) are inert — GitHub only processes them for PRs based on

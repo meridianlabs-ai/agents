@@ -397,6 +397,12 @@ text are checked by the tests under `tests/`.
   move as the one board write a forged review manifest can choose. A human
   reads every review.
 
+## Local skills
+
+The skills under `skills/` run in a maintainer's own session with their
+`gh` login, not in CI. Their trust model is
+[skills/THREAT_MODEL.md](skills/THREAT_MODEL.md).
+
 ## Adding or changing a workflow
 
 The rules are in [AGENTS.md](AGENTS.md) → Adding or changing a workflow.
