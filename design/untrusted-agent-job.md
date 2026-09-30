@@ -169,11 +169,19 @@ the manifest. Some of their rules exist nowhere else:
   claude-auto-review.yml:1676, claude-review.yml:1993) and the provenance
   refusal snippet (model-provenance/action.yml:164-172) do not. That is
   4773878 and its siblings 4773339, 4773881, 4773886 and 4773889.
-- **The reopen marker.** atlas_sync treats a comment as its own reopen
-  record when the author is the machine account and the body starts with
-  `Reopened — upstream PR <url> ` (atlas_sync.py:75, 680, 727-731).
-  Agent comments post verbatim as the machine account (land/action.yml:1017-1021),
-  so an agent can write that prefix. That is 4773875.
+- **The reopen marker.** Before #185, atlas_sync treated a comment as
+  its own reopen record when the author was the machine account and the
+  body started with `Reopened — upstream PR <url> `. Agent comments post
+  verbatim as the machine account (land/action.yml:1017-1021), so an
+  agent could write that prefix. That was 4773875. #185 closed it:
+  `field_is_stale()` now needs the last ReopenedEvent's actor to be the
+  machine account, a machine-account comment at or after it that starts
+  with the marker and carries an `<!-- atlas-sync-reopen event=<id>
+  comment=<id> -->` tag naming that event and that comment, and GraphQL
+  reporting the machine account as the comment's last editor
+  (atlas_sync.py `reopen_tag`, `edited_by_machine_account`,
+  `field_is_stale`). The sync posts the marker, then edits in the tag;
+  land never edits a comment, so no landing can produce the signal.
 - **Hand-back, stage and the mention.** The dev composer decides
   `handback` from the gate's `auto`, whether HEAD moved and whether there
   was an error. It decides `stage` from the hand-back. The reviewer's
@@ -451,15 +459,22 @@ strict value. The defaults flip once the direct callers are checked, as
      narrow from "any Bot type or `i-am-marvin`" to the machine account's
      two logins. The Bot clause only ever meant `claude[bot]` and the
      machine App, and `claude[bot]` stops being trusted in step 1.
-   - This fixes the root of 4773878, its is_error siblings (4773339,
-     4773881, 4773886, 4773889) and 4773875 on the trusted side. The
+   - The `Reopened — upstream PR` rule is depth, not the fix for 4773875.
+     Since #185 the marker text decides nothing on its own: atlas_sync
+     also needs its reopen tag and a machine-account edit, which land
+     cannot make (Current behaviour → The reopen marker). The rule stays
+     so an agent body still cannot even start like the sync's record.
+   - This fixes the root of 4773878 and its is_error siblings (4773339,
+     4773881, 4773886, 4773889) on the trusted side. The
      composers' own footer seds stay as harmless duplicates. (Removed with
      the legacy anchor: `land` is the one place that splits the footer.
      Decision: Ransom, 2026-09-30.)
    - A test pins the class. Every string a consumer keys on in a
      machine-account comment must be in defang's list or appended by land
-     after it. The consumers are pr-feedback-context's anchors,
-     atlas_sync's reopen marker and the loop markers already listed.
+     after it. The consumers are pr-feedback-context's anchors and the
+     loop markers already listed. atlas_sync's reopen prefix is not a
+     consumer in this sense since #185 (its tag and edit check decide);
+     the test keeps it in the list anyway, as the depth rule above.
 4. **The dev agent's hand-back and stage are bounded by trusted inputs.**
    - claude.yml's land job passes `allow-no-change-handback: "false"`,
      so a hand-back needs a bundle.
@@ -1269,16 +1284,20 @@ Unit tests (`python3 -m pytest`, CI `tests / pytest`):
   - The defaults keep today's acceptance.
 - **test_land_helpers.py.**
   - `defang` splits `engine: codex` and a leading `Reopened — upstream
-    PR`, case-insensitively.
+    PR`, case-insensitively. The second is depth: since #185 atlas_sync's
+    reopen check rests on its tag and a machine-account edit, which
+    tests/test_atlas_sync.py pins, not on the prefix.
   - A `review` comment gets `<!-- claude-review-comment -->` after the
     de-fang on a codex review too.
   - The plan step drops `handback` under `allow-handback: "false"`, and
     `stage-override` replaces or removes the manifest's `stage`.
   - The post step, against a stub `gh`, skips and reports a reply to a
     review comment id that is not on the PR, and posts one reply per id.
-  - A new class test extracts every marker pr-feedback-context,
-    atlas_sync and the loop gates key on in machine-account comments, and
-    requires each to be in defang's list or on land's appended-after list.
+  - A new class test extracts every marker pr-feedback-context and the
+    loop gates key on in machine-account comments, and requires each to
+    be in defang's list or on land's appended-after list. It also pins
+    atlas_sync's reopen prefix, as the depth rule, not as a marker that
+    decides.
 - **test_review_composer.py.**
   - The codex composer flags its comment `review` and writes no footer.
   - The reviewer's land job runs the moved `who` and loop-ownership reads
