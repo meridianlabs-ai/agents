@@ -266,12 +266,15 @@ inputs:
       trusted configuration names one (claude.yml's `base_branch`; the
       inspect_ai fork's stubs pass `main`, its pristine mirror, while its
       default branch `meridian` carries workflow files `main` does not).
-      The `workflows` step lists a branch the push creates against this
-      branch's tip on origin; compared against the default branch instead,
-      every default-only workflow file would read as deleted and a
-      source-only issue run would be refused. Empty (the default): the
-      default branch. On a PR run the PR's own base wins; the
-      `default-branch` refusal of the manifest's `branch` is unaffected.
+      For a branch the push creates, the `workflows` step lists changes
+      from the run's trusted start (`start-sha`) when this branch's tip on
+      origin descends from it, and from that tip otherwise; the tip also
+      exempts a protected path whose content already matches it. Were the
+      default branch's tip the baseline instead, every default-only
+      workflow file would read as deleted. Empty (the default): the default
+      branch.
+      On a PR run the PR's own base wins; the `default-branch` refusal of
+      the manifest's `branch` is unaffected.
     required: false
     default: ""
   pr-number:
@@ -807,6 +810,9 @@ runs:
       run: |
         set -euo pipefail
         cd "$WORK"
+        # Trimmed, as the validator trims the same input before it pins the
+        # bundle's start to it.
+        TRUSTED_START=${TRUSTED_START//[[:space:]]/}
         # The baseline (above): the branch's tip on origin; on a new branch
         # the run's trusted start when the base tip descends from it, else
         # the base tip. is-ancestor exits 1 for "no"; anything higher (a

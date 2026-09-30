@@ -3010,6 +3010,20 @@ def test_new_branch_raced_by_a_base_change_still_refuses_the_agents_own_protecte
     assert outputs["files"] == f"`{path}`"
 
 
+def test_new_branch_trusted_start_is_trimmed_as_the_validator_trims_it(repos):
+    # Review round 1 (O1): the validator strips the `start-sha` input before
+    # comparing it, so a padded value passes validation; the step must read
+    # the same SHA, not fail the ancestry lookup on the padding.
+    r = repos
+    cut_branch_from_base_tip(r)
+    commit_path(r, "src/agent.py")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, remote="", trusted=f" {r['start']}\n")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert f"between the run's trusted start ({r['start']})" in res.stdout
+
+
 def test_new_branch_with_an_unreadable_trusted_start_is_refused_unchecked(repos):
     # A trusted start this runner does not hold (the fetch step fetched the
     # manifest's): the ancestry read fails, and nothing is listed.
