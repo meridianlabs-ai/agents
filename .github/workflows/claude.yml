@@ -1403,12 +1403,14 @@ jobs:
       #   - open same-repository PR: sync-branch checked the head out at the
       #     gate's pin and merged the base (a conflicted merge is aborted
       #     and handed to the agent); this only checks HEAD is on it;
-      #   - closed or merged PR whose head branch is still on origin: its
-      #     tip must be the gate's `start_sha`, and it is checked out there
-      #     with no merge, so the continuation lands on that branch;
-      #   - closed or merged PR whose head branch is gone (no `start_sha`):
-      #     nothing can land, so `mode=comment-only`, HEAD left where the
-      #     checkout put it, and the agent answers by comment.
+      #   - closed or merged PR the gate pinned (`start_sha`): if the head
+      #     branch is still on origin its tip must be that pin, and it is
+      #     checked out there with no merge, so the continuation lands on
+      #     that branch; if origin says the branch is gone, comment-only; a
+      #     failed lookup fails the step;
+      #   - closed or merged PR with no pin (the gate's read 404'd on a
+      #     deleted branch): nothing can land, so `mode=comment-only`, HEAD
+      #     left where the checkout put it, and the agent answers by comment.
       # Fork heads never get here (the gate refuses them). `branch` and
       # `mode` are what the prompt, the composer and Surface read. After
       # the settings composer, so a `settings` path is read from the same
@@ -1422,7 +1424,6 @@ jobs:
           HEAD_BRANCH: ${{ needs.gate.outputs.head_branch }}
           START_SHA: ${{ needs.gate.outputs.start_sha }}
           SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
-          SYNC_HEAD_SHA: ${{ steps.sync.outputs.head_sha }}
           GIT_TOKEN: ${{ github.token }}
           GIT_CONFIG_COUNT: "2"
           GIT_CONFIG_KEY_0: credential.helper
@@ -1442,22 +1443,38 @@ jobs:
               echo "::error::sync-branch checked out PR #$NUM's head '$branch', but HEAD is on '${cur:-a detached HEAD}'."
               exit 1
             fi
-          elif [ -n "$START_SHA" ] && [ -n "$SYNC_HEAD_SHA" ] && [ -n "$HEAD_BRANCH" ]; then
-            # Closed or merged, head branch still on origin.
+          elif [ -n "$START_SHA" ] && [ -n "$HEAD_BRANCH" ]; then
+            # Closed or merged, and the gate read the head branch's tip. Git
+            # itself says whether the branch is still there: `ls-remote
+            # --exit-code` exits 2 for no such ref, which is the only answer
+            # that makes the run comment-only; any other failure fails the
+            # step, so a lookup error never passes for a deleted branch.
             branch="$HEAD_BRANCH"
-            git fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"
-            tip=$(git rev-parse "refs/remotes/origin/$branch")
-            if [ "$tip" != "$START_SHA" ]; then
-              echo "::error::PR #$NUM is closed and its head branch '$branch' is at $tip, not at $START_SHA where the gate read it; refusing to continue it. Re-trigger."
+            rc=0
+            git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null || rc=$?
+            if [ "$rc" = 2 ]; then
+              mode=comment-only
+              echo "PR #$NUM is closed and its head branch '$branch' was deleted after the gate read it; the agent answers by comment only."
+            elif [ "$rc" != 0 ]; then
+              echo "::error::could not tell whether PR #$NUM's head branch '$branch' is still on origin (git ls-remote exit $rc). Re-trigger."
               exit 1
+            else
+              git fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+              tip=$(git rev-parse "refs/remotes/origin/$branch")
+              if [ "$tip" != "$START_SHA" ]; then
+                echo "::error::PR #$NUM is closed and its head branch '$branch' is at $tip, not at $START_SHA where the gate read it; refusing to continue it. Re-trigger."
+                exit 1
+              fi
+              git checkout --quiet -B "$branch" "$START_SHA"
+              echo "PR #$NUM is closed; continuing its head branch '$branch' at $START_SHA (no base merge)."
             fi
-            git checkout --quiet -B "$branch" "$START_SHA"
-            echo "PR #$NUM is closed; continuing its head branch '$branch' at $START_SHA (no base merge)."
           else
-            # Closed or merged, head branch gone: nothing can land.
+            # Closed or merged, and the gate found no head branch to pin
+            # (its read 404s for a deleted branch; a read that kept failing
+            # leaves no pin either, and nothing could land without one).
             branch="$HEAD_BRANCH"
             mode=comment-only
-            echo "PR #$NUM is closed and its head branch '${HEAD_BRANCH:-unknown}' is no longer on origin; the agent answers by comment only."
+            echo "PR #$NUM is closed and the gate found no tip for its head branch '${HEAD_BRANCH:-unknown}'; nothing can land, so the agent answers by comment only."
           fi
           echo "branch: ${branch:-none}, mode: $mode"
           {

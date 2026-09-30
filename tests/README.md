@@ -188,8 +188,10 @@ Testing a change).
   design/untrusted-agent-job.md): `Prepare branch` lifted and run against
   local repositories (an issue run's new branch; an open PR left where the
   sync put it, a merge in progress untouched; a closed PR continued at the
-  gate's start, fork-shaped name included; a moved tip refused; a deleted
-  head comment-only), the prompt step's random delimiter, the gate's
+  gate's start, fork-shaped name included, whatever sync-branch's branch
+  read said; a moved tip refused; a head never pinned or deleted after the
+  gate comment-only; a failed origin lookup failing the step), sync-branch
+  emitting a closed PR's base, the prompt step's random delimiter, the gate's
   trigger-time step against stub payloads (comment, review, review
   comment, opened, labeled with the history lookup, a stale entry and the
   fallback, assigned), the gate's status comment and the land job's

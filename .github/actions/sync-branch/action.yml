@@ -111,7 +111,9 @@ inputs:
 
 outputs:
   base:
-    description: The PR's base branch name (empty when the sync was skipped).
+    description: >-
+      The PR's base branch name, from the PR read: set whenever that read
+      succeeded, a closed or fork-head PR the sync skips included.
     value: ${{ steps.sync.outputs.base }}
   branch:
     description: The PR's head branch name (empty when the sync was skipped).
@@ -215,6 +217,13 @@ runs:
           echo "::error::PR #$NUM's base is now '$base', but the caller's trusted context established '$PINNED_BASE' (the base the failed run tested); refusing to merge a base the run never saw."
           exit 1
         fi
+        # The PR's base, emitted before the closed-PR and fork-head exits
+        # below: claude.yml passes it to claude-code-action as `base_branch`,
+        # which on an issue_comment has no other source for the branch the
+        # PR targets and restores `.claude/` and `.mcp.json` from it — a
+        # closed PR continued on its live head included.
+        git check-ref-format --branch "$base" >/dev/null 2>&1 || { echo "::error::PR #$NUM's base '$base' is not a valid branch name"; exit 1; }
+        echo "base=$base" >>"$GITHUB_OUTPUT"
         # Live head tip, stamped before the agent runs and BEFORE the
         # closed-PR skip below: claude.yml's "Ensure hand-back after agent
         # push" compares it to the live tip after the run, and the closed-PR
@@ -260,7 +269,6 @@ runs:
           git fetch --quiet origin "$base"
         fi
         echo "branch=$branch" >>"$GITHUB_OUTPUT"
-        echo "base=$base" >>"$GITHUB_OUTPUT"
         # Pre-merge tip. The landing steps treat "HEAD moved past this" as
         # landable work, so stamping it BEFORE the merge is what makes a
         # merge-only round push. Stamped after, a clean merge with no agent

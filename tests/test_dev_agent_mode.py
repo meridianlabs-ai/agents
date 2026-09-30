@@ -6,8 +6,11 @@
   untouched (index and MERGE_HEAD); a closed PR whose head branch is live at
   the gate's `start_sha` is checked out there with no merge (also for a
   fork-shaped name: a closed `meridian`-based PR whose same-repository
-  branch still backs an upstream PR); a live tip that moved past it is
-  refused; a deleted head is `comment-only`.
+  branch still backs an upstream PR), whatever sync-branch's own branch
+  read returned; a live tip that moved past it is refused; a head deleted
+  after the gate read it, or never pinned, is `comment-only`; a failed
+  origin lookup fails the step. sync-branch emits a closed PR's base, which
+  the action step restores configuration from.
 - The gate's `Record the trigger time`, against stub payloads and a stub
   `gh`: a comment, a review, a review comment, an opened issue, a `labeled`
   issue (the event-history lookup, a stale entry, the fallback when the
@@ -35,7 +38,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 CLAUDE = WORKFLOWS / "claude.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_ci_fix_binding import sync_repo  # noqa: E402
+from test_ci_fix_binding import GH_STUB as SYNC_GH_STUB, sync_repo  # noqa: E402
 from test_ci_fix_gate import step_script  # noqa: E402
 from test_land_helpers import git, job_block, sh  # noqa: E402
 from test_app_token_minting import REUSABLE, jobs, steps  # noqa: E402
@@ -45,6 +48,7 @@ TRIGGER_TIME = step_script(CLAUDE, "        id: triggertime", 10)
 STATUS = step_script(CLAUDE, "        id: status", 10)
 FINISH = step_script(CLAUDE, "        id: finish", 10)
 PROMPT = step_script(CLAUDE, "        id: prompt", 10)
+SYNC = step_script(ROOT / ".github" / "actions" / "sync-branch" / "action.yml", "    - id: sync", 8)
 
 
 def outputs(path):
@@ -58,7 +62,7 @@ def prep(tmp_path, work, **env):
     out = tmp_path / "prep-output"
     out.write_text("")
     base = {"IS_PR": "false", "NUM": "12", "BASE": "main", "HEAD_BRANCH": "", "START_SHA": "",
-            "SYNC_BRANCH": "", "SYNC_HEAD_SHA": "", "GITHUB_RUN_NUMBER": "40", "GITHUB_OUTPUT": str(out),
+            "SYNC_BRANCH": "", "GITHUB_RUN_NUMBER": "40", "GITHUB_OUTPUT": str(out),
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ALLOW_PROTOCOL": "file", "PATH": os.environ["PATH"]}
     res = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", PREP, cwd=work, check=False,
              env={**base, **env})
@@ -86,7 +90,7 @@ def test_an_open_pr_is_left_where_the_sync_put_it(tmp_path):
     work = sync_repo(tmp_path)   # on `shared`, as sync-branch leaves an open PR
     before = head(work)
     res, out = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH="shared", START_SHA=before,
-                    SYNC_BRANCH="shared", SYNC_HEAD_SHA=before)
+                    SYNC_BRANCH="shared")
     assert res.returncode == 0, res.stderr
     assert out == {"branch": "shared", "mode": "commit"} and head(work) == before
 
@@ -100,7 +104,7 @@ def test_a_merge_left_for_the_agent_is_not_touched(tmp_path):
     unmerged = git("ls-files", "-u", cwd=work).stdout
     assert unmerged
     res, _ = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH="shared", START_SHA=head(work),
-                  SYNC_BRANCH="shared", SYNC_HEAD_SHA=head(work))
+                  SYNC_BRANCH="shared")
     assert res.returncode == 0, res.stderr
     assert (work / ".git" / "MERGE_HEAD").read_text() == merge_head
     assert git("ls-files", "-u", cwd=work).stdout == unmerged
@@ -122,7 +126,9 @@ def test_a_closed_pr_with_a_live_head_is_checked_out_at_the_gates_start(tmp_path
         git("push", "-q", "origin", f"shared:refs/heads/{name}", cwd=work)
     tip = git("rev-parse", "origin/shared", cwd=work).stdout.strip()
     git("checkout", "-q", "main", cwd=work)      # the checkout's default ref: sync-branch skipped the closed PR
-    res, out = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH=name, START_SHA=tip, SYNC_HEAD_SHA=tip)
+    # sync-branch's own branch read is not consulted (it is best-effort, and
+    # an empty answer there must not turn a live branch into comment-only).
+    res, out = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH=name, START_SHA=tip)
     assert res.returncode == 0, res.stderr
     assert out == {"branch": name, "mode": "commit"}
     assert current(work) == name and head(work) == tip
@@ -132,13 +138,13 @@ def test_a_closed_pr_with_a_live_head_is_checked_out_at_the_gates_start(tmp_path
 def test_a_closed_pr_whose_head_moved_is_refused(tmp_path):
     work = sync_repo(tmp_path)
     git("checkout", "-q", "main", cwd=work)
-    res, _ = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH="shared", START_SHA="a" * 40,
-                  SYNC_HEAD_SHA="a" * 40)
+    res, _ = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH="shared", START_SHA="a" * 40)
     assert res.returncode != 0 and "not at " + "a" * 40 in res.stdout
     assert current(work) == "main"
 
 
 def test_a_closed_pr_whose_head_is_gone_is_comment_only(tmp_path):
+    # No pin: the gate's read of the branch 404'd.
     work = sync_repo(tmp_path)
     git("checkout", "-q", "main", cwd=work)
     before = head(work)
@@ -146,6 +152,54 @@ def test_a_closed_pr_whose_head_is_gone_is_comment_only(tmp_path):
     assert res.returncode == 0, res.stderr
     assert out == {"branch": "deleted", "mode": "comment-only"}
     assert current(work) == "main" and head(work) == before
+
+
+def test_a_head_deleted_after_the_gate_read_it_is_comment_only(tmp_path):
+    work = sync_repo(tmp_path)
+    tip = git("rev-parse", "origin/shared", cwd=work).stdout.strip()
+    git("checkout", "-q", "main", cwd=work)
+    git("push", "-q", "origin", "--delete", "shared", cwd=work)
+    res, out = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH="shared", START_SHA=tip)
+    assert res.returncode == 0, res.stderr
+    assert out == {"branch": "shared", "mode": "comment-only"} and current(work) == "main"
+
+
+def test_a_failed_origin_lookup_fails_rather_than_going_comment_only(tmp_path):
+    work = sync_repo(tmp_path)
+    tip = git("rev-parse", "origin/shared", cwd=work).stdout.strip()
+    git("checkout", "-q", "main", cwd=work)
+    git("remote", "set-url", "origin", str(tmp_path / "unreachable.git"), cwd=work)
+    res, out = prep(tmp_path, work, IS_PR="true", NUM="34", HEAD_BRANCH="shared", START_SHA=tip)
+    assert res.returncode != 0 and "could not tell whether" in res.stdout
+    assert "mode" not in out
+
+
+def test_sync_branch_emits_a_closed_prs_base(tmp_path):
+    # claude.yml passes it as the action's base_branch, the only source of
+    # the PR's base on an issue_comment: without it a closed PR continued on
+    # its head would restore .claude/ and .mcp.json from the default branch.
+    work = sync_repo(tmp_path)
+    git("checkout", "-q", "main", cwd=work)
+    binp = tmp_path / "bin"
+    binp.mkdir()
+    (binp / "gh").write_text(SYNC_GH_STUB)
+    (binp / "gh").chmod(0o755)
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "calls").write_text("")
+    (stub / "pr").write_text(json.dumps({"headRefName": "shared", "baseRefName": "release",
+                                         "isCrossRepository": False, "state": "MERGED"}))
+    out = tmp_path / "sync-output"
+    out.write_text("")
+    env = {"PATH": f"{binp}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_OUTPUT": str(out),
+           "GH_TOKEN": "x", "REPO": "o/r", "NUM": "34", "ENGINE": "claude", "CHECKOUT": "true",
+           "USER_NAME": "a", "USER_EMAIL": "a@b", "PINNED_BASE": "", "PINNED_BASE_SHA": "",
+           "PINNED_HEAD_SHA": "", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ALLOW_PROTOCOL": "file"}
+    res = sh("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", SYNC, cwd=work, check=False, env=env)
+    assert res.returncode == 0, res.stderr
+    o = outputs(out)
+    assert o["base"] == "release" and "branch" not in o and "merge_sha" not in o
+    assert "          base_branch: ${{ steps.sync.outputs.base || inputs.base_branch }}\n" in claude_action_step()
 
 
 # --- the prompt ----------------------------------------------------------------

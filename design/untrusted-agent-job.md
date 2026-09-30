@@ -1644,8 +1644,14 @@ THREAT_MODEL.md text that its change makes true.
        comment. `dev-agent-status` joined `defang`'s list, since
        pr-feedback-context now keys on it (the registry test).
      - `Prepare branch` refuses an open PR whose HEAD is not on the head
-       branch sync-branch checked out. The launcher no longer records HEAD:
-       only launch step 6 read it.
+       branch sync-branch checked out. For a closed PR it goes by the
+       gate's pin and asks origin (`git ls-remote --exit-code`) whether the
+       branch is still there: only "no such ref" makes the run
+       comment-only, and a failed lookup fails the step. sync-branch now
+       emits the PR's `base` before its closed-PR exit, so a closed PR's
+       issue-comment run restores `.claude/` and `.mcp.json` from the PR's
+       own base. The launcher no longer records HEAD: only launch step 6
+       read it.
      - The private-repository image check has not been run: no Meridian
        caller repository is private, and a private test repository has to
        be made for it. The image code was run against a real public
