@@ -743,10 +743,21 @@ def last_reopen(issue: int):
     return n.get("id") or "", n.get("createdAt") or "", graphql_login(n.get("actor"))
 
 
+class OriginUnverified(Exception):
+    """A recovery marker's origin could not be read this run.
+
+    Neither answer is safe to act on: "not the sync's" retires a genuine
+    recovery's field for good (the row then leaves the scan), and "the
+    sync's" lets a terminal PR close an issue nobody verified. So
+    field_is_stale lets it through its own best-effort handler, and
+    main's per-item handler skips the item until a later run can read it.
+    """
+
+
 def edited_by_machine_account(comment) -> bool:
     """Whether a REST issue comment was last edited by the machine account,
-    read from GraphQL (REST carries no editor). An origin check, so a failed
-    lookup fails closed: not edited."""
+    read from GraphQL (REST carries no editor). A failed lookup raises
+    OriginUnverified rather than answering."""
     try:
         node = gql(
             """query($id:ID!){ node(id:$id){ ... on IssueComment{
@@ -754,8 +765,9 @@ def edited_by_machine_account(comment) -> bool:
             id=comment.get("node_id") or "",
         )["node"] or {}
     except (RuntimeError, ValueError, KeyError, TypeError) as e:
-        print(f"::warning::comment edit lookup failed for {comment.get('id')}: {e}")
-        return False
+        raise OriginUnverified(
+            f"edit lookup for comment {comment.get('id')} failed: {e}"
+        ) from e
     return (
         node.get("databaseId") == comment.get("id")
         and bool(node.get("lastEditedAt"))
@@ -840,7 +852,8 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
     park — accepted: the window is consecutive calls in one run, and the
     outcome self-announces (the retire comment lands on the issue, naming
     the PR). Best-effort: unreadable timeline or comments -> not stale
-    (the old behavior); an unreadable comment edit is not the sync's edit.
+    (the old behavior). An unreadable comment edit is neither answer: it
+    raises OriginUnverified and the run leaves the item alone.
     """
     terminal_ts = pr.get("mergedAt") or pr.get("closedAt") or ""
     if not terminal_ts:
@@ -864,6 +877,8 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
             and edited_by_machine_account(c)
             for c in issue_comments(FORK, issue)
         )
+    except OriginUnverified:
+        raise  # not "not stale": the caller must not act on this item
     except Exception as e:  # noqa: BLE001
         print(f"::warning::reopen-timeline check failed for #{issue}: {e}")
         return False
@@ -1486,6 +1501,8 @@ def main() -> int:
     for row in board_items():
         try:
             sync_item(row)
+        except OriginUnverified as e:
+            print(f"::warning::#{row['issue']} left unchanged this run: {e}")
         except Exception as e:  # noqa: BLE001 — per-item isolation
             print(f"::warning::sync failed for #{row['issue']}: {e}")
     try:

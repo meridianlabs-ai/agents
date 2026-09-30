@@ -192,8 +192,9 @@ Testing a change).
   machine-account marker comment that names that event and its own id and
   was last edited by the machine account. A marker after a human's reopen,
   or a correctly tagged comment that was only posted (as land would post
-  it), retires the field. A test pins the list of comment-edit paths in
-  `.github/` that this proof relies on.
+  it), retires the field. When the editor cannot be read, the run changes
+  nothing on that item, at each of the three callers. A test pins the list
+  of comment-edit paths in `.github/` that this proof relies on.
 - `test_ci_fix_binding.py` — the CI-fix loop's run-to-PR binding (Claude
   Security 4628657): the `bind-ci-run` composite's step, lifted the same
   way and run against a stub `gh` answering the run record and the

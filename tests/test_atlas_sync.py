@@ -833,11 +833,82 @@ def test_a_tagged_comment_not_last_edited_by_the_machine_account_does_not_keep_t
     assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
 
 
-def test_a_failed_edit_read_fails_closed_and_warns(gh, capsys):
+def test_a_failed_edit_read_is_neither_answer(gh):
+    # Review round 2, B1: "not the sync's" would retire a genuine recovery for
+    # good; "not stale" would let a terminal PR close an unverified issue.
     reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=RuntimeError("graphql: boom"))
-    # an origin check: unreadable means not the sync's, unlike the timeline
-    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
-    assert "comment edit lookup failed for 5001" in capsys.readouterr().out
+    with pytest.raises(atlas.OriginUnverified, match="comment 5001"):
+        atlas.field_is_stale(9, MERGED, REOPEN_URL)
+
+
+@pytest.fixture
+def writes(monkeypatch):
+    """Every board and issue write sync_item can make, recorded."""
+    log = []
+    for name in ("clear_field", "set_single_select", "close_issue", "comment"):
+        monkeypatch.setattr(atlas, name, lambda *a, _n=name: log.append((_n, *a)))
+    monkeypatch.setattr(atlas, "set_stage", lambda *a: log.append(("set_stage", *a)) or True)
+    monkeypatch.setattr(atlas, "auto_closed_by_pr", lambda issue: True)
+    return log
+
+
+def recovered_row(gh, monkeypatch, edit, *, open_, pr_state, external=False, stage="Review"):
+    """Issue #9 carrying a genuine, tagged sync recovery (reopen event and
+    marker by the machine account), with the comment-edit read answering
+    `edit`; its upstream PR is `pr_state`. Runs sync_item on the row."""
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=edit)
+    gh.route(lambda a: a[:3] == ("api", "-X", "PATCH"), "{}")
+    merged = pr_state == "MERGED"
+    monkeypatch.setattr(atlas, "upstream_pr", lambda url: {
+        "_ref": ("UKGovernmentBEIS", "inspect_ai", 1), "merged": merged,
+        "state": "MERGED" if merged else "CLOSED", "headRefName": "",
+        "mergedAt": "2026-09-01T00:00:00Z" if merged else None,
+        "closedAt": "2026-09-01T00:00:00Z"})
+    atlas.sync_item({"url": REOPEN_URL, "stage": stage, "item": "I", "issue": 9,
+                     "open": open_, "state_reason": "COMPLETED", "external": external})
+
+
+CALL_SITES = [
+    # (issue open, upstream state, external proxy): the three field_is_stale callers
+    pytest.param(False, "MERGED", False, id="closed-issue"),
+    pytest.param(True, "MERGED", False, id="open-merged"),
+    pytest.param(True, "CLOSED", False, id="open-closed-unmerged"),
+    pytest.param(True, "CLOSED", True, id="open-closed-unmerged-proxy"),
+]
+
+
+@pytest.mark.parametrize("open_, pr_state, external", CALL_SITES)
+def test_an_unreadable_origin_leaves_the_item_untouched(gh, monkeypatch, writes, open_, pr_state, external):
+    with pytest.raises(atlas.OriginUnverified):
+        recovered_row(gh, monkeypatch, RuntimeError("graphql: boom"),
+                      open_=open_, pr_state=pr_state, external=external)
+    assert writes == []
+    assert gh.matching(lambda a: a[:3] == ("api", "-X", "PATCH")) == []  # no close, no reopen
+
+
+@pytest.mark.parametrize("open_, pr_state, external", CALL_SITES)
+def test_a_later_readable_run_keeps_the_genuine_recovery(gh, monkeypatch, writes, open_, pr_state, external):
+    recovered_row(gh, monkeypatch, edited(), open_=open_, pr_state=pr_state, external=external)
+    # the field is never retired (no "field cleared" comment, no clear of it)
+    assert not any(w[0] == "clear_field" and w[2] == atlas.UPSTREAM_PR_FIELD for w in writes)
+    assert not any(w[0] == "comment" and "Upstream PR field cleared" in w[2] for w in writes)
+    if (open_, pr_state, external) == (True, "CLOSED", False):
+        assert writes == []  # parked at Review for the human decision
+
+
+def test_main_skips_an_unreadable_item_and_goes_on(gh, monkeypatch, writes, capsys):
+    rows = [{"url": REOPEN_URL, "stage": "Review", "item": "I", "issue": 9,
+             "open": True, "state_reason": None, "external": False}]
+    monkeypatch.setattr(atlas, "board_items", lambda: rows)
+    monkeypatch.setattr(atlas, "reflect_companion_loops", lambda: None)
+    monkeypatch.setattr(atlas, "retrigger_stale_handbacks", lambda: None)
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=RuntimeError("graphql: boom"))
+    monkeypatch.setattr(atlas, "upstream_pr", lambda url: {
+        "_ref": ("UKGovernmentBEIS", "inspect_ai", 1), "merged": True, "state": "MERGED",
+        "mergedAt": "2026-09-01T00:00:00Z", "closedAt": "2026-09-01T00:00:00Z", "headRefName": ""})
+    assert atlas.main() == 0
+    assert writes == []
+    assert "#9 left unchanged this run" in capsys.readouterr().out
 
 
 def test_a_machine_account_marker_after_a_human_reopen_does_not_keep_the_field(gh):
@@ -941,6 +1012,15 @@ def test_a_reopen_the_sync_cannot_prove_is_left_untagged(gh, monkeypatch, read_b
     body, edits = recovery_row(gh, monkeypatch, read_back, before=before)
     assert body.startswith(atlas.reopen_marker(REOPEN_URL))
     assert edits == []
+
+
+def test_a_machine_account_reopen_between_the_pre_read_and_the_patch_is_tagged_as_the_syncs(gh, monkeypatch):
+    # The documented residual race: another machine-account reopen lands
+    # after the pre-read, so the sync's PATCH is a no-op and the read-back
+    # finds that reopen. The sync had decided to reopen the issue itself, so
+    # the outcome is the one its own reopen would have had.
+    _, edits = recovery_row(gh, monkeypatch, reopen_event("REE_land", "meridian-marvin", "Bot"))
+    assert edits and edits[0].endswith(atlas.reopen_tag("REE_land", CID))
 
 
 def test_only_the_loops_counter_comments_are_edited_by_machine_account_code():
