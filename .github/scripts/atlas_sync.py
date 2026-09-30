@@ -93,6 +93,12 @@ UPSTREAM_PR_FIELD = "PVTF_lADOC7YMCM4BU68pzhYZp9Q"
 # Stages where the ball is upstream — the promotion mapping's whole domain.
 TAIL_STAGES = ("Sign-off", "Merge")
 
+# The shape of a dev-agent companion branch, matched whole before the name
+# goes into a REST path (reflect_companion_loops): ASCII only, and the part
+# after the number carries no `/`, `?`, `#`, `%` or `.`. The agents name
+# them claude/issue-N-<date>-<time>, -run-<id> or -codex-<n>.
+COMPANION_BRANCH_RE = re.compile(r"claude/issue-([0-9]+)-[A-Za-z0-9_-]+")
+
 actions: list = []  # human-readable log for the job summary
 
 # The token every ts-mono call runs under (Phase 2 of the credential
@@ -170,6 +176,24 @@ def graphql_login(author) -> str:
     login = author.get("login") or ""
     if login and author.get("__typename") == "Bot" and not login.endswith("[bot]"):
         return f"{login}[bot]"
+    return login
+
+
+def cli_login(author) -> str:
+    """A `gh pr list --json author` object as its REST login.
+
+    gh renders an App author as `app/<slug>` with `is_bot` set (the
+    machine account's companion PRs read `app/meridian-marvin`), where REST
+    and TRUSTED_LOGINS carry `<slug>[bot]`. A User's login is kept as is. A
+    missing author (deleted account) is "".
+    """
+    if not isinstance(author, dict):
+        return ""
+    login = author.get("login") or ""
+    if login and author.get("is_bot"):
+        login = login.removeprefix("app/")
+        if not login.endswith("[bot]"):
+            login = f"{login}[bot]"
     return login
 
 
@@ -672,12 +696,129 @@ def companion_blocks_merge(issue: int, pr) -> bool:
 def reopen_marker(url: str) -> str:
     """Shared prefix of the sync's own recovery-reopen comments.
 
-    Load-bearing: field_is_stale keys on this prefix to tell the sync's
-    own reopen (which exists to decide THIS PR's fate) from a reopen that
-    starts a new generation of work — change it and the closed-early
-    recovery path starts retiring its own field an hour later.
+    Load-bearing: field_is_stale keys on this prefix, together with the
+    reopen_tag the sync's edit adds, to tell the sync's own reopen (which
+    exists to decide THIS PR's fate) from a reopen that starts a new
+    generation of work — change it and the closed-early recovery path
+    starts retiring its own field an hour later.
     """
     return f"Reopened — upstream PR {url} "
+
+
+def reopen_tag(event_id: str, comment_id) -> str:
+    """The hidden line the sync's edit adds to its recovery-reopen comment.
+
+    It names the ReopenedEvent the sync's own PATCH created (node id) and
+    the comment itself (REST id). The comment's id exists only once the
+    comment does, so the line can only be added by editing it, and
+    field_is_stale also requires the comment's last editor to be the
+    machine account. That is what no landing can produce (finding
+    4773875): land posts agent-written comments as the machine account and
+    the fork reviewer's land job can reopen an issue (`issues[].comment_on`
+    + `reopen`), but land never edits a comment. The only other
+    machine-account comment edits (the loops' counter comments) write
+    fixed bodies to comments carrying a counter marker, which land's
+    defang strips; tests/test_atlas_sync.py pins that list.
+    """
+    return f"<!-- atlas-sync-reopen event={event_id} comment={comment_id} -->"
+
+
+def last_reopen(issue: int):
+    """The issue's last ReopenedEvent as (node id, createdAt, actor login),
+    or None when it has none. The actor is the REST login (graphql_login),
+    so the machine account's App reads as MACHINE_BOT. Raises on a failed
+    lookup."""
+    nodes = gql(
+        """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
+             issue(number:$n){
+               timelineItems(itemTypes:[REOPENED_EVENT], last:1){
+                 nodes{ ... on ReopenedEvent{ id createdAt actor{login __typename} }}}}}}""",
+        o=FORK.split("/")[0],
+        r=FORK.split("/")[1],
+        n=issue,
+    )["repository"]["issue"]["timelineItems"]["nodes"]
+    if not nodes:
+        return None
+    n = nodes[0]
+    return n.get("id") or "", n.get("createdAt") or "", graphql_login(n.get("actor"))
+
+
+class OriginUnverified(Exception):
+    """A recovery marker's origin could not be read this run.
+
+    Neither answer is safe to act on: "not the sync's" retires a genuine
+    recovery's field for good (the row then leaves the scan), and "the
+    sync's" lets a terminal PR close an issue nobody verified. So
+    field_is_stale lets it through its own best-effort handler, and
+    main's per-item handler skips the item until a later run can read it.
+    """
+
+
+def edited_by_machine_account(comment) -> bool:
+    """Whether a REST issue comment was last edited by the machine account,
+    read from GraphQL (REST carries no editor). A failed lookup raises
+    OriginUnverified rather than answering."""
+    try:
+        node = gql(
+            """query($id:ID!){ node(id:$id){ ... on IssueComment{
+                 databaseId lastEditedAt editor{login __typename} }}}""",
+            id=comment.get("node_id") or "",
+        )["node"] or {}
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:
+        raise OriginUnverified(
+            f"edit lookup for comment {comment.get('id')} failed: {e}"
+        ) from e
+    return (
+        node.get("databaseId") == comment.get("id")
+        and bool(node.get("lastEditedAt"))
+        and graphql_login(node.get("editor")) in TRUSTED_LOGINS
+    )
+
+
+def recovery_reopen(issue: int, body: str) -> None:
+    """The closed-early recovery: reopen the issue, post `body` (which
+    starts with reopen_marker) and edit it to add reopen_tag.
+
+    The tag is added only when the read-back finds a machine-account
+    reopen that is not the one the timeline showed before the PATCH, so a
+    PATCH that was a no-op (someone else reopened first) is not claimed.
+    Left untagged (a failed read, or an edit that fails), the reopen looks
+    like anyone's: the next run retires the field instead of keeping it
+    (the known gap field_is_stale describes), never the other way round.
+    Residual race: a machine-account reopen that lands between the
+    pre-read and the PATCH, on an issue the sync was reopening anyway, is
+    tagged as the sync's.
+    """
+    try:
+        before = last_reopen(issue)
+    except Exception as e:  # noqa: BLE001 — reopen anyway, untagged
+        print(f"::warning::reopen pre-read failed for #{issue}: {e}")
+        before = False
+    gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
+    posted = gh_json("api", f"repos/{FORK}/issues/{issue}/comments", "-f", f"body={body}")
+    if before is False:
+        return
+    try:
+        ev = last_reopen(issue)
+        if (
+            not ev
+            or not ev[0]
+            or ev[2] not in TRUSTED_LOGINS
+            or (before and before[0] == ev[0])
+        ):
+            print(f"::warning::reopen read-back for #{issue} found no new reopen by the sync")
+            return
+        cid = posted["id"]
+        gh(
+            "api",
+            "-X",
+            "PATCH",
+            f"repos/{FORK}/issues/comments/{cid}",
+            "-f",
+            f"body={body}\n\n{reopen_tag(ev[0], cid)}",
+        )
+    except Exception as e:  # noqa: BLE001 — the comment stays, untagged
+        print(f"::warning::reopen tagging failed for #{issue}: {e}")
 
 
 def field_is_stale(issue: int, pr, url: str) -> bool:
@@ -693,43 +834,51 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
     PR's terminal timestamp — EXCEPT when that reopen is the sync's own
     closed-early recovery: it postdates the terminal by construction but
     exists to decide this same PR's fate, not to start a new generation.
-    Its marker comment (see reopen_marker) lands right after the
-    ReopenedEvent, so a MACHINE_ACCOUNT marker at/after the last reopen
-    means the reopen was the sync's own (the author check keeps another
-    commenter's echo of the prefix from suppressing detection; the
-    pagination-safe fetch keeps the marker from aging out of a fixed
-    window). Known gap: the marker posts in the API call right after the
-    recovery's reopen PATCH, so a transient comment failure between the
-    two leaves that reopen unmarked and the next run retires the field
-    instead of re-running the recovery's Review park — accepted: the
-    window is two consecutive calls in one run, and the outcome
-    self-announces (the retire comment lands on the issue, naming the
-    PR). Best-effort: unreadable timeline -> not stale (the old
-    behavior).
+    The sync's own reopen is recognised by three facts together (finding
+    4773875): the ReopenedEvent's actor is the machine account; a
+    machine-account comment at/after it starts with reopen_marker and
+    carries reopen_tag naming THAT event and the comment's own id; and the
+    comment's last editor is the machine account (recovery_reopen posts,
+    then edits). The actor alone is not enough: the fork reviewer's land
+    job reopens issues as the machine account too. Text alone is not
+    enough: land posts agent-written comments under the same login, and
+    event ids are public. The edit is what land cannot do (see
+    reopen_tag). The pagination-safe fetch keeps the marker from aging out
+    of a fixed window. Known gap: the marker is tagged in the API calls
+    right after the recovery's reopen PATCH, so a transient failure there
+    (the comment, the read-back or the edit) leaves that reopen
+    unrecognised and the
+    next run retires the field instead of re-running the recovery's Review
+    park — accepted: the window is consecutive calls in one run, and the
+    outcome self-announces (the retire comment lands on the issue, naming
+    the PR). Best-effort: unreadable timeline or comments -> not stale
+    (the old behavior). An unreadable comment edit is neither answer: it
+    raises OriginUnverified and the run leaves the item alone.
     """
     terminal_ts = pr.get("mergedAt") or pr.get("closedAt") or ""
     if not terminal_ts:
         return False
     try:
-        nodes = gql(
-            """query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){
-                 issue(number:$n){
-                   timelineItems(itemTypes:[REOPENED_EVENT], last:1){
-                     nodes{ ... on ReopenedEvent{ createdAt }}}}}}""",
-            o=FORK.split("/")[0],
-            r=FORK.split("/")[1],
-            n=issue,
-        )["repository"]["issue"]["timelineItems"]["nodes"]
-        reopened_ts = nodes[0]["createdAt"] if nodes else ""
+        ev = last_reopen(issue)
+        if not ev:
+            return False
+        event_id, reopened_ts, actor = ev
         if not (reopened_ts and reopened_ts > terminal_ts):
             return False
+        if not event_id or actor not in TRUSTED_LOGINS:
+            return True
         marker = reopen_marker(url)
         return not any(
             (c.get("body") or "").startswith(marker)
+            and reopen_tag(event_id, c.get("id")) in (c.get("body") or "")
             and (c.get("created_at") or "") >= reopened_ts
             and (c.get("user") or {}).get("login") in TRUSTED_LOGINS
+            # last: one GraphQL read, only for a comment that passed the rest
+            and edited_by_machine_account(c)
             for c in issue_comments(FORK, issue)
         )
+    except OriginUnverified:
+        raise  # not "not stale": the caller must not act on this item
     except Exception as e:  # noqa: BLE001
         print(f"::warning::reopen-timeline check failed for #{issue}: {e}")
         return False
@@ -853,7 +1002,6 @@ def sync_item(row) -> None:
                 "-> left closed, Stage cleared"
             )
             return
-        gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
         escape_hatch = (
             "If the close was deliberate, close it again (any reason), or "
             "clear the item's Upstream PR field — the sync respects both. "
@@ -866,9 +1014,10 @@ def sync_item(row) -> None:
             # will. Runs at most once per issue: next hour the reopened row
             # takes the open path, whose TAIL_STAGES gate keeps Review
             # parked — and whose staleness gate stays quiet, because
-            # field_is_stale recognizes this reopen's marker comment and
-            # knows the field still names the PR under decision.
-            comment(
+            # field_is_stale recognizes this reopen by its actor and the
+            # marker comment the sync tagged by editing it, and knows the
+            # field still names the PR under decision.
+            recovery_reopen(
                 issue,
                 reopen_marker(row["url"]) + "was closed unmerged and "
                 "needs a human decision; this issue was closed early (most "
@@ -882,7 +1031,7 @@ def sync_item(row) -> None:
                 f"#{issue}: closed with upstream closed unmerged -> reopened (Review)"
             )
             return
-        comment(
+        recovery_reopen(
             issue,
             reopen_marker(row["url"]) + "is still open; this issue "
             "was closed early (most likely by a linked companion PR merging). "
@@ -1090,6 +1239,14 @@ def reflect_companion_loops() -> None:
     machinery owns the issue (Agent); otherwise a human does (Review).
     Only items already in Agent/Review move — parked stages are left
     alone, same as the promotion tail.
+
+    ts-mono is public, so neither a branch name nor a comment is identity
+    on its own (finding 4773874). A PR counts as the companion only when
+    its head is in ts-mono itself (not a fork of it), its branch name has
+    the dev agent's exact shape (COMPANION_BRANCH_RE), and its author is
+    trusted (trusted_author on ts-mono: the machine account, or a
+    write-access human). A marker counts only from a comment whose author
+    is trusted the same way.
     """
     try:
         prs = gh_json(
@@ -1105,15 +1262,29 @@ def reflect_companion_loops() -> None:
             "--limit",
             "200",
             "--json",
-            "number,headRefName,labels",
+            "number,headRefName,labels,author,isCrossRepository",
             repo=TS_MONO,
         )
     except RuntimeError as e:
         print(f"::warning::companion reflection: pr list failed: {e}")
         return
     for cpr in prs:
-        m = re.match(r"claude/issue-(\d+)-", cpr.get("headRefName") or "")
+        m = COMPANION_BRANCH_RE.fullmatch(cpr.get("headRefName") or "")
         if not m:
+            continue
+        # Same-repository head and a trusted author: an outsider can open a
+        # fork-of-ts-mono PR with any head name.
+        if cpr.get("isCrossRepository") is not False:
+            actions.append(
+                f"{TS_MONO}#{cpr['number']}: head is not in {TS_MONO} — not a companion"
+            )
+            continue
+        author = cli_login(cpr.get("author"))
+        if not trusted_author(author, TS_MONO):
+            actions.append(
+                f"{TS_MONO}#{cpr['number']}: author {author or '(none)'} is not a "
+                "trusted author — not a companion"
+            )
             continue
         # Companion, not ts-mono-native: the SAME branch must exist on the
         # fork (ts-mono's own dev agent mints identically-shaped names whose
@@ -1137,16 +1308,24 @@ def reflect_companion_loops() -> None:
         go_ts, stop_ts = "", ""
         for c in comments:
             body, ts = c.get("body") or "", c.get("created_at") or ""
-            if (
+            stop = (
                 "auto-handoff" in body
                 or "auto-converged" in body
                 or "claude-review-verdict:clean" in body
-            ):
-                stop_ts = max(stop_ts, ts)
-            elif (
+            )
+            go = not stop and (
                 body.strip() == "@" + "review"
                 or "claude-review-verdict:suggestions" in body
+            )
+            # Looked up only for a marker-shaped comment: a PR's other
+            # comments cost no permission lookup.
+            if (stop or go) and not trusted_author(
+                (c.get("user") or {}).get("login") or "", TS_MONO
             ):
+                continue
+            if stop:
+                stop_ts = max(stop_ts, ts)
+            elif go:
                 go_ts = max(go_ts, ts)
         # The no-progress escalation posts NO marker — it exits the loop by
         # REMOVING the auto label (observed: ts-mono#557 escalated and the
@@ -1322,6 +1501,8 @@ def main() -> int:
     for row in board_items():
         try:
             sync_item(row)
+        except OriginUnverified as e:
+            print(f"::warning::#{row['issue']} left unchanged this run: {e}")
         except Exception as e:  # noqa: BLE001 — per-item isolation
             print(f"::warning::sync failed for #{row['issue']}: {e}")
     try:

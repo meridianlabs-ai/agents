@@ -204,7 +204,18 @@ Testing a change).
   the companion merge gate clearing only on a write-access reviewer's
   APPROVED review naming the companion's current head (never on
   `reviewDecision` alone) — the machine account's App login included, with
-  GraphQL's bare Bot login restored to its REST form before the check.
+  GraphQL's bare Bot login restored to its REST form before the check. Also
+  the companion-loop reflection (finding 4773874): a ts-mono PR is a
+  companion only with a same-repository head, a trusted author and a branch
+  name of the strict shape, and its loop markers count only from trusted
+  commenters; and the stale-field check (4773875): the sync's own recovery
+  reopen is recognised only by a machine-account ReopenedEvent plus a
+  machine-account marker comment that names that event and its own id and
+  was last edited by the machine account. A marker after a human's reopen,
+  or a correctly tagged comment that was only posted (as land would post
+  it), retires the field. When the editor cannot be read, the run changes
+  nothing on that item, at each of the three callers. A test pins the list
+  of comment-edit paths in `.github/` that this proof relies on.
 - `test_ci_fix_binding.py` — the CI-fix loop's run-to-PR binding (Claude
   Security 4628657): the `bind-ci-run` composite's step, lifted the same
   way and run against a stub `gh` answering the run record and the

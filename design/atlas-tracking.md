@@ -379,7 +379,16 @@ because the field still named a PR merged weeks earlier (#46 — the field
 is *generational*: it describes one promotion, and a reopen after that
 PR's terminal state starts a new generation the field no longer
 represents — except the sync's *own* recovery reopen, which exists to
-decide that same PR's fate and is recognized by its marker comment).
+decide that same PR's fate. The sync posts its marker comment right
+after the reopen, then edits it to add a line naming the new
+ReopenedEvent and the comment's own id. The reopen counts as the sync's
+only when the event's actor is the machine account and a machine-account
+comment after it carries that line and was last edited by the machine
+account. The land composite posts agent-written comments as the machine
+account, and the fork reviewer's land job can reopen an issue through its
+manifest, but land never edits a comment. The loops' counter comments are
+the only other machine-account edits, and they write fixed text (finding
+4773875).
 Retiring the stale field also resets the old generation's Stage to
 Agent (Review for External proxies, whose lifecycle has no Agent): a
 parked Sign-off/Merge is the same kind of stale claim, and with the
@@ -580,7 +589,12 @@ stage, resolved by the hourly sync:
   reading ownership from the loop's ending-contract markers (continue:
   re-review trigger / verdict:suggestions; stop: auto-handoff /
   auto-converged / verdict:clean). Only items already in Agent/Review
-  move; parked stages stay parked.
+  move; parked stages stay parked. ts-mono is public, so a PR counts as
+  the companion only when its head is in ts-mono itself (not a fork),
+  its author is trusted (the machine account or a write-access human,
+  looked up on ts-mono) and its branch name has the dev agent's exact
+  shape before it goes into the fork-branch lookup; a marker counts only
+  from a commenter trusted the same way (finding 4773874).
 - **Single-writer discipline**: ts-mono's own agent workflows (dev,
   reviewer, auto loop) run on ts-mono PRs but never write Atlas stage;
   the sync is the only component that folds companion state into the

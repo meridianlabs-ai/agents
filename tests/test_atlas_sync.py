@@ -6,7 +6,10 @@ believed comment text (retrigger_stale_handbacks) and issue-body text
 (companion_pr) from anyone. Finding 4628443 (2026-09-21): it then believed
 any author whose payload carried an OWNER/MEMBER/COLLABORATOR
 `author_association`, which GitHub reports for org members and invited
-collaborators at ANY repository permission, read and triage included. Every
+collaborators at ANY repository permission, read and triage included.
+Findings 4773874 and 4773875 (2026-09-30): the companion-loop reflection
+believed any ts-mono PR and comment, and the stale-field check believed a
+machine-account comment's text (see those sections). Every
 `gh` call goes through the module's `gh()` wrapper, so the tests stand in a
 fake for it and route each call by the arguments. Run with `python3 -m
 pytest` from the repo root.
@@ -737,30 +740,492 @@ def test_an_importers_own_directive_above_the_rule_is_honoured(gh):
 
 
 # ------------------------------------------------------------ field_is_stale
+#
+# Finding 4773875: the sync's own recovery reopen was recognised by a
+# machine-account comment starting with reopen_marker, but the land composite
+# posts agent-written text under that login and the fork reviewer's land job
+# can reopen an issue (`issues[].reopen`). It is recognised now by the
+# ReopenedEvent's actor, a marker comment tagged with that event and its own
+# comment id, and the machine account as that comment's last editor: land
+# posts comments but never edits one.
 
 
 REOPEN_URL = "https://github.com/UKGovernmentBEIS/inspect_ai/pull/1"
+MERGED = {"mergedAt": "2026-09-01T00:00:00Z"}
+REOPEN_TS = "2026-09-02T00:00:00Z"
+SYNC_EVENT = "REE_sync"
+HUMAN_EVENT = "REE_human"
+CID = 5001
 
 
-def reopened_issue(gh, marker_login):
-    """Issue #9 reopened after its PR merged, with a reopen-marker comment by
-    `marker_login` right after the reopen (None: no marker)."""
-    gh.route(has("timelineItems"), {"data": {"repository": {"issue": {"timelineItems": {
-        "nodes": [{"createdAt": "2026-09-02T00:00:00Z"}]}}}}})
-    comments = []
-    if marker_login:
-        comments.append({"body": atlas.reopen_marker(REOPEN_URL) + "parked", "created_at": "2026-09-02T00:00:01Z",
-                         "user": {"login": marker_login}})
+def reopen_event(event_id, actor, typename="User", ts=REOPEN_TS):
+    return {"data": {"repository": {"issue": {"timelineItems": {"nodes": [
+        {"id": event_id, "createdAt": ts, "actor": {"login": actor, "__typename": typename}}]}}}}}
+
+
+NO_REOPEN = {"data": {"repository": {"issue": {"timelineItems": {"nodes": []}}}}}
+SYNC_REOPEN = reopen_event(SYNC_EVENT, "meridian-marvin", "Bot")
+
+
+def marker(event_id=None, cid=CID, rest="parked"):
+    body = atlas.reopen_marker(REOPEN_URL) + rest
+    return body + "\n\n" + atlas.reopen_tag(event_id, cid) if event_id else body
+
+
+def by(login, body, cid=CID, created="2026-09-02T00:00:01Z"):
+    return {"id": cid, "node_id": f"IC_{cid}", "body": body, "created_at": created, "user": {"login": login}}
+
+
+def is_edit_query(args):
+    return args[:2] == ("api", "graphql") and "lastEditedAt" in args[3]
+
+
+def edited(editor="meridian-marvin", typename="Bot", cid=CID):
+    """The comment-edit read: last edited by `editor` (None: never edited)."""
+    node = {"databaseId": cid, "lastEditedAt": None, "editor": None}
+    if editor:
+        node.update(lastEditedAt="2026-09-02T00:00:02Z", editor={"login": editor, "__typename": typename})
+    return {"data": {"node": node}}
+
+
+def reopened_issue(gh, event, comments, edit=None):
+    """Issue #9 reopened after its PR merged by `event`, then these comments;
+    `edit` answers the comment-edit read (default: edited by the App)."""
+    gh.route(is_edit_query, edit or edited())
+    gh.route(has("timelineItems"), event)
     gh.route(has(f"repos/{FORK}/issues/9/comments?per_page=100"), [comments])
 
 
-@pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT])
-def test_the_syncs_own_reopen_marker_under_either_login_keeps_the_field(gh, login):
-    reopened_issue(gh, login)
-    assert atlas.field_is_stale(9, {"mergedAt": "2026-09-01T00:00:00Z"}, REOPEN_URL) is False
+@pytest.mark.parametrize(
+    "actor, typename, commenter",
+    [
+        ("meridian-marvin", "Bot", MARVIN_BOT),  # GraphQL renders the App bare
+        (MARVIN, "User", MARVIN),
+    ],
+)
+def test_the_syncs_own_tagged_and_edited_reopen_keeps_the_field(gh, actor, typename, commenter):
+    reopened_issue(gh, reopen_event(SYNC_EVENT, actor, typename), [by(commenter, marker(SYNC_EVENT))])
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is False
+    (q,) = gh.matching(is_edit_query)
+    assert "id=IC_5001" in q
 
 
-@pytest.mark.parametrize("login", ["drive-by", "foo[bot]", None])
-def test_a_reopen_without_the_syncs_own_marker_makes_the_field_stale(gh, login):
-    reopened_issue(gh, login)
-    assert atlas.field_is_stale(9, {"mergedAt": "2026-09-01T00:00:00Z"}, REOPEN_URL) is True
+def test_a_landing_reopen_then_a_correctly_tagged_landing_comment_does_not_keep_the_field(gh):
+    # Review round 1, B1: land reopens a closed issue as the machine account;
+    # a later landing reads that public event and posts the marker tagged
+    # with it and its own id. Every text and author check passes, but land
+    # only posts: the comment was never edited.
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=edited(None))
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        edited("ransomr", "User"),  # a human edited it: not the sync's edit
+        edited("claude", "Bot"),  # another App
+        edited(cid=9999),  # the node read names another comment
+        {"data": {"node": None}},
+    ],
+)
+def test_a_tagged_comment_not_last_edited_by_the_machine_account_does_not_keep_the_field(gh, edit):
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=edit)
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
+
+
+def test_a_failed_edit_read_is_neither_answer(gh):
+    # Review round 2, B1: "not the sync's" would retire a genuine recovery for
+    # good; "not stale" would let a terminal PR close an unverified issue.
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=RuntimeError("graphql: boom"))
+    with pytest.raises(atlas.OriginUnverified, match="comment 5001"):
+        atlas.field_is_stale(9, MERGED, REOPEN_URL)
+
+
+@pytest.fixture
+def writes(monkeypatch):
+    """Every board and issue write sync_item can make, recorded."""
+    log = []
+    for name in ("clear_field", "set_single_select", "close_issue", "comment"):
+        monkeypatch.setattr(atlas, name, lambda *a, _n=name: log.append((_n, *a)))
+    monkeypatch.setattr(atlas, "set_stage", lambda *a: log.append(("set_stage", *a)) or True)
+    monkeypatch.setattr(atlas, "auto_closed_by_pr", lambda issue: True)
+    return log
+
+
+def recovered_row(gh, monkeypatch, edit, *, open_, pr_state, external=False, stage="Review"):
+    """Issue #9 carrying a genuine, tagged sync recovery (reopen event and
+    marker by the machine account), with the comment-edit read answering
+    `edit`; its upstream PR is `pr_state`. Runs sync_item on the row."""
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=edit)
+    gh.route(lambda a: a[:3] == ("api", "-X", "PATCH"), "{}")
+    merged = pr_state == "MERGED"
+    monkeypatch.setattr(atlas, "upstream_pr", lambda url: {
+        "_ref": ("UKGovernmentBEIS", "inspect_ai", 1), "merged": merged,
+        "state": "MERGED" if merged else "CLOSED", "headRefName": "",
+        "mergedAt": "2026-09-01T00:00:00Z" if merged else None,
+        "closedAt": "2026-09-01T00:00:00Z"})
+    atlas.sync_item({"url": REOPEN_URL, "stage": stage, "item": "I", "issue": 9,
+                     "open": open_, "state_reason": "COMPLETED", "external": external})
+
+
+CALL_SITES = [
+    # (issue open, upstream state, external proxy): the three field_is_stale callers
+    pytest.param(False, "MERGED", False, id="closed-issue"),
+    pytest.param(True, "MERGED", False, id="open-merged"),
+    pytest.param(True, "CLOSED", False, id="open-closed-unmerged"),
+    pytest.param(True, "CLOSED", True, id="open-closed-unmerged-proxy"),
+]
+
+
+@pytest.mark.parametrize("open_, pr_state, external", CALL_SITES)
+def test_an_unreadable_origin_leaves_the_item_untouched(gh, monkeypatch, writes, open_, pr_state, external):
+    with pytest.raises(atlas.OriginUnverified):
+        recovered_row(gh, monkeypatch, RuntimeError("graphql: boom"),
+                      open_=open_, pr_state=pr_state, external=external)
+    assert writes == []
+    assert gh.matching(lambda a: a[:3] == ("api", "-X", "PATCH")) == []  # no close, no reopen
+
+
+@pytest.mark.parametrize("open_, pr_state, external", CALL_SITES)
+def test_a_later_readable_run_keeps_the_genuine_recovery(gh, monkeypatch, writes, open_, pr_state, external):
+    recovered_row(gh, monkeypatch, edited(), open_=open_, pr_state=pr_state, external=external)
+    # the field is never retired (no "field cleared" comment, no clear of it)
+    assert not any(w[0] == "clear_field" and w[2] == atlas.UPSTREAM_PR_FIELD for w in writes)
+    assert not any(w[0] == "comment" and "Upstream PR field cleared" in w[2] for w in writes)
+    if (open_, pr_state, external) == (True, "CLOSED", False):
+        assert writes == []  # parked at Review for the human decision
+
+
+def test_main_skips_an_unreadable_item_and_goes_on(gh, monkeypatch, writes, capsys):
+    rows = [{"url": REOPEN_URL, "stage": "Review", "item": "I", "issue": 9,
+             "open": True, "state_reason": None, "external": False}]
+    monkeypatch.setattr(atlas, "board_items", lambda: rows)
+    monkeypatch.setattr(atlas, "reflect_companion_loops", lambda: None)
+    monkeypatch.setattr(atlas, "retrigger_stale_handbacks", lambda: None)
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT))], edit=RuntimeError("graphql: boom"))
+    monkeypatch.setattr(atlas, "upstream_pr", lambda url: {
+        "_ref": ("UKGovernmentBEIS", "inspect_ai", 1), "merged": True, "state": "MERGED",
+        "mergedAt": "2026-09-01T00:00:00Z", "closedAt": "2026-09-01T00:00:00Z", "headRefName": ""})
+    assert atlas.main() == 0
+    assert writes == []
+    assert "#9 left unchanged this run" in capsys.readouterr().out
+
+
+def test_a_machine_account_marker_after_a_human_reopen_does_not_keep_the_field(gh):
+    # The finding: land posts an agent's comment carrying the marker prefix
+    # (even one naming the human's public event id) as the machine account.
+    reopened_issue(gh, reopen_event(HUMAN_EVENT, "ransomr"), [
+        by(MARVIN_BOT, marker(), cid=1),
+        by(MARVIN_BOT, marker(HUMAN_EVENT, cid=2), cid=2),
+    ])
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
+    assert gh.matching(is_edit_query) == []  # decided by the actor, no edit read
+
+
+@pytest.mark.parametrize(
+    "body",
+    [marker(), marker("REE_other"), marker(SYNC_EVENT, cid=4242)],  # untagged, other event, other comment
+)
+def test_a_machine_account_reopen_without_its_own_tag_does_not_keep_the_field(gh, body):
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, body)])
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
+
+
+@pytest.mark.parametrize("login", ["drive-by", "foo[bot]"])
+def test_a_tagged_marker_from_anyone_else_does_not_keep_the_field(gh, login):
+    reopened_issue(gh, SYNC_REOPEN, [by(login, marker(SYNC_EVENT))])
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
+
+
+def test_a_tagged_marker_older_than_the_reopen_does_not_keep_the_field(gh):
+    reopened_issue(gh, SYNC_REOPEN, [by(MARVIN_BOT, marker(SYNC_EVENT), created="2026-09-01T23:59:59Z")])
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
+
+
+def test_another_apps_reopen_is_not_the_syncs(gh):
+    reopened_issue(gh, reopen_event(SYNC_EVENT, "other-app", "Bot"), [by(MARVIN_BOT, marker(SYNC_EVENT))])
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is True
+
+
+def test_a_reopen_before_the_terminal_is_not_stale(gh):
+    reopened_issue(gh, reopen_event(HUMAN_EVENT, "ransomr", ts="2026-08-31T00:00:00Z"), [])
+    assert atlas.field_is_stale(9, MERGED, REOPEN_URL) is False
+
+
+def is_issue_patch(args):
+    return args[:4] == ("api", "-X", "PATCH", f"repos/{FORK}/issues/9")
+
+
+def is_comment_edit(args):
+    return args[:4] == ("api", "-X", "PATCH", f"repos/{FORK}/issues/comments/{CID}")
+
+
+def recovery_row(gh, monkeypatch, read_back, before=NO_REOPEN):
+    """Closed non-external issue #9 at Sign-off whose upstream PR closed
+    unmerged before it was panel-closed: the sync's recovery reopen. The
+    timeline shows `before` until the sync's PATCH, then `read_back`.
+    Returns the posted body and the edits made to it."""
+    patched = lambda: bool(gh.matching(is_issue_patch))
+    gh.route(lambda a: has("timelineItems")(a) and patched(), read_back)
+    gh.route(has("timelineItems"), before)
+    gh.route(is_issue_patch, "{}")
+    gh.route(is_comment_edit, "{}")
+    gh.route(lambda a: a[:2] == ("api", f"repos/{FORK}/issues/9/comments"), {"id": CID, "node_id": f"IC_{CID}"})
+    monkeypatch.setattr(atlas, "upstream_pr", lambda url: {
+        "_ref": ("UKGovernmentBEIS", "inspect_ai", 1), "merged": False, "state": "CLOSED",
+        "closedAt": "2026-09-01T00:00:00Z", "mergedAt": None})
+    monkeypatch.setattr(atlas, "auto_closed_by_pr", lambda issue: True)
+    monkeypatch.setattr(atlas, "set_stage", lambda item, stage, cur: True)
+    atlas.sync_item({"url": REOPEN_URL, "stage": "Sign-off", "item": "I", "issue": 9,
+                     "open": False, "state_reason": "COMPLETED", "external": False})
+    (post,) = gh.matching(lambda a: a[:2] == ("api", f"repos/{FORK}/issues/9/comments"))
+    assert gh.calls.index(post) > gh.calls.index(gh.matching(is_issue_patch)[0])
+    return post[-1].removeprefix("body="), [e[-1].removeprefix("body=") for e in gh.matching(is_comment_edit)]
+
+
+def test_the_recovery_reopen_posts_then_edits_in_its_tag_and_the_next_run_keeps_the_field(gh, monkeypatch):
+    body, edits = recovery_row(gh, monkeypatch, SYNC_REOPEN)
+    assert body.startswith(atlas.reopen_marker(REOPEN_URL))
+    assert "atlas-sync-reopen" not in body  # the post itself carries no tag
+    (final,) = edits
+    assert final == body + "\n\n" + atlas.reopen_tag(SYNC_EVENT, CID)
+    # next hour: the same timeline, the comment as the sync left it
+    later = FakeGH()
+    monkeypatch.setattr(atlas, "gh", later)
+    reopened_issue(later, SYNC_REOPEN, [by(MARVIN_BOT, final)])
+    assert atlas.field_is_stale(9, {"closedAt": "2026-09-01T00:00:00Z"}, REOPEN_URL) is False
+
+
+@pytest.mark.parametrize(
+    "read_back, before",
+    [
+        (RuntimeError("graphql: boom"), NO_REOPEN),
+        (NO_REOPEN, NO_REOPEN),
+        (reopen_event(HUMAN_EVENT, "ransomr"), NO_REOPEN),
+        # the PATCH was a no-op: the machine-account reopen was already there
+        (SYNC_REOPEN, SYNC_REOPEN),
+        # the pre-read failed: nothing to tell the new event from an old one
+        (SYNC_REOPEN, RuntimeError("graphql: boom")),
+    ],
+)
+def test_a_reopen_the_sync_cannot_prove_is_left_untagged(gh, monkeypatch, read_back, before):
+    body, edits = recovery_row(gh, monkeypatch, read_back, before=before)
+    assert body.startswith(atlas.reopen_marker(REOPEN_URL))
+    assert edits == []
+
+
+def test_a_machine_account_reopen_between_the_pre_read_and_the_patch_is_tagged_as_the_syncs(gh, monkeypatch):
+    # The documented residual race: another machine-account reopen lands
+    # after the pre-read, so the sync's PATCH is a no-op and the read-back
+    # finds that reopen. The sync had decided to reopen the issue itself, so
+    # the outcome is the one its own reopen would have had.
+    _, edits = recovery_row(gh, monkeypatch, reopen_event("REE_land", "meridian-marvin", "Bot"))
+    assert edits and edits[0].endswith(atlas.reopen_tag("REE_land", CID))
+
+
+def test_only_the_loops_counter_comments_are_edited_by_machine_account_code():
+    """The proof above rests on land never editing a comment: the only
+    comment edits in the machine account's trusted code are the loops'
+    counter rewrites, which write a fixed body. A new edit path must be
+    checked against reopen_tag before it joins this list."""
+    import re
+
+    edit = re.compile(r"PATCH[^\n]*issues/comments|updateIssueComment|--edit-last")
+    found = {
+        str(f.relative_to(ROOT))
+        for f in (ROOT / ".github").rglob("*")
+        if f.is_file() and f != SCRIPT and edit.search(f.read_text(errors="ignore"))
+    }
+    assert found == {
+        ".github/workflows/claude-auto.yml",
+        ".github/workflows/claude-auto-review.yml",
+        ".github/actions/reset-auto-counters/action.yml",
+    }
+
+
+# ---------------------------------------------------- reflect_companion_loops
+#
+# Finding 4773874: the reflection believed any ts-mono PR named
+# claude/issue-N-* whose branch exists on the fork, and any comment's loop
+# markers on it. ts-mono is public: an outsider can comment on the real
+# companion, or open a fork-of-ts-mono PR with a head named after a fork branch.
+
+COMP = 50
+COMP_BRANCH = "claude/issue-42-20260915-1200"
+
+
+def ts_pr(number=COMP, branch=COMP_BRANCH, author=None, cross=False, labels=("auto",)):
+    return {
+        "number": number,
+        "headRefName": branch,
+        "labels": [{"name": n} for n in labels],
+        "author": author or {"is_bot": True, "login": "app/meridian-marvin"},
+        "isCrossRepository": cross,
+    }
+
+
+def ts_comment(body, login=MARVIN_BOT, created="2026-09-02T00:00:00Z"):
+    return {"body": body, "created_at": created, "user": {"login": login}}
+
+
+@pytest.fixture
+def stages(monkeypatch):
+    moves = []
+
+    def record(item, stage, current):
+        moves.append((item, stage, current))
+        return stage != current
+
+    monkeypatch.setattr(atlas, "set_stage", record)
+    return moves
+
+
+def reflection(gh, prs, comments, stage="Review"):
+    """ts-mono lists `prs`; each has `comments`; every branch exists on the
+    fork; fork issue #42 is Ransom's, open, on Atlas at `stage`."""
+    gh.route(lambda a: a[:2] == ("pr", "list"), prs)
+    gh.route(lambda a: a[0] == "api" and a[1].startswith(f"repos/{FORK}/branches/"), "{}")
+    gh.route(has("projectItems"), {"data": {"repository": {"issue": {
+        "state": "OPEN",
+        "assignees": {"nodes": [{"login": atlas.REVIEWER}]},
+        "projectItems": {"nodes": [{"id": "ITEM", "project": {"id": atlas.PROJECT_ID},
+                                    "fieldValueByName": {"name": stage}}]}}}}})
+    gh.route(has(f"repos/{TS_MONO}/issues/"), [comments])
+
+
+def fork_branch_checks(gh):
+    return gh.matching(lambda a: a[0] == "api" and a[1].startswith(f"repos/{FORK}/branches/"))
+
+
+def test_a_trusted_go_marker_on_the_machine_accounts_companion_engages(gh, stages):
+    reflection(gh, [ts_pr()], [ts_comment("@" + "review")])
+    atlas.reflect_companion_loops()
+    assert stages == [("ITEM", "Agent", "Review")]
+
+
+def test_a_write_access_humans_marker_counts_after_a_lookup(gh, stages):
+    permission(gh, "colleague", "write")
+    reflection(gh, [ts_pr()], [ts_comment("@" + "review", login="colleague")])
+    atlas.reflect_companion_loops()
+    assert stages == [("ITEM", "Agent", "Review")]
+    assert gh.repos_of(is_permission_lookup) == [TS_MONO]
+
+
+def test_a_trusted_stop_marker_hands_back(gh, stages):
+    reflection(gh, [ts_pr()], [
+        ts_comment("@" + "review", created="2026-09-01T00:00:00Z"),
+        ts_comment("<!-- auto-handoff -->", created="2026-09-02T00:00:00Z"),
+    ], stage="Agent")
+    atlas.reflect_companion_loops()
+    assert stages == [("ITEM", "Review", "Agent")]
+
+
+@pytest.mark.parametrize("body", ["@" + "review", "<!-- claude-review-verdict:suggestions -->"])
+def test_an_outsiders_go_marker_on_an_auto_companion_moves_nothing(gh, stages, body):
+    permission(gh, "drive-by", "read")
+    reflection(gh, [ts_pr()], [ts_comment(body, login="drive-by")])
+    atlas.reflect_companion_loops()
+    # no counted go marker: not engaged, and the item already rests at Review
+    assert [s for s in stages if s[1] != s[2]] == []
+
+
+@pytest.mark.parametrize("body", ["auto-handoff", "auto-converged", "claude-review-verdict:clean"])
+def test_an_outsiders_stop_marker_does_not_hand_back_an_engaged_loop(gh, stages, body):
+    permission(gh, "drive-by", "none")
+    reflection(gh, [ts_pr()], [
+        ts_comment("@" + "review", created="2026-09-01T00:00:00Z"),
+        ts_comment(body, login="drive-by", created="2026-09-02T00:00:00Z"),
+    ], stage="Agent")
+    atlas.reflect_companion_loops()
+    assert [s for s in stages if s[1] != s[2]] == []
+
+
+def test_a_sub_write_members_marker_is_not_counted(gh, stages):
+    permission(gh, "triager", "triage")
+    reflection(gh, [ts_pr()], [ts_comment("@" + "review", login="triager")])
+    atlas.reflect_companion_loops()
+    assert [s for s in stages if s[1] != s[2]] == []
+
+
+def test_an_outsiders_fork_of_ts_mono_pr_is_not_a_companion(gh, stages):
+    reflection(gh, [ts_pr(author={"is_bot": False, "login": "drive-by"}, cross=True)],
+               [ts_comment("@" + "review")])
+    atlas.reflect_companion_loops()
+    assert stages == []
+    assert fork_branch_checks(gh) == []
+    assert gh.matching(is_permission_lookup) == []  # refused before any lookup
+
+
+def test_a_cross_repository_head_is_refused_whoever_opened_it(gh, stages):
+    reflection(gh, [ts_pr(cross=True)], [ts_comment("@" + "review")])
+    atlas.reflect_companion_loops()
+    assert stages == []
+    assert fork_branch_checks(gh) == []
+
+
+def test_a_pr_without_the_cross_repository_flag_fails_closed(gh, stages):
+    pr = ts_pr()
+    del pr["isCrossRepository"]
+    reflection(gh, [pr], [ts_comment("@" + "review")])
+    atlas.reflect_companion_loops()
+    assert stages == []
+
+
+@pytest.mark.parametrize("perm", ["read", "triage", "none"])
+def test_an_untrusted_authors_same_repo_pr_is_not_a_companion(gh, stages, perm):
+    permission(gh, "drive-by", perm)
+    reflection(gh, [ts_pr(author={"is_bot": False, "login": "drive-by"})], [ts_comment("@" + "review")])
+    atlas.reflect_companion_loops()
+    assert stages == []
+    assert fork_branch_checks(gh) == []
+
+
+def test_another_apps_pr_is_looked_up_under_its_rest_login_and_refused(gh, stages):
+    permission(gh, "dependabot[bot]", "none")
+    reflection(gh, [ts_pr(author={"is_bot": True, "login": "app/dependabot"})], [ts_comment("@" + "review")])
+    atlas.reflect_companion_loops()
+    assert stages == []
+    assert gh.matching(has("/collaborators/dependabot[bot]/permission"))
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "claude/issue-42-x/../../../../repos/o/r",
+        "claude/issue-42-x?ref=main",
+        "claude/issue-42-x#frag",
+        "claude/issue-42-x%2F..",
+        "claude/issue-42-x.y",
+        "claude/issue-42-",
+        "claude/issue-٤٢-x",  # non-ASCII digits
+        "xclaude/issue-42-x",
+    ],
+)
+def test_a_branch_outside_the_strict_shape_reaches_no_rest_path(gh, stages, branch):
+    reflection(gh, [ts_pr(branch=branch)], [ts_comment("@" + "review")])
+    atlas.reflect_companion_loops()
+    assert stages == []
+    assert fork_branch_checks(gh) == []
+
+
+@pytest.mark.parametrize(
+    "branch",
+    ["claude/issue-42-20260915-1200", "claude/issue-42-run-123456", "claude/issue-42-codex-17"],
+)
+def test_the_dev_agents_branch_names_fit_the_shape(branch):
+    assert atlas.COMPANION_BRANCH_RE.fullmatch(branch).group(1) == "42"
+
+
+def test_the_pr_list_asks_for_the_author_and_the_head_repository(gh, stages):
+    reflection(gh, [], [])
+    atlas.reflect_companion_loops()
+    (call,) = gh.matching(lambda a: a[:2] == ("pr", "list"))
+    fields = call[call.index("--json") + 1].split(",")
+    assert {"author", "isCrossRepository"} <= set(fields)
+
+
+def test_cli_login_restores_the_rest_suffix_for_bots_only():
+    assert atlas.cli_login({"is_bot": True, "login": "app/meridian-marvin"}) == MARVIN_BOT
+    assert atlas.cli_login({"is_bot": False, "login": "ransomr"}) == "ransomr"
+    assert atlas.cli_login({"is_bot": False, "login": "meridian-marvin"}) == "meridian-marvin"
+    assert atlas.cli_login(None) == ""
