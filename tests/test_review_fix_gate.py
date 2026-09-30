@@ -150,7 +150,7 @@ def run_gate(tmp_path, comments, perms=None, *, env_extra=None):
     env = {
         "GITHUB_OUTPUT": str(out), "STATE": str(state), "REPO": "o/r", "PR": "42",
         "PR_JSON": json.dumps(pr_json), "RESOLVED": "verify", "LABELER_VERDICT": "ok",
-        "CAP": "10", "REVIEWER": "claude[bot]", "HANDOFF_MENTION": "someone",
+        "CAP": "10", "REVIEWER": reviewer_login_default(), "HANDOFF_MENTION": "someone",
         "ANCHOR_REPO": "", "MARKER": MARKER,
         "TRUSTED_LOGINS": TRUSTED_LOGINS, "REVIEWER_LOGINS": REVIEWER_LOGINS,
         "ALLOWED_BOTS": "",
@@ -172,9 +172,20 @@ def test_forged_clean_verdict_from_an_outsider_is_ignored(tmp_path):
 
 
 def test_reviewer_identities_clean_verdict_converges(tmp_path):
-    for login in ("i-am-marvin", "claude[bot]"):
+    for login in (MARVIN, MARVIN_BOT):
         _, o, _ = run_gate(tmp_path, [verdict(login, "clean", T1)])
         assert o["act"] == "converged", login
+
+
+def test_a_claude_bot_verdict_is_ignored(tmp_path):
+    # claude[bot] is trusted nowhere (design/untrusted-agent-job.md → Stop
+    # trusting claude[bot]): the reviewer's verdict is posted by the machine
+    # account on both engines, and a minted Claude App token must not be
+    # able to converge the loop. The defaults add no login to REVIEWER_LOGINS.
+    assert "claude" not in REVIEWER_LOGINS and reviewer_login_default() == ""
+    _, o, _ = run_gate(tmp_path, [verdict(MARVIN, "suggestions", T1, cid=1),
+                                  verdict("claude[bot]", "clean", T2, cid=2)])
+    assert o["verdict"] == "suggestions" and o["act"] == "fix"
 
 
 def test_callers_reviewer_login_override_is_a_verdict_author(tmp_path):
@@ -292,26 +303,33 @@ def test_failed_permission_lookup_is_untrusted(tmp_path):
 
 def review_allowed_bots_default() -> str:
     """The `review_allowed_bots` input's default, read from the workflow."""
+    return input_default("review_allowed_bots")
+
+
+def reviewer_login_default() -> str:
+    """The `reviewer_login` input's default, read from the workflow."""
+    return input_default("reviewer_login")
+
+
+def input_default(name: str) -> str:
     text = WORKFLOW.read_text()
-    block = text[text.index("      review_allowed_bots:"):]
+    block = text[text.index(f"      {name}:"):]
     block = block[:re.search(r"\n {6}\S", block[1:]).start() + 1]  # up to the next input key
     return re.search(r'default: "([^"]*)"', block).group(1)
 
 
-def test_reviewer_identitys_request_is_pending_only_where_the_caller_allow_lists_it(tmp_path):
-    # claude[bot] is a verdict author, not a requester by right: its `@review`
-    # counts through review_allowed_bots like any bot's. The input's DEFAULT
-    # names it — the deployed reviewer stubs that allow-list a bot name the
-    # reviewer bot, and the loop counted its requests before the author
-    # filters — so a caller passing nothing keeps that; one whose reviewer
-    # admits no bot passes an explicit empty string and the gate no longer
-    # waits for a review that never runs.
+def test_claude_bots_request_is_pending_only_where_the_caller_allow_lists_it(tmp_path):
+    # claude[bot]'s `@review` counts through review_allowed_bots like any
+    # bot's. The input's default is empty since claude[bot] stopped being
+    # trusted (design/untrusted-agent-job.md), so a caller passing nothing
+    # does not wait on it; one that still names it (as the inspect_ai fork's
+    # reviewer stub does until it drops the line) can say so.
     comments = [verdict("i-am-marvin", "suggestions", T1, cid=1), comment(2, "claude[bot]", "@review", T2)]
-    assert review_allowed_bots_default() == "claude[bot]"
+    assert review_allowed_bots_default() == ""
     _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": review_allowed_bots_default()})
-    assert o["act"] == "skip" and lookups(state) == []
-    _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": ""})
     assert o["act"] == "fix" and lookups(state) == []
+    _, o, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": "claude[bot]"})
+    assert o["act"] == "skip" and lookups(state) == []
 
 
 @pytest.mark.parametrize("allowed", ["ci-helper[bot]", "ci-helper", "CI-Helper[bot]", "*", "other, ci-helper"])
@@ -770,21 +788,22 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_every_composite(
     # GitHub App's; retiring the PAT removes the User's); every composite
     # that decides trust reads it from there (the labeler check and the
     # escalation reset), and no step — the gate's @-mention derivation
-    # included — names a login itself. The reviewer bot is a verdict author
-    # next to both.
+    # included — names a login itself. The verdict authors are the same two
+    # logins: claude[bot] is trusted nowhere (design/untrusted-agent-job.md).
     text = WORKFLOW.read_text()
     assert text.count("\nenv:\n") == 1
     assert TRUSTED_LOGINS == f"{MARVIN},{MARVIN_BOT}"
-    assert REVIEWER_LOGINS == f"{MARVIN},{MARVIN_BOT},claude[bot]"
+    assert REVIEWER_LOGINS == f"{MARVIN},{MARVIN_BOT}"
     assert text.count("trusted-logins: ${{ env.TRUSTED_LOGINS }}") == 2
     for anchor in ("        id: resolve", "        id: gate", "      - name: Converged handoff",
                    "      - name: Refund infra-crashed round"):
         assert "i-am-marvin" not in lift_step(WORKFLOW, anchor), anchor
     assert "trusted_author" in lift_step(WORKFLOW, "        id: gate")
-    # The fix agent's bot allow-lists carry the same value (the codex verdict
-    # is posted by the machine account, a bot actor under Phase 2).
-    assert "allowed_bots: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
-    assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
+    # The fix agent's bot allow-lists carry the same value and nothing else
+    # (the verdict is posted by the machine account, a bot actor under Phase 2).
+    assert "allowed_bots: ${{ env.TRUSTED_LOGINS }}" in text
+    assert "allow-bot-users: ${{ env.TRUSTED_LOGINS }}" in text
+    assert "claude,{0}" not in text
 
 
 @pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT])
@@ -826,7 +845,8 @@ gh() {
 """
 
 
-def run_resolve(tmp_path, author):
+def run_resolve(tmp_path, author, reviewer=None):
+    reviewer = reviewer_login_default() if reviewer is None else reviewer
     state = fresh_state(tmp_path)
     (state / "pr.json").write_text(json.dumps({
         "state": "OPEN", "closedAt": None, "headRefName": "claude/issue-9-x", "headRefOid": HEAD,
@@ -834,20 +854,27 @@ def run_resolve(tmp_path, author):
     out = tmp_path / "out"
     out.write_text("")
     env = {"GITHUB_OUTPUT": str(out), "STATE": str(state), "REPO": "o/r", "PR": "42", "AUTHOR": author,
-           "REVIEWER": "claude[bot]", "AUTO_LABEL": "auto",
+           "REVIEWER": reviewer, "AUTO_LABEL": "auto",
            "TRUSTED_LOGINS": TRUSTED_LOGINS}
     r = sh(*STEP_BASH, RESOLVE_STUB + lift_step(WORKFLOW, "        id: resolve"), check=False, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     return r, outputs(out)
 
 
-@pytest.mark.parametrize("author", ["claude[bot]", MARVIN, MARVIN_BOT])
-def test_resolve_proceeds_on_the_reviewers_and_the_machine_accounts_verdict_comments(tmp_path, author):
+@pytest.mark.parametrize("author", [MARVIN, MARVIN_BOT])
+def test_resolve_proceeds_on_the_machine_accounts_verdict_comments(tmp_path, author):
     _, o = run_resolve(tmp_path, author)
     assert o["act"] == "verify", author
 
 
-@pytest.mark.parametrize("author", ["github-actions[bot]", "foo[bot]", "nobody"])
+def test_resolve_proceeds_on_a_callers_reviewer_login(tmp_path):
+    _, o = run_resolve(tmp_path, "other-reviewer[bot]", reviewer="other-reviewer[bot]")
+    assert o["act"] == "verify"
+
+
+@pytest.mark.parametrize("author", ["claude[bot]", "github-actions[bot]", "foo[bot]", "nobody", ""])
 def test_resolve_skips_a_marker_comment_from_anyone_else(tmp_path, author):
+    # claude[bot] included (the default reviewer_login until 2026-09-30), and
+    # an empty author, which must not match the empty default reviewer_login.
     r, o = run_resolve(tmp_path, author)
     assert o["act"] == "skip" and "not the automated reviewer" in r.stdout, author

@@ -65,10 +65,11 @@ write — except when a CLOSED fork PR's upstream PR is adopted, where a
 moved branch is normal and only noted); prints preflight ADVISORY lines
 (review verdict, fork CI) — **relay these to the user, and pause for
 confirmation if the verdict isn't `clean` or CI shows failures**. Only
-verdict comments posted by the reviewer app (`claude[bot]`, the script's
-`REVIEWER_BOT`) or by a trusted login / write-access collaborator count;
-the PR is public, so others are ignored and the ADVISORY line says how
-many were. If the comment lookup fails part-way the verdict is reported
+verdict comments posted by a trusted login (the machine account) or a
+write-access collaborator count; the PR is public, so others are ignored
+and the ADVISORY line says how many were. `claude[bot]` is not trusted: a
+fork PR whose only verdict is an old `claude[bot]` one reads
+`verdict:none`, so pause as for any missing verdict. If the comment lookup fails part-way the verdict is reported
 `verdict:unavailable` (partial pages are discarded — an older `clean` must
 not stand in for a newer verdict): treat it as not clean and pause. It
 adopts the existing upstream PR via the

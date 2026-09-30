@@ -840,7 +840,8 @@ the agent push mid-run:
   rejected `@auto` run is not stranded at Agent. Only a named-nothing,
   moved-nothing run is the quiet early-failure fence. The action step also
   asks its App token for
-  `actions: read` (`additional_permissions`, as the CI-fix loop does): the
+  `actions: read` (`additional_permissions`, as the CI-fix loop did until
+  it moved to the job token on 2026-09-30): the
   job's own `actions: read` covers the job token, not that token, and "why
   is CI red" is an everyday dev-agent request the PAT used to cover.
 - **The hand-back keys on the label, not only the trigger.** A PR run whose

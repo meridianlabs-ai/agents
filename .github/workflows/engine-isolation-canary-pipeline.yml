@@ -32,6 +32,16 @@
 # jobs of the same called workflow referenced them, before and after it, and
 # no OpenAI key although the caller passed it; the codex job holds B and not
 # A. Per-workflow delivery would put A into both agent jobs.
+#
+# Each agent job also runs the OIDC exchange probe
+# (tests/app_token_exchange_probe.sh; design/untrusted-agent-job.md →
+# Testing) before its scan, with the real jobs' OIDC permission: the Claude
+# job has `id-token: write` (Workload Identity Federation), the codex job
+# none. As `runner`, the probe asks the Claude App token exchange for a
+# token and revokes any it gets. Expected: the Claude job mints one (while
+# the App is installed on this repository; that is the evidence the design
+# rests on, and step 6 of the design flips it to `refused`), the codex job
+# cannot, having no OIDC request token.
 
 name: engine isolation canary (pipeline probe)
 
@@ -89,10 +99,15 @@ jobs:
     if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.engine != 'codex'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write         # as the real Claude job's (WIF auth)
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: OIDC exchange probe (expect an App token, revoked at once)
+        run: bash tests/app_token_exchange_probe.sh minted
       - name: Scan runner memory (expect neither sentinel)
         run: sudo python3 tests/secret_delivery_scan.py absent absent
 
@@ -109,6 +124,8 @@ jobs:
         uses: ./tests/fixtures/secret-input
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+      - name: OIDC exchange probe (expect no token; the job has no id-token)
+        run: bash tests/app_token_exchange_probe.sh refused
       - name: Scan runner memory (expect A absent, B present)
         run: sudo python3 tests/secret_delivery_scan.py absent present
 

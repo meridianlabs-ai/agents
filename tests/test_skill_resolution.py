@@ -1070,7 +1070,7 @@ def test_promote_collaborator_author_and_cached_lookup(tmp_path):
 # --- promote.sh: review round 1 (Codex) regressions -------------------------
 
 
-def test_promote_verdict_counts_only_reviewer_app_and_trusted_authors(tmp_path):
+def test_promote_verdict_counts_only_trusted_authors(tmp_path):
     # The PR is public: anyone can post a comment carrying the verdict marker.
     s = Stub(tmp_path, issue([chip(400, branch="claude/issue-42-a")]), comments={400: [
         (MARVIN, "<!-- claude-review-verdict:issues -->\nTwo blocking findings."),
@@ -1080,14 +1080,22 @@ def test_promote_verdict_counts_only_reviewer_app_and_trusted_authors(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "ADVISORY: fork PR #400 review verdict:issues (1 verdict comment(s) by untrusted authors ignored)" in r.stdout
 
-    # The reviewer app's later verdict wins over marvin's earlier one.
+    # claude[bot] is trusted nowhere (design/untrusted-agent-job.md → Stop
+    # trusting claude[bot]): its later verdict is ignored and marvin's stands;
+    # alone it reads as no verdict, and the skill pauses.
     s2 = Stub(tmp_path / "b", issue([chip(400, branch="claude/issue-42-a")]), comments={400: [
         (MARVIN, "claude-review-verdict:issues"),
         ("claude[bot]", "<!-- claude-review-verdict:clean -->"),
     ]})
     r2 = s2.run(PROMOTE, str(N), "--dry-run")
     assert r2.returncode == 0, r2.stderr
-    assert "ADVISORY: fork PR #400 review verdict:clean;" in r2.stdout
+    assert "ADVISORY: fork PR #400 review verdict:issues (1 verdict comment(s) by untrusted authors ignored);" in r2.stdout
+    s2b = Stub(tmp_path / "b2", issue([chip(400, branch="claude/issue-42-a")]), comments={400: [
+        ("claude[bot]", "<!-- claude-review-verdict:clean -->"),
+    ]})
+    r2b = s2b.run(PROMOTE, str(N), "--dry-run")
+    assert r2b.returncode == 0, r2b.stderr
+    assert "ADVISORY: fork PR #400 review verdict:none (1 verdict comment(s) by untrusted authors ignored);" in r2b.stdout
 
     # A write-access collaborator's verdict counts; nothing trusted → none.
     s3 = Stub(tmp_path / "c", issue([chip(400, branch="claude/issue-42-a")]), perms=[("colleague", "write")],

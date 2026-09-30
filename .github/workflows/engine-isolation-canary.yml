@@ -27,7 +27,12 @@
 #                          the gate's `engine` output. Expected: the Claude
 #                          agent job holds no App secret and no OpenAI key,
 #                          the codex job the OpenAI key alone (finding
-#                          4629153, fix criterion 3).
+#                          4629153, fix criterion 3). Each agent job also
+#                          asks the Claude App token exchange for a token
+#                          as `runner` (design/untrusted-agent-job.md →
+#                          Testing): the Claude job gets one, revoked at
+#                          once, while the App is installed; the codex job,
+#                          with no `id-token: write`, cannot.
 #   provisioning-boundary  the codex-side boundary of THIS revision, with the
 #                          real codex user, real sudo and the composites
 #                          lifted from the checkout (not `@main`, so a branch
@@ -117,6 +122,7 @@ on:
       - ".github/workflows/engine-isolation-canary-pipeline.yml"
       - "tests/fixtures/secret-input/**"
       - "tests/secret_delivery_scan.py"
+      - "tests/app_token_exchange_probe.sh"
       - "tests/fixtures/hostile-checkout/**"
       - "tests/fixtures/callers/**"
 
@@ -136,6 +142,11 @@ jobs:
       matrix:
         engine: [claude, codex]
     uses: ./.github/workflows/engine-isolation-canary-pipeline.yml
+    # The probe's Claude agent job requests an OIDC token, as the real one
+    # does; a called workflow's jobs get no more than this.
+    permissions:
+      contents: read
+      id-token: write
     with:
       engine: ${{ matrix.engine }}
     secrets:

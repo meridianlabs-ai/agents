@@ -262,11 +262,15 @@ text are checked by the tests under `tests/`.
 
 ## By design, not a finding
 
-- The Claude GitHub App's own installation token is present in the agent job
-  while the action step runs: no workflow passes a token to the action, so it
-  mints its own, with contents, pull requests and issues write on the caller
-  repository whatever the job's own permissions say, and revokes it when the
-  step ends. It is the action's token, used by the action's own runner-side
+- The Claude GitHub App's own installation token is present in the dev
+  agent's job (`claude.yml`) while the action step runs: that workflow
+  passes no token to the action, so it mints its own, with contents, pull
+  requests and issues write on the caller repository whatever the job's own
+  permissions say, and revokes it when the step ends. The reviewer and the
+  loops pass the job token as `github_token`, so the action mints none
+  there, and the codex jobs request no OIDC token to mint one with
+  (design/untrusted-agent-job.md → Stop trusting `claude[bot]`). It is the
+  action's token, used by the action's own runner-side
   code only (its tracking comment on `claude.yml`, the revocation): the
   agent runs as `claude-agent` behind the launcher, which keeps the token
   out of its argv, environment, settings, MCP servers and `.git/config`, and
@@ -275,13 +279,15 @@ text are checked by the tests under `tests/`.
   hold is closed: the agent's `gh` holds the read-only job token, its
   replies, thread resolutions and comments go through the landing manifest,
   and the settings denies on push and posting verbs are guard rails behind
-  that. `claude[bot]` stays a verdict author the review-fix workflow
-  accepts, and its re-review requests follow the configured allow-lists
-  (`review_allowed_bots` defaults to `claude[bot]` in the review-fix gate;
-  the reviewer admits that bot when the caller's `allowed_bots` includes
-  it, as in the inspect_ai fork): such comments now come from the action's
-  own code, or from a direct caller's agent job that still runs the action
-  as the runner. A CI run started by a push from `claude[bot]` — or any bot
+  that. While the App is installed, a job with `id-token: write` can still
+  mint its token, so `claude[bot]` is trusted nowhere: the review-fix
+  workflow takes verdicts only from the machine account (or a caller's
+  `reviewer_login`), counts a `claude[bot]` re-review request only when the
+  caller's `review_allowed_bots` names it (empty by default), and the codex
+  fix prompt anchors on the machine account's review comments alone. The
+  reviewer still admits a `claude[bot]` `@review` when the caller's
+  `allowed_bots` names it, as the inspect_ai fork's stub does until it
+  drops the line. A CI run started by a push from `claude[bot]` — or any bot
   other than the machine account — is refused by the CI-fix gate's actor
   check before any write, on both engines (decision: Ransom, 2026-09-22;
   design/auto-agent.md → Binding the failed run to its PR → Decisions).
@@ -369,8 +375,8 @@ text are checked by the tests under `tests/`.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The
-  Claude action's own installation token in the review job stays out of its
-  reach (the launcher, above), so it cannot post as `claude[bot]` either;
+  review job holds no Claude App token (the action runs on the read-only
+  job token), so it cannot post as `claude[bot]` either;
   the command denies are guard rails behind that. Its normal output is the review
   files in its landing
   directory, posted as the review after trigger tokens and loop markers are

@@ -294,7 +294,8 @@ Testing a change).
   diagram and footnote identifiers per render, as GitHub does, and those
   alone do not count), makes promote refuse before
   any write; a trusted header's `Fixes #<up>` is prepended even when the
-  body quotes one. Acceptance paths
+  body quotes one. promote's review verdict counts only a trusted or
+  write-access author's; a `claude[bot]` verdict is ignored. Acceptance paths
   run through `--dry-run` only; the test clone's remote is non-routable.
   Except checkout's External path (Claude Security 4629158, 4629155), run
   for real against local repos: an outsider's upstream PR head named
@@ -341,7 +342,11 @@ Testing a change).
   PR comments (verdict, round counter and head SHA, re-review requests,
   hand-off marker) counts only from `REVIEWER_LOGINS` / `TRUSTED_LOGINS` or
   a write-access author, a forged marker is never adopted or PATCHed, and a
-  malformed counter counts as absent (Claude Security 4121983). Also runs
+  malformed counter counts as absent (Claude Security 4121983).
+  `REVIEWER_LOGINS` and the `reviewer_login` / `review_allowed_bots`
+  defaults name no `claude[bot]`: its verdict is ignored, its `@review` is
+  pending only where the caller names it, and the `Resolve PR` step skips
+  its marker comments (design/untrusted-agent-job.md). Also runs
   the `reset-auto-counters` composite's step (lifted the same way) in a
   gate → reset → gate sequence: escalation resets the comment the gate
   counted from (`comment-id`), so re-adding the label really starts a fresh
@@ -367,10 +372,17 @@ Testing a change).
   the caller's `allowed_bots` names (same-repo heads only) — with the fork
   head admitted sandboxed and a failed lookup refused (Claude Security
   4085111). Also that the review step's `allowed_bots` is the caller's list
-  plus `TRUSTED_LOGINS`, and that `issue_comment` is the only event the step
+  plus `TRUSTED_LOGINS`, the codex step's `allow-bot-users` the same with no
+  `claude[bot]` of its own, and that `issue_comment` is the only event the step
   admits: a `pull_request` / `pull_request_target` run fails it red with an
   error naming the caller stub (the path was removed 2026-09-22), and no
   expression in the workflow or the stubs reads the PR-event payload.
+- `test_pr_feedback_context.py` — the `pr-feedback-context` composite's
+  step, lifted and run against a stub `gh`: a review round is anchored only
+  on a marker-bearing comment (the review-comment marker or the codex
+  footer) by the machine account's two logins; `claude[bot]` or any other
+  Bot does not anchor one, and the section falls back to the last 8
+  comments (design/untrusted-agent-job.md).
 - `test_codex_path.py` — the codex path's runner-side search path (Claude
   Security 4628448): the `assert-runner-only-path` check `create-codex-user`
   runs before its grant and `reclaim-codex-workspace` runs after codex
@@ -501,7 +513,9 @@ Testing a change).
   the same `recipe`, then runs the pre-agent reclaim and the launcher before
   the claude-code-action step, which names the launcher's executable and
   sets `classify_inline_comments: "false"` (every claude-code-action step
-  does); the post-agent reclaim is the first step after it, and every later
+  does; in the reviewer and the loops each also passes `github_token: ${{
+  github.token }}` and no `additional_permissions`, and only the Claude job
+  requests `id-token: write`, never the codex job); the post-agent reclaim is the first step after it, and every later
   git step (the origin reset, the import — which also needs a successful
   launcher and an entered Claude step — the Surface tree check, the
   composers, the reviewer's re-plant check and landing prep, emit-landing's
@@ -555,12 +569,20 @@ Testing a change).
   the memory scan its references imply, the canary calls the probe per
   engine with the two sentinels only, the canary keeps a weekly off-the-hour
   schedule beside its push and dispatch triggers, and the stand-in action
-  prints lengths, never values.
-- `secret_delivery_scan.py`, `fixtures/secret-input/`,
+  prints lengths, never values. The OIDC exchange probe
+  (design/untrusted-agent-job.md → Testing): each probe agent job requests
+  an OIDC token exactly when the real one does and runs
+  `app_token_exchange_probe.sh` before its scan (Claude job `minted`, codex
+  job `refused`); the script, against a stub `curl`, revokes a minted token
+  at once, prints no token outside a mask command, and fails on the
+  unexpected outcome or a failed revocation.
+- `secret_delivery_scan.py`, `app_token_exchange_probe.sh`, `fixtures/secret-input/`,
   `fixtures/hostile-checkout/` and `fixtures/callers/` are not tests but
   the hosted canary's pieces
   (`.github/workflows/engine-isolation-canary.yml`): the root-run scanner
   that counts synthetic sentinel secrets in the runner processes' memory,
+  the probe that asks the Claude App token exchange for a token as `runner`
+  (and revokes what it gets),
   the stand-in action through which the pipeline probe's gate, land and
   codex jobs consume the sentinels as action inputs (printing lengths
   only),

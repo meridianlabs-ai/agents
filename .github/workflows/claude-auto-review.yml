@@ -60,26 +60,30 @@ on:
         required: true
         type: string
       reviewer_login:
-        description: Login of the automated reviewer whose marked summary comments drive the loop.
+        description: >-
+          An extra login whose marked summary comments drive the loop, next
+          to the machine account (REVIEWER_LOGINS). Empty by default, which
+          adds nothing: the reviewer's verdict is posted by the machine
+          account on both engines. claude[bot] was the default until
+          2026-09-30 and is trusted nowhere now
+          (design/untrusted-agent-job.md).
         required: false
         type: string
-        default: "claude[bot]"
+        default: ""
       review_allowed_bots:
         description: >-
           The reviewer's `allowed_bots` for this repo (claude-review.yml; same
           syntax — comma-separated bot logins, `[bot]` suffix optional, or
           "*"). A bot the reviewer honours a `@review` from has a review
           pending when it posts one, so the stale-verdict guard counts its
-          requests; keep it equal to the reviewer stub's value. The default
-          is the reviewer bot: that is what the deployed reviewer stubs that
-          allow-list any bot name (the inspect_ai fork's, for the dev agent's
-          PR-open request), and the loop's behaviour for its requests before
-          the author filters — so existing callers need no change. A caller
-          whose reviewer admits no bot passes an explicit empty string.
+          requests; keep it equal to the reviewer stub's value. Empty by
+          default: no bot's request is pending. It was "claude[bot]" until
+          2026-09-30, for the dev agent's PR-open request, which no dev agent
+          has posted since 2026-09-16 (design/untrusted-agent-job.md).
           github-actions[bot] is never honoured, whatever the list.
         required: false
         type: string
-        default: "claude[bot]"
+        default: ""
       auto_label:
         required: false
         type: string
@@ -309,13 +313,12 @@ env:
   # hand-off as it, the gate records the round counter as it. Only its
   # counter and hand-off comments are loop state, and only they are PATCHed.
   TRUSTED_LOGINS: i-am-marvin,meridian-marvin[bot]
-  # Who posts the reviewer's marked summary (the verdict). All are active
-  # authors: the Claude engine posts its marked verdict directly, as
-  # claude[bot] (claude-review.yml's review prompt; also `reviewer_login`'s
-  # default); the Codex engine's verdict travels in the landing manifest and
-  # claude-review.yml's land job posts it as the machine account (either
-  # login). Any other login's verdict is ignored.
-  REVIEWER_LOGINS: i-am-marvin,meridian-marvin[bot],claude[bot]
+  # Who posts the reviewer's marked summary (the verdict): the machine
+  # account (either login). On both engines the verdict travels in the
+  # landing manifest and claude-review.yml's land job posts it (issue #114).
+  # Any other login's verdict is ignored, claude[bot]'s included
+  # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
+  REVIEWER_LOGINS: i-am-marvin,meridian-marvin[bot]
 
 jobs:
   # TRUSTED, first: the PR lookup, the `auto`-label gate, the stale-verdict
@@ -445,12 +448,13 @@ jobs:
             printf '%s' "$out"
           }
           echo "review-fix gate: pr=#$PR comment_author='$AUTHOR' reviewer_login='$REVIEWER'"
-          # Codex-engine reviews post their verdict via the machine account
-          # (design/codex-engine.md — github-actions[bot] comments trigger no
-          # stubs), so marker comments from it (TRUSTED_LOGINS, either login)
-          # carry the same authority as the reviewer bot's.
+          # The reviewer's land job posts the verdict as the machine account
+          # on both engines (issue #114; github-actions[bot] comments trigger
+          # no stubs), so marker comments count from it (TRUSTED_LOGINS,
+          # either login) and from a caller's reviewer_login, if it passes
+          # one. An empty reviewer_login (the default) matches no author.
           in_trusted() { case ",${TRUSTED_LOGINS// /}," in *",$1,"*) return 0 ;; esac; return 1; }
-          if [ "$AUTHOR" != "$REVIEWER" ] && ! in_trusted "$AUTHOR"; then
+          if { [ -z "$REVIEWER" ] || [ "$AUTHOR" != "$REVIEWER" ]; } && ! in_trusted "$AUTHOR"; then
             echo "Comment by '$AUTHOR', not the automated reviewer '$REVIEWER' (or the machine account); ignoring."
             act skip; exit 0
           fi
@@ -1127,7 +1131,7 @@ jobs:
       contents: read          # checkout, sync fetches; cannot push
       pull-requests: read     # the review reads; cannot comment or resolve
       issues: read
-      id-token: write         # WIF auth (and the action's own App token)
+      id-token: write         # WIF auth
       actions: read
     outputs:
       # What the land job needs from this job, both read from STEP OUTCOMES
@@ -1160,7 +1164,7 @@ jobs:
       # git network call authenticates itself (design/architecture.md → "No
       # persisted git credentials"): the runner-side steps through a
       # step-scoped credential helper on the job token, the agent through
-      # claude-code-action's own origin-URL credential (its App token — the
+      # claude-code-action's own origin-URL credential (the job token — the
       # agent never pushes, so the identity behind it no longer matters
       # here). The fetch itself is a read, so the job token is enough for it.
       - name: Check out PR branch
@@ -1448,12 +1452,13 @@ jobs:
           fi
           printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, instead of changing code, write a brief rationale to its own file under $LANDING_DIR/ (e.g. $LANDING_DIR/reply-1.md; file names must match [A-Za-z0-9._-] and must not start with a dot) and append {\"review_comment_id\": <id>, \"body_file\": \"<file name relative to $LANDING_DIR>\"} to the \`replies\` array in $LANDING_DIR/manifest-extra.json. The id is the numeric \`id\` of that inline comment as \`gh api repos/$REPO/pulls/$PR/comments\` returns it; use the thread's FIRST comment (the one with no \`in_reply_to_id\`) so the reply lands in the right thread. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, COMMIT them to the current branch with git — do NOT push — and set \`handback\` to true in the manifest: the workflow pushes and requests the re-review for you. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you committed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT set handback — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. LANDING (mandatory): you hold no credential that may push or post as the loop's identity, so do NOT push, do NOT open a PR, and do NOT post any comment, review, reply or reaction or resolve any thread yourself. The workflow lands your work after your run ends — it pushes the branch's new commits as the machine account (which re-runs CI), posts your replies, resolves the threads you list, and posts the re-review request or the hand-off — all from the manifest you write: $LANDING_DIR/manifest-extra.json, one JSON object with at most these four keys and nothing else: \`replies\` (array of {review_comment_id, body_file}), \`resolve_threads\` (array of review-thread node ids), \`handback\` (boolean), \`handoff_body_file\` (file name). Body files live next to it under $LANDING_DIR/ and are referenced by name. Create the file if it does not exist and rewrite it whole when you update it, so it is valid JSON when your turn ends (an unparsable file drops everything in it). Do NOT create, edit or delete files that later automated runs execute or load as configuration: $PROTECTED_FILES. The landing refuses the whole bundle, so every commit of the run is lost; if the task needs such a change, stop and say so in a comment so a maintainer makes it from their machine. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn: background tasks do not re-invoke you and their completion notifications never arrive, so never end your turn waiting on anything (subagents, background commands, test suites): collect results in the foreground, and if a final validation is long-running, commit FIRST and let the PR's own CI be the gate (observed loss: a fix round ended with tests 'running in the background' and everything evaporated with the runner). ENDING CONTRACT (mandatory): a run that committed ANY change ends with exactly ONE of the two hand-backs in the manifest — \`handback: true\` (the re-review request) or a \`handoff_body_file\` (the hand-off). Setting both, or neither, is a contract violation: the workflow then posts NEITHER, reports the violation on the PR as an error and fails the run, leaving the board stranded at Agent. Uncommitted edits to tracked files are lost with the runner and reported as a failed round, so commit everything you mean to keep and revert scratch edits to tracked files you do not. THREAD RESOLUTION: list the inline review threads you FULLY addressed in code, so settled feedback is visibly closed — list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\` of the form PRRT_…, \`isResolved\`, and its \`comments\`), then append each such thread's \`id\` to \`resolve_threads\` in the manifest; the workflow resolves exactly those after the push. Never list a thread you deliberately declined (the one you wrote a rationale for), only partly addressed, or did not actually address — declined threads stay open so a human can adjudicate them. HAND-OFF: hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a rationale in \`replies\`, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then write ONE file under $LANDING_DIR/ (e.g. $LANDING_DIR/handoff.md) and name it in \`handoff_body_file\`: a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status${mention_note}. The workflow prepends the hand-off marker line itself when it posts that file (the board stage moves on it); do NOT write any marker into the file. Do NOT merge — auto hands the final step to a human. In commit messages and in every file you write for the manifest, refer to this automation as \`auto\` without an @ prefix, and never write the review or dev-agent trigger tokens bare (backtick them): the commit list and those bodies render on the PR from a write-access account, where a bare trigger token would start a workflow. The loop's marker substrings get the same discipline: never write claude-review-summary, claude-review-verdict, claude-review-comment, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in a commit message or a body file — the loop matches them by plain substring, so quoting a reviewer verdict comment verbatim would forge a verdict; when referencing one, break it (e.g. 'claude-review summary'). Likewise never write the codex reviewer's footer 'engine: codex' verbatim: it and the review-comment marker are how the codex fix rounds locate the newest review, so a body of yours carrying either would be mistaken for the review.${note}${merge_note}" >>"$GITHUB_OUTPUT"
 
-      # No github_token: the action mints its own App token through the OIDC
-      # exchange (as claude-review.yml's and claude-auto.yml's do), so the
-      # machine-account PAT is nowhere in this job. The GIT_CONFIG_* env is
+      # github_token is the job token (design/untrusted-agent-job.md → Stop
+      # trusting claude[bot]): the action skips its OIDC exchange for the
+      # Claude App token and its revoke post-step, so no App token and no
+      # machine-account token is in this job. The GIT_CONFIG_* env is
       # the step-scoped fallback credential (issue #61) for any git call that
       # does not go through the action's rewritten origin URL — the JOB token
-      # now: the agent never pushes, and the helper is scoped to this
+      # too: the agent never pushes, and the helper is scoped to this
       # server's URL, so a `git fetch` the agent aims at any other host gets
       # no credential.
       - uses: anthropics/claude-code-action@v1
@@ -1470,20 +1475,21 @@ jobs:
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
+          github_token: ${{ github.token }}
           prompt: ${{ steps.prompt.outputs.value }}
-          # The trigger actor is the reviewer bot — or, for a codex-engine
-          # verdict, the machine account, whose Phase 2 App login is a bot too
-          # (TRUSTED_LOGINS; the User entry is inert) — so lift
-          # claude-code-action's default non-human-actor guard for exactly
-          # those (never '*'). The gate above did the real authorization.
-          allowed_bots: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
+          # The trigger actor is the verdict's author, the machine account,
+          # whose Phase 2 App login is a bot (TRUSTED_LOGINS; the User entry
+          # is inert) — so lift claude-code-action's default non-human-actor
+          # guard for exactly those (never '*'). Not claude[bot]: the gate
+          # skips its verdicts. The gate above did the real authorization.
+          allowed_bots: ${{ env.TRUSTED_LOGINS }}
           settings: ${{ steps.fixsettings.outputs.value }}
           # The launcher's wrapper, spawned in place of the CLI: it starts the
           # real one as `claude-agent` in its own namespace
           # (design/executed-paths-residual.md → The launcher).
           path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}
           # Skips the action's `Post buffered inline comments` post-step, which
-          # would post, with the App token, whatever records a local process
+          # would post, with the action's token, whatever records a local process
           # left in /tmp/inline-comments-buffer.jsonl (the agent's /tmp is
           # private anyway; belt and braces).
           classify_inline_comments: "false"
@@ -1509,7 +1515,7 @@ jobs:
         with:
           user: claude-agent
 
-      # The action leaves its App token in remote.origin.url; the wrapper
+      # The action leaves its token (the job token) in remote.origin.url; the wrapper
       # already reset it before the agent started, and this stays as belt and
       # braces for the action's own later writes, after the reclaim (git over
       # a `.git` the agent could write is never run) — git never consults a
@@ -2061,10 +2067,12 @@ jobs:
       group: claude-auto-${{ github.repository }}-pr-${{ inputs.pr_number }}
       cancel-in-progress: false
     permissions:
+      # No id-token: write: nothing in this job requests an OIDC token, and
+      # with it a runner compromise here could mint a Claude App token
+      # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
       contents: read          # checkout, sync fetches; cannot push
       pull-requests: read     # the review reads; cannot comment or resolve
       issues: read
-      id-token: write         # WIF auth (and the action's own App token)
       actions: read
     outputs:
       # What the land job's refund step needs from this job: whether the
@@ -2242,9 +2250,9 @@ jobs:
       # boundary exists (Claude Security finding 4628446). The Claude job
       # runs the caller's `claude-setup` composite and the fallback recipe as
       # the runner; a composite action can only run as the runner, and on
-      # this job the runner is a uid with passwordless sudo, the OIDC request
-      # token and — at the codex-action step below — OPENAI_API_KEY, none of
-      # which the codex user boundary lets codex reach. The PR head this job
+      # this job the runner is a uid with passwordless sudo and — at the
+      # codex-action step below — OPENAI_API_KEY, neither of which the
+      # codex user boundary lets codex reach. The PR head this job
       # checks out may be one the pipeline itself authored from an outsider's
       # issue text (pushed and labelled by the machine account, so
       # `same-repo` says nothing about who wrote its `pyproject.toml` build
@@ -2295,7 +2303,7 @@ jobs:
       # reads ~codex/.codex/config.toml (following a symlink) and writes the
       # merged file back readable by codex, so a config.toml the provisioning
       # had replaced with a link to /proc/self/environ would copy the action
-      # process's environment — the OIDC request token, the key input — into
+      # process's environment — the key input — into
       # a file codex can read. After this step nothing runs as codex and the
       # only files codex-action reads before launching codex are the ones the
       # composite wrote. A failure skips codex (the Surface step names it).
@@ -2459,9 +2467,9 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          # As the Claude fix step's allowed_bots: the reviewer bot, or the
-          # machine account's App login posting a codex verdict.
-          allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
+          # As the Claude fix step's allowed_bots: the machine account's App
+          # login posting the verdict.
+          allow-bot-users: ${{ env.TRUSTED_LOGINS }}
           prompt-file: ${{ runner.temp }}/codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 
