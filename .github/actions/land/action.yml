@@ -662,7 +662,7 @@ runs:
     # LOADS (lib.sh's TIER1_PATHSPECS and, unless the caller passed
     # `allow-build-config`, TIER2_PATHSPECS, and what they reach; not the
     # ordinary files those run — an accepted gap stated there and in
-    # SECURITY.md): the machine account's push would move
+    # THREAT_MODEL.md): the machine account's push would move
     # agent-written files into the same-repo tree the next run — the
     # reviewer admitting the `@review` hand-back, a loop round, a `@claude`
     # follow-up — provisions from as `runner` or hands its agent as

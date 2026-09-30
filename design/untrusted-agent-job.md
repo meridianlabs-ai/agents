@@ -94,7 +94,7 @@ Goals:
 Non-goals:
 
 - **Keeping the model credential from the agent.** That is the declared
-  exception (SECURITY.md → Adding or changing a workflow; decision: Ransom,
+  exception (AGENTS.md → Adding or changing a workflow; decision: Ransom,
   2026-09-23). It stays as it is, and it now covers codex's federated
   OpenAI token too (Design → Codex jobs).
 - **Removing the agent user boundary.** It stays as the second line
@@ -957,7 +957,7 @@ read-only, and the exchangeable model credential, all of which the agent
 may have. The App token is gone after step 6, and no key is left to steal.
 The existing codex uid machinery stays as hygiene, as on the Claude jobs.
 
-### What changes in SECURITY.md
+### What changes in THREAT_MODEL.md and AGENTS.md
 
 The implementation PRs change these (the text lands with the step that
 makes it true):
@@ -995,9 +995,10 @@ makes it true):
   caller-repository issue write" become refused (`comment-numbers: event`,
   `allowed-issue-repos: ""`), leaving the stage move as the one board
   write a forged review manifest can make.
-- **Adding or changing a workflow, first bullet**: the exceptions list
-  loses "the Claude action's own token". The model-credential exception
-  reads: "the model credential, which is workload identity federation
+- **AGENTS.md → Adding or changing a workflow, first bullet**: the
+  exceptions list loses "the Claude action's own token". The
+  model-credential exception reads: "the model credential, which is
+  workload identity federation
   only: Anthropic's, and OpenAI API Platform's for the codex jobs (a
   project service-account token exchanged from the job's OIDC token, at
   most an hour and never beyond it, held by the `openai-wif-proxy`
@@ -1011,7 +1012,7 @@ makes it true):
 
 ### The tier-2 opt-in's premise
 
-SECURITY.md → Build and dependency configuration lets tier-2 files land
+THREAT_MODEL.md → Build and dependency configuration lets tier-2 files land
 because "every automated agent job that executes them does so only as an
 unprivileged user holding the read-only job token (and the model
 credential)". Its premise was the uid boundary. Before step 6 that
@@ -1214,7 +1215,7 @@ Untrusted input reaching the new or moved code:
   Step 5's audit is what makes "no relying party grants more" true, and
   it has to stay true. A new OIDC trust (a cloud role, a publisher) that
   does not pin its workflow must not be added for Meridian repositories.
-  SECURITY.md → Adding or changing a workflow gains that line. Sigstore
+  AGENTS.md → Adding or changing a workflow gains that line. Sigstore
   accepts any token, but binds the certificate to the agent workflow's
   identity, so a verifier pinned to a release workflow rejects it.
 - **What this does not close.**
@@ -1419,7 +1420,7 @@ model or a real secret):
 
 Each step is one PR in this repository unless it says otherwise, runs
 `actionlint` and `python3 -m pytest`, and updates the design and
-SECURITY.md text that its change makes true.
+THREAT_MODEL.md text that its change makes true.
 
 0. **Settings path (4773338).** The helper in the three `Compose …
    settings` steps (claude.yml, claude-auto.yml, claude-auto-review.yml)
@@ -1580,9 +1581,10 @@ SECURITY.md text that its change makes true.
 6. **Uninstall the Claude GitHub App** from the Meridian repositories
    (org admin: Ransom).
    - Run the canary: the exchange now fails.
-   - Then land the SECURITY.md rewrite (What changes in SECURITY.md), the
-     tier-2 premise text, credential-separation.md's I1 and I5, and
-     AGENTS.md's paragraphs that describe the reclaim as the boundary.
+   - Then land the THREAT_MODEL.md and AGENTS.md rewrite (What changes in
+     THREAT_MODEL.md and AGENTS.md), the tier-2 premise text,
+     credential-separation.md's I1 and I5, and AGENTS.md's paragraphs
+     that describe the reclaim as the boundary.
 7. **Codex to OpenAI workload identity federation** (after step 6).
    - Ransom:
      - creates the CI project and its service account, with a hard spend
@@ -1602,8 +1604,8 @@ SECURITY.md text that its change makes true.
      - the negative canaries: a job outside a reusable workflow, another
        reusable workflow of this repository, a wrong audience and a wrong
        event, each refused;
-     - SECURITY.md's exception and OpenAI-key bullet, AGENTS.md's
-       codex-key and PATH-boundary paragraphs, codex-engine.md and
+     - AGENTS.md's exception, codex-key and PATH-boundary paragraphs,
+       THREAT_MODEL.md's OpenAI-key bullet, codex-engine.md and
        credential-separation.md (3.1, 3.5, I1) rewritten to match.
    - Companion PRs in the caller repositories drop `OPENAI_API_KEY` from
      their agent stubs. The org secret is **not** deleted: actions'
