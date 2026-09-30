@@ -12,7 +12,8 @@
 # `minted`: the exchange returned an App token. The probe revokes it at once
 # (DELETE /installation/token) and prints nothing from it. `refused`: no
 # token, because the job has no OIDC request token (no `id-token: write`) or
-# the exchange said no. Only the outcome and HTTP statuses are printed. The
+# the exchange said no. Only the outcome, HTTP statuses and a refusal's
+# error message are printed. The
 # probe fails when the outcome is not the expected one, and when a minted
 # token's revocation fails.
 set -uo pipefail
@@ -55,7 +56,11 @@ else
   else
     outcome=refused
     detail="exchange HTTP $status"
-    grep -qi 'workflow validation' "$tmp/exchange" 2>/dev/null && detail="$detail (workflow validation)"
+    # The refusal's reason, which carries no token: the error message, one
+    # line of printable characters, at most 200.
+    why=$(jq -r '[.error.message?, .message?, .error_code?] | map(strings) | first // empty' "$tmp/exchange" 2>/dev/null \
+      | tr -cd '[:print:]' | cut -c1-200)
+    [ -z "$why" ] || detail="$detail: $why"
   fi
   rm -f "$tmp/exchange"
 fi

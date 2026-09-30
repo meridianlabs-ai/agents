@@ -252,8 +252,9 @@ def test_exchange_probe_fails_when_the_revocation_fails(tmp_path):
 
 
 @pytest.mark.parametrize("status, body, detail", [
-    ("401", '{"error":{"message":"Workflow validation failed"}}', "exchange HTTP 401 (workflow validation)"),
-    ("404", '{"error":{"message":"no installation"}}', "exchange HTTP 404"),
+    ("401", '{"error":{"message":"Workflow validation failed"}}', "exchange HTTP 401: Workflow validation failed"),
+    ("404", '{"message":"no installation\\n\\u001b[31m"}', "exchange HTTP 404: no installation[31m"),
+    ("502", "<html>bad gateway</html>", "exchange HTTP 502"),
     ("200", '{"token":null}', "exchange HTTP 200"),
 ])
 def test_exchange_probe_reports_a_refusal(tmp_path, status, body, detail):
