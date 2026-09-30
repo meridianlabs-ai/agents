@@ -163,9 +163,8 @@ def test_defang_breaks_triggers_and_markers_case_insensitively(tmp_path):
     # The replacement text is literal (lowercase); the captured suffix keeps its case.
     assert "claude-review verdict" in out and "auto HANDOFF" in out
     # Since step 3 of design/untrusted-agent-job.md the codex reviewer's old
-    # footer (pr-feedback-context's anchor for reviews posted before it;
-    # Claude Security 4773878) and atlas_sync's reopen record (4773875) are
-    # split too, in any case.
+    # footer (Claude Security 4773878; no longer an anchor since 2026-09-30)
+    # and atlas_sync's reopen record (4773875) are split too, in any case.
     assert "engine: codex" not in out.lower() and "🤖 engine  codex · engine  codex" in out
     assert "reopened — upstream pr" not in out.lower()
     assert "Reopened — upstream  PR https://x/1 · Reopened — upstream  PR" in out
@@ -219,7 +218,8 @@ def consumer_markers() -> set:
         # Markers matched without their comment delimiters (the review-fix
         # gate's `sed -n 's/.*claude-review-verdict:…`).
         found |= set(re.findall(r"claude-review-[a-z]+:", text))
-    # pr-feedback-context's anchor regex: its non-HTML alternatives.
+    # pr-feedback-context's anchor regex: any non-HTML alternatives (none
+    # since the codex footer was dropped, 2026-09-30).
     for pattern in re.findall(r'test\("([^"]*<!--[^"]*)"\)', PR_FEEDBACK_CONTEXT.read_text()):
         found |= {a for a in pattern.split("|") if a and not a.startswith("<!--") and not set(a) & set("()[]")}
     src = (ROOT / ".github" / "scripts" / "atlas_sync.py").read_text()
@@ -232,7 +232,7 @@ def test_every_consumer_marker_is_broken_by_the_defang_or_appended_by_land(tmp_p
     # The extraction finds what it must, so an empty list cannot pass.
     for must in ("claude-review-comment", "claude-review-summary", "claude-review-verdict:", "auto-handoff",
                  "auto-review-rounds", "auto-fix-attempts", "auto-review-head:", "auto-converged", "model-provenance",
-                 "🤖 engine: codex", "Reopened — upstream PR"):
+                 "Reopened — upstream PR"):
         assert must in markers, (must, sorted(markers))
     land = LAND.read_text()
     for m in sorted(markers):

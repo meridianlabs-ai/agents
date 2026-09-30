@@ -594,9 +594,9 @@ the model for the review-fix loop and the dev agent:
   clean base merge — a merge-only round, which lands and owes its hand-back
   but carries no agent commit; the relay's first line says so) the
   workflow relays its final message as a `comments[]` entry (de-fanged in
-  the fix job with the codex summary's sed, footer rule included, so the
-  relay cannot become a false review anchor; `land` de-fangs triggers,
-  markers and, since 2026-09-30, the footer again) — the Claude analogue
+  the fix job with the codex summary's sed, footer rule included; `land`
+  de-fangs triggers, markers and, since 2026-09-30, the footer again, and
+  the footer anchors no review round since then) — the Claude analogue
   of the codex summary that has always posted. Its first line, like the
   codex summary's, says "committed" / "base merge only", never "pushed":
   the fix job composes it before `emit-landing` runs, and a `git bundle`

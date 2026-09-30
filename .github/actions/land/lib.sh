@@ -15,10 +15,11 @@
 # broken here or appended by this composite after the de-fang). Two more
 # since step 3 of design/untrusted-agent-job.md, so no agent body can pose
 # as what they mark: the codex reviewer's old `engine: codex` footer, which
-# pr-feedback-context still anchors a review-fix round on (Claude Security
-# 4773878 and its siblings; the codex review now lands flagged `review`
-# and gets the `claude-review-comment` marker after this de-fang, like the
-# Claude review), and atlas_sync's `Reopened — upstream PR` reopen record
+# anchored a review-fix round until 2026-09-30 (Claude Security 4773878 and
+# its siblings; the codex review now lands flagged `review` and gets the
+# `claude-review-comment` marker after this de-fang, like the Claude
+# review, and that marker alone anchors), and atlas_sync's `Reopened —
+# upstream PR` reopen record
 # (4773875). Truncation only drops trailing bytes, so it cannot resurrect a
 # trigger the sed removed.
 DEFANG_SED=(

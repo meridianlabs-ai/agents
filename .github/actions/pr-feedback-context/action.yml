@@ -86,9 +86,11 @@ runs:
           # rather than filtered out; and BARE triggers — the token followed
           # by nothing but whitespace or punctuation; a short human
           # instruction that opens with the token is an adjudication and
-          # stays), find the newest review round (Claude's comments carry the
-          # claude-review-comment marker, and so do codex's since 2026-09-30;
-          # older codex reviews carry the engine footer) and keep
+          # stays), find the newest review round (Claude's and codex's review
+          # comments carry the claude-review-comment marker, which land
+          # appends after its de-fang; codex reviews from before 2026-09-30
+          # carried an engine footer instead and anchor nothing now:
+          # decision: Ransom, 2026-09-30) and keep
           # it plus everything after it, plus the last 5 HUMAN comments
           # before it (an adjudication that preceded the review is context;
           # older review rounds are stale by construction — their findings
@@ -103,10 +105,10 @@ runs:
           # since the filter drops them). Anchors are taken from the machine
           # account's two logins only (i-am-marvin and its App login
           # meridian-marvin[bot], which land posts every review as): the
-          # Claude fix prompt forbids echoing either pattern and the codex
-          # landing de-fangs them, but a caller's human commenters are under
-          # no such rule, and one quoting the footer would otherwise demote
-          # the real review to pre-anchor. No other Bot anchors a round, not
+          # Claude fix prompt forbids echoing the marker and land de-fangs
+          # it, but a caller's human commenters are under no such rule, and
+          # one quoting the marker would otherwise demote the real review to
+          # pre-anchor. No other Bot anchors a round, not
           # claude[bot] either (design/untrusted-agent-job.md → Stop trusting
           # claude[bot]; before 2026-09-30 any Bot-type author did).
           # The post-anchor tail is bounded too — over 30 comments, keep the
@@ -126,7 +128,7 @@ runs:
                 and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
                 and (.body | test("^\\*\\*Claude finished") | not)))
             | . as $all
-            | ([ $all | to_entries[] | select((.value.user.login == "i-am-marvin" or .value.user.login == "meridian-marvin[bot]") and (.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex"))) ]) as $marks
+            | ([ $all | to_entries[] | select((.value.user.login == "i-am-marvin" or .value.user.login == "meridian-marvin[bot]") and (.value.body | test("<!-- claude-review-comment -->"))) ]) as $marks
             | (if ($marks | length) == 0 then []
                else ([ $raw[] | select((.body | test("<!-- claude-review-summary -->")) and .created_at < $marks[-1].value.created_at) | .created_at ] | last // "") as $pv
                   | ($marks | map(select(.value.created_at > $pv)) | map(.key)) end) as $rk

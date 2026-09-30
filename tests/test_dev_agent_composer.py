@@ -572,10 +572,9 @@ def test_agent_comments_are_pinned_checked_and_capped(repo):
         assert warned in res.stdout, warned
     # The agent left a comment of its own, so the final message is not relayed.
     assert "agent-summary.md" not in files
-    # De-fanged in place, footer included: posted as marvin, a body carrying
-    # the codex reviewer's footer would be the next fix round's review anchor
-    # (`land` leaves the footer alone), and a quoted marker would forge a
-    # verdict.
+    # De-fanged in place, footer included (a duplicate of land's rule; the
+    # footer anchors no review round since 2026-09-30): posted as marvin, a
+    # quoted marker would forge a verdict.
     body = (landing / "ok.md").read_text()
     assert body == "Fixed as `review` asked. <!-- claude-review summary -->\n\n🤖 engine  codex · auto handoff\n"
 

@@ -68,9 +68,14 @@ def test_no_other_bot_anchors_the_round(tmp_path, login):
     assert "\nh6\n" not in text and "\nh7\n" in text and "Finding: x" in text
 
 
-def test_the_codex_footer_anchors_only_by_the_machine_account(tmp_path):
+@pytest.mark.parametrize("login, kind", [("i-am-marvin", "User"), ("meridian-marvin[bot]", "Bot")])
+def test_the_old_codex_footer_anchors_nothing(tmp_path, login, kind):
+    # Codex reviews from before 2026-09-30 carried this footer and no marker;
+    # they are no longer supported as anchors (decision: Ransom, 2026-09-30).
     comments = thread("human", "User")
-    comments[10] = comment(20, "claude[bot]", "Review\n\n🤖 engine: codex", "Bot")
-    assert "\nh6\n" not in feedback(tmp_path, comments)
-    comments[10] = comment(20, "meridian-marvin[bot]", "Review\n\n🤖 engine: codex", "Bot")
+    comments[10] = comment(20, login, "Review\n\n🤖 engine: codex", kind)
+    text = feedback(tmp_path, comments)
+    assert "\nh6\n" not in text and "\nh7\n" in text
+    # The same comment with land's marker still anchors the round.
+    comments[10] = comment(20, login, "Review\n\n🤖 engine: codex\n<!-- claude-review-comment -->", kind)
     assert "\nh6\n" in feedback(tmp_path / "b", comments)
