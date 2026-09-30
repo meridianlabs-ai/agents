@@ -2612,14 +2612,12 @@ jobs:
           echo "codex review prompt: $(wc -c <"$RUNNER_TEMP/codex-review-prompt.md") bytes (context $(wc -c <"$RUNNER_TEMP/codex-review-context.md") bytes before the cap)"
 
       # Our trig gate did the real authorization; allow-bot-users lifts the
-      # action's own actor guard for the bots the Claude path's allowed_bots
-      # admits: the caller's list, and the loops' own identity
-      # (TRUSTED_LOGINS: the land jobs' hand-back under Phase 2's App login;
-      # the User entry is inert — the action normalises every entry to a
-      # `[bot]` login and consults the list for bot actors only). The action
-      # does not support "*", so a caller's "*" admits TRUSTED_LOGINS alone
-      # here. No claude[bot] unless the caller names it
-      # (design/untrusted-agent-job.md).
+      # action's own actor guard for the reviewer-bot trigger the Claude
+      # path already accepts (the dev agent's @review hand-back) and for the
+      # loops' own identity (TRUSTED_LOGINS: the land jobs' hand-back under
+      # Phase 2's App login; the User entry is inert — the action normalises
+      # every entry to a `[bot]` login and consults the list for bot actors
+      # only).
       - name: Run Codex review
         id: codex
         if: needs.gate.outputs.ok == 'true'
@@ -2631,7 +2629,7 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          allow-bot-users: ${{ inputs.allowed_bots != '' && inputs.allowed_bots != '*' && format('{0},{1}', inputs.allowed_bots, env.TRUSTED_LOGINS) || env.TRUSTED_LOGINS }}
+          allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           output-file: ${{ runner.temp }}/codex/codex-review.json
           # Written runner-owned by the setup step above; NOT the inline
           # output-schema input, which is broken with unprivileged-user

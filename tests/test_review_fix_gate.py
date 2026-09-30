@@ -799,11 +799,10 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_every_composite(
                    "      - name: Refund infra-crashed round"):
         assert "i-am-marvin" not in lift_step(WORKFLOW, anchor), anchor
     assert "trusted_author" in lift_step(WORKFLOW, "        id: gate")
-    # The fix agent's bot allow-lists carry the same value and nothing else
-    # (the verdict is posted by the machine account, a bot actor under Phase 2).
-    assert "allowed_bots: ${{ env.TRUSTED_LOGINS }}" in text
-    assert "allow-bot-users: ${{ env.TRUSTED_LOGINS }}" in text
-    assert "claude,{0}" not in text
+    # The fix agent's bot allow-lists carry the same value (the codex verdict
+    # is posted by the machine account, a bot actor under Phase 2).
+    assert "allowed_bots: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
+    assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
 
 
 @pytest.mark.parametrize("login", [MARVIN, MARVIN_BOT])

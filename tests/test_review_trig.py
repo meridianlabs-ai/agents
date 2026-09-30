@@ -169,19 +169,15 @@ def test_workflow_trusts_both_machine_account_logins_and_appends_them_to_the_bot
     # One env value names the User (the PAT) and the App's bot login; the
     # review step's allowed_bots is the caller's list plus that value (the
     # bare "*" kept as is — claude-code-action recognises only the exact
-    # string), and the codex step's allow-bot-users is the same list (with
-    # "*" dropped: codex-action does not support it), so the hand-back posted
-    # under Phase 2's identity is not refused by either action's own actor
-    # guard after trig admitted it. Neither names claude[bot] itself
-    # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
+    # string), and the codex step's allow-bot-users carries it too, so the
+    # hand-back posted under Phase 2's identity is not refused by either
+    # action's own actor guard after trig admitted it.
     assert TRUSTED_LOGINS == f"{MARVIN},{MARVIN_BOT}"
     text = WORKFLOW.read_text()
     assert text.count("\nenv:\n") == 1
     assert ("allowed_bots: ${{ inputs.allowed_bots == '*' && '*' || (inputs.allowed_bots != '' "
             "&& format('{0},{1}', inputs.allowed_bots, env.TRUSTED_LOGINS) || env.TRUSTED_LOGINS) }}") in text
-    assert ("allow-bot-users: ${{ inputs.allowed_bots != '' && inputs.allowed_bots != '*' "
-            "&& format('{0},{1}', inputs.allowed_bots, env.TRUSTED_LOGINS) || env.TRUSTED_LOGINS }}") in text
-    assert "claude,{0}" not in text
+    assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
     assert "i-am-marvin" not in lift_step(WORKFLOW, "        id: trig")
     assert "i-am-marvin" not in lift_step(WORKFLOW, "      - name: Verify a review landed")
 

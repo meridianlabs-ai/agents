@@ -1477,12 +1477,12 @@ jobs:
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
           github_token: ${{ github.token }}
           prompt: ${{ steps.prompt.outputs.value }}
-          # The trigger actor is the verdict's author, the machine account,
-          # whose Phase 2 App login is a bot (TRUSTED_LOGINS; the User entry
-          # is inert) — so lift claude-code-action's default non-human-actor
-          # guard for exactly those (never '*'). Not claude[bot]: the gate
-          # skips its verdicts. The gate above did the real authorization.
-          allowed_bots: ${{ env.TRUSTED_LOGINS }}
+          # The trigger actor is the reviewer bot — or, for a codex-engine
+          # verdict, the machine account, whose Phase 2 App login is a bot too
+          # (TRUSTED_LOGINS; the User entry is inert) — so lift
+          # claude-code-action's default non-human-actor guard for exactly
+          # those (never '*'). The gate above did the real authorization.
+          allowed_bots: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           settings: ${{ steps.fixsettings.outputs.value }}
           # The launcher's wrapper, spawned in place of the CLI: it starts the
           # real one as `claude-agent` in its own namespace
@@ -2467,9 +2467,9 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          # As the Claude fix step's allowed_bots: the machine account's App
-          # login posting the verdict.
-          allow-bot-users: ${{ env.TRUSTED_LOGINS }}
+          # As the Claude fix step's allowed_bots: the reviewer bot, or the
+          # machine account's App login posting a codex verdict.
+          allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           prompt-file: ${{ runner.temp }}/codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 

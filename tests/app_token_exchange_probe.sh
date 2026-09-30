@@ -19,8 +19,10 @@
 # `minted`: the exchange returned an App token. The probe revokes it at once
 # (DELETE /installation/token) and prints nothing from it. `refused`: no
 # token, because the job has no OIDC request token (no `id-token: write`) or
-# the exchange said no. Only the outcome, HTTP statuses and a refusal's
-# error message are printed. The
+# the exchange answered 4xx. `error`: the exchange could not be reached,
+# answered 5xx, or answered 2xx without a token; that is no evidence either
+# way, so it fails both `minted` and `refused`. Only the outcome, HTTP
+# statuses and a refusal's error message are printed. The
 # probe fails when the outcome is not the expected one, and when a minted
 # token's revocation fails.
 set -uo pipefail
@@ -61,7 +63,7 @@ else
     detail="exchange HTTP $status; revoked, HTTP $rc"
     [ "$rc" = 204 ] || revoke_failed=$rc
   else
-    outcome=refused
+    case "$status" in 4??) outcome=refused ;; *) outcome=error ;; esac
     detail="exchange HTTP $status"
     # The refusal's reason, which carries no token: the error message, one
     # line of printable characters, at most 200.

@@ -2140,13 +2140,13 @@ jobs:
           model: ${{ inputs.codex_model }}
           effort: ${{ inputs.codex_effort }}
           permission-profile: workspace_net
-          # workflow_run's actor is the CI run's actor: the machine account
-          # (a User with write today — passes the action's built-in check;
-          # the App's bot login under Phase 2 — TRUSTED_LOGINS, as the
-          # Claude step's allowed_bots). Not claude[bot]: every agent push
-          # lands as the machine account since #79, and claude[bot] is
-          # trusted nowhere (design/untrusted-agent-job.md).
-          allow-bot-users: ${{ env.TRUSTED_LOGINS }}
+          # workflow_run's actor is the CI run's actor: normally the machine
+          # account (a User with write today — passes the action's built-in
+          # check; the App's bot login under Phase 2 — TRUSTED_LOGINS, as the
+          # Claude step's allowed_bots), but a branch the Claude App pushed
+          # (mixed-engine PR relabeled mid-loop) makes it the claude bot —
+          # allow that one too, matching the other codex steps.
+          allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}
           prompt-file: ${{ runner.temp }}/codex-prompt.md
           output-file: ${{ runner.temp }}/codex/codex-final.md
 

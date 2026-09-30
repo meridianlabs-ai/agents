@@ -287,7 +287,9 @@ text are checked by the tests under `tests/`.
   fix prompt anchors on the machine account's review comments alone. The
   reviewer still admits a `claude[bot]` `@review` when the caller's
   `allowed_bots` names it, as the inspect_ai fork's stub does until it
-  drops the line. A CI run started by a push from `claude[bot]` — or any bot
+  drops the line. The loops' agent steps and the codex reviewer still list
+  `claude` in the action's own actor guard (`allowed_bots`,
+  `allow-bot-users`); the gates in front of them decide, and refuse it. A CI run started by a push from `claude[bot]` — or any bot
   other than the machine account — is refused by the CI-fix gate's actor
   check before any write, on both engines (decision: Ransom, 2026-09-22;
   design/auto-agent.md → Binding the failed run to its PR → Decisions).

@@ -28,8 +28,9 @@ probe keeps their shape, so these checks hold the two together:
   Claude job on a dispatch from main (elsewhere the exchange refuses the
   event or the changed workflow, and the outcome is only recorded) and none
   in the codex job; the probe script, run against a
-  stub curl, revokes a minted token at once, prints no token and fails on
-  the unexpected outcome or a failed revocation
+  stub curl, revokes a minted token at once, prints no token, counts an
+  unreachable exchange, a 5xx or a token-less 2xx as neither mint nor
+  refusal, and fails on the unexpected outcome or a failed revocation
   (design/untrusted-agent-job.md → Testing).
 """
 
@@ -257,8 +258,6 @@ def test_exchange_probe_fails_when_the_revocation_fails(tmp_path):
 @pytest.mark.parametrize("status, body, detail", [
     ("401", '{"error":{"message":"Workflow validation failed"}}', "exchange HTTP 401: Workflow validation failed"),
     ("404", '{"message":"no installation\\n\\u001b[31m"}', "exchange HTTP 404: no installation[31m"),
-    ("502", "<html>bad gateway</html>", "exchange HTTP 502"),
-    ("200", '{"token":null}', "exchange HTTP 200"),
 ])
 def test_exchange_probe_reports_a_refusal(tmp_path, status, body, detail):
     r, calls, _ = run_probe(tmp_path, "refused", status=status, body=body)
@@ -267,6 +266,18 @@ def test_exchange_probe_reports_a_refusal(tmp_path, status, body, detail):
     assert not any("DELETE" in c for c in calls)
     r, _, _ = run_probe(tmp_path / "b", "minted", status=status, body=body)
     assert r.returncode == 1 and "outcome is refused, expected minted" in r.stdout
+
+
+@pytest.mark.parametrize("status, body", [("502", "<html>bad gateway</html>"), ("000", ""), ("200", '{"token":null}')])
+def test_exchange_probe_counts_an_outage_as_neither_mint_nor_refusal(tmp_path, status, body):
+    # An unreachable exchange, a 5xx or a token-less 2xx proves nothing about
+    # the App, so it cannot pass as step 6's refusal either.
+    for i, expect in enumerate(("refused", "minted")):
+        r, calls, _ = run_probe(tmp_path / str(i), expect, status=status, body=body)
+        assert r.returncode == 1 and f"error (exchange HTTP {status}" in r.stdout, r.stdout
+        assert not any("DELETE" in c for c in calls)
+    r, _, _ = run_probe(tmp_path / "any", "any", status=status, body=body)
+    assert r.returncode == 0 and "; expected any" in r.stdout
 
 
 def test_exchange_probe_without_an_oidc_request_token_is_refused_without_a_call(tmp_path):

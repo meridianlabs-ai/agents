@@ -687,9 +687,7 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_the_composite():
     # The fix agents' bot allow-lists carry the value: workflow_run's actor
     # is the pusher, the App's bot login under Phase 2.
     assert "allowed_bots: ${{ env.TRUSTED_LOGINS }}" in text
-    # No claude[bot] (design/untrusted-agent-job.md → Stop trusting claude[bot]).
-    assert "allow-bot-users: ${{ env.TRUSTED_LOGINS }}" in text
-    assert "claude,{0}" not in text
+    assert "allow-bot-users: ${{ format('claude,{0}', env.TRUSTED_LOGINS) }}" in text
 
 
 def test_gate_counts_the_machine_accounts_bot_login_under_the_workflow_value_and_not_other_apps(tmp_path):

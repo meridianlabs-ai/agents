@@ -498,7 +498,10 @@ human step.
   `@review` is not a pending request unless the caller names it
   (`review_allowed_bots` defaults to empty), pr-feedback-context anchors a
   review round only on the machine account's comments, and the promote
-  skill ignores `claude[bot]` verdicts. The CI-fix gate refuses a run whose
+  skill ignores `claude[bot]` verdicts. The loops' agent steps and the
+  codex reviewer still list `claude` in the action's own actor guard
+  (`allowed_bots`, `allow-bot-users`), behind gates that refuse it;
+  dropping it is a separate change. The CI-fix gate refuses a run whose
   actor is any bot but the machine account, on both engines (finding
   4628657; decision: Ransom, 2026-09-22). The CI-fix agent reads CI logs
   with the job token, which has `actions: read`.

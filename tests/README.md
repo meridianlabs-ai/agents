@@ -372,8 +372,7 @@ Testing a change).
   the caller's `allowed_bots` names (same-repo heads only) — with the fork
   head admitted sandboxed and a failed lookup refused (Claude Security
   4085111). Also that the review step's `allowed_bots` is the caller's list
-  plus `TRUSTED_LOGINS`, the codex step's `allow-bot-users` the same with no
-  `claude[bot]` of its own, and that `issue_comment` is the only event the step
+  plus `TRUSTED_LOGINS`, and that `issue_comment` is the only event the step
   admits: a `pull_request` / `pull_request_target` run fails it red with an
   error naming the caller stub (the path was removed 2026-09-22), and no
   expression in the workflow or the stubs reads the PR-event payload.
@@ -574,8 +573,9 @@ Testing a change).
   an OIDC token exactly when the real one does and runs
   `app_token_exchange_probe.sh` before its scan (Claude job `minted` on a
   dispatch from main and `any` elsewhere, codex job `refused`); the script, against a stub `curl`, revokes a minted token
-  at once, prints no token outside a mask command, and fails on the
-  unexpected outcome or a failed revocation.
+  at once, prints no token outside a mask command, counts an outage (no
+  answer, 5xx, a token-less 2xx) as neither mint nor refusal, and fails on
+  the unexpected outcome or a failed revocation.
 - `secret_delivery_scan.py`, `app_token_exchange_probe.sh`, `fixtures/secret-input/`,
   `fixtures/hostile-checkout/` and `fixtures/callers/` are not tests but
   the hosted canary's pieces

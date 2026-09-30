@@ -1374,10 +1374,14 @@ model or a real secret):
     - the codex job: no OIDC request token, so no request.
 
     So the probe expects a token only on a `workflow_dispatch` from `main`
-    and records the outcome on every other run. The first positive run is
-    a dispatch from `main` after step 1 merges. The agent jobs are not
-    limited this way: they run on the events the action supports, from
-    workflow files that match the default branch.
+    and records the outcome on every other run. The probe's own positive
+    result (exchange `200`, revocation `204`) is therefore not recorded
+    before step 1 merges; whether it may follow the merge is Ransom's call.
+    Real agent runs show the exchange succeeding from runner-side code
+    today: the action's own exchange logs "App token successfully
+    obtained" in this repository's reviewer job 107763176352 (2026-09-24,
+    claude-review.yml at 0aa1f20) and in an inspect_ai fork dev-agent job,
+    109170645052 (2026-09-28, claude.yml at 609e20d).
   - After step 6 it must fail, and that failure is the proof of step 6.
   - Add the same probe to a codex job, where it must fail after step 1
     because the job has no `id-token: write`, and again after step 7
@@ -1430,7 +1434,7 @@ SECURITY.md text that its change makes true.
    - Tests: test_review_fix_gate, test_review_trig, test_skill_resolution,
      test_engine_job_isolation.
    - The canary's OIDC exchange probe lands here too, recording today's
-     positive result (by a dispatch from `main` after merge: Testing).
+     positive result.
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
    maintainer's machine. It can merge before or after step 1.
