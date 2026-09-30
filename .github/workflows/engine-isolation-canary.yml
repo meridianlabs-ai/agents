@@ -605,6 +605,12 @@ jobs:
       # check, `npm install -g` for the CLI and the proxy, and resolves the
       # codex home; the proxy and `codex exec` steps are skipped.
       - name: openai/codex-action, without a key or a prompt
+        # npm extracts packages with its own `umask` setting, 0 by default,
+        # so codex-action's `npm install -g` would leave the CLI and the
+        # proxy world-writable in the Node tree, which the reclaim refuses
+        # (design/codex-engine.md → Runner-side search path).
+        env:
+          NPM_CONFIG_UMASK: "022"
         uses: openai/codex-action@v1
         with:
           safety-strategy: unprivileged-user

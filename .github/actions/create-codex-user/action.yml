@@ -52,16 +52,14 @@ description: >-
      Before all that, every toolcache tree with an entry on the job PATH
      (`$RUNNER_TOOL_CACHE/<tool>/<version>`: in the codex jobs, the Node 24
      that codex-action runs) is made runner-only as a whole: `chown -R
-     runner:root`, `chmod -R go-w`, setgid on its directories. The PATH
-     check reaches only an entry's hops, its files and their link targets,
-     and the image ships the whole Node tree writable by the user (about
-     6,000 entries, npm's own `lib/` included), so a build backend running
-     as codex during provisioning could otherwise rewrite the npm code that
-     codex-action's `npm install -g` then runs as runner. The runner's
-     umask leaves group write on what npm creates later, and the runner's
-     primary group is one the user belongs to; with group root inherited
-     through the setgid directories, those new entries are not the user's
-     to write either (canary run 36741770176, 2026-09-30). Then
+     runner`, `chmod -R go-w`. The PATH check reaches only an entry's hops,
+     its files and their link targets, and the image ships the whole Node
+     tree writable by the user (about 6,000 entries, npm's own `lib/`
+     included; canary run 36741770176, 2026-09-30), so a build backend
+     running as codex during provisioning could otherwise rewrite the npm
+     code that codex-action's `npm install -g` then runs as runner. What
+     that install adds later is kept runner-only by the codex-action
+     step's `NPM_CONFIG_UMASK`, not here. Then
      `chown -R runner:codex` + `chmod -R g+rwX` + setgid on every directory
      of the workspace — the action's `examples/unprivileged-user.yml`
      recipe; the group grant is what lets codex (primary group codex) write
@@ -277,11 +275,9 @@ runs:
         cp "$GITHUB_WORKSPACE/.git/config" "$RUNNER_TEMP/git-config.pre-codex"
         sudo find "$GITHUB_WORKSPACE" -mindepth 2 -name .git | LC_ALL=C sort >"$RUNNER_TEMP/embedded-git.pre-codex"
         # 1b. Every toolcache tree on the job PATH, whole (see description,
-        #     2): runner-owned, group root with setgid directories, no group
-        #     or other write. The PATH check below only reaches an entry's
-        #     hops, its files and their link targets; this also covers the
-        #     code those files load (npm's lib) and what the runner adds to
-        #     the tree later (openai/codex-action's `npm install -g`).
+        #     2): runner-owned, no group or other write. The PATH check below
+        #     only reaches an entry's hops, its files and their link targets;
+        #     this also covers the code those files load (npm's lib).
         tc_root=${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}
         if tc=$(cd "$tc_root" 2>/dev/null && pwd -P); then
           trees="|"
@@ -294,10 +290,9 @@ runs:
             tree="$tc/$tool/$version"
             case "$trees" in *"|$tree|"*) continue ;; esac
             trees="$trees$tree|"
-            sudo chown -R runner:root "$tree"
+            sudo chown -R runner "$tree"
             sudo chmod -R go-w "$tree"
-            sudo find "$tree" -type d -exec chmod g+s {} +
-            echo "toolcache tree $tree: now runner:root, setgid directories, no group or other write"
+            echo "toolcache tree $tree: now runner-owned, no group or other write"
           done < <(printf '%s\n' "$PATH" | tr ':' '\n')
         fi
         # 2. User and groups — no grant yet: the PATH check in the next step

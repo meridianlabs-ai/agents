@@ -771,7 +771,7 @@ def test_create_codex_user_checks_the_path_after_the_user_and_before_the_grant()
     # No grant in the first step: its only chown/chmod are the toolcache
     # trees' repair, which never names the workspace.
     assert all("GITHUB_WORKSPACE" not in l for l in first.splitlines() if "chown" in l or "chmod" in l)
-    assert first.index('sudo chown -R runner:root "$tree"') < first.index("sudo adduser")
+    assert first.index('sudo chown -R runner "$tree"') < first.index("sudo adduser")
     # The check probes as the user being created, whichever it is.
     assert ASSERT_USES in check_step and "user: ${{ inputs.user }}" in check_step and 'protect: "true"' in check_step
     assert 'sudo chown -R "runner:$AGENT_USER" "$GITHUB_WORKSPACE"' in grant
@@ -891,11 +891,11 @@ def test_create_codex_user_makes_each_toolcache_tree_on_the_path_runner_only(tmp
     results, calls, ws, temp = run_create(tmp_path, "codex", path_prefix=prefix)
     assert [r.returncode for r in results] == [0, 0], [r.stderr for r in results]
     tree = str((tc / "node" / "24.21.0").resolve())
-    repair = [f"chown -R runner:root {tree}", f"chmod -R go-w {tree}", f"find {tree} -type d -exec chmod g+s {{}} +"]
-    assert calls[:5] == [f"find {ws} -mindepth 2 -name .git", *repair,
+    repair = [f"chown -R runner {tree}", f"chmod -R go-w {tree}"]
+    assert calls[:4] == [f"find {ws} -mindepth 2 -name .git", *repair,
                          "adduser --system --home /home/codex --shell /bin/bash --group codex"], calls
-    assert sum("-R runner:root" in c for c in calls) == 1
-    assert f"toolcache tree {tree}: now runner:root" in results[0].stdout
+    assert sum(c.startswith("chown -R runner ") for c in calls) == 1
+    assert f"toolcache tree {tree}: now runner-owned" in results[0].stdout
 
 
 @pytest.mark.parametrize("user,grant", [("root", "workspace"), ("", "workspace"), ("codex", "partial")])
@@ -1305,6 +1305,17 @@ def test_the_codex_job_puts_node_on_the_job_path_before_the_codex_user(name):
     assert cond(step) == cond(codex[user])
     # The Claude job never runs it: codex-action is the only reason for it.
     assert "actions/setup-node@" not in job_text(WORKFLOWS[name], CLAUDE_JOB[name])
+
+
+@pytest.mark.parametrize("name", [*sorted(WORKFLOWS), "engine-isolation-canary.yml"])
+def test_every_codex_action_step_installs_with_a_runner_only_umask(name):
+    # npm's own `umask` setting (0 by default) decides the modes of what
+    # codex-action's `npm install -g` extracts; 0 left the CLI and the proxy
+    # world-writable in the Node tree (canary run 36742725084).
+    text = (ROOT / ".github" / "workflows" / name).read_text()
+    at = text.index("        uses: openai/codex-action@v1\n")
+    step = text[text.rindex("\n      - ", 0, at):text.find("\n      - ", at)]
+    assert '        env:\n          NPM_CONFIG_UMASK: "022"\n' in step
 
 
 @pytest.mark.parametrize("name", ["claude.yml", "claude-auto.yml", "claude-auto-review.yml"])
