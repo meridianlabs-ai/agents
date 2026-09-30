@@ -21,10 +21,22 @@ probe keeps their shape, so these checks hold the two together:
 - the canary calls the probe once per engine with A for both App secrets
   and B for the OpenAI key, from the repository's sentinel secrets only;
 - the canary runs weekly (off the hour) as well as on its push paths and by
-  hand.
+  hand;
+- each probe agent job requests an OIDC token exactly when the real one
+  does (the Claude job for WIF, the codex job never) and runs the OIDC
+  exchange probe before its scan, expecting a minted App token in the
+  Claude job on a dispatch from main (elsewhere the exchange refuses the
+  event or the changed workflow, and the outcome is only recorded) and none
+  in the codex job; the probe script, run against a
+  stub curl, revokes a minted token at once, prints no token, counts an
+  unreachable exchange, a 5xx or a token-less 2xx as neither mint nor
+  refusal, and fails on the unexpected outcome or a failed revocation
+  (design/untrusted-agent-job.md → Testing).
 """
 
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -147,3 +159,143 @@ def test_the_canary_runs_weekly_as_well_as_on_push_and_by_hand():
     minute, hour, dom, month, dow = cron[0].split()
     assert minute.isdigit() and minute != "0", "off the top of the hour"
     assert hour.isdigit() and (dom, month) == ("*", "*") and dow.isdigit(), "once a week"
+
+
+# --- the OIDC exchange probe (design/untrusted-agent-job.md → Testing) -------
+
+EXCHANGE_PROBE = Path(__file__).resolve().parent / "app_token_exchange_probe.sh"
+
+
+def job_permissions(block: str) -> str:
+    if "    permissions:\n" not in block:
+        return ""
+    return block[block.index("    permissions:\n"):block.index("    steps:\n")]
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_probe_agent_jobs_request_oidc_like_the_real_ones(name):
+    # The exchange probe measures what a runner in each agent job can mint,
+    # so each probe job requests an OIDC token exactly when the real one does.
+    real, probe = jobs(workflow(name)), jobs(workflow(PROBE))
+    for role in ("claude", "codex"):
+        wants = "id-token: write" in "\n".join(code_lines(job_permissions(real[real_jobs(name)[role]])))
+        has = "id-token: write" in "\n".join(code_lines(job_permissions(probe[PROBE_JOBS[role]])))
+        assert wants == has == (role == "claude"), (name, role)
+    # A called workflow's jobs get no more than the calling job grants.
+    caller = jobs(workflow(CANARY))["pipeline-probe"]
+    assert "    permissions:\n      contents: read\n      id-token: write\n" in caller
+
+
+def test_each_probe_agent_job_runs_the_exchange_probe_before_its_scan():
+    probe = jobs(workflow(PROBE))
+    dispatch_from_main = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'minted' || 'any' }}"
+    for job, expect in (("agent", dispatch_from_main), ("agent-codex", "refused")):
+        runs = [s for s in steps(probe[job]) if "app_token_exchange_probe.sh" in s]
+        assert len(runs) == 1 and f"        run: bash tests/app_token_exchange_probe.sh {expect}\n" in runs[0], job
+        assert steps(probe[job]).index(runs[0]) == len(steps(probe[job])) - 2, job
+    for job in ("gate", "land"):
+        assert "app_token_exchange_probe.sh" not in probe[job]
+    assert '      - "tests/app_token_exchange_probe.sh"\n' in workflow(CANARY)
+
+
+CURL_STUB = r"""#!/usr/bin/env bash
+# Stub curl: -o <file> gets the canned body, -w '%{http_code}' prints the
+# canned status. Each call is logged, one line of argv.
+printf '%s\n' "$*" >>"$STUB/calls"
+out=/dev/null
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; *) url=$1; shift ;; esac; done
+case "$url" in
+  *audience=claude-code-github-action) printf '{"value":"JWT-SECRET-1"}' >"$out"; echo 200 ;;
+  https://exchange.test/*) cat "$STUB/exchange_body" >"$out"; cat "$STUB/exchange_status" ;;
+  */installation/token) cat "$STUB/revoke_status" ;;
+  *) echo "unexpected url $url" >&2; exit 7 ;;
+esac
+"""
+
+
+def run_probe(tmp_path, expect, *, oidc=True, status="200", body='{"token":"ghs_APPTOKEN"}', revoke="204"):
+    stub = tmp_path / "stub"
+    (stub / "bin").mkdir(parents=True)
+    (stub / "bin" / "curl").write_text(CURL_STUB)
+    (stub / "bin" / "curl").chmod(0o755)
+    (stub / "exchange_status").write_text(status)
+    (stub / "exchange_body").write_text(body)
+    (stub / "revoke_status").write_text(revoke)
+    summary = tmp_path / "summary"
+    env = {"PATH": f"{stub / 'bin'}:{os.environ['PATH']}", "STUB": str(stub), "GITHUB_STEP_SUMMARY": str(summary),
+           "APP_TOKEN_EXCHANGE_URL": "https://exchange.test/api/github/github-app-token-exchange",
+           "GITHUB_API_URL": "https://api.test", "HOME": str(tmp_path)}
+    if oidc:
+        env |= {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.test/token?api-version=2.0",
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "REQ-SECRET"}
+    r = subprocess.run(["bash", str(EXCHANGE_PROBE), expect], env=env, capture_output=True, text=True)
+    calls = (stub / "calls").read_text().splitlines() if (stub / "calls").exists() else []
+    return r, calls, summary.read_text() if summary.exists() else ""
+
+
+def test_exchange_probe_revokes_a_minted_token_and_prints_nothing_from_it(tmp_path):
+    r, calls, summary = run_probe(tmp_path, "minted")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Claude App token exchange as runner: minted (exchange HTTP 200; revoked, HTTP 204); expected minted" in r.stdout
+    assert summary.strip() == r.stdout.splitlines()[-1]
+    assert len(calls) == 3 and "-X DELETE" in calls[2] and "https://api.test/installation/token" in calls[2]
+    assert "Authorization: Bearer ghs_APPTOKEN" in calls[2] and "Authorization: Bearer JWT-SECRET-1" in calls[1]
+    # The tokens appear only in mask commands, which the runner hides.
+    for secret in ("ghs_APPTOKEN", "JWT-SECRET-1", "REQ-SECRET"):
+        printed = [line for line in (r.stdout + r.stderr + summary).splitlines() if secret in line]
+        assert all(line == f"::add-mask::{secret}" for line in printed), secret
+    # A minted token is a failure once the App is uninstalled (step 6).
+    r, calls, _ = run_probe(tmp_path / "b", "refused")
+    assert r.returncode == 1 and "outcome is minted, expected refused" in r.stdout
+    assert "-X DELETE" in calls[-1], "revoked even when unexpected"
+
+
+def test_exchange_probe_fails_when_the_revocation_fails(tmp_path):
+    r, _, _ = run_probe(tmp_path, "minted", revoke="401")
+    assert r.returncode == 1 and "revoking the minted App token answered HTTP 401" in r.stdout
+
+
+@pytest.mark.parametrize("status, body, detail", [
+    ("401", '{"error":{"message":"Workflow validation failed"}}', "exchange HTTP 401: Workflow validation failed"),
+    ("404", '{"message":"no installation\\n\\u001b[31m"}', "exchange HTTP 404: no installation[31m"),
+])
+def test_exchange_probe_reports_a_refusal(tmp_path, status, body, detail):
+    r, calls, _ = run_probe(tmp_path, "refused", status=status, body=body)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"refused ({detail}); expected refused" in r.stdout
+    assert not any("DELETE" in c for c in calls)
+    r, _, _ = run_probe(tmp_path / "b", "minted", status=status, body=body)
+    assert r.returncode == 1 and "outcome is refused, expected minted" in r.stdout
+
+
+@pytest.mark.parametrize("status, body", [("502", "<html>bad gateway</html>"), ("000", ""), ("200", '{"token":null}')])
+def test_exchange_probe_counts_an_outage_as_neither_mint_nor_refusal(tmp_path, status, body):
+    # An unreachable exchange, a 5xx or a token-less 2xx proves nothing about
+    # the App, so it cannot pass as step 6's refusal either.
+    for i, expect in enumerate(("refused", "minted")):
+        r, calls, _ = run_probe(tmp_path / str(i), expect, status=status, body=body)
+        assert r.returncode == 1 and f"error (exchange HTTP {status}" in r.stdout, r.stdout
+        assert not any("DELETE" in c for c in calls)
+    r, _, _ = run_probe(tmp_path / "any", "any", status=status, body=body)
+    assert r.returncode == 0 and "; expected any" in r.stdout
+
+
+def test_exchange_probe_without_an_oidc_request_token_is_refused_without_a_call(tmp_path):
+    r, calls, _ = run_probe(tmp_path, "refused", oidc=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "refused (no OIDC request token in this job); expected refused" in r.stdout
+    assert calls == []
+
+
+def test_exchange_probe_records_any_outcome_without_asserting_it(tmp_path):
+    r, _, _ = run_probe(tmp_path, "any")
+    assert r.returncode == 0 and "minted (exchange HTTP 200; revoked, HTTP 204); expected any" in r.stdout
+    r, _, _ = run_probe(tmp_path / "b", "any", status="401", body='{"error":{"message":"Invalid OIDC token"}}')
+    assert r.returncode == 0 and "refused (exchange HTTP 401: Invalid OIDC token); expected any" in r.stdout
+    r, _, _ = run_probe(tmp_path / "c", "any", revoke="500")
+    assert r.returncode == 1 and "answered HTTP 500" in r.stdout
+
+
+def test_exchange_probe_refuses_an_unknown_expectation(tmp_path):
+    r, calls, _ = run_probe(tmp_path, "maybe")
+    assert r.returncode == 2 and calls == []

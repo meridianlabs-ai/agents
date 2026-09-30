@@ -208,15 +208,15 @@ changes who pushes. Per step:
 | codex commit steps | none — in all three workflows (#82, #83, #84) the codex step only commits; the `land` job pushes |
 | hand-back, unlanded-work, open-PR and verify fetches | gone with the landing-job split (#82, #83, #84): the land job opens the PR and posts the hand-back from the manifest, and knows what it pushed |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
-| the claude-code-action step | no `github_token` in any of the four workflows (since #81 / #82 / #83 / #84): the action's own App token, and a job-token credential helper for its fetches — load-bearing in `claude.yml`, see below |
+| the claude-code-action step | the reviewer and both loops: `github_token: ${{ github.token }}` since 2026-09-30, so the action runs on the read-only job token and mints no App token (untrusted-agent-job.md → Stop trusting `claude[bot]`). `claude.yml`: no `github_token` (since #84; tag mode needs a write token until that design's step 4), so the action's own App token. Every Claude job keeps `id-token: write` for Workload Identity Federation, so while the Claude App is installed a runner compromise in any of them can still exchange the job's OIDC token for an App token itself. All four also get a job-token credential helper for their fetches — load-bearing in `claude.yml`, see below |
 | the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted (`\|\| github.token` in `claude.yml` only, the marvin-less degradation; the reviewer's was retired by #114, and the `MARVIN_TOKEN` PAT fallback by the Phase 2 retirement, 2026-09-18) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
 | `reset-origin-url` (after the action step and the post-agent reclaim, all three) | none — local `git remote set-url`, no network |
 
 The agent's own pushes never depended on the persisted credential:
 claude-code-action's prepare step (`configureGitAuth`, agent mode included —
 its `src/modes/agent/index.ts`) removes checkout's header and rewrites the
-origin URL to carry its `github_token` (its own App token since no workflow
-passes one any more). The action step still gets the helper env. In
+origin URL to carry its `github_token`: the job token in the reviewer and
+both loops since 2026-09-30, its own App token in `claude.yml`. The action step still gets the helper env. In
 `claude.yml` it is load-bearing: tag mode's `setupBranch` runs `git fetch
 origin <branch>` (and `git ls-remote` on issue runs) *before*
 `configureGitAuth`, which rode on the persisted header and would fail on a
@@ -522,7 +522,10 @@ the model for the review-fix loop and the dev agent:
   (from a JSON object or the action's path form) so a caller's `settings`
   cannot re-enable them — plus the prompt, whose ending contract is now "a
   run that changed anything ends with those changes committed on the
-  branch, nothing more". Those are guard rails, not the security boundary:
+  branch, nothing more". (Since 2026-09-30 the step passes the job token as
+  `github_token` and asks for no `additional_permissions`, so it holds no
+  App token at all; untrusted-agent-job.md → Stop trusting `claude[bot]`.)
+  Those are guard rails, not the security boundary:
   `Bash(gh:*)` stays allowed (the log and PR reads need it), so `gh api -X
   POST …/comments`, `gh api -X PATCH …/git/refs/…`, `gh pr edit|close|ready`
   and `git -C . push` all pass the listed prefixes. The load-bearing
@@ -840,7 +843,8 @@ the agent push mid-run:
   rejected `@auto` run is not stranded at Agent. Only a named-nothing,
   moved-nothing run is the quiet early-failure fence. The action step also
   asks its App token for
-  `actions: read` (`additional_permissions`, as the CI-fix loop does): the
+  `actions: read` (`additional_permissions`, as the CI-fix loop did until
+  it moved to the job token on 2026-09-30): the
   job's own `actions: read` covers the job token, not that token, and "why
   is CI red" is an everyday dev-agent request the PAT used to cover.
 - **The hand-back keys on the label, not only the trigger.** A PR run whose
@@ -1007,9 +1011,9 @@ the dev-agent shape did not:
   gated on the land step having succeeded (a failed landing is already
   reported). The settings deny list follows the fix job's model above: the
   gh posting verbs and the inline-comment MCP tool are denied at runtime
-  whatever the caller's `settings` say — guard rails around the action's
-  App token, which the job's permissions do not scope, while the job token
-  itself can no longer post.
+  whatever the caller's `settings` say — guard rails, around the action's
+  App token until 2026-09-30 (which the job's permissions did not scope)
+  and around the read-only job token since, which can no longer post.
 
 The review job's `Surface agent errors` no longer posts: its message is the
 manifest's `error` (fail_run true) and the land job posts it, de-fanged, and
@@ -1624,7 +1628,8 @@ external mode and fork heads only — normal same-repo reviews are untouched):
   **The `.git/config` mask is retired** (plan step 5 of
   [executed-paths-residual.md](executed-paths-residual.md), 2026-09-24): the
   launcher's wrapper resets the origin URL before the agent starts and
-  refuses to launch while the App token is in `.git/config`, and the mask's
+  refuses to launch while a privileged token is in `.git/config` (since
+  2026-09-30 the review job holds no App token at all), and the mask's
   `onExtractNoMatch: deny` would make a token-free config unreadable to the
   reviewer's sandboxed git. The `~/.config/gh` and `~/.gitconfig` denies
   (the agent user's home now), the deletion of `network.tlsTerminate` and
@@ -1698,7 +1703,8 @@ holds the model credential, the read-only job token and an unsandboxed
 `gh`, and its `Read` tool is not sandboxed either — a channel that existed
 in static-review mode too (it reads untrusted text either way). Since plan
 step 5 the agent is `claude-agent` in its own namespace, with the checkout
-read-only to it on these paths, and the App token out of its reach. The PyPI egress needed for `pip install` is a (narrow)
+read-only to it on these paths; since 2026-09-30 the job holds no App
+token (the action runs on the job token). The PyPI egress needed for `pip install` is a (narrow)
 exfiltration path for code running during the install itself.
 
 ### Branch sync before work

@@ -95,10 +95,6 @@ TRUSTED_LOGINS="i-am-marvin,meridian-marvin[bot]"
 # `app/<slug>`. A deleted author (null) is "". A User's login is never
 # rewritten, so a User who registers an App's slug is not the App.
 NORM_LOGIN='if . == null then "" elif (.__typename // "") == "Bot" then "\(.login // "")[bot]" elif ((.login // "") | startswith("app/")) then "\(.login[4:])[bot]" else (.login // "") end'
-# The reviewer app's own login, trusted ONLY where its review verdicts are
-# read back (the ADVISORY line): the app posts on this repo only through
-# this repo's own workflows. Never trusted for PR authorship.
-REVIEWER_BOT="claude[bot]"
 # Open fork PRs the fallback lists at most; a listing this long is treated
 # as truncated (uniqueness cannot be established) and refused.
 LIST_LIMIT=500
@@ -387,8 +383,11 @@ has_login() {
 }
 # --paginate: busy @auto issues/PRs exceed 100 comments, and the API returns
 # oldest-first — a single page never sees recent comments. Only a verdict
-# posted by the reviewer app or a trusted login counts (the PR is public:
-# anyone can post a comment carrying the marker); the latest such verdict
+# posted by a trusted login counts (trusted_login: TRUSTED_LOGINS or write
+# access; the PR is public: anyone can post a comment carrying the marker).
+# claude[bot] is not one: since #114 the reviewer's verdict is posted by the
+# machine account, and a claude[bot] verdict is ignored like any other
+# untrusted author's (design/untrusted-agent-job.md); the latest such verdict
 # wins, and ignored ones are counted on the ADVISORY line. The lookup must
 # complete: a page that fails after earlier pages returned rows would leave
 # an OLDER verdict standing, so partial rows are discarded and the verdict
@@ -399,7 +398,7 @@ if VERDICT_ROWS=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=1
     --jq '.[] | select(.body | contains("claude-review-verdict")) | [.user.login, (.body | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null); then
   while IFS=$'\t' read -r v_login v_body; do
     [ -n "$v_login" ] || continue
-    if [ "$v_login" = "$REVIEWER_BOT" ] || trusted_login "$v_login"; then
+    if trusted_login "$v_login"; then
       VERDICT=$(grep -o 'verdict:[a-z]*' <<<"$v_body" | tail -1 || true)
       VERDICT=${VERDICT:-verdict:none}
     else

@@ -231,18 +231,18 @@ def test_the_gate_treats_a_bots_request_as_pending_exactly_when_the_reviewer_adm
     assert g["act"] == "fix" and lookups(state) == []
 
 
-def test_a_deployed_caller_that_allow_lists_the_reviewer_bot_needs_no_loop_stub_change(tmp_path):
-    # The inspect_ai fork's reviewer stub sets `allowed_bots: "claude[bot]"`
-    # and its loop stub passes no review_allowed_bots (the input is new):
-    # with the loop's DEFAULT the two agree, so the reviewer admits the
-    # bot's `@review` and a queued gate treats it as pending rather than
-    # converging on the older verdict — the base behaviour, kept without a
-    # coordinated caller update.
+def test_the_loop_no_longer_waits_on_a_claude_bot_request_the_fork_reviewer_admits(tmp_path):
+    # The inspect_ai fork's reviewer stub still sets `allowed_bots:
+    # "claude[bot]"` (a companion PR drops it) and its loop stub passes no
+    # review_allowed_bots. The loop's default no longer names claude[bot]
+    # (design/untrusted-agent-job.md), so a claude[bot] `@review`, which no
+    # dev agent has posted since 2026-09-16, does not hold back convergence
+    # on the machine account's verdict.
     comments = [verdict("i-am-marvin", "clean", T1, cid=1), comment(2, "claude[bot]", "@review", T2)]
     _, o, _ = run_trig(tmp_path, actor="claude[bot]", allowed_bots="claude[bot]")
     assert o["ok"] == "true"
     _, g, state = run_gate(tmp_path, comments, env_extra={"ALLOWED_BOTS": review_allowed_bots_default()})
-    assert g["act"] == "skip" and lookups(state) == []
+    assert g["act"] == "converged" and lookups(state) == []
 
 
 def test_review_stubs_route_bot_commenters_to_the_reusables_allow_list():

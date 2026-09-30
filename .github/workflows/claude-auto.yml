@@ -943,7 +943,7 @@ jobs:
       contents: read          # checkout, sync fetches; cannot push
       pull-requests: read     # the PR lookups; cannot comment
       issues: read
-      id-token: write         # WIF auth (and the action's own App token)
+      id-token: write         # WIF auth
       actions: read           # the failed CI run's logs
     outputs:
       # What the land job needs from this job, both read from STEP OUTCOMES
@@ -978,7 +978,7 @@ jobs:
       # authenticates itself (design/architecture.md → "No persisted git
       # credentials"): the runner-side steps through a step-scoped credential
       # helper on the job token, the agent through claude-code-action's own
-      # origin-URL credential (its App token — the agent never pushes, so
+      # origin-URL credential (the job token — the agent never pushes, so
       # the identity behind it no longer matters here). The fetch itself is a
       # read, so the job token is enough for it.
       - uses: actions/checkout@v4
@@ -1251,23 +1251,18 @@ jobs:
           fi
           printf 'value=%s\n' "You are @auto, fixing failing CI on PR #$PR (branch $HEAD). CI run $CI_RUN_ID ($RUN_URL) failed — this is fix attempt $ATTEMPT of $CAP. Inspect the failing jobs with \`gh run view $CI_RUN_ID --log-failed\`, diagnose the root cause, and fix it on the current branch. Verify your fix locally (run the relevant pytest/ruff/mypy). Then COMMIT to the current branch with git and stop. Do NOT push, do NOT open a PR, and do NOT post any comment, review or reaction: you hold no credential that may push or post as the loop's identity, and the workflow lands your work after your run ends — it pushes the branch's new commits as the machine account (which re-runs CI) and posts the re-review request itself. Do NOT create, edit or delete files that later automated runs execute or load as configuration: $PROTECTED_FILES. The landing refuses the whole bundle, so every commit of the run is lost; if the task needs such a change, stop and say so in a comment so a maintainer makes it from their machine. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn: background tasks do not re-invoke you and their completion notifications never arrive, so never end your turn waiting on anything (subagents, background commands, test suites): collect results in the foreground, and if a final validation is long-running, commit FIRST and let the PR's own CI be the gate (observed loss: a fix round ended with tests 'running in the background' and everything evaporated with the runner). ENDING CONTRACT (mandatory): a run that changed anything ends with those changes COMMITTED on the current branch — nothing more, nothing less. Uncommitted edits to tracked files are lost with the runner and are reported to the PR as a failed round, so commit everything you mean to keep, and revert scratch edits to tracked files you do not. If after investigating you cannot fix it, leave the tree unchanged and make your final message a plain explanation of what is blocking — the workflow relays it to the PR. In commit messages and in that final message, refer to this automation as \`auto\` without an @ prefix, and never write the review or dev-agent trigger tokens bare (backtick them): the commit list and the relayed text render on the PR, where a bare trigger token would start a workflow. Likewise never write the loop's marker substrings claude-review-summary, claude-review-verdict, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim — they are matched by plain substring, so quoting one would forge a verdict or a hand-off; break the token if you must reference it (e.g. 'claude-review summary').${merge_note}" >>"$GITHUB_OUTPUT"
 
-      # No github_token: the action mints its own App token through the OIDC
-      # exchange (as claude-review.yml's does), so the machine-account PAT is
-      # nowhere in this job. additional_permissions asks that token for
-      # actions: read — the exchange grants contents/PR/issues by default,
-      # and `gh run view --log-failed` on the failed CI run is the first
-      # thing the fix does (the job's own actions: read covers the job token,
-      # not the App token). First use of additional_permissions in this repo:
-      # if the exchange or a caller's App installation does not grant
-      # `actions`, this step fails before Claude starts on EVERY Claude-engine
-      # round — loud (the Surface step reports "failed before producing a
-      # result" and the attempt is refunded), but confirm on the first caller
-      # round after merge; the PAT used to cover the log read. The
-      # GIT_CONFIG_* env is the step-scoped fallback credential (issue #61)
-      # for any git call that does not go through the action's rewritten
-      # origin URL — the JOB token now: the agent never pushes, and the
-      # helper is scoped to this server's URL, so a `git fetch` the agent
-      # aims at any other host gets no credential.
+      # github_token is the job token (design/untrusted-agent-job.md → Stop
+      # trusting claude[bot]): the action skips its OIDC exchange for the
+      # Claude App token and its revoke post-step, so no App token and no
+      # machine-account token is in this job. The job's own `actions: read`
+      # covers `gh run view --log-failed` on the failed CI run, the first
+      # thing the fix does (additional_permissions, which asked the App
+      # token for it, is gone: the action sends it only to the exchange).
+      # The GIT_CONFIG_* env is the step-scoped fallback credential (issue
+      # #61) for any git call that does not go through the action's
+      # rewritten origin URL — the JOB token too: the agent never pushes,
+      # and the helper is scoped to this server's URL, so a `git fetch` the
+      # agent aims at any other host gets no credential.
       - uses: anthropics/claude-code-action@v1
         id: claude
         env:
@@ -1282,7 +1277,7 @@ jobs:
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
-          additional_permissions: "actions: read"
+          github_token: ${{ github.token }}
           prompt: ${{ steps.prompt.outputs.value }}
           # workflow_run's actor is the CI run's actor — the account that
           # pushed the branch: the machine account, a User today and the
@@ -1298,7 +1293,7 @@ jobs:
           # (design/executed-paths-residual.md → The launcher).
           path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}
           # Skips the action's `Post buffered inline comments` post-step, which
-          # would post, with the App token, whatever records a local process
+          # would post, with the action's token, whatever records a local process
           # left in /tmp/inline-comments-buffer.jsonl (the agent's /tmp is
           # private anyway; belt and braces).
           classify_inline_comments: "false"
@@ -1324,7 +1319,7 @@ jobs:
         with:
           user: claude-agent
 
-      # The action leaves its App token in remote.origin.url; the wrapper
+      # The action leaves its token (the job token) in remote.origin.url; the wrapper
       # already reset it before the agent started, and this stays as belt and
       # braces for the action's own later writes, after the reclaim (git over
       # a `.git` the agent could write is never run) — git never consults a
@@ -1771,10 +1766,12 @@ jobs:
       group: claude-auto-${{ github.repository }}-pr-${{ inputs.pr_number }}
       cancel-in-progress: false
     permissions:
+      # No id-token: write: nothing in this job requests an OIDC token, and
+      # with it a runner compromise here could mint a Claude App token
+      # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
       contents: read          # checkout, sync fetches; cannot push
       pull-requests: read     # the PR lookups; cannot comment
       issues: read
-      id-token: write         # WIF auth (and the action's own App token)
       actions: read           # the failed CI run's logs
     outputs:
       # What the land job's refund step needs from this job: whether the
@@ -1969,9 +1966,9 @@ jobs:
       # boundary exists (Claude Security finding 4628446). The Claude job
       # runs the caller's `claude-setup` composite and the fallback recipe as
       # the runner; a composite action can only run as the runner, and on
-      # this job the runner is a uid with passwordless sudo, the OIDC request
-      # token and — at the codex-action step below — OPENAI_API_KEY, none of
-      # which the codex user boundary lets codex reach. The PR head this job
+      # this job the runner is a uid with passwordless sudo and — at the
+      # codex-action step below — OPENAI_API_KEY, neither of which the
+      # codex user boundary lets codex reach. The PR head this job
       # checks out may be one the pipeline itself authored from an outsider's
       # issue text (pushed and labelled by the machine account, so
       # `same-repo` says nothing about who wrote its `pyproject.toml` build
@@ -2022,7 +2019,7 @@ jobs:
       # reads ~codex/.codex/config.toml (following a symlink) and writes the
       # merged file back readable by codex, so a config.toml the provisioning
       # had replaced with a link to /proc/self/environ would copy the action
-      # process's environment — the OIDC request token, the key input — into
+      # process's environment — the key input — into
       # a file codex can read. After this step nothing runs as codex and the
       # only files codex-action reads before launching codex are the ones the
       # composite wrote. A failure skips codex (the Surface step names it).

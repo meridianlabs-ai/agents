@@ -89,6 +89,10 @@ def job_if(job: str) -> str:
     return next(line for line in job.splitlines() if line.startswith("    if: "))
 
 
+def permissions(job: str) -> str:
+    return job[job.index("    permissions:\n"):job.index("    steps:\n")]
+
+
 def step_with(job: str, needle: str) -> str:
     found = [s for s in steps(job) if needle in s]
     assert len(found) == 1, (needle, len(found))
@@ -138,15 +142,51 @@ def test_the_two_agent_jobs_are_selected_by_the_gate_engine_and_never_both(name)
     assert "needs.gate.outputs.engine != 'codex'" in job_if(claude_job)
     assert "needs.gate.outputs.engine == 'codex'" in job_if(codex_job)
     assert "    needs: gate\n" in claude_job and "    needs: gate\n" in codex_job
-    # Same untrusted permissions block on both.
-    perms = lambda job: job[job.index("    permissions:\n"):job.index("    steps:\n")]  # noqa: E731
-    assert [l.split("#")[0].strip() for l in perms(claude_job).splitlines() if l.strip().startswith(("contents", "pull-requests", "issues", "id-token", "actions"))] == \
-           [l.split("#")[0].strip() for l in perms(codex_job).splitlines() if l.strip().startswith(("contents", "pull-requests", "issues", "id-token", "actions"))]
-    for want in ("contents: read", "pull-requests: read", "issues: read", "id-token: write", "actions: read"):
-        assert want in perms(codex_job)
+    # Same untrusted read permissions on both; only the Claude job requests
+    # an OIDC token (test_only_the_claude_job_requests_an_oidc_token).
+    reads = ("contents", "pull-requests", "issues", "actions")
+    assert [l.split("#")[0].strip() for l in permissions(claude_job).splitlines() if l.strip().startswith(reads)] == \
+           [l.split("#")[0].strip() for l in permissions(codex_job).splitlines() if l.strip().startswith(reads)]
+    for want in ("contents: read", "pull-requests: read", "issues: read", "actions: read"):
+        assert want in permissions(codex_job)
     # No step of either job gates on the engine any more: the job does.
     for job in (claude_job, codex_job):
         assert "needs.gate.outputs.engine" not in "\n".join(l for l in code_lines(job) if l.startswith("        if:") or "if: >-" in l or l.startswith("          needs.gate.outputs.engine")), name
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_only_the_claude_job_requests_an_oidc_token(name):
+    # design/untrusted-agent-job.md → Stop trusting claude[bot]: nothing in a
+    # codex job requests an OIDC token, and with `id-token: write` a runner
+    # compromise there could exchange one for a Claude App token. The Claude
+    # job keeps it for Workload Identity Federation. (Step 7 of that design
+    # restores it on the codex jobs for the OpenAI federation.)
+    claude_job, codex_job = (jobs(workflow_text(name))[j] for j in AGENT_JOBS[name])
+    assert "id-token" not in "\n".join(code_lines(permissions(codex_job)))
+    assert "      id-token: write         # WIF auth" in permissions(claude_job)
+
+
+# claude.yml's Claude job stays in tag mode, which needs a write token, until
+# step 4 of design/untrusted-agent-job.md moves it to agent mode.
+JOB_TOKEN_MODE = [name for name in REUSABLE if name != "claude.yml"]
+
+
+@pytest.mark.parametrize("name", JOB_TOKEN_MODE)
+def test_every_claude_action_step_runs_on_the_job_token(name):
+    # github_token is the job token, so the action never exchanges the job's
+    # OIDC token for a Claude App token (and runs no revoke post-step);
+    # additional_permissions, which only that exchange reads, is gone.
+    found = 0
+    for job, block in jobs(workflow_text(name)).items():
+        for s in steps(block):
+            if CLAUDE_ACTION not in s:
+                continue
+            found += 1
+            code = "\n".join(code_lines(s))
+            assert "\n          github_token: ${{ github.token }}" in code, job
+            for key in ("additional_permissions", "trigger_phrase", "label_trigger"):
+                assert f"          {key}:" not in code, (job, key)
+    assert found == 1, name
 
 
 @pytest.mark.parametrize("name", REUSABLE)

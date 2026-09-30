@@ -2243,10 +2243,12 @@ jobs:
     if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.engine == 'codex'
     runs-on: ubuntu-latest
     permissions:
+      # No id-token: write: nothing in this job requests an OIDC token, and
+      # with it a runner compromise here could mint a Claude App token
+      # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
       contents: read          # checkout, sync fetches; cannot push
       pull-requests: read     # the PR reads; cannot comment
       issues: read
-      id-token: write         # WIF auth (and the action's own App token)
       actions: read
     steps:
       # Full history + tags: setuptools-scm versioning needs tags, and Claude
@@ -2520,9 +2522,9 @@ jobs:
       # boundary exists (Claude Security finding 4628446). The Claude job
       # runs the caller's `claude-setup` composite and the fallback recipe as
       # the runner; a composite action can only run as the runner, and on
-      # this job the runner is a uid with passwordless sudo, the OIDC request
-      # token and — at the codex-action step below — OPENAI_API_KEY, none of
-      # which the codex user boundary lets codex reach. The head this job
+      # this job the runner is a uid with passwordless sudo and — at the
+      # codex-action step below — OPENAI_API_KEY, neither of which the
+      # codex user boundary lets codex reach. The head this job
       # checks out may be one the pipeline itself authored from an outsider's
       # issue text (a `claude/issue-N-*` branch, pushed and labelled by the
       # machine account, so `same-repo` says nothing about who wrote its
@@ -2570,7 +2572,7 @@ jobs:
       # reads ~codex/.codex/config.toml (following a symlink) and writes the
       # merged file back readable by codex, so a config.toml the provisioning
       # had replaced with a link to /proc/self/environ would copy the action
-      # process's environment — the OIDC request token, the key input — into
+      # process's environment — the key input — into
       # a file codex can read. After this step nothing runs as codex and the
       # only files codex-action reads before launching codex are the ones the
       # composite wrote. A failure skips codex (the Surface step names it).

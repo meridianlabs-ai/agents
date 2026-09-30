@@ -192,9 +192,9 @@ on:
           tool from the allow-list and denies the gh verbs that post or open
           things, so a caller's settings cannot re-enable posting. Those
           denies make read-only intent explicit; the job token — contents
-          and pull requests read — can't push or post regardless, and the
-          action's own App token, which can, is the guard-rail case
-          design/architecture.md → Landing job describes for the fix job.
+          and pull requests read — can't push or post regardless, and it is
+          the action's own token too (`github_token`), so no token in the
+          job can.
           deny beats allow, so it holds even against any claude_args
           override. In external-review mode a sandbox overlay is merged in
           at runtime (same step) so the reviewer can execute the untrusted
@@ -236,8 +236,9 @@ on:
           Comma-separated bot logins whose events may trigger the reviewer, or
           "*" for all. Empty by default, which means claude-code-action rejects
           ALL bot-authored events (its checkHumanActor runs even in prompt/agent
-          mode). The fork sets "claude[bot]" so the dev agent can kick off a
-          review by posting a top-level @review comment when it opens a PR.
+          mode). The inspect_ai fork sets "claude[bot]", for a dev-agent
+          @review on PR open that no dev agent has posted since 2026-09-16;
+          nothing else trusts claude[bot] (design/untrusted-agent-job.md).
           Keep this empty on the dev workflow: allowing bots there
           would let the reviewer's own comments retrigger the dev agent.
           The trig step reads it too: a `[bot]` commenter's @review is
@@ -1155,7 +1156,7 @@ jobs:
       # verbs that post or open things are denied — claude-auto.yml's fix
       # job's list, composed here for the same reason: a caller's `settings`
       # cannot re-enable posting. Guard rails, not the boundary (the job
-      # token is read-only; the action's App token is what they fence — see
+      # token, which is the action's token too, is read-only — see
       # design/architecture.md → Landing job on the fix job).
       #
       # On the sandboxed paths the review output directory is ALSO put on the
@@ -1258,7 +1259,7 @@ jobs:
       # sandboxed commands, which would break the reviewer's own git in the
       # checkout, and the token is no longer there — the launcher's wrapper
       # resets the origin URL before the agent starts and refuses to launch
-      # while the App token appears in `.git/config` (or anywhere in the
+      # while a privileged token appears in `.git/config` (or anywhere in the
       # agent's argv, env or settings). `safe.directory` for the checkout
       # comes from the root-owned system git config (create-codex-user),
       # which the sandbox does not deny. ~/.config/gh and ~/.gitconfig — the
@@ -1361,6 +1362,11 @@ jobs:
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
           anthropic_service_account_id: svac_01RL4wYD7ikbypwYKf4wFojv
           anthropic_workspace_id: wrkspc_01RKCQ5DTPBatQ7kHLkaEueD
+          # The job token (design/untrusted-agent-job.md → Stop trusting
+          # claude[bot]): the action skips its OIDC exchange for the Claude
+          # App token and its revoke post-step, so no App token is in this
+          # job. The review is posted by the land job from the manifest.
+          github_token: ${{ github.token }}
           prompt: ${{ steps.reviewprompt.outputs.value }}
           settings: ${{ steps.reviewsettings.outputs.value }}
           # The launcher's wrapper, spawned in place of the CLI: it starts the
@@ -1368,7 +1374,7 @@ jobs:
           # (design/executed-paths-residual.md → The launcher).
           path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}
           # Skips the action's `Post buffered inline comments` post-step, which
-          # would post, with the App token, whatever records a local process
+          # would post, with the action's token, whatever records a local process
           # left in /tmp/inline-comments-buffer.jsonl: the reviewer's inline
           # findings reach the PR only through inline.json and the landing
           # manifest (and the agent's /tmp is private anyway).
@@ -2216,10 +2222,12 @@ jobs:
       group: claude-review-${{ github.repository }}-${{ github.event.issue.number }}
       cancel-in-progress: true
     permissions:
+      # No id-token: write: nothing in this job requests an OIDC token, and
+      # with it a runner compromise here could mint a Claude App token
+      # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
       contents: read          # read code to review; cannot push
       pull-requests: read     # the diff and the thread; the review is posted by `land` from the manifest (issue #114)
       issues: read
-      id-token: write         # WIF auth
       actions: read
     steps:
       # On an @review comment (issue_comment) the default checkout would be
@@ -2299,9 +2307,9 @@ jobs:
       # boundary exists (Claude Security finding 4628446). The Claude job
       # runs the caller's `claude-setup` composite and the fallback recipe as
       # the runner; a composite action can only run as the runner, and on
-      # this job the runner is a uid with passwordless sudo, the OIDC request
-      # token and — at the codex-action step below — OPENAI_API_KEY, none of
-      # which the codex user boundary lets codex reach. The PR head this job
+      # this job the runner is a uid with passwordless sudo and — at the
+      # codex-action step below — OPENAI_API_KEY, neither of which the
+      # codex user boundary lets codex reach. The PR head this job
       # checks out may be one the pipeline itself authored from an outsider's
       # issue text (pushed and labelled by the machine account, so
       # `same-repo` says nothing about who wrote its `pyproject.toml` build
@@ -2345,7 +2353,7 @@ jobs:
       # reads ~codex/.codex/config.toml (following a symlink) and writes the
       # merged file back readable by codex, so a config.toml the provisioning
       # had replaced with a link to /proc/self/environ would copy the action
-      # process's environment — the OIDC request token, the key input — into
+      # process's environment — the key input — into
       # a file codex can read. After this step nothing runs as codex and the
       # only files codex-action reads before launching codex are the ones the
       # composite wrote. A failure skips codex (the Surface step names it).

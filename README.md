@@ -253,9 +253,10 @@ Branch layout:
 > unasked on 2026-09-16, and why the reviewer stub no longer carries the
 > trigger.) The dev agent used to post a top-level `@review` when it opened a
 > PR, as the fork's substitute for auto-review-on-open; that is off too
-> (`request_review_after_open: "false"`, 2026-09-16). The reviewer stub keeps
-> `allowed_bots: "claude[bot]"` so a bot-authored `@review` is still honored
-> when one is posted. Every PR needs a human `@review`.
+> (`request_review_after_open: "false"`, 2026-09-16). The reviewer stub's
+> `allowed_bots: "claude[bot]"` is left from then and is being removed:
+> nothing else trusts `claude[bot]`, and the review-fix loop ignores its
+> verdicts and requests. Every PR needs a human `@review`.
 
 Both branches are kept current by `sync-upstream.yml` (hourly): it
 fast-forwards `main` from upstream and merges upstream into `meridian`. It

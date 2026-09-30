@@ -453,19 +453,28 @@ human step.
 
 - **The job token, read-only.** In the four reusable workflows every agent
   job's `permissions:` block is
-  `contents: read`, `pull-requests: read`, `issues: read`, `actions: read`
-  and `id-token: write`. The checkout runs on it with
+  `contents: read`, `pull-requests: read`, `issues: read` and
+  `actions: read`, plus `id-token: write` on the Claude jobs, for Workload
+  Identity Federation. The codex jobs have requested no OIDC token since
+  2026-09-30: nothing in them uses one, and with it a runner compromise
+  there could mint a Claude App token ([untrusted-agent-job.md](untrusted-agent-job.md)
+  → Stop trusting `claude[bot]`). The checkout runs on it with
   `persist-credentials: false`; the three writing workflows assert right
   after that `http.<server>/.extraheader` is empty
   (`assert-no-persisted-credential`). The `sync-branch` base merge fetches
   with it through a step-scoped helper and never pushes.
-- **The Claude GitHub App's own installation token — in the job, not in
-  the agent's reach.** No workflow passes a `github_token` to
-  `claude-code-action`, so the action exchanges the job's OIDC token for its
+- **The Claude GitHub App's installation token, in the dev agent's job
+  only.** The reviewer and both loops pass `github_token: ${{ github.token }}`
+  to `claude-code-action` (since 2026-09-30), so the action skips its OIDC
+  exchange and its revoke post-step, and those jobs hold no App token.
+  claude.yml's Claude job still passes none, because tag mode needs a write
+  token for its tracking comment (step 4 of untrusted-agent-job.md moves it
+  to agent mode). There the action exchanges the job's OIDC token for its
   own installation token of the Claude app, requesting contents, pull
-  requests and issues write on the caller repository (its
-  `src/github/token.ts`), and revokes it when the step ends. The job's
-  `permissions:` block does not scope this token. Since plan step 5 of
+  requests and issues write on the caller repository, plus `actions: read`
+  (`additional_permissions`; its `src/github/token.ts`), and revokes it when
+  the step ends. The job's `permissions:` block does not scope this token.
+  Since plan step 5 of
   [executed-paths-residual.md](executed-paths-residual.md) it lives only in
   the action's runner-side process and files: the agent runs as
   `claude-agent`, started by the launcher's wrapper, which drops every MCP
@@ -475,25 +484,27 @@ human step.
   appears anywhere in the agent's argv, environment, settings or
   `.git/config`; the agent's PID and mount namespace hides the action's
   process, the step scripts that embed the token and the runner's files.
-  So the agent no longer holds a `claude[bot]` write channel: the composed
+  So the agent holds no `claude[bot]` write channel: the composed
   settings still deny its push and posting commands (`Bash(git push:*)`,
   the action's `scripts/git-push.sh` wrapper, the `gh` comment, review,
   create and merge verbs, the reviewer's inline-comment tool) as guard
   rails, and what slipped past them would fail for want of a credential.
   Thread resolutions, replies and comments go through the landing
-  manifest. `claude[bot]` stays an identity the loops believe: the
-  review-fix workflow accepts it as a verdict author (`reviewer_login`
-  defaults to `claude[bot]`, `REVIEWER_LOGINS` names it next to the machine
-  account's two logins), and re-review requests follow the configured
-  allow-lists (`review_allowed_bots` defaults to `claude[bot]`; the reviewer
-  admits a bot's `@review` when the caller's `allowed_bots` names it). Its
-  comments now come from the action's own runner-side code (the dev
-  agent's tracking comment) or from a direct caller's agent job that still
-  runs the action as the runner. The CI-fix gate refuses a run whose actor
-  is any bot but the machine account, on both engines (finding 4628657;
-  decision: Ransom, 2026-09-22). The dev agent and the CI-fix loop ask the
-  token for `actions: read` in addition (`additional_permissions`); the
-  agent reads CI logs with the job token, which has it.
+  manifest. While the App is installed, any job with `id-token: write` can
+  still mint its token (step 6 of untrusted-agent-job.md uninstalls it), so
+  `claude[bot]` is trusted nowhere since 2026-09-30: the review-fix
+  workflow's verdict authors are the machine account's two logins
+  (`REVIEWER_LOGINS`; `reviewer_login` defaults to empty), a `claude[bot]`
+  `@review` is not a pending request unless the caller names it
+  (`review_allowed_bots` defaults to empty), pr-feedback-context anchors a
+  review round only on the machine account's comments, and the promote
+  skill ignores `claude[bot]` verdicts. The loops' agent steps and the
+  codex reviewer still list `claude` in the action's own actor guard
+  (`allowed_bots`, `allow-bot-users`), behind gates that refuse it;
+  dropping it is a separate change. The CI-fix gate refuses a run whose
+  actor is any bot but the machine account, on both engines (finding
+  4628657; decision: Ransom, 2026-09-22). The CI-fix agent reads CI logs
+  with the job token, which has `actions: read`.
 - **The model credential.** Claude authenticates through Workload Identity
   Federation: the job's OIDC token is exchanged for a short-lived Anthropic
   credential under a rule that matches `repository_owner ==
@@ -744,8 +755,9 @@ A caller repository enables an agent by copying a stub from `examples/` into
 - Grants the calling job what the reusable workflow's jobs need at most, and
   no job inside takes more than it uses. The dev-agent and loop stubs grant
   `contents`, `pull-requests` and `issues` write, `id-token` write and
-  `actions` read; inside, the agent job takes read on all three plus
-  `id-token: write` and `actions: read`, and only `claude.yml`'s land job
+  `actions` read; inside, the agent jobs take read on all three plus
+  `actions: read`, the Claude jobs `id-token: write` as well (the codex jobs
+  since 2026-09-30 no OIDC token), and only `claude.yml`'s land job
   takes `contents: write`, for the job-token fallback push. The reviewer stub
   grants `contents`, `pull-requests` and `issues` read, `id-token` write and
   `actions` read: the review is posted by the land job as the machine

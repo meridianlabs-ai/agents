@@ -1364,6 +1364,26 @@ model or a real secret):
     positive control and the evidence for this design. If a token comes
     back the probe revokes it at once (`DELETE /installation/token`) and
     prints nothing from it.
+  - The exchange answers only an event and a workflow file it accepts.
+    Measured on the step-1 branch on 2026-09-30:
+    - a `push` run: `401`, "Invalid OIDC token";
+    - a `workflow_dispatch` run of the branch, whose canary files differ
+      from `main`'s: `401`, "Workflow validation failed. The workflow file
+      must exist and have identical content to the version on the
+      repository's default branch";
+    - the codex job: no OIDC request token, so no request.
+
+    So the probe expects a token only on a `workflow_dispatch` from `main`
+    and records the outcome on every other run. The probe's own positive
+    result (exchange `200`, revocation `204`) therefore cannot be recorded
+    before step 1 merges. It is run immediately after the merge, with step
+    1's live runs (decision: Ransom, 2026-09-30; Implementation plan →
+    step 1).
+    Real agent runs show the exchange succeeding from runner-side code
+    today: the action's own exchange logs "App token successfully
+    obtained" in this repository's reviewer job 107763176352 (2026-09-24,
+    claude-review.yml at 0aa1f20) and in an inspect_ai fork dev-agent job,
+    109170645052 (2026-09-28, claude.yml at 609e20d).
   - After step 6 it must fail, and that failure is the proof of step 6.
   - Add the same probe to a codex job, where it must fail after step 1
     because the job has no `id-token: write`, and again after step 7
@@ -1417,6 +1437,22 @@ SECURITY.md text that its change makes true.
      test_engine_job_isolation.
    - The canary's OIDC exchange probe lands here too, recording today's
      positive result.
+   - Verified after merge, not before (decision: Ransom, 2026-09-30): the
+     exchange refuses runs from a PR branch, and a live run of the branch
+     would need a stub pointed at it. Immediately after the merge:
+     - `gh workflow run engine-isolation-canary.yml --repo
+       meridianlabs-ai/agents --ref main`: the Claude probe must print
+       `minted (exchange HTTP 200; revoked, HTTP 204)`, the codex probe
+       `refused`;
+     - `@review` on a PR on each engine: the review lands as the machine
+       account, and no `claude[bot]` post appears;
+     - one round of each loop (CI-fix and review-fix): the Claude CI-fix
+       agent reads the failed run's log with the job token, the round
+       lands as the machine account, and a codex review anchors the next
+       fix prompt.
+
+     The run URLs and outcomes are recorded here, under this step, in a
+     follow-up PR. If a check fails, step 1 is reverted.
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
    maintainer's machine. It can merge before or after step 1.
