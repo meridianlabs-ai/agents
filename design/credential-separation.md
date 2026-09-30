@@ -5,7 +5,7 @@ and every other secret they control, away from content an outsider can
 shape, as they stand on `main` today. Written for someone who
 maintains these workflows or adds a caller. The rules here are the ones the
 tests under `tests/` check and the ones a review of a workflow change holds
-it to; [SECURITY.md](../SECURITY.md) is the short public statement of the
+it to; [THREAT_MODEL.md](../THREAT_MODEL.md) is the short public statement of the
 same boundaries.
 
 **History.** How this shape was reached, one issue and one review round at a
@@ -436,13 +436,13 @@ executes or loads (Claude Security finding 4628446, criterion 2): anything
 under `.github/`, agent instructions and settings, and build and
 dependency configuration, at any depth, plus the symlink targets and
 `CLAUDE.md` imports they reach — the list and its rationale are in lib.sh
-and in SECURITY.md → Guarantees. GitHub's check covers only workflows, so
+and in THREAT_MODEL.md → Guarantees. GitHub's check covers only workflows, so
 for these the land job's refusal is the whole boundary: without it the
 machine account's push would launder an agent-written `claude-setup`
 composite or build hook into a same-repo branch the next run provisions
 from as `runner`. It does not close the class: an ordinary file that
 unchanged configuration executes still lands, an accepted gap (decision:
-Ransom, 2026-09-23) stated in SECURITY.md → Guarantees and left to the
+Ransom, 2026-09-23) stated in THREAT_MODEL.md → Guarantees and left to the
 design follow-up named there.
 
 The app is not a member of `UKGovernmentBEIS`, so, like the PAT before it, it
@@ -971,7 +971,7 @@ results against the invariant each one tests.
   the next run of the reusable workflows executes it during provisioning,
   at agent start or in the agent's tests — as `codex` or, since plan step 5
   of executed-paths-residual.md, as `claude-agent`, never as `runner`
-  (SECURITY.md → Guarantees). Since that design's plan step 6 a caller
+  (THREAT_MODEL.md → Guarantees). Since that design's plan step 6 a caller
   that opts in (`allow_build_config`, passed to land as
   `allow-build-config`) lets the build and dependency group land; the
   rest stays refused. Price: a task that needs a dependency bump (without the opt-in), a

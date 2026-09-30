@@ -271,7 +271,7 @@ landing_failure_hint() {
 # one still lands; the reusable workflows' next run executes it during
 # provisioning, at agent start or in the agent's own tool calls only as the
 # unprivileged agent user (`codex`, or `claude-agent` on Claude jobs);
-# SECURITY.md → Guarantees states it. Links and CLAUDE.md imports out of
+# THREAT_MODEL.md → Guarantees states it. Links and CLAUDE.md imports out of
 # the checked paths are followed by protected_reach below.
 # shellcheck disable=SC2034  # read by the land composite's `workflows` step
 TIER1_PATHSPECS=(

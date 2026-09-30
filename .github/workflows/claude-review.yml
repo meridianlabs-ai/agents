@@ -2254,6 +2254,26 @@ jobs:
           sha=$(git rev-parse HEAD)
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
 
+      # Node on the job PATH BEFORE the codex user exists (design/codex-engine.md
+      # → Runner-side search path). openai/codex-action runs this same
+      # setup-node, pinned to this commit, with node-version "24", then
+      # `npm install -g` for the CLI and its proxy into that Node's prefix.
+      # Run only there, it adds the toolcache's Node bin directory to the
+      # job PATH after `Create codex user` has checked and repaired the
+      # PATH, and the image ships that directory writable by the codex user,
+      # so the reclaim's check refused every run (run 36738559681, PR #180,
+      # 2026-09-30). Run here first, the directory is on the PATH when
+      # `Create codex user` makes it runner-only, and the action's own
+      # setup-node finds the same cached version. Keep the pin and the
+      # version equal to the action's. No package cache: nothing restored
+      # from the caller's caches, no post-step save.
+      - name: Set up Node for codex-action
+        if: needs.gate.outputs.ok == 'true'
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
       # Codex engine (design/codex-engine.md): the sandbox has no GitHub
       # credentials, so the agent cannot post — it emits a
       # structured review (schema below) and the next step posts it with the
@@ -2752,7 +2772,7 @@ jobs:
             err="resetting the codex home after provisioning failed before the agent started — processes were still running as codex after repeated kills (a provisioning survivor?) or the home could not be re-created (see the job logs); nothing was attempted."
           fi
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
-            err="the codex user setup failed before the reviewer started (a job PATH entry inside the workspace or writable by the codex user — nothing in this job adds to the job PATH before it, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
+            err="the codex user setup failed before the reviewer started (a job PATH entry inside the workspace or writable by the codex user — only the Node setup step adds to the job PATH before it, and this check makes that directory runner-only, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEXINPUTS_OUTCOME:-}" = "failure" ]; then
             err="preparing the codex review inputs (tool discovery, the review schema file) failed before the reviewer started — see the job logs."
