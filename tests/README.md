@@ -525,9 +525,9 @@ Testing a change).
   order. `scheduler_boundary_smoke.sh` is that job's script: cron and at
   installed, each layer shown to refuse on its own with a positive
   control, both schedulers tried as the agent user during provisioning
-  and inside the launched namespace, then entries planted as root for
-  each purge site, which must fail and leave no agent-uid process on the
-  host past the next minute boundary.
+  and inside the launched namespace, then, with the deny lifted, a
+  crontab and an at job planted for each purge site, which must fail and
+  leave no agent-uid process on the host past the next minute boundary.
 - `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
   the same way against a stub `gh`: an issue's `auto` label is the run's
   opt-in only when the account that applied it most recently is a human

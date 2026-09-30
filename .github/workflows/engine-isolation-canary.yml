@@ -113,12 +113,13 @@
 #                          through the real agent-ns-launch (a copy of
 #                          bash named `bun` stands in for the action's
 #                          process, a root-owned script for the CLI).
-#                          Last, root plants a crontab and an at job for
-#                          the user, as a bypassed deny would leave them,
-#                          before each purge site (the launcher or
-#                          `reset-home`, then the reclaim): each must fail,
-#                          and no agent-uid process may appear on the host
-#                          past the next minute boundary.
+#                          Last, with the deny lifted as a bypass would
+#                          leave it, a crontab and an at job are planted
+#                          for the user before each purge site (the
+#                          launcher or `reset-home`, then the reclaim):
+#                          each must fail, and no agent-uid process may
+#                          appear on the host past the next minute
+#                          boundary.
 #   codex-action-path      the job PATH around the real openai/codex-action
 #                          (design/codex-engine.md → Runner-side search
 #                          path), in the codex jobs' step order: the Node

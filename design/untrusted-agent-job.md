@@ -749,9 +749,10 @@ in place for `claude-agent` and `codex` (criterion 1):
   the job if there was one.
 - The engine isolation canary's `scheduler-boundary` job tries both
   schedulers as each agent user during provisioning and, for
-  `claude-agent`, from inside a launched namespace. It then plants
-  entries as root, as a bypassed deny would leave them, and checks that
-  each purge site fails and that no agent-uid process appears afterwards.
+  `claude-agent`, from inside a launched namespace. Then, with the deny
+  lifted as a bypass would leave it, it plants a crontab and an at job
+  for the user before each purge site and checks that the site fails and
+  that no agent-uid process appears afterwards.
 
 Criterion 2 (the App token on argv) is steps 1, 4 and 6.
 

@@ -113,6 +113,9 @@ def test_create_mode_denies_right_after_the_user_exists():
     assert first.index('sudo usermod -a -G runner "$AGENT_USER"') < first.index('sudo bash "$DENY_SCRIPT" "$AGENT_USER"')
     assert "        DENY_SCRIPT: ${{ github.action_path }}/deny-schedulers.sh\n" in CREATE.read_text()
     assert os.access(DENY, os.X_OK)
+    # The path smoke runs the same block with the step's env.
+    smoke = (ROOT / "tests" / "codex_path_smoke.sh").read_text()
+    assert 'DENY_SCRIPT="$root/.github/actions/create-codex-user/deny-schedulers.sh"' in smoke
 
 
 # --- purge_agent_schedules.sh ---------------------------------------------------

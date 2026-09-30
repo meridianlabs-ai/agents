@@ -21,14 +21,14 @@
 #                  each. Always exits 0: `check` judges the result.
 #   check U FILE   (runner) FILE, an `attempt` report, shows no_new_privs
 #                  set and every attempt refused; then `quiet U`.
-#   plant U        (runner) what a bypassed deny would leave: root installs
-#                  a crontab for U, and U queues an at job with the deny
-#                  lifted for a moment. Waits until both have started a U
-#                  process on the host, so the purge after it has something
-#                  to find.
+#   plant U        (runner) what a bypassed deny would leave: the deny
+#                  lifted, root installs a crontab for U and U queues an at
+#                  job. Waits until both have started a U process on the
+#                  host, so the purge after it has something to find. The
+#                  deny stays lifted, so only the purge stops the daemons.
 #   quiet U        (runner) no cron or at entry of U, no U process now, and
 #                  still none after the next minute boundary, when cron
-#                  would have started one.
+#                  would have started one; then the deny is put back.
 set -uo pipefail
 
 mode=${1:?mode: image | layers U | attempt WHERE | check U FILE | plant U | quiet U}
@@ -131,10 +131,11 @@ case "$mode" in
   plant)
     U=${2:-}; need_user "$U"
     say "planting what a bypassed deny would leave for $U"
-    printf '* * * * * sleep 601\n' | sudo crontab -u "$U" - || fail "root could not install $U's crontab"
+    # crontab refuses a denied user even to root, and the deny stays lifted
+    # until `quiet` has run, so that only the purge stops the daemons.
     lift_deny "$U"
-    echo 'sleep 602' | sudo -u "$U" at now 2>&1 || { restore_deny "$U"; fail "$U could not queue an at job with the deny lifted"; }
-    restore_deny "$U"
+    printf '* * * * * sleep 601\n' | sudo crontab -u "$U" - || fail "root could not install $U's crontab"
+    echo 'sleep 602' | sudo -u "$U" at now 2>&1 || fail "$U could not queue an at job with the deny lifted"
     entries "$U"
     # cron reads a changed crontab at a minute boundary: up to two of them.
     for _ in $(seq 1 75); do
@@ -162,6 +163,7 @@ case "$mode" in
     sleep "$wait"
     if pgrep -u "$U" -a; then fail "a $U process appeared on the host after the purge"; fi
     [ -z "$(entries "$U")" ] || fail "$U has scheduler entries again: $(entries "$U")"
+    restore_deny "$U"
     echo "$U has no scheduler entry and no process on the host, past a minute boundary"
     ;;
 
