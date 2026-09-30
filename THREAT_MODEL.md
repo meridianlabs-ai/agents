@@ -75,12 +75,18 @@ text are checked by the tests under `tests/`.
   After the agent, a reclaim kills whatever is left, removes its Workload
   Identity access and credential cache, and takes `.git` back before any
   runner-side git; the agent's landing files reach the runner only through
-  an owner-checked, `O_NOFOLLOW`, size-capped copy. A hosted canary
+  an owner-checked, `O_NOFOLLOW`, size-capped copy. Neither agent user
+  can schedule host-side work: both are in `/etc/cron.deny` and
+  `/etc/at.deny`, the launcher's privilege drop and provisioning run with
+  no_new_privs, and every kill of the agent user's processes is followed
+  by a purge of its cron and at entries that fails the job if one existed
+  (Claude Security finding 4773340, criterion 1). A hosted canary
   exercises the codex boundary and the secret delivery against a hostile
   checkout and synthetic secrets (design/credential-separation.md → section
-  6), and the Claude launcher up to its launch; adversarial probing of the
-  Claude agent's namespace is left to Claude Security scans (decision:
-  Ransom, 2026-09-24).
+  6), the Claude launcher up to its launch, and the scheduler denial
+  from provisioning and from inside a launched namespace; other
+  adversarial probing of the Claude agent's namespace is left to Claude
+  Security scans (decision: Ransom, 2026-09-24).
 - A `settings` input that names a file is read only from inside the
   workspace, as a regular file of at most 64 KiB with no `..` and no
   symlink anywhere on its path, opened `O_NOFOLLOW`. Anything else fails

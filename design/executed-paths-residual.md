@@ -742,9 +742,11 @@ It builds the view in this order:
 7. It opens the final workspace bind by its absolute path, freshly
    resolved, and starts the child with that as its cwd. That is `setpriv
    --reuid claude-agent --regid claude-agent --init-groups
-   --inh-caps=-all --bounding-set=-all -- env -i <env…> <real claude>
-   <args…>`, with the pidfd closed in the child. The child inherits the
-   SDK's stdio.
+   --inh-caps=-all --bounding-set=-all --no-new-privs -- env -i <env…>
+   <real claude> <args…>`, with the pidfd closed in the child. The child
+   inherits the SDK's stdio. `--no-new-privs` makes a setuid or setgid
+   file, such as `crontab`, gain nothing (Claude Security finding 4773340;
+   design/untrusted-agent-job.md → What stays in the untrusted job).
 
 From inside, the agent sees:
 

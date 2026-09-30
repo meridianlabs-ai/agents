@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The reclaim itself (reclaim-codex-workspace/action.yml, steps 1-9 of its
-# description): kill every process of the agent user, refuse a redirected
+# description): kill every process of the agent user and purge its cron
+# and at entries, refuse a redirected
 # git dir or a new embedded repository, take `.git` back and revoke the
 # group's write on it and on the workspace root, restore the pre-agent
 # config, move hooks aside and pin core.hooksPath/core.fsmonitor. A script
@@ -61,6 +62,10 @@ if [ "$clear" -ne 1 ]; then
   echo "::error::processes were still running as $user after repeated kills — refusing to reclaim the workspace under them."
   exit 1
 fi
+# Nor anything cron or at would start as the agent user later (Claude
+# Security finding 4773340): the purge removes it and fails the step if
+# there was one.
+AGENT_USER="$user" bash "$(dirname "${BASH_SOURCE[0]}")/../../scripts/purge_agent_schedules.sh"
 # The Claude agent's launch (claude-agent-launcher's agent-ns-launch) gave
 # the agent user named-user ACL entries on the action's Workload Identity dir
 # and token file, and its own copy of the WIF profile dir in its home

@@ -75,6 +75,19 @@ description: >-
      Group kept as a faithful copy of the example; if codex ever drops a
      600 file, the reclaim step needs a `chmod -R a+rX` sweep, not this
      group.
+  2b. Deny cron and at to the new user (Claude Security finding 4773340,
+     criterion 1; `deny-schedulers.sh` next to this file): it is appended
+     to `/etc/cron.deny` and `/etc/at.deny`, each created when missing, and
+     the step fails if `/etc/cron.allow` or `/etc/at.allow` lists it (with
+     an allow file present, Debian's crontab and at read only that file).
+     The agent user's commands run with no_new_privs as well (the Claude
+     launcher's privilege drop, `provision-fallback`'s `sudo -u`), so the
+     setgid `crontab` and setuid `at` cannot write their spools even past
+     the deny; and every kill of the user's processes is followed by a
+     purge of its cron and at entries (`.github/scripts/
+     purge_agent_schedules.sh`), which fails the job if one exists. The
+     root cron or at daemon would otherwise start an agent-uid process on
+     the host after the kills, outside the agent's namespace.
   3. A codex-owned `$RUNNER_TEMP/codex` dir (755) for the explicit
      `output-file` — codex itself (via `sudo -u`) writes it and the action
      re-reads it as codex, but `$RUNNER_TEMP` is 755 runner:runner on the
@@ -227,7 +240,9 @@ inputs:
       and BEFORE the codex-action step (Claude Security finding 4628446,
       review round 1): kill every process still running as codex (a
       hostile build backend's survivor, exactly as the reclaim step kills
-      codex's own), then delete and re-create the codex home from scratch —
+      codex's own) and purge its cron and at entries, failing the step if
+      it had one (finding 4773340; see description, 2b), then delete and
+      re-create the codex home from scratch —
       codex-action's runner-side bootstrap reads `~codex/.codex/config.toml`
       (following a symlink) and writes the merged file back readable by
       codex, so a `config.toml` a process running as codex had replaced with
@@ -263,6 +278,7 @@ runs:
       env:
         AGENT_USER: ${{ inputs.user }}
         GRANT: ${{ inputs.grant }}
+        DENY_SCRIPT: ${{ github.action_path }}/deny-schedulers.sh
       run: |
         set -euo pipefail
         case "$AGENT_USER" in
@@ -308,6 +324,8 @@ runs:
         sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"
         sudo usermod -a -G "$AGENT_USER" runner
         sudo usermod -a -G runner "$AGENT_USER"
+        # 2b. No cron or at for the user (see description, 2b).
+        sudo bash "$DENY_SCRIPT" "$AGENT_USER"
 
     # Refuse before the grant if the job PATH has a directory codex could
     # write (see description, 2). Its own probes run by system path.
@@ -373,6 +391,7 @@ runs:
       env:
         HOME_SCRIPT: ${{ github.action_path }}/codex-home.sh
         PIN_SCRIPT: ${{ github.action_path }}/pin-bwrap.sh
+        PURGE_SCRIPT: ${{ github.action_path }}/../../scripts/purge_agent_schedules.sh
         SYSTEM_PATH: /usr/sbin:/usr/bin:/sbin:/bin
         BIN: ${{ inputs.bin }}
         AGENT_USER: ${{ inputs.user }}
@@ -406,6 +425,9 @@ runs:
           echo "::error::processes were still running as codex after repeated kills (a provisioning survivor?) — refusing to hand the workspace to codex-action."
           exit 1
         fi
+        # Nor anything cron or at would start as codex later (finding
+        # 4773340): removed, and the step fails if there was one.
+        bash "$PURGE_SCRIPT"
         # With bin directories for codex's command PATH, first pin the
         # bubblewrap codex's sandbox runs (they are codex-writable, and a
         # `bwrap` planted there would otherwise be the one it runs); then

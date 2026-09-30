@@ -15,7 +15,8 @@
 #   --phase namespace  agent-ns-init, inside the finished agent namespace,
 #                      with the CLI's own privilege drop, cwd and
 #                      environment, immediately before the CLI starts: the
-#                      above, plus no process outside the namespace in /proc
+#                      above, plus no_new_privs set, no process outside the
+#                      namespace in /proc
 #                      and no readable environ or mem of another user's
 #                      process; no connectable .NET diagnostic socket;
 #                      nothing under the runner's home but the binds (and
@@ -94,6 +95,11 @@ for v in grant runner_home workspace landing wif; do
 done
 case "$grant" in workspace|none) ;; *) echo "::error::agent isolation: --grant workspace|none"; exit 2 ;; esac
 [ "$grant" = workspace ] || [ -n "$scratch" ] || { echo "::error::agent isolation: --scratch is required in none mode"; exit 2; }
+
+# no_new_privs, from the privilege drop: a setuid or setgid file such as
+# `crontab` or `at` gains nothing (Claude Security finding 4773340).
+nnp=$(sed -n 's/^NoNewPrivs:[[:space:]]*//p' /proc/self/status 2>/dev/null)
+[ "$nnp" = 1 ] || fail "no_new_privs is not set (NoNewPrivs '${nnp:-missing}')"
 
 # /proc is the namespace's own: PID 1 is agent-ns-init (root), every other
 # process is the agent's. A host process — the sudo/unshare chain, the

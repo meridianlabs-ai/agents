@@ -509,13 +509,14 @@ def exit_code(status):
 
 
 def drop_and_exec(cwd, argv, env):
-    """In a forked child: the agent user, no capabilities, `cwd` freshly
+    """In a forked child: the agent user, no capabilities, no_new_privs (a
+    setuid or setgid file such as `crontab` gains nothing), `cwd` freshly
     resolved, the pidfd closed."""
     try:
         os.close(3)
         os.chdir(cwd)
         os.execve(SETPRIV, ["setpriv", "--reuid", AGENT_USER, "--regid", AGENT_USER, "--init-groups",
-                            "--inh-caps=-all", "--bounding-set=-all", "--", *argv], env)
+                            "--inh-caps=-all", "--bounding-set=-all", "--no-new-privs", "--", *argv], env)
     except BaseException as e:  # noqa: BLE001 — the child must never return
         log(f"exec {argv[0]!r} failed: {e}")
     os._exit(127)

@@ -731,8 +731,29 @@ quo, and the reason step 7 follows step 6 closely.
 escape from the namespace reaches the host as `claude-agent`. From there
 it can read world- or group-readable runner files and see the argv of
 runner processes, and holds nothing more than the job token. Denying
-cron and at to the agent users (`/etc/cron.deny`, `/etc/at.deny`, written
-by `create-codex-user`) is cheap depth for both engines.
+cron and at to the agent users is cheap depth for both engines, and it is
+in place for `claude-agent` and `codex` (criterion 1):
+
+- `create-codex-user` appends the user to `/etc/cron.deny` and
+  `/etc/at.deny`, creating them when missing. Debian's crontab and at read
+  the deny file only when no allow file exists, so the step fails if
+  `/etc/cron.allow` or `/etc/at.allow` lists the user.
+- The launcher's privilege drop and `provision-fallback`'s `sudo -u` run
+  with no_new_privs, so the setgid `crontab` and setuid `at` cannot write
+  their spools even past the deny. The namespace's isolation check fails
+  the launch if `NoNewPrivs` is not set.
+- The launcher's pre-launch kill, the codex `reset-home` kill and the
+  reclaim's kill are each followed by a purge
+  (`.github/scripts/purge_agent_schedules.sh`). It removes every crontab
+  and at job the user owns, kills the user's processes again and fails
+  the job if there was one.
+- The engine isolation canary's `scheduler-boundary` job tries both
+  schedulers as each agent user during provisioning and, for
+  `claude-agent`, from inside a launched namespace. It then plants
+  entries as root, as a bypassed deny would leave them, and checks that
+  each purge site fails and that no agent-uid process appears afterwards.
+
+Criterion 2 (the App token on argv) is steps 1, 4 and 6.
 
 **4773338 (settings path).** This is independent of the rest and ships
 first. The three `Compose … settings` steps keep accepting a path, because

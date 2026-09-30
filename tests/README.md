@@ -500,12 +500,34 @@ Testing a change).
   namespace read is recorded, the pinned-version pattern against sample
   `run.ts` files), the isolation check's arguments, and `reclaim.sh`'s
   removal of the WIF ACL and the agent's config dir (real xattrs on Linux).
-  The namespace itself is not run by any test here or in CI: the hosted
-  canary's `claude-launcher` job stops at an intentional refusal before the
-  namespace exists. Successful-launch coverage is step 5's real-model runs,
-  and adversarial probing is left to Claude Security scans
-  (design/executed-paths-residual.md → Testing; decision: Ransom,
-  2026-09-24).
+  The namespace itself is not run by any test here: the hosted canary's
+  `claude-launcher` job stops at an intentional refusal before the
+  namespace exists, and its `scheduler-boundary` job launches it with a
+  stand-in for the CLI that only tries cron and at
+  (`test_agent_schedulers.py`). Successful-launch coverage is step 5's
+  real-model runs, and other adversarial probing is left to Claude
+  Security scans (design/executed-paths-residual.md → Testing; decision:
+  Ransom, 2026-09-24).
+- `test_agent_schedulers.py` — the agent users cannot schedule host-side
+  work (Claude Security finding 4773340, criterion 1).
+  `create-codex-user/deny-schedulers.sh` against a scratch `/etc`: the
+  user appended once to `cron.deny` and `at.deny`, on its own line, the
+  files created when missing, and an allow file that lists the user
+  failing the step. `.github/scripts/purge_agent_schedules.sh` against
+  scratch spools and a stub `sudo`: a crontab named after the user or
+  owned by it and an at job owned by it removed, the user's processes
+  killed again and the script failing, other entries kept, missing
+  spools passed, a failing scan failing. The three kill sites (launcher,
+  `reset-home`, reclaim) purging right after their kill, the reclaim
+  failing at a planted crontab before it touches `.git`;
+  `drop_and_exec`'s setpriv argv carrying `--no-new-privs`, and the
+  namespace check requiring it; the canary's `scheduler-boundary` job
+  order. `scheduler_boundary_smoke.sh` is that job's script: cron and at
+  installed, each layer shown to refuse on its own with a positive
+  control, both schedulers tried as the agent user during provisioning
+  and inside the launched namespace, then entries planted as root for
+  each purge site, which must fail and leave no agent-uid process on the
+  host past the next minute boundary.
 - `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
   the same way against a stub `gh`: an issue's `auto` label is the run's
   opt-in only when the account that applied it most recently is a human

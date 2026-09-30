@@ -40,7 +40,13 @@ description: >-
      reap orphans between steps, so a background process a prompt-injected
      codex left behind (`setsid nohup … &`) would otherwise outlive this
      step — and could rewrite the restored config below before the landing
-     step's credentialed push (review round 4 of #73).
+     step's credentialed push (review round 4 of #73). Then remove every
+     cron and at entry the user owns (`.github/scripts/
+     purge_agent_schedules.sh`), which fails the step if there was one: the
+     root cron or at daemon would start the user's process again on the
+     host after the kill (Claude Security finding 4773340;
+     `create-codex-user` denies both to the user, so an entry means that
+     denial was bypassed).
   2. Refuse a redirected git dir: fail if `.git` is a symlink, not a
      directory, or contains a `commondir` file. gitrepository-layout(5): a
      `commondir` file sets `$GIT_COMMON_DIR` unless the env already does,
