@@ -1534,10 +1534,17 @@ THREAT_MODEL.md text that its change makes true.
        stands; codex fix and dev rounds need the PATH fix before they can
        land.
      - Codex fix round after the PATH fix (#183, merged 2026-09-30 as
-       9d8b6dc): pending, exercised on the PR that records it. A
-       deliberately failing probe test with `auto` and `engine:codex` on
-       the PR starts a `fix-codex` CI round, which always runs the
-       post-codex reclaim.
+       9d8b6dc): #186, triggered by a deliberately failing probe test
+       ([tests run 36750034419](https://github.com/meridianlabs-ai/agents/actions/runs/36750034419))
+       with `auto` and `engine:codex` on the PR. The CI-fix round
+       ([run 36750356809](https://github.com/meridianlabs-ai/agents/actions/runs/36750356809))
+       succeeded: `fix-codex` ran, `fix` was skipped, and `Reclaim
+       workspace from codex` passed, confirming the Node PATH fix clears
+       the post-codex check. The land job pushed 98f80d6, deleting exactly
+       the failing probe; the fix summary and `@review` request were
+       posted by `meridian-marvin[bot]`. The tests run the push triggered
+       ([36751315927](https://github.com/meridianlabs-ai/agents/actions/runs/36751315927))
+       passed.
 
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
