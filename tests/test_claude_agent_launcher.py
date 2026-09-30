@@ -709,8 +709,12 @@ def test_the_canary_runs_the_launcher_per_grant_mode_without_the_action():
     assert "grant: [workspace, none]" in job
     # claude-code-action is named (so the runner downloads it) and never run.
     assert "        if: false\n        uses: anthropics/claude-code-action@v1\n" in job
+    # The launcher checks a real context directory there.
+    assert "          context-dir: ${{ runner.temp }}/agent-context\n" in job
+    assert '"context-dir=$RUNNER_TEMP/agent-context"' in job and "run/head" in job
     order = ["uses: ./.github/actions/create-codex-user", "uses: ./.github/actions/reclaim-codex-workspace",
-             "uses: ./.github/actions/claude-agent-launcher", "uses: ./.github/actions/assert-runner-only-path",
+             "name: Context directory", "uses: ./.github/actions/claude-agent-launcher",
+             "uses: ./.github/actions/assert-runner-only-path",
              "A launch from outside the action is refused", "Post-agent reclaim"]
     assert [job.index(o) for o in order] == sorted(job.index(o) for o in order)
     assert '      - ".github/actions/claude-agent-launcher/**"\n' in text

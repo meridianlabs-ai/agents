@@ -488,12 +488,22 @@ jobs:
         with:
           user: claude-agent
 
+      # The dev agent's image directory (claude.yml's context step makes it
+      # before the agent user exists; here after, which the launcher's check
+      # does not care about): runner-owned 0755, bound read-only.
+      - name: Context directory
+        run: |
+          set -euo pipefail
+          (umask 022 && mkdir "$RUNNER_TEMP/agent-context")
+          echo probe >"$RUNNER_TEMP/agent-context/image-1.png"
+
       - name: Launcher (this revision)
         id: launcher
         uses: ./.github/actions/claude-agent-launcher
         with:
           grant: ${{ matrix.grant }}
           path-prefix: ${{ github.workspace }}/.venv/bin
+          context-dir: ${{ runner.temp }}/agent-context
 
       - name: What the launcher installed and recorded
         env:
@@ -519,11 +529,12 @@ jobs:
           echo "through the wrapper: $got"
           case "$got" in *"$pinned"*) ;; *) fail "the wrapper's --version passthrough printed '$got'" ;; esac
           for kv in "grant=$GRANT" "workspace=$GITHUB_WORKSPACE" "runner-temp=$RUNNER_TEMP" "runner-home=$HOME" \
-                    "system-path=/usr/sbin:/usr/bin:/sbin:/bin" "head=$(git symbolic-ref -q HEAD || echo "detached:$(git rev-parse HEAD)")"; do
+                    "system-path=/usr/sbin:/usr/bin:/sbin:/bin" "context-dir=$RUNNER_TEMP/agent-context"; do
             [ "$(cat "$opt/run/${kv%%=*}")" = "${kv#*=}" ] || fail "run/${kv%%=*} is '$(cat "$opt/run/${kv%%=*}")', not '${kv#*=}'"
           done
           case "$(cat "$opt/run/path")" in "$GITHUB_WORKSPACE/.venv/bin:$opt/claude/.local/bin:"*) ;; *) fail "run/path is '$(cat "$opt/run/path")'" ;; esac
           [ -n "$(cat "$opt/run/runner-root")" ] || fail "run/runner-root is empty (no Runner.Worker found)"
+          [ ! -e "$opt/run/head" ] || fail "run/head is still recorded (launch step 6 is retired)"
           if sudo pgrep -u claude-agent -a; then fail "a claude-agent process survived the launcher"; fi
           # The directory claude-code-action appends to GITHUB_PATH.
           echo "$opt/bin" >>"$GITHUB_PATH"
