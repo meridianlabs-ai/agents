@@ -1467,6 +1467,69 @@ SECURITY.md text that its change makes true.
 
      The run URLs and outcomes are recorded here, under this step, in a
      follow-up PR. If a check fails, step 1 is reverted.
+
+     Results (2026-09-30, #179 merged as 23913b0):
+     - Canary, dispatched on `main`:
+       [run 36729558388](https://github.com/meridianlabs-ai/agents/actions/runs/36729558388),
+       success. The Claude probe printed `minted (exchange HTTP 200;
+       revoked, HTTP 204)` and the codex probe `refused (no OIDC request
+       token in this job)`. The push-triggered run the merge started
+       ([36729058076](https://github.com/meridianlabs-ai/agents/actions/runs/36729058076))
+       was green too, but on a push the Claude probe only records: the
+       exchange answered `401 Invalid OIDC token`.
+     - `@review`, Claude engine: meridianlabs-ai/ts-mono#697,
+       [run 36729713075](https://github.com/meridianlabs-ai/ts-mono/actions/runs/36729713075),
+       success. The action logged `Using provided GITHUB_TOKEN for
+       authentication` and skipped `Revoke app token` (no App token was
+       minted). The review and its verdict were posted by
+       `meridian-marvin[bot]`; nothing was posted as `claude[bot]`.
+     - `@review`, codex engine: the same PR with a temporary
+       `engine:codex` label (created in ts-mono for this),
+       [run 36730675006](https://github.com/meridianlabs-ai/ts-mono/actions/runs/36730675006),
+       success. `review-codex` ran and `review` was skipped; the review
+       and verdict were posted by `meridian-marvin[bot]`; nothing was
+       posted as `claude[bot]`.
+     - CI-fix round (Claude): #180, triggered by a deliberately failing
+       probe test ([tests run 36731690917](https://github.com/meridianlabs-ai/agents/actions/runs/36731690917)),
+       [run 36732043829](https://github.com/meridianlabs-ai/agents/actions/runs/36732043829),
+       success. The gate bound the failed run to #180. The `fix` job's
+       action logged `Using provided GITHUB_TOKEN for authentication`
+       and skipped `Revoke app token`; the agent's output is hidden, but
+       its commit (888ca63) deleted exactly the failing probe, which it
+       could only find from the failed run. The land job pushed 888ca63,
+       and the attempts counter, the `@review` re-review request and the
+       review that followed were all posted by `meridian-marvin[bot]`. The
+       tests run the push triggered
+       ([36733176986](https://github.com/meridianlabs-ai/agents/actions/runs/36733176986))
+       has `meridian-marvin[bot]` as actor and passed. The commit's git
+       author is `claude[bot]`: that is the action's default commit
+       identity (earlier loop commits on `main` carry it too), not the
+       push actor, so it does not fail this check, which is about who
+       pushed and posted.
+     - Review-fix round, Claude engine: the Claude review of #180
+       ([run 36733173930](https://github.com/meridianlabs-ai/agents/actions/runs/36733173930))
+       had suggestions; its fix round
+       ([run 36733648937](https://github.com/meridianlabs-ai/agents/actions/runs/36733648937))
+       ran on the job token, the land job pushed a8b35e2, and the round
+       handed off as `meridian-marvin[bot]` (documentation-only nits).
+     - Review-fix round, codex engine: with `engine:codex` on #180, the
+       codex review
+       ([run 36738095760](https://github.com/meridianlabs-ai/agents/actions/runs/36738095760))
+       ran as `review-codex` and landed as `meridian-marvin[bot]` with
+       suggestions. The `fix-codex` round
+       ([run 36738559681](https://github.com/meridianlabs-ai/agents/actions/runs/36738559681))
+       built its prompt from that review, and codex ran, but the
+       post-codex reclaim refused: `job PATH entry
+       '/opt/hostedtoolcache/node/24.21.0/x64/bin' is writable by the
+       codex user`. codex-action's own `actions/setup-node` step adds that
+       directory to the job PATH inside the codex step, after
+       `create-codex-user` has checked and repaired the PATH, and the
+       post-codex check does not repair. Nothing landed, and land posted
+       the error as `meridian-marvin[bot]`. This is not caused by step 1
+       (#179 removed only `id-token: write` from the codex jobs), so step 1
+       stands; codex fix and dev rounds need the PATH fix before they can
+       land.
+
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
    maintainer's machine. It can merge before or after step 1.
