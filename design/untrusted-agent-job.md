@@ -59,7 +59,7 @@ scan of 609e20d (created 2026-09-25). Every one of them is an agent-uid to
 | 4773887 | High | reclaim.sh's refusal exits leave the agent's `.git/config` in place for that same post-job git. The kill-loop exhaustion exits at :60-63, the redirected `.git`/`commondir` refusal at :94-97 and the new embedded `.git` refusal at :105-110. All of them come before the restore at :121. |
 | 4773888 | High | The reclaim chowns `.git` (GNU default `-P`, :111), restores only `config` (:121) and moves `hooks` aside (:133-139). Other symlinks inside `.git` survive, and later runner-side git writes follow them. |
 | 4773340 | High | The agent uid leaves its PID and mount namespace through host cron. `agent_ns.py`'s `build_view` (:467-492) covers only `/home/runner` and `/tmp`, the setgid `crontab` is reachable, nothing denies cron or at, and provisioning runs with no namespace at all. From outside, the wrapper's argv and the action's `Revoke app token` `curl` argv show the App token. |
-| 4773338 | Medium | `Compose agent settings` reads `settings` with `[ -f ]` and `cat`, following a symlink committed in the checkout, as `runner`, before the agent user exists: claude.yml:1295-1297, claude-auto.yml:1119-1121, claude-auto-review.yml:1283-1285. |
+| 4773338 | Medium | `Compose agent settings` reads `settings` with `[ -f ]` and `cat`, following a symlink committed in the checkout, as `runner`, before the agent user exists: claude.yml:1295-1297, claude-auto.yml:1119-1121, claude-auto-review.yml:1283-1285. Fixed by step 0. |
 
 Each could be patched in turn. But the uid boundary has needed a new
 patch for each new runner-side git call, each new post-step and each new
@@ -737,7 +737,7 @@ by `create-codex-user`) is cheap depth for both engines.
 **4773338 (settings path).** This is independent of the rest and ships
 first. The three `Compose … settings` steps keep accepting a path, because
 ts-mono uses `.github/claude-settings.json`, but read it through a small
-Python helper. The helper resolves the path under `$GITHUB_WORKSPACE`,
+Python helper (`compose-settings`, Implementation plan → step 0). The helper resolves the path under `$GITHUB_WORKSPACE`,
 refuses it if any component is a symlink or the resolved path leaves the
 workspace, opens it `O_NOFOLLOW`, requires a regular file and caps its
 size. inspect_harbor's inline JSON is unaffected. `.github/` is tier 1,
@@ -1424,6 +1424,18 @@ SECURITY.md text that its change makes true.
 0. **Settings path (4773338).** The helper in the three `Compose …
    settings` steps (claude.yml, claude-auto.yml, claude-auto-review.yml)
    and its test. It is independent of everything else.
+   - The three steps are now one composite, `compose-settings`, with the
+     workflow's deny list as its `deny` input. The step ids and outputs
+     are unchanged.
+   - The helper is `.github/scripts/read_settings.py`. It refuses a `..`
+     component, an absolute path outside the workspace, a symlink at any
+     step of the path, a file that is not regular, one over 256 KiB and
+     one that is not UTF-8. It walks the path one directory at a time with
+     `O_NOFOLLOW`. A refusal fails the step with no output, so the agent
+     step is skipped and the Surface step reports it.
+   - `tests/test_compose_settings.py` runs the composite's step against
+     each refusal, an in-tree path and inline JSON, and pins the three
+     workflows to the composite and their deny lists.
 1. **Stop trusting `claude[bot]`, and pass `github_token` in the reviewer
    and both loops.**
    - Workflows: claude-review.yml, claude-auto.yml, claude-auto-review.yml

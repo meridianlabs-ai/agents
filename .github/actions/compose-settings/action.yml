@@ -1,0 +1,73 @@
+name: compose-settings
+description: >-
+  Compose the Claude agent's settings from the caller's `settings` input and
+  a deny overlay: the `Compose agent settings` step of claude.yml and the
+  `Compose fix settings` steps of claude-auto.yml and claude-auto-review.yml
+  (one copy for all three). Runs as the runner, before the agent user
+  exists.
+
+  The action documents `settings` as a JSON string OR a path to a settings
+  file (its setupClaudeCodeSettings tries JSON.parse first, then reads the
+  path relative to the workspace, i.e. a file from this checkout, which the
+  deny overlay then covers like any other). This mirrors that, since the
+  value is transformed here before the action sees it. An empty input is
+  `{}`. A value that is not a JSON object is read as a path by
+  `.github/scripts/read_settings.py` (Claude Security finding 4773338): the
+  path must name a regular UTF-8 file inside `$GITHUB_WORKSPACE`, of at most
+  256 KiB, with no `..` component and no symlink at any step, so a symlink
+  committed in the checkout cannot redirect the read to a runner file
+  outside it. The result must be a JSON object. The overlay's rules are
+  removed from `permissions.allow` and added to `permissions.deny`, so a
+  caller's settings cannot re-enable them.
+
+  Anything else fails the step and writes no output; the caller's Surface
+  step reports it (its `*SETTINGS_OUTCOME`), because the action step is then
+  skipped, not failed. Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/compose-settings@main); NO post
+  step (local composite actions with post steps break teardown on the
+  fork).
+
+inputs:
+  settings:
+    description: >-
+      The caller's `settings` input: a JSON object, a path to a file inside
+      the workspace holding one, or empty.
+    required: false
+    default: ""
+  deny:
+    description: >-
+      JSON array of permission rules to remove from `permissions.allow` and
+      add to `permissions.deny`.
+    required: true
+
+outputs:
+  value:
+    description: The composed settings, one line of JSON.
+    value: ${{ steps.compose.outputs.value }}
+
+runs:
+  using: composite
+  steps:
+    - id: compose
+      shell: bash
+      env:
+        SETTINGS: ${{ inputs.settings }}
+        DENY: ${{ inputs.deny }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/read_settings.py
+      run: |
+        set -euo pipefail
+        [ -n "$SETTINGS" ] || SETTINGS='{}'
+        is_object() { printf '%s' "$1" | jq -e 'type == "object"' >/dev/null 2>&1; }
+        if ! is_object "$SETTINGS"; then
+          echo "settings input is a path; reading $SETTINGS"
+          SETTINGS=$(python3 "$SCRIPT" "$SETTINGS")
+        fi
+        is_object "$SETTINGS" || { echo "::error::the settings input is neither a JSON object nor a path to a file holding one"; exit 1; }
+        merged=$(printf '%s' "$SETTINGS" | jq -c --argjson d "$DENY" '
+          .permissions.allow = ((.permissions.allow // []) - $d)
+          | .permissions.deny = (((.permissions.deny // []) + $d) | unique)')
+        {
+          echo "value<<SETTINGS_EOF"
+          printf '%s\n' "$merged"
+          echo "SETTINGS_EOF"
+        } >>"$GITHUB_OUTPUT"
