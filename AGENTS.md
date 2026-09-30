@@ -181,6 +181,10 @@ take effect on every repo's next run.
   `reset-home` step, which runs after provisioning as codex — pins `PATH`
   to the root-owned system directories (`system-path`, no `/usr/local`)
   before its first command; a new post-codex step should too.
+  openai/codex-action's own setup-node adds the toolcache Node's bin to
+  the job PATH, so every codex job runs `Set up Node for codex-action`
+  (the same pin and node-version) before `Create codex user`; keep the two
+  equal when codex-action changes them.
   `tests/codex_path_smoke.sh` runs all of it on a hosted runner. See
   design/architecture.md → No persisted git credentials,
   design/codex-engine.md → Hook-safe landing and → Runner-side search

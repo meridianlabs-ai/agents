@@ -76,9 +76,9 @@ description: >-
   on a stock runner ANY unprivileged user could plant `/opt/pipx_bin/sudo`
   ahead of `/usr/bin` — refusing that would fail every codex run, and
   ignoring it would leave the hole the workspace venv merely made
-  convenient. Protecting keeps the runner user's own writes (npm's global
-  bin in `/usr/local/bin`, which openai/codex-action's `npm install -g`
-  needs; the toolcache setup-* actions fill) and takes the codex user's
+  convenient. Protecting keeps the runner user's own writes (the
+  toolcache Node's bin, where openai/codex-action's `npm install -g` puts
+  the CLI; the toolcache setup-* actions fill) and takes the codex user's
   away. Owned or writable files directly inside an entry, and the targets
   their symlinks reach, are protected the same way. Workspace hops are never protected: a workspace directory
   on the job PATH is a provisioning mistake the caller must fix
@@ -93,9 +93,12 @@ description: >-
   the runner's PATH or the protected directories); and by
   `reclaim-codex-workspace` first thing after codex, in case a later step or
   action added to `GITHUB_PATH` meanwhile (codex itself cannot: the
-  per-step `GITHUB_PATH` file lives under the runner-only `$RUNNER_TEMP`;
-  openai/codex-action installs the CLI with `npm install -g` and adds no
-  path). Referenced fully-qualified
+  per-step `GITHUB_PATH` file lives under the runner-only `$RUNNER_TEMP`).
+  openai/codex-action does add one: its setup-node step puts the
+  toolcache's Node 24 bin on the job PATH. The codex jobs run the same
+  setup-node before `create-codex-user`, so that directory is already on
+  the PATH, and protected, when the first check runs. Referenced
+  fully-qualified
   (meridianlabs-ai/agents/.github/actions/assert-runner-only-path@main); NO
   post step (local composite actions with post steps break teardown on the
   fork). `tests/codex_path_smoke.sh` runs it on a hosted runner against the

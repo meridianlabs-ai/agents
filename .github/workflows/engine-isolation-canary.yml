@@ -1,7 +1,8 @@
 # Hosted-runner canary for the engine split (Claude Security findings 4628446
 # and 4629153; design/codex-engine.md → One job per engine). Not a caller
-# stub and not an agent run: no real secret, no model, no codex-action. Four
-# parts on the stock `ubuntu-latest` image:
+# stub and not an agent run: no real secret, no model, and codex-action only
+# without a key or a prompt (codex-action-path, below). Six parts on the
+# stock `ubuntu-latest` image:
 #
 #   probe                  the secret-delivery probe
 #                          (engine-isolation-canary-reusable.yml): a called
@@ -99,6 +100,24 @@
 #                          hostile probe: the boundary inside the namespace
 #                          is assessed by Claude Security scans instead
 #                          (decision: Ransom, 2026-09-24).
+#   codex-action-path      the job PATH around the real openai/codex-action
+#                          (design/codex-engine.md → Runner-side search
+#                          path), in the codex jobs' step order: the Node
+#                          setup step, `create-codex-user` and its
+#                          `reset-home` mode, then `openai/codex-action@v1`
+#                          with no key and no prompt, so it runs its
+#                          setup-node, its write-access check and its two
+#                          `npm install -g` steps and stops (every later
+#                          step of it needs a key or a prompt), then the
+#                          reclaim of THIS revision. Asserted: the reclaim,
+#                          with its PATH check, passes. The control runs
+#                          without the Node step, the shape before the fix:
+#                          the reclaim must refuse the toolcache Node's bin
+#                          directory (a warning, not a failure, if the image
+#                          stops shipping it writable). A codex-action
+#                          release that adds another codex-writable PATH
+#                          entry fails this job, weekly at the latest, before
+#                          it fails every real run.
 #
 # Runs on pushes that touch the composites, the harness, the scanner or the
 # fixtures, by hand, and weekly on `main`: per-job secret delivery is the
@@ -116,6 +135,7 @@ on:
     - cron: "17 6 * * 1"   # Mondays 06:17 UTC, off the top-of-hour rush
   push:
     paths:
+      - ".github/actions/assert-runner-only-path/**"
       - ".github/actions/create-codex-user/**"
       - ".github/actions/provision-fallback/**"
       - ".github/actions/reclaim-codex-workspace/**"
@@ -546,3 +566,79 @@ jobs:
           [ ! -e /home/claude-agent/.anthropic-config ] || { echo "::error::the agent's config dir survived"; exit 1; }
           git status --short >/dev/null
           echo "reclaimed: .git and the root runner-owned and closed to the group"
+
+  codex-action-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # node-first true is the codex jobs' shape; false is the control, the
+    # shape before the Node step was added.
+    strategy:
+      fail-fast: false
+      matrix:
+        node-first: [true, false]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The codex jobs' step, verbatim: the same pin and version as
+      # openai/codex-action@v1's own setup-node.
+      - name: Set up Node for codex-action
+        if: matrix.node-first
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Create codex user (this revision)
+        id: codexuser
+        uses: ./.github/actions/create-codex-user
+
+      - name: Reset codex home (this revision)
+        uses: ./.github/actions/create-codex-user
+        with:
+          mode: reset-home
+
+      # No key and no prompt: the action runs setup-node, the write-access
+      # check, `npm install -g` for the CLI and the proxy, and resolves the
+      # codex home; the proxy and `codex exec` steps are skipped.
+      - name: openai/codex-action, without a key or a prompt
+        uses: openai/codex-action@v1
+        with:
+          safety-strategy: unprivileged-user
+          codex-user: codex
+
+      - name: Reclaim workspace from codex (this revision)
+        id: codexreclaim
+        continue-on-error: ${{ !matrix.node-first }}
+        if: always() && steps.codexuser.outcome == 'success'
+        uses: ./.github/actions/reclaim-codex-workspace
+
+      - name: The job PATH after codex-action
+        if: always() && steps.codexuser.outcome == 'success'
+        env:
+          NODE_FIRST: ${{ matrix.node-first }}
+          RECLAIM: ${{ steps.codexreclaim.outcome }}
+        run: |
+          set -euo pipefail
+          node=$(command -v node)
+          node_bin=$(dirname "$node")
+          echo "node: $node ($(node --version)); codex: $(command -v codex || echo none); proxy: $(command -v codex-responses-api-proxy || echo none)"
+          stat -c '%A %U:%G %n' "$node_bin"
+          echo "job PATH entries under the toolcache:"
+          printf '%s\n' "$PATH" | tr ':' '\n' | grep -n "^${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}/" || echo "(none)"
+          prefix=$(dirname "$node_bin")
+          echo "files and directories under $prefix the codex user can write: $(sudo -u codex find "$prefix" -writable 2>/dev/null | wc -l)"
+          sudo -u codex find "$prefix" -writable 2>/dev/null | head -20
+          if [ "$NODE_FIRST" = true ]; then
+            [ "$RECLAIM" = success ] || { echo "::error::the reclaim failed with the Node step in place (outcome: $RECLAIM); see its PATH check above"; exit 1; }
+            if sudo -u codex test -w "$node_bin"; then echo "::error::$node_bin is writable by the codex user"; exit 1; fi
+            echo "the reclaim passed: codex-action added no codex-writable directory to the job PATH"
+          else
+            if [ "$RECLAIM" = success ]; then
+              echo "::warning::the control did not reproduce: without the Node step the reclaim passed, so the image no longer ships $node_bin writable by the codex user"
+            else
+              sudo -u codex test -w "$node_bin" || { echo "::error::the control's reclaim failed, but not because $node_bin is codex-writable; see its log"; exit 1; }
+              echo "control: without the Node step, $node_bin is codex-writable and the reclaim refuses it"
+            fi
+          fi

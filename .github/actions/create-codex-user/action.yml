@@ -47,7 +47,9 @@ description: >-
      `configure-system.sh`, `install-nodejs.sh`), which any unprivileged
      user could plant into; protecting them takes that away from codex
      while runner keeps its own writes (openai/codex-action's `npm install
-     -g` puts the CLI in `/usr/local/bin`). Then
+     -g` puts the CLI in the toolcache Node's bin, which the codex jobs put
+     on the job PATH before this composite runs, so it is protected here).
+     Then
      `chown -R runner:codex` + `chmod -R g+rwX` + setgid on every directory
      of the workspace — the action's `examples/unprivileged-user.yml`
      recipe; the group grant is what lets codex (primary group codex) write

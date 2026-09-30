@@ -415,7 +415,11 @@ Testing a change).
   steps discover the tools from the composite's `bin` directories and never
   through `command -v`, the commit steps pin PATH, the user is created,
   checked, then granted, and `create-codex-user`'s `reset-home` mode
-  re-checks and pins PATH (and is codex-only). `create-codex-user`'s create
+  re-checks and pins PATH (and is codex-only); each codex job runs
+  codex-action's own setup-node (same pin, node-version "24") before
+  `Create codex user`, the codex reclaim's Surface message names the PATH
+  check, and the canary's `codex-action-path` job runs the real
+  codex-action, with no key or prompt, between the user and the reclaim. `create-codex-user`'s create
   steps run against a logging `sudo` for its `user` and `grant` inputs: the
   codex sequence unchanged by default, `claude-agent` with its landing dir,
   system `safe.directory` and `/opt/meridian-agent` and none of the codex

@@ -513,9 +513,9 @@ three layers:
   protects `/opt`, `/opt/pipx_bin`, the
   toolcache chain, `/usr/local/bin` and `/usr/local/.ghcup`, the
   world-writable files in them and the targets their links reach, and
-  keeps the runner user's own writes — npm's global bin, which
-  openai/codex-action's `npm install -g @openai/codex` needs; the toolcache
-  setup-* actions fill — while taking the codex user's away. The one
+  keeps the runner user's own writes — the toolcache Node's bin, where
+  openai/codex-action's `npm install -g @openai/codex` puts the CLI; the
+  toolcache setup-* actions fill — while taking the codex user's away. The one
   exception to "writable refuses" is a sticky directory codex does NOT own,
   such as `/tmp`, where a user may create entries but not rename or unlink
   another user's: accepted when the child on the way down exists and is
@@ -527,10 +527,28 @@ three layers:
   input — `/usr/sbin:/usr/bin:/sbin:/bin`, the root-owned system
   directories; NOT `/usr/local/bin`, world-writable on the image — never
   through the PATH under test. codex cannot add to `GITHUB_PATH` later —
-  the per-step file lives under the runner-only `$RUNNER_TEMP` — and
-  openai/codex-action installs the CLI with `npm install -g` and adds no
-  path, so the PATH the pre-grant check accepted is the PATH every
-  post-codex step gets.
+  the per-step file lives under the runner-only `$RUNNER_TEMP`.
+  openai/codex-action can, and does: its "Ensure Node.js available" step
+  runs `actions/setup-node` (pinned to `53b83947`, v6.3.0, node-version
+  "24") on every run, which puts the toolcache's Node bin
+  (`/opt/hostedtoolcache/node/<version>/x64/bin`) on the job PATH, and
+  then `npm install -g` puts the CLI and the proxy into that Node's
+  prefix. The image ships that directory writable by the codex user, so
+  when only the action ran setup-node, the directory arrived after the
+  pre-grant check and the reclaim refused every codex run (run
+  36738559681 on #180, 2026-09-30). So each codex job runs the same
+  setup-node, same pin and version, as the step right before `Create
+  codex user`: the directory is on the job PATH when the pre-grant check
+  protects it, and the action's own setup-node then finds that cached
+  version and adds the same, already runner-only, directory. With that,
+  the PATH the pre-grant check accepted is the PATH every post-codex step
+  gets. The step sets `package-manager-cache: false`, so it restores and
+  saves no cache. If a codex-action release changes the version or the
+  pin, the action's step adds a directory the check never saw, and the
+  reclaim refuses it; the `codex-action-path` job of
+  `.github/workflows/engine-isolation-canary.yml` runs the real action
+  (no key, no prompt, so it stops after its installs) between `Create
+  codex user` and the reclaim, weekly and on pushes, to catch that first.
 - **Belt and braces after codex.** `reclaim-codex-workspace` runs the same
   check as its first step — without `protect`: a hop that became writable
   after the grant is refused, not fixed — so a `GITHUB_PATH` addition made
