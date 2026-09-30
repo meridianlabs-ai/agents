@@ -14,7 +14,8 @@
 # image): in the crontab spool, a file named after the user (cron runs it
 # as that user when root or the user owns it) or owned by the user; in the
 # at spool, a job file owned by the user (atd runs a job as its file's
-# owner). The spools are root's to write, so the removal goes through
+# owner, and unlinks the file when it starts the job, so a running job is
+# the kill's). The spools are root's to write, so the removal goes through
 # sudo. After a removal, every process of the user is killed again, since
 # the daemon may have started one between the caller's kill and the purge.
 #

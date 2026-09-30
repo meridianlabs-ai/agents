@@ -23,10 +23,12 @@
 #                  set and every attempt refused; then `quiet U`.
 #   plant U        (runner) what a bypassed deny would leave: the deny
 #                  lifted, root installs a crontab for U and U queues an at
-#                  job. Waits until both have started a U process on the
-#                  host, so the purge after it has something to find. The
-#                  deny stays lifted, so only the purge stops the daemons.
-#   quiet U        (runner) no cron or at entry of U, no U process now, and
+#                  job to run now and one in five minutes. Waits until cron
+#                  and atd have each started a U process on the host, so
+#                  the purge after it has something to find. The deny stays
+#                  lifted, so only the purge stops the daemons.
+#   quiet U        (runner) no cron or at entry of U (atq included), no U
+#                  process now, and
 #                  still none after the next minute boundary, when cron
 #                  would have started one; then the deny is put back.
 set -uo pipefail
@@ -47,6 +49,8 @@ restore_deny() {
     sudo grep -qxF "$1" "$f" || printf '%s\n' "$1" | sudo tee -a "$f" >/dev/null
   done
 }
+# U's pending at jobs, as atd lists them (whoever owns the file).
+at_jobs() { sudo atq | awk -v u="$1" '$NF == u {print $1}'; }
 # U's entries: the crontab named U or owned by U, at jobs owned by U.
 entries() {
   sudo find "$cron_spool" -mindepth 1 -maxdepth 1 \( -name "$1" -o -user "$1" \) -print
@@ -96,10 +100,10 @@ case "$mode" in
     printf '* * * * * true\n' | sudo -u "$U" crontab - || ok=0
     echo true | sudo -u "$U" at now + 10 minutes || ok=0
     sudo crontab -u "$U" -r 2>/dev/null || true
-    for j in $(sudo atq | awk -v u="$U" '$NF == u {print $1}'); do sudo atrm "$j"; done
+    for j in $(at_jobs "$U"); do sudo atrm "$j"; done
     restore_deny "$U"
     [ "$ok" = 1 ] || fail "positive control missing: with no deny and no no_new_privs $U could not use crontab or at, so the refusals above prove nothing"
-    [ -z "$(entries "$U")" ] || fail "the positive control's entries were not removed: $(entries "$U")"
+    [ -z "$(entries "$U")" ] && [ -z "$(at_jobs "$U")" ] || fail "the positive control's entries were not removed: $(entries "$U") $(at_jobs "$U")"
     echo "each layer refuses on its own; the positive control's entries are gone"
     ;;
 
@@ -136,7 +140,11 @@ case "$mode" in
     lift_deny "$U"
     printf '* * * * * sleep 601\n' | sudo crontab -u "$U" - || fail "root could not install $U's crontab"
     echo 'sleep 602' | sudo -u "$U" at now 2>&1 || fail "$U could not queue an at job with the deny lifted"
+    # And one still pending when the purge runs (atd unlinks a job's file
+    # when it starts it).
+    echo 'sleep 607' | sudo -u "$U" at now + 5 minutes 2>&1 || fail "$U could not queue a pending at job"
     entries "$U"
+    [ -n "$(at_jobs "$U")" ] || fail "atq lists no pending job of $U"
     # cron reads a changed crontab at a minute boundary: up to two of them.
     for _ in $(seq 1 75); do
       if pgrep -u "$U" -f 'sleep 601' >/dev/null && pgrep -u "$U" -f 'sleep 602' >/dev/null; then
@@ -156,6 +164,7 @@ case "$mode" in
     say "no scheduler entry and no process of $U"
     left=$(entries "$U")
     [ -z "$left" ] || fail "$U still has scheduler entries: $left"
+    [ -z "$(at_jobs "$U")" ] || fail "atq still lists jobs of $U: $(at_jobs "$U")"
     if pgrep -u "$U" -a; then fail "a $U process runs on the host"; fi
     # Past the next minute boundary, when cron would start a job.
     wait=$((75 - 10#$(date +%S)))
