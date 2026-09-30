@@ -755,7 +755,7 @@ jobs:
       # trig step's for the `labeled` path: the most recent `labeled` actor
       # for `auto` must be a human account holding admin/maintain/write —
       # not a bot, and not the machine account, whose label is a write for
-      # someone else's decision and never that decision itself (SECURITY.md
+      # someone else's decision and never that decision itself (THREAT_MODEL.md
       # → Guarantees; finding 4628345). Fails closed: a timeline or
       # permission lookup that never answers leaves the run one-shot. A PR's
       # `auto` label is verified by the loop gates instead (verify-auto-
