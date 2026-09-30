@@ -12,21 +12,22 @@
 # sed the codex landing steps and model-provenance use; keep the marker list
 # in step with the `<!-- … -->` comments the workflows read (a test pins
 # it: every marker a consumer keys on in a machine-account comment is
-# broken here or appended by this composite after the de-fang). Two more
-# since step 3 of design/untrusted-agent-job.md, so no agent body can pose
-# as what they mark: the codex reviewer's old `engine: codex` footer, which
-# pr-feedback-context still anchors a review-fix round on (Claude Security
-# 4773878 and its siblings; the codex review now lands flagged `review`
-# and gets the `claude-review-comment` marker after this de-fang, like the
-# Claude review), and atlas_sync's `Reopened — upstream PR` reopen record
-# (4773875). Truncation only drops trailing bytes, so it cannot resurrect a
-# trigger the sed removed.
+# broken here or appended by this composite after the de-fang). Since step
+# 3 of design/untrusted-agent-job.md it also breaks atlas_sync's `Reopened —
+# upstream PR` reopen record (4773875). The codex reviewer's old `engine:
+# codex` footer is split here only, belt and braces for a body quoting a
+# codex review from before 2026-09-30 (it anchors nothing now; 4773878).
+# Since step 4 it also splits the dev agent's status-comment marker, which
+# pr-feedback-context drops, so no agent body can hide itself from the next
+# round's context. Truncation only drops trailing bytes, so it cannot
+# resurrect a trigger the sed removed.
 DEFANG_SED=(
   -e 's/@(review|claude|auto)/`\1`/gI'
   -e 's/claude-review-(summary|verdict|comment|nudge)/claude-review \1/gI'
   -e 's/auto-(handoff|converged|review-rounds|review-head|fix-attempts)/auto \1/gI'
   -e 's/engine: codex/engine  codex/gI'
   -e 's/Reopened — upstream PR/Reopened — upstream  PR/gI'
+  -e 's/dev-agent-status/dev-agent status/gI'
 )
 defang() {
   local src="$1" dst="$2"
@@ -93,8 +94,12 @@ post_comment_file() {
 # data whatever it holds. Its own retry, not `retry`: a 422 means the line is
 # not in the PR's diff (the reviewer read a tip the PR page does not show, or
 # mis-numbered a line) and no retry will change that, so it is final at once;
-# any other failure gets three attempts. Returns 0 posted, 1 not — the
-# caller folds a comment that did not post into its follow-up comment.
+# so is a 403 or 429 (a rate limit, or a refusal the next comment would get
+# too), which the caller answers by posting no more inline comments (Claude
+# Security 4773341); any other failure gets three attempts. Returns 0
+# posted, 1 not in the diff (422), 2 refused (403/429), 3 failed after its
+# attempts — the caller folds a comment that did not post into its
+# follow-up comment.
 post_review_comment_file() {
   local repo="$1" pr="$2" commit="$3" path="$4" line="$5" side="$6" file="$7" i err
   for ((i = 1; i <= 3; i++)); do
@@ -103,10 +108,13 @@ post_review_comment_file() {
       return 0
     fi
     printf '%s\n' "$err" >&2
-    case "$err" in *"(HTTP 422)"*) return 1 ;; esac
+    case "$err" in
+      *"(HTTP 422)"*) return 1 ;;
+      *"(HTTP 403)"*|*"(HTTP 429)"*) return 2 ;;
+    esac
     if [ "$i" -lt 3 ]; then sleep $((i * 15)); fi
   done
-  return 1
+  return 3
 }
 
 # remote_branch_exists REPO BRANCH — prints `yes` or `no` and returns 0 when

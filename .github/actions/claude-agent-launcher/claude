@@ -4,12 +4,12 @@
 # /opt/meridian-agent/bin/claude by the claude-agent-launcher composite
 # (design/executed-paths-residual.md → The launcher (step 5) and the wrapper).
 # The action's SDK spawns it with the CLI's argv and the action process's
-# environment — the App token in GH_TOKEN/GITHUB_TOKEN, the MCP servers
-# carrying it on the argv — as the runner. It never hands any of that to the
+# environment — the action's token in GH_TOKEN/GITHUB_TOKEN (the job token
+# when the step passes `github_token`, else an App token the action minted),
+# the MCP servers carrying it on the argv — as the runner. It never hands any of that to the
 # agent: it rebuilds the argv and an allow-listed environment, prepares git,
-# refuses a launch that would still carry a privileged token or that the
-# action's post-CLI branch cleanup could act on, writes the result to a
-# runner-only handoff file and execs `sudo -n agent-ns-launch`, which starts
+# refuses a launch that would still carry a privileged token, writes the
+# result to a runner-only handoff file and execs `sudo -n agent-ns-launch`, which starts
 # the real CLI as the unprivileged `claude-agent` user in its own PID and
 # mount namespace.
 #
@@ -55,7 +55,6 @@ grant=$(read_run grant)
 case "$grant" in workspace|none) ;; *) die "unknown grant mode '$grant' in $run/grant" ;; esac
 ws=$(read_run workspace)
 rt=$(read_run runner-temp)
-recorded_head=$(read_run head)
 agent_path=$(read_run path)
 runner_root=$(read_run runner-root)
 agent_home=/home/claude-agent
@@ -204,7 +203,7 @@ settings=$(cat "$settings_file")
 printf '%s' "$settings" | jq -e 'type == "object"' >/dev/null || die "$settings_file is not a JSON object"
 
 # 5. Git, as the runner over the reclaimed .git: the credential-free origin
-#    URL (the action's prepare wrote the App token into it), then a fresh
+#    URL (the action's prepare wrote its token into it), then a fresh
 #    snapshot for the post-agent reclaim (prepare also set user.name/email,
 #    which the pre-action snapshot lacks). The re-grant of .git and the root
 #    (workspace mode) is agent-ns-launch's, after the last runner git below.
@@ -213,31 +212,6 @@ gitr() { GIT_CONFIG_GLOBAL=/dev/null git -C "$ws" -c core.hooksPath=/dev/null -c
 gitr remote set-url origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" || die "cannot reset origin's URL"
 cp "$ws/.git/config" "$rt/git-config.pre-codex" || die "cannot snapshot .git/config"
 
-# 6. A branch the action's prepare created (an issue run, or a closed or
-#    merged PR) is the `claudeBranch` its post-CLI cleanup would commit and
-#    push to as the runner if it exists on origin — so it must not. Only "no
-#    such ref" lets the launch proceed; a hit or a lookup error refuses.
-if cur=$(gitr symbolic-ref -q HEAD); then :; else
-  cur="detached:$(gitr rev-parse --verify HEAD)" || die "cannot read HEAD"
-fi
-if [ "$cur" != "$recorded_head" ]; then
-  case "$cur" in
-    refs/heads/?*) branch=${cur#refs/heads/} ;;
-    *) die "HEAD is '$cur', neither the checkout the launcher recorded ('$recorded_head') nor a new branch" ;;
-  esac
-  rc=0
-  # shellcheck disable=SC2016 # the helper expands $GIT_TOKEN when git runs it
-  GIT_TOKEN=$job GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
-    GIT_CONFIG_KEY_1="credential.$GITHUB_SERVER_URL.helper" \
-    GIT_CONFIG_VALUE_1='!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' \
-    GIT_TERMINAL_PROMPT=0 gitr ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1 || rc=$?
-  case "$rc" in
-    2) ;;
-    0) die "the action checked out a new branch '$branch' that already exists on origin — its post-CLI cleanup would commit and push to it as the runner" ;;
-    *) die "cannot tell whether the new branch '$branch' exists on origin (git ls-remote exit $rc)" ;;
-  esac
-fi
-
 # The by-value check: no privileged token anywhere the agent reaches.
 for v in "${out[@]}"; do holds_privileged "$v" && die "a privileged token value is on the rewritten argv"; done
 for v in "${envv[@]}"; do holds_privileged "$v" && die "a privileged token value is in the agent's environment"; done
@@ -245,7 +219,7 @@ holds_privileged "$settings" && die "a privileged token value is in the settings
 holds_privileged "$wif_config" && die "a privileged token value is in the WIF profile"
 holds_privileged "$(cat "$ws/.git/config")" && die "a privileged token value is in .git/config"
 
-# 7. The handoff, runner-only, and the namespace. The paths the isolation
+# 6. The handoff, runner-only, and the namespace. The paths the isolation
 #    check must find unreachable: the step's command files, the runner's
 #    registration key, the downloaded actions, the runner's settings and
 #    this handoff's own directory.

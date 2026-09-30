@@ -335,9 +335,9 @@ def test_compose_codex_review_is_flagged_and_moves_no_stage(tmp_path):
 
 
 def test_codex_prep_writes_no_footer(tmp_path):
-    # The old `engine: codex` footer is what pr-feedback-context still
-    # anchors on for reviews posted before step 3; no new review carries
-    # it, and a review quoting it has it split (here too, by land).
+    # The old `engine: codex` footer anchored a review round before step 3;
+    # no review carries it now, and a review quoting it has it split (by
+    # land).
     out = tmp_path / "codex-review.json"
     out.write_text(json.dumps({"verdict": "clean", "review": "Looks fine; cc @review.\n"}))
     landing = tmp_path / "landing"

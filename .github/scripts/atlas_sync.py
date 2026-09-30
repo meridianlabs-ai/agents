@@ -716,9 +716,10 @@ def reopen_tag(event_id: str, comment_id) -> str:
     4773875): land posts agent-written comments as the machine account and
     the fork reviewer's land job can reopen an issue (`issues[].comment_on`
     + `reopen`), but land never edits a comment. The only other
-    machine-account comment edits (the loops' counter comments) write
-    fixed bodies to comments carrying a counter marker, which land's
-    defang strips; tests/test_atlas_sync.py pins that list.
+    machine-account comment edits (the loops' counter comments, and
+    claude.yml's status comment, which its land job rewrites) write fixed
+    bodies to comments carrying a marker land's defang strips;
+    tests/test_atlas_sync.py pins that list.
     """
     return f"<!-- atlas-sync-reopen event={event_id} comment={comment_id} -->"
 

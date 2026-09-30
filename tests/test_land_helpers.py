@@ -163,9 +163,8 @@ def test_defang_breaks_triggers_and_markers_case_insensitively(tmp_path):
     # The replacement text is literal (lowercase); the captured suffix keeps its case.
     assert "claude-review verdict" in out and "auto HANDOFF" in out
     # Since step 3 of design/untrusted-agent-job.md the codex reviewer's old
-    # footer (pr-feedback-context's anchor for reviews posted before it;
-    # Claude Security 4773878) and atlas_sync's reopen record (4773875) are
-    # split too, in any case.
+    # footer (Claude Security 4773878; no longer an anchor since 2026-09-30)
+    # and atlas_sync's reopen record (4773875) are split too, in any case.
     assert "engine: codex" not in out.lower() and "🤖 engine  codex · engine  codex" in out
     assert "reopened — upstream pr" not in out.lower()
     assert "Reopened — upstream  PR https://x/1 · Reopened — upstream  PR" in out
@@ -219,7 +218,8 @@ def consumer_markers() -> set:
         # Markers matched without their comment delimiters (the review-fix
         # gate's `sed -n 's/.*claude-review-verdict:…`).
         found |= set(re.findall(r"claude-review-[a-z]+:", text))
-    # pr-feedback-context's anchor regex: its non-HTML alternatives.
+    # pr-feedback-context's anchor regex: any non-HTML alternatives (none
+    # since the codex footer was dropped, 2026-09-30).
     for pattern in re.findall(r'test\("([^"]*<!--[^"]*)"\)', PR_FEEDBACK_CONTEXT.read_text()):
         found |= {a for a in pattern.split("|") if a and not a.startswith("<!--") and not set(a) & set("()[]")}
     src = (ROOT / ".github" / "scripts" / "atlas_sync.py").read_text()
@@ -232,7 +232,7 @@ def test_every_consumer_marker_is_broken_by_the_defang_or_appended_by_land(tmp_p
     # The extraction finds what it must, so an empty list cannot pass.
     for must in ("claude-review-comment", "claude-review-summary", "claude-review-verdict:", "auto-handoff",
                  "auto-review-rounds", "auto-fix-attempts", "auto-review-head:", "auto-converged", "model-provenance",
-                 "🤖 engine: codex", "Reopened — upstream PR"):
+                 "Reopened — upstream PR", "dev-agent-status"):
         assert must in markers, (must, sorted(markers))
     land = LAND.read_text()
     for m in sorted(markers):
@@ -656,7 +656,9 @@ def post_script() -> str:
 # failed lookup), whether `issue edit` / `issue reopen` succeed, the PR's
 # head SHA (or a failed lookup: `head-fails`) and whether an inline review
 # comment anchors (`inline-422`: never; `inline-flaky`: after one 500;
-# `inline-500`: never, no 422) or a top-level comment posts
+# `inline-500`: never, no 422; `inline-429` / `inline-403`: refused;
+# `inline-second-500`: the first posts, every later one fails) or a
+# top-level comment posts
 # (`comment-fails`, alone or as `inline-422-comment-fails`). `curl` records the Slack request. Every call is logged;
 # the Atlas status write is logged separately so a test can assert the board
 # was not touched, and every body file handed to `-F body=@…` is appended to
@@ -681,6 +683,9 @@ gh() {
       case "$SCENARIO" in
         inline-422*) echo '{"message": "Validation Failed"}'; echo "gh: Validation Failed (HTTP 422)" >&2; return 1 ;;
         inline-500) echo "gh: Server Error (HTTP 500)" >&2; return 1 ;;
+        inline-429) echo "gh: API rate limit exceeded (HTTP 429)" >&2; return 1 ;;
+        inline-403) echo "gh: You have exceeded a secondary rate limit (HTTP 403)" >&2; return 1 ;;
+        inline-second-500) if [ -f "$STATE/second" ]; then echo "gh: Server Error (HTTP 500)" >&2; return 1; fi; touch "$STATE/second" ;;
         inline-flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo "gh: Server Error (HTTP 500)" >&2; return 1; fi ;;
       esac
       return 0 ;;
@@ -972,6 +977,59 @@ def test_post_retries_a_transient_inline_comment_failure(tmp_path):
     assert len(posted_bodies(tmp_path)) == 4  # summary, failed attempt, retry, second inline
 
 
+def many_inline(n):
+    m = review_landing(review_comments=[{"path": f"src/f{i}.py", "line": i + 1, "body_file": f"rc{i}.md"} for i in range(n)])
+    files = {"review.md": REVIEW_FILES["review.md"], **{f"rc{i}.md": f"Finding {i}.\n" for i in range(n)}}
+    return m, files
+
+
+@pytest.mark.parametrize("scenario", ["inline-429", "inline-403"])
+def test_post_stops_inline_comments_on_a_rate_limit(tmp_path, scenario):
+    # Claude Security 4773341: a 403/429 is final at once and ends inline
+    # posting for the run; every comment, the refused one included, goes into
+    # the follow-up comment, and nothing is recorded as a lost post.
+    m, files = many_inline(6)
+    r, calls, writes, failed = run_post(tmp_path, m, files, pr_number="5", scenario=scenario)
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 1
+    assert "posting no more inline review comments this run" in r.stdout
+    follow_up = posted_bodies(tmp_path)[-1]
+    assert follow_up.startswith("Inline review comments that could not be anchored")
+    assert all(f"Finding {i}." in follow_up for i in range(6))
+    assert "posted 0 of 6 inline review comment(s)" in r.stdout
+
+
+def test_post_stops_inline_comments_after_three_failures_in_a_row(tmp_path):
+    # Three comments that each failed their three attempts (not a 422) end
+    # inline posting; the rest are folded without being tried.
+    m, files = many_inline(6)
+    r, calls, writes, failed = run_post(tmp_path, m, files, pr_number="5", scenario="inline-500")
+    assert r.returncode == 0, r.stderr
+    assert failed == ""
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 9
+    assert "three inline comments in a row failed" in r.stdout
+    follow_up = posted_bodies(tmp_path)[-1]
+    assert all(f"Finding {i}." in follow_up for i in range(6))
+
+
+def test_post_stops_only_on_failures_in_a_row(tmp_path):
+    # 422s never count towards the stop: every comment is tried once.
+    m, files = many_inline(6)
+    r, calls, writes, failed = run_post(tmp_path, m, files, pr_number="5", scenario="inline-422")
+    assert r.returncode == 0, r.stderr
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 6
+    assert "posting no more inline review comments" not in r.stdout
+    # A success before the failures: the stop still needs three in a row.
+    m, files = many_inline(3)
+    (tmp_path / "b").mkdir()
+    r, calls, writes, failed = run_post(tmp_path / "b", m, files, pr_number="5", scenario="inline-second-500")
+    assert r.returncode == 0, r.stderr
+    assert sum(c.startswith("api repos/o/r/pulls/5/comments ") for c in calls) == 1 + 3 + 3
+    assert "posting no more inline review comments" not in r.stdout
+    assert "posted 1 of 3 inline review comment(s)" in r.stdout
+
+
 def test_post_folds_every_inline_comment_when_the_head_lookup_fails(tmp_path):
     # No commit to anchor to: nothing is tried inline, all go to the follow-up.
     r, calls, writes, failed = run_post(tmp_path, review_landing(), REVIEW_FILES, pr_number="5", scenario="head-fails")
@@ -1218,6 +1276,8 @@ gh() {
   case "$SCENARIO" in
     422) echo '{"message": "Validation Failed"}'; echo "gh: Validation Failed (HTTP 422)" >&2; return 1 ;;
     500) echo "gh: Server Error (HTTP 500)" >&2; return 1 ;;
+    429) echo "gh: API rate limit exceeded (HTTP 429)" >&2; return 1 ;;
+    403) echo "gh: Resource not accessible by integration (HTTP 403)" >&2; return 1 ;;
     flaky) if [ ! -f "$STATE/flaked" ]; then touch "$STATE/flaked"; echo "gh: Server Error (HTTP 500)" >&2; return 1; fi ;;
   esac
   return 0
@@ -1225,7 +1285,8 @@ gh() {
 """
 
 
-@pytest.mark.parametrize("scenario,rc,attempts", [("", 0, 1), ("422", 1, 1), ("flaky", 0, 2), ("500", 1, 3)])
+@pytest.mark.parametrize("scenario,rc,attempts", [("", 0, 1), ("422", 1, 1), ("flaky", 0, 2), ("500", 3, 3),
+                                                   ("429", 2, 1), ("403", 2, 1)])
 def test_post_review_comment_file_retry_policy(tmp_path, scenario, rc, attempts):
     state = tmp_path / "state"
     state.mkdir()

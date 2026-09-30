@@ -1422,7 +1422,7 @@ jobs:
           elif [ -n "${MERGE_SHA:-}" ] && [ -n "${SYNC_APPEND:-}" ]; then
             merge_note=" NOTE: a workflow step already merged origin/$SYNC_BASE into this branch before you started (a clean merge, no conflicts). Review that merge result against the following before your other changes, and fix it in your commit if it is off: $(tr '\n' ' ' <<<"$SYNC_APPEND")"
           fi
-          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, instead of changing code, write a brief rationale to its own file under $LANDING_DIR/ (e.g. $LANDING_DIR/reply-1.md; file names must match [A-Za-z0-9._-] and must not start with a dot) and append {\"review_comment_id\": <id>, \"body_file\": \"<file name relative to $LANDING_DIR>\"} to the \`replies\` array in $LANDING_DIR/manifest-extra.json. The id is the numeric \`id\` of that inline comment as \`gh api repos/$REPO/pulls/$PR/comments\` returns it; use the thread's FIRST comment (the one with no \`in_reply_to_id\`) so the reply lands in the right thread. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, COMMIT them to the current branch with git — do NOT push — and set \`handback\` to true in the manifest: the workflow pushes and requests the re-review for you. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you committed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT set handback — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. LANDING (mandatory): you hold no credential that may push or post as the loop's identity, so do NOT push, do NOT open a PR, and do NOT post any comment, review, reply or reaction or resolve any thread yourself. The workflow lands your work after your run ends — it pushes the branch's new commits as the machine account (which re-runs CI), posts your replies, resolves the threads you list, and posts the re-review request or the hand-off — all from the manifest you write: $LANDING_DIR/manifest-extra.json, one JSON object with at most these four keys and nothing else: \`replies\` (array of {review_comment_id, body_file}), \`resolve_threads\` (array of review-thread node ids), \`handback\` (boolean), \`handoff_body_file\` (file name). Body files live next to it under $LANDING_DIR/ and are referenced by name. Create the file if it does not exist and rewrite it whole when you update it, so it is valid JSON when your turn ends (an unparsable file drops everything in it). Do NOT create, edit or delete files that later automated runs execute or load as configuration: $PROTECTED_FILES. The landing refuses the whole bundle, so every commit of the run is lost; if the task needs such a change, stop and say so in a comment so a maintainer makes it from their machine. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn: background tasks do not re-invoke you and their completion notifications never arrive, so never end your turn waiting on anything (subagents, background commands, test suites): collect results in the foreground, and if a final validation is long-running, commit FIRST and let the PR's own CI be the gate (observed loss: a fix round ended with tests 'running in the background' and everything evaporated with the runner). ENDING CONTRACT (mandatory): a run that committed ANY change ends with exactly ONE of the two hand-backs in the manifest — \`handback: true\` (the re-review request) or a \`handoff_body_file\` (the hand-off). Setting both, or neither, is a contract violation: the workflow then posts NEITHER, reports the violation on the PR as an error and fails the run, leaving the board stranded at Agent. Uncommitted edits to tracked files are lost with the runner and reported as a failed round, so commit everything you mean to keep and revert scratch edits to tracked files you do not. THREAD RESOLUTION: list the inline review threads you FULLY addressed in code, so settled feedback is visibly closed — list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\` of the form PRRT_…, \`isResolved\`, and its \`comments\`), then append each such thread's \`id\` to \`resolve_threads\` in the manifest; the workflow resolves exactly those after the push. Never list a thread you deliberately declined (the one you wrote a rationale for), only partly addressed, or did not actually address — declined threads stay open so a human can adjudicate them. HAND-OFF: hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a rationale in \`replies\`, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then write ONE file under $LANDING_DIR/ (e.g. $LANDING_DIR/handoff.md) and name it in \`handoff_body_file\`: a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status${mention_note}. The workflow prepends the hand-off marker line itself when it posts that file (the board stage moves on it); do NOT write any marker into the file. Do NOT merge — auto hands the final step to a human. In commit messages and in every file you write for the manifest, refer to this automation as \`auto\` without an @ prefix, and never write the review or dev-agent trigger tokens bare (backtick them): the commit list and those bodies render on the PR from a write-access account, where a bare trigger token would start a workflow. The loop's marker substrings get the same discipline: never write claude-review-summary, claude-review-verdict, claude-review-comment, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in a commit message or a body file — the loop matches them by plain substring, so quoting a reviewer verdict comment verbatim would forge a verdict; when referencing one, break it (e.g. 'claude-review summary'). Likewise never write the codex reviewer's footer 'engine: codex' verbatim: it and the review-comment marker are how the codex fix rounds locate the newest review, so a body of yours carrying either would be mistaken for the review.${note}${merge_note}" >>"$GITHUB_OUTPUT"
+          printf 'value=%s\n' "You are @auto addressing automated-review feedback on PR #$PR in $REPO (review round $ROUND of $CAP). Read the reviewer's latest summary and any inline review comments with gh: \`gh pr view $PR --comments\`, \`gh api repos/$REPO/pulls/$PR/reviews\`, and \`gh api repos/$REPO/pulls/$PR/comments\`. Your goal is to leave the PR in the best shape you reasonably can, so address the feedback thoroughly — this INCLUDES minor and explicitly non-blocking suggestions (nits, naming, small refactors, reuse/DRY cleanups, doc fixes). Do NOT skip a suggestion just because the reviewer marked it non-blocking or 'not worth blocking on'; if it is a reasonable improvement, make it. The only items to leave unaddressed are ones you genuinely disagree with, that are clearly out of scope for this PR, or that are not a net improvement — for each of those, instead of changing code, write a brief rationale to its own file under $LANDING_DIR/ (e.g. $LANDING_DIR/reply-1.md; file names must match [A-Za-z0-9._-] and must not start with a dot) and append {\"review_comment_id\": <id>, \"body_file\": \"<file name relative to $LANDING_DIR>\"} to the \`replies\` array in $LANDING_DIR/manifest-extra.json. The id is the numeric \`id\` of that inline comment as \`gh api repos/$REPO/pulls/$PR/comments\` returns it; use the thread's FIRST comment (the one with no \`in_reply_to_id\`) so the reply lands in the right thread. Verify your changes (run the relevant pytest/ruff/mypy). If you made any changes, COMMIT them to the current branch with git — do NOT push — and set \`handback\` to true in the manifest: the workflow pushes and requests the re-review for you. EXCEPTION — documentation-only nit round: if EVERY suggestion you acted on this round was explicitly minor/non-blocking (nit-level) AND every change you committed is documentation-only (markdown/doc files, code comments, docstrings — zero behavioral code change), do NOT set handback — another review round would just re-read prose. Instead declare the loop done: hand off to a human as described below, noting the round was doc-only nits. LANDING (mandatory): you hold no credential that may push or post as the loop's identity, so do NOT push, do NOT open a PR, and do NOT post any comment, review, reply or reaction or resolve any thread yourself. The workflow lands your work after your run ends — it pushes the branch's new commits as the machine account (which re-runs CI), posts your replies, resolves the threads you list, and posts the re-review request or the hand-off — all from the manifest you write: $LANDING_DIR/manifest-extra.json, one JSON object with at most these four keys and nothing else: \`replies\` (array of {review_comment_id, body_file}), \`resolve_threads\` (array of review-thread node ids), \`handback\` (boolean), \`handoff_body_file\` (file name). Body files live next to it under $LANDING_DIR/ and are referenced by name. Create the file if it does not exist and rewrite it whole when you update it, so it is valid JSON when your turn ends (an unparsable file drops everything in it). Do NOT create, edit or delete files that later automated runs execute or load as configuration: $PROTECTED_FILES. The landing refuses the whole bundle, so every commit of the run is lost; if the task needs such a change, stop and say so in a comment so a maintainer makes it from their machine. ENVIRONMENT (mandatory): your work exists ONLY on this ephemeral runner until committed — the workflow packages the commits on the current branch when your turn ends — and a run can NEVER resume after your final turn: background tasks do not re-invoke you and their completion notifications never arrive, so never end your turn waiting on anything (subagents, background commands, test suites): collect results in the foreground, and if a final validation is long-running, commit FIRST and let the PR's own CI be the gate (observed loss: a fix round ended with tests 'running in the background' and everything evaporated with the runner). ENDING CONTRACT (mandatory): a run that committed ANY change ends with exactly ONE of the two hand-backs in the manifest — \`handback: true\` (the re-review request) or a \`handoff_body_file\` (the hand-off). Setting both, or neither, is a contract violation: the workflow then posts NEITHER, reports the violation on the PR as an error and fails the run, leaving the board stranded at Agent. Uncommitted edits to tracked files are lost with the runner and reported as a failed round, so commit everything you mean to keep and revert scratch edits to tracked files you do not. THREAD RESOLUTION: list the inline review threads you FULLY addressed in code, so settled feedback is visibly closed — list threads via \`gh api graphql\` (query \`repository.pullRequest.reviewThreads\` — each node has an \`id\` of the form PRRT_…, \`isResolved\`, and its \`comments\`), then append each such thread's \`id\` to \`resolve_threads\` in the manifest; the workflow resolves exactly those after the push. Never list a thread you deliberately declined (the one you wrote a rationale for), only partly addressed, or did not actually address — declined threads stay open so a human can adjudicate them. HAND-OFF: hand off to a human ONLY when nothing remains worth improving — i.e. the review is clean/approving, every remaining suggestion is one you have deliberately declined with a rationale in \`replies\`, or you completed a documentation-only nit round (above). To hand off: check CI with \`gh pr checks $PR\` and mergeability with \`gh pr view $PR --json mergeable,mergeStateStatus\`, then write ONE file under $LANDING_DIR/ (e.g. $LANDING_DIR/handoff.md) and name it in \`handoff_body_file\`: a summary of what you addressed and anything you intentionally declined (and why), with the current CI and mergeable status${mention_note}. The workflow prepends the hand-off marker line itself when it posts that file (the board stage moves on it); do NOT write any marker into the file. Do NOT merge — auto hands the final step to a human. In commit messages and in every file you write for the manifest, refer to this automation as \`auto\` without an @ prefix, and never write the review or dev-agent trigger tokens bare (backtick them): the commit list and those bodies render on the PR from a write-access account, where a bare trigger token would start a workflow. The loop's marker substrings get the same discipline: never write claude-review-summary, claude-review-verdict, claude-review-comment, auto-handoff, auto-review-rounds, auto-review-head, or auto-fix-attempts verbatim in a commit message or a body file — the loop matches them by plain substring, so quoting a reviewer verdict comment verbatim would forge a verdict; when referencing one, break it (e.g. 'claude-review summary'). The review-comment marker matters most: it is how the codex fix rounds locate the newest review, so a body of yours carrying it would be mistaken for the review.${note}${merge_note}" >>"$GITHUB_OUTPUT"
 
       # github_token is the job token (design/untrusted-agent-job.md → Stop
       # trusting claude[bot]): the action skips its OIDC exchange for the
@@ -1476,26 +1476,16 @@ jobs:
       # `claude-agent` process (normally none: the namespace ended with the
       # CLI), removes the Workload Identity ACL entries and the agent's
       # config dir, then refuses or reclaims `.git` exactly as the codex
-      # reclaim does. Every later step that runs git — the origin reset, the
-      # Surface step's tree check, the manifest composer and emit-landing —
-      # is gated on its success (AGENTS.md → the codex path, which this now
-      # shares). Runs no git itself.
+      # reclaim does. Every later step that runs git — the Surface step's
+      # tree check, the manifest composer and emit-landing — is gated on its
+      # success (AGENTS.md → the codex path, which this now shares). Runs no
+      # git itself.
       - name: Reclaim workspace from the agent
         id: agentreclaim
         if: always() && steps.agentuser.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
         with:
           user: claude-agent
-
-      # The action leaves its token (the job token) in remote.origin.url; the wrapper
-      # already reset it before the agent started, and this stays as belt and
-      # braces for the action's own later writes, after the reclaim (git over
-      # a `.git` the agent could write is never run) — git never consults a
-      # helper when the URL carries a credential. One mechanism across the
-      # three workflows. always(): a failed agent leaves the URL rewritten too.
-      - name: Reset origin URL after the agent
-        if: always() && steps.claude.outcome != 'skipped' && steps.agentreclaim.outcome == 'success'
-        uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
 
       # Bring the agent's landing files across the user boundary ONCE, after
       # the reclaim's kill: every regular, single-link, `claude-agent`-owned
@@ -1648,20 +1638,22 @@ jobs:
           if [ -z "$err" ] && [ "${LAUNCHER_OUTCOME:-}" = "failure" ]; then
             err="preparing the fix agent's launch failed before it started — installing Claude Code at the version claude-code-action pins, the check that the agent user has no sudo, no Docker access and Yama ptrace_scope 1 or more, or a process still running as the agent user (see the job logs); no fix was attempted this round, though the runner's clean base merge, if there was one, was still landed on the branch. Re-trigger if it was the download, otherwise the runner image changed."
           fi
+          # A reclaim that did not succeed skips every later git call (the
+          # composer runs no git and emit-landing runs read-only), so it
+          # needs its own clause or the round is a silent no-change. `!=
+          # success` so a cancel mid-reclaim is named too; the agentuser test
+          # keeps a run that never created the user out.
+          # Before the agent's own error text below, so a round whose work was
+          # withheld reports only this fixed text (Claude Security 4773889).
+          if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then
+            err="the workspace could not be reclaimed from the fix agent (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — a job PATH entry writable by or owned by the agent user (a directory added to the job PATH after the Create agent user step checked it, most likely by a runner-image change; the reclaim refuses it and does not repair it), processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, an embedded git repository appeared in the tree, the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed this round, the runner's base merge included. Inspect the run before re-triggering."
+          fi
           # The agent's own error text is free-form (and unbounded — it is
           # the final message when is_error is set); cap it so the manifest's
           # error.message stays well under the validator's 64 KiB limit.
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review-fix step failed before producing a result (see the job logs)."
-          fi
-          # A reclaim that did not succeed skips every later git call (the
-          # composer runs no git and emit-landing runs read-only), so it
-          # needs its own clause or the round is a silent no-change. `!=
-          # success` so a cancel mid-reclaim is named too; the agentuser test
-          # keeps a run that never created the user out.
-          if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then
-            err="the workspace could not be reclaimed from the fix agent (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, an embedded git repository appeared in the tree, the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed this round, the runner's base merge included. Inspect the run before re-triggering."
           fi
           # Completed-but-blocked: the action reports success,
           # but the agent left edits to tracked files uncommitted — they die
@@ -1687,13 +1679,10 @@ jobs:
             if [ -n "$dirty" ]; then
               head=$(git rev-parse HEAD 2>/dev/null || echo "$BASE_SHA")
               if [ "$head" = "$BASE_SHA" ] || { [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ]; }; then
-                # Strip the @ from trigger tokens in agent-authored text and
-                # split the codex reviewer's footer — this is embedded in a
-                # marvin-authored comment, which pr-feedback-context would
-                # take for the newest review if it carried the footer (the
-                # land job de-fangs triggers and markers again, but not the
-                # footer: see the codex summary step's comment).
-                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' -e 's/engine: codex/engine  codex/g' || true)
+                # Strip the @ from trigger tokens in agent-authored text —
+                # this is embedded in a marvin-authored comment (the land job
+                # de-fangs triggers and markers again).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' || true)
                 err="the agent finished but left edits to tracked files uncommitted, so no fix landed on the branch (only the runner's base merge, if there was one) — whatever its summary reports, no code change reached the PR."
                 [ -n "$summary" ] && err="$err Agent summary: $summary"
               else
@@ -1948,16 +1937,13 @@ jobs:
             # about: the same shape as the codex no-change hand-off (ping,
             # header, the final message), de-fanged as the codex summary
             # step does — this posts as marvin, so a final message quoting a
-            # trigger, a loop marker or the codex reviewer's footer would
-            # fire a workflow, forge a verdict or pose as the newest review.
-            # `land` repeats the trigger and marker rules but deliberately
-            # not the footer (it posts the codex reviewer's real one), so
-            # this is the footer's only layer. The land job prepends the
-            # auto-handoff marker; nothing here writes it.
+            # trigger or a loop marker would fire a workflow, forge a verdict
+            # or pose as the newest review. `land` repeats every rule here.
+            # The land job prepends the auto-handoff marker; nothing here
+            # writes it.
             summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 \
               | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                        -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                       -e 's/engine: codex/engine  codex/g' \
                        -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' || true)
             ping=""; [ -n "${MENTION:-}" ] && ping="@$MENTION "
             {
@@ -2434,13 +2420,12 @@ jobs:
           # output de-fang: the embedded comments include the reviewer's
           # verdict comments, and a marker substring codex never sees is one
           # it cannot echo; the substitutions are length-neutral. The
-          # review-comment anchor marker and the codex reviewer's engine
-          # footer are in the list too: the pr-feedback-context composite has
-          # already anchored on them, and a fix summary that echoed either
-          # would be a false anchor for a later round on this PR.)
+          # review-comment anchor marker is in the list too: the
+          # pr-feedback-context composite has already anchored on it, and a
+          # fix summary that echoed it would be a false anchor for a later
+          # round on this PR.)
           head -c 120000 "$RUNNER_TEMP/codex-context.md" \
             | sed -E -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                     -e 's/engine: codex/engine  codex/g' \
                      -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >"$RUNNER_TEMP/codex-prompt.md"
 
       - name: Run Codex fix
@@ -2686,18 +2671,12 @@ jobs:
           # read needs no write permission, and a stray RESOLVED-THREADS
           # line in a comment beats the summary going unread —
           # inspect_ai#428's ten blind rounds). The list here includes the
-          # review-comment anchor marker and the codex reviewer's engine
-          # footer: this body posts as marvin, a machine author the
-          # review-fix rounds' anchor selection trusts, so a summary echoing
-          # either would be taken for the newest review by the next fix
-          # round on the same PR. The land job's `defang` (land/lib.sh)
-          # repeats the trigger and marker rules (two layers, so neither can
-          # drift to zero) but deliberately NOT the footer: `land` is shared
-          # with claude-review.yml, which posts the codex reviewer's own
-          # footer through it as the anchor. So the footer sed lives only
-          # here and in the Claude-path bodies below (the relay's
-          # agent-summary.md and the Surface step's embedded summary); keep
-          # the three copies in step.
+          # review-comment anchor marker: this body posts as marvin, a
+          # machine author the review-fix rounds' anchor selection trusts,
+          # so a summary echoing it would be taken for the newest review by
+          # the next fix round on the same PR. The land job's `defang`
+          # (land/lib.sh) repeats every rule here (two layers, so neither
+          # can drift to zero).
           src="$OUT"; [ -f "$src" ] || src="$FINAL"
           n_ids=$(wc -w <<<"${IDS:-}" | tr -d ' ')
           {
@@ -2709,7 +2688,6 @@ jobs:
             fi
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                   -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$src" 2>/dev/null || echo "(codex produced no final message)"
           } >"$DIR/codex-comment.md"
@@ -3095,6 +3073,11 @@ jobs:
     needs: [gate, fix, fix-codex]
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.act == 'fix'
     runs-on: ubuntu-latest
+    # Land runs take 10-50 s (56 land jobs across five caller repositories,
+    # 2026-09-30); the retries' backoff adds minutes at most. Well under
+    # the 6 h default, so a stuck post cannot hold the run (Claude
+    # Security 4773341).
+    timeout-minutes: 15
     env:
       # The result and outputs of the ONE fix job the gate's engine selected
       # (the other is `skipped`, with empty outputs): what the steps below

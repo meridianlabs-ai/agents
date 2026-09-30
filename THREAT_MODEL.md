@@ -23,10 +23,11 @@ Each of these holds on `main`; the ones that can be read from the workflow
 text are checked by the tests under `tests/`.
 
 - A job that runs an agent holds no credential of the machine account and no
-  token minted from it; its own job token is read-only. The Claude action's
-  own token, present in the action's runner-side process while that step
-  runs and never within the agent's reach, is described under "By design"
-  below.
+  token minted from it; its own job token is read-only. Every
+  claude-code-action step passes that job token as `github_token`, so the
+  action mints no Claude App token (since step 4 of
+  design/untrusted-agent-job.md, the dev agent's included). What the
+  installed App still allows is described under "By design" below.
 - No job of the agent workflows can save to the GitHub Actions cache: every
   reusable workflow declares `cache-mode: read`, which the platform enforces
   on the job's token, so nothing an agent does or a caller's setup nests can
@@ -66,12 +67,14 @@ text are checked by the tests under `tests/`.
   workspace in that interval, so nothing provisioning left behind reaches
   the action's runner-side reads. The Claude CLI itself runs as
   `claude-agent` in its own PID and mount namespace, started by a
-  root-owned wrapper that refuses to launch it if the action's App token
-  appears anywhere in its argv, environment, settings or `.git/config`,
-  that drops every App-token MCP server, and that gives it the read-only
-  job token as its only GitHub credential; inside, it sees no host process
-  and nothing under the runner's home but the workspace, its landing
-  directory, the review scratch copy and the Workload Identity directory.
+  root-owned wrapper that refuses to launch it if a token other than the
+  job token appears anywhere in its argv, environment, settings or
+  `.git/config`, that drops the MCP servers the action composes, and that
+  gives it the read-only job token as its only GitHub credential; inside,
+  it sees no host process and nothing under the runner's home but the
+  workspace, its landing directory, the review scratch copy, the Workload
+  Identity directory and, for the dev agent, a read-only directory of the
+  images its context links.
   After the agent, a reclaim kills whatever is left, removes its Workload
   Identity access and credential cache, and takes `.git` back before any
   runner-side git; the agent's landing files reach the runner only through
@@ -278,25 +281,26 @@ text are checked by the tests under `tests/`.
 
 ## By design, not a finding
 
-- The Claude GitHub App's own installation token is present in the dev
-  agent's job (`claude.yml`) while the action step runs: that workflow
-  passes no token to the action, so it mints its own, with contents, pull
-  requests and issues write on the caller repository whatever the job's own
-  permissions say, and revokes it when the step ends. The reviewer and the
-  loops pass the job token as `github_token`, so the action mints none
-  there, and the codex jobs request no OIDC token to mint one with
-  (design/untrusted-agent-job.md → Stop trusting `claude[bot]`). It is the
-  action's token, used by the action's own runner-side
-  code only (its tracking comment on `claude.yml`, the revocation): the
-  agent runs as `claude-agent` behind the launcher, which keeps the token
-  out of its argv, environment, settings, MCP servers and `.git/config`, and
-  the agent's namespace hides the action's process, the step scripts and
-  the runner's files. So the `claude[bot]` write channel the agent used to
-  hold is closed: the agent's `gh` holds the read-only job token, its
-  replies, thread resolutions and comments go through the landing manifest,
-  and the settings denies on push and posting verbs are guard rails behind
-  that. While the App is installed, a job with `id-token: write` can still
-  mint its token, so `claude[bot]` is trusted nowhere: the review-fix
+- The Claude GitHub App is still installed on the Meridian repositories,
+  and a job with `id-token: write` can exchange its OIDC token for the
+  App's installation token (contents, pull requests and issues write on
+  the caller repository). No job in the four reusable workflows asks for
+  one: every claude-code-action step passes the job token as
+  `github_token`, the dev agent included since it moved to agent mode
+  (design/untrusted-agent-job.md, step 4), so the action mints none and
+  posts nothing; the dev agent's status comment is the machine account's,
+  posted by the gate and finished by the land job from trusted values.
+  The codex jobs request no OIDC token at all. What is left is a runner
+  compromise in a Claude job making the exchange itself, which the App's
+  uninstall (that design's step 6) closes. The agent runs as
+  `claude-agent` behind the launcher, which keeps any token other than the
+  job token out of its argv, environment, settings, MCP servers and
+  `.git/config`, and the agent's namespace hides the action's process, the
+  step scripts and the runner's files. The agent's `gh` holds the
+  read-only job token, its replies, thread resolutions and comments go
+  through the landing manifest, and the settings denies on push and
+  posting verbs are guard rails behind that. Because the App can still
+  mint tokens, `claude[bot]` is trusted nowhere: the review-fix
   workflow takes verdicts only from the machine account (or a caller's
   `reviewer_login`), counts a `claude[bot]` re-review request only when the
   caller's `review_allowed_bots` names it (empty by default), and the codex
@@ -406,6 +410,12 @@ text are checked by the tests under `tests/`.
   from its own label read, which leaves an External proxy issue's stage
   move as the one board write a forged review manifest can choose. A human
   reads every review.
+
+## Local skills
+
+The skills under `skills/` run in a maintainer's own session with their
+`gh` login, not in CI. Their trust model is
+[skills/THREAT_MODEL.md](skills/THREAT_MODEL.md).
 
 ## Adding or changing a workflow
 

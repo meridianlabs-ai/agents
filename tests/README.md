@@ -114,7 +114,10 @@ Testing a change).
   "false", and `stage-override` replaces or removes the manifest's
   `stage`. The Post step replies only to the PR's own review comments
   (a foreign id skipped and recorded, a repeat dropped), and a codex
-  review flagged `review` gets the review marker after the de-fang. The
+  review flagged `review` gets the review marker after the de-fang.
+  Inline review comments stop after a 403 or 429 (one attempt, then none
+  more) or after three failures in a row, never over 422s, and the rest go
+  into the follow-up comment (4773341). The
   de-fang registry test extracts every marker pr-feedback-context,
   atlas_sync and the loop gates key on and requires each to be broken by
   `defang` or appended by `land` (4773878 and its siblings, 4773875). The
@@ -176,10 +179,37 @@ Testing a change).
   autonomous PR run, the stage rule, the agent's `comments` (pinned,
   shape-checked, capped), the no-change relay, the codex summary and
   thread ids, the branch-evidence rule (nothing bundled while HEAD is off
-  the run's branch) and the guard-failed codex path — with the issue-run
+  the run's branch; the branch is `Prepare branch`'s output, and a
+  comment-only run bundles nothing) and the guard-failed codex path — with the issue-run
   case run on through `emit-landing` and the validator under the land job's
   `branch-prefix`. Also checks every `workflow_call` input declares a
   `type`.
+- `test_dev_agent_mode.py` — `claude.yml` in agent mode (step 4 of
+  design/untrusted-agent-job.md): `Prepare branch` lifted and run against
+  local repositories (an issue run's new branch; an open PR left where the
+  sync put it, a merge in progress untouched; a closed PR continued at the
+  gate's start, fork-shaped name included, whatever sync-branch's branch
+  read said; a moved tip refused; a head never pinned or deleted after the
+  gate comment-only; a failed origin lookup failing the step), sync-branch
+  emitting a closed PR's base, the prompt step's random delimiter, the gate's
+  trigger-time step against stub payloads (comment, review, review
+  comment, opened, labeled with the history lookup, a stale entry and the
+  fallback, assigned), the gate's status comment and the land job's
+  finishing step against a stub `gh` (fixed bodies for each outcome, from
+  trusted values only), and the shape: agent mode on the job token with
+  the prompt and the PR's base, the context bound read-only, no job that
+  can mint a Claude App token.
+- `test_dev_agent_context.py` — the `dev-agent-context` composite's script
+  (`.github/scripts/dev_agent_context.py`) against a stub `gh`: an issue
+  run's comments before the trigger, oldest first, machine comments
+  dropped, the 30-comment and 40,000-character bounds with the "omitted"
+  line (a comment pointing at an earlier one, a `labeled` and an
+  `assigned` trigger); later comments, edits and reviews left out and the
+  payload's title and body used; a PR run's review summaries ahead of the
+  pr-feedback-context file; a failed read failing after three attempts;
+  images from the signed attachment host only, redirects refused, the
+  count and byte caps, a failed download leaving the link; the composite's
+  step; both engines reading the file.
 - `test_app_token_minting.py` — Phase 2 of the credential separation, as
   structural checks on the workflow text: every `gate` and `land` job (and
   the Atlas sync) mints the machine account's token first, for exactly the
@@ -280,24 +310,46 @@ Testing a change).
   SHA, not commit dates, is the binding) and the command line end to end
   against a stub `gh` on PATH (GETs only, `--paginate` on the lists, the
   exit codes, a head that moves during the check). Also lifts the skill's
-  approval-bound checkout blocks from `SKILL.md` and runs them against local
-  repos — promotions (the approved commit is checked out and merged; a tip
-  moved after the check stops it before anything is checked out) and
-  External PRs (the PR head is fetched without checkout and a moved head
-  carrying a `post-checkout` hook is refused without the hook running; on
-  the approved head the fork wiring makes a plain push land on the
-  contributor's branch) — and checks that every upstream merge request and
+  promotion checkout block from `SKILL.md` and runs it against local repos
+  (the approved commit is checked out and merged; a tip moved after the
+  check stops it before anything is checked out; the External path is
+  `test_merge_external.py`) — and checks that every upstream merge request and
   re-approval in the skill names the pushed commit, that the External path
   runs `checks_at_head.py` before its checkout, and — lifting the ts-mono
   step 3 block with the helper and `gh` stubbed — that the companion merge
   happens only after `companion_mergeable.py` passes on the head as it is
   then, pinned to the SHA it returned, and never after a failed recheck.
-  Also lifts the CHANGELOG-section check and the conflicted-paths block
-  (finding 4628737): entries carrying apostrophes, backticks, `$(…)`, quotes
+  Also runs the CHANGELOG-section check (`changelog_check.sh`) and the
+  conflicted-paths script (`conflicts.sh`) SKILL.md points at (finding
+  4628737): entries carrying apostrophes, backticks, `$(…)`, quotes
   and regex specials are each reported with their heading and none of them
-  runs (the block fails on an entry under a released heading, a dropped
+  runs (the check fails on an entry under a released heading, a dropped
   entry, or a copy under both), and a conflicted file name with spaces,
   quotes and `$(…)` is inspected without reaching the shell's parser.
+- `test_merge_external.py` — the merge queue's External path
+  (`skills/merge-approved-prs/external.sh`, Claude Security 4773883 and
+  4773882), run for real in a linked worktree of a local clone whose
+  config points `core.hooksPath`, `core.fsmonitor` and a required filter
+  driver at relative paths the contributor's tree supplies (plain git on
+  that tree runs them all): `start`, `commit` and `push` run none of them;
+  the approved commit is checked out detached and a moved head is refused
+  before any checkout; with the contributor's head named `main` and named
+  after an existing local branch, the clone's branches, HEAD and
+  `.git/config` are unchanged and the merge lands on their fork through
+  `HEAD:refs/heads/<branch>`; conflicts (a hostile file name among them)
+  are listed and the commit waits for their markers to go — of any size
+  git accepts (`1001`, `+12`, `0012`; the attribute parsed as git parses
+  it) or a size the resolution then changed in `.gitattributes`, staged first, committed around the script, or in a path
+  whose attributes (`-diff`, a `binary` diff driver) make `git diff
+  --check` skip it (`conflict_residue.py` reads the blobs), while a marker
+  line main already carries passes; file names with pathspec magic are
+  literal; the SKILL.md block's detach step runs pinned after a promotion
+  and after an earlier External item (a bare checkout there runs the
+  previous tree's fsmonitor); a CHANGELOG
+  entry under a release fails the commit and the push; a rejected push is
+  reported, never forced; the push needs `maintainerCanModify` and a HEAD
+  built on the approved commit; the primary clone and a branch worktree
+  are refused.
 - `test_checks_at_head.py` — the merge queue's deferral of External PR
   trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
   Claude Security 4122327 criterion 2): the decision on canned payloads
@@ -323,6 +375,32 @@ Testing a change).
   access (`approval_at_head.TRUSTED_LOGINS` stays empty: it may not approve,
   Ransom 2026-09-16); the command line against a stub `gh` (GETs only, the
   head re-read, cached lookups).
+- `test_skills_lib.py` — `skills/lib`, the helpers the local skills share
+  (`skills/THREAT_MODEL.md`): `trusted_login` (the machine account by name,
+  other logins by a write-access lookup that fails closed and is cached per
+  repository; no other App, and no value not shaped like a login, is ever
+  looked up), `check_pr`, `genuine_proxy`, `proxy_upstream_pr`,
+  `pin_git_config` against a clone whose hooks, fsmonitor and filter
+  drivers (one defined only in the worktree's own config) resolve into the
+  tree, `rendered_refs`, and `outbound.py`'s `defang`, `defang-review` and
+  plain-text commit-message scan (complete listings only). Also fails when
+  a skill script defines its own copy of a shared helper.
+- `test_post_upstream_review.py` — `skills/post-upstream-review/gather.sh`
+  and `post.sh` against a stub `gh` (Claude Security 4773885, 4773877): the
+  findings comment is chosen only from the machine account or a
+  write-access author, an outsider's newer findings-shaped comment stops
+  the run naming them, other Apps are never looked up, the proxy must be
+  labelled External and written by the machine account or a write-access
+  maintainer (a hand-seeded proxy passes, an outsider's does not), its
+  `Upstream PR:` line under upstream, a review of yours
+  newer than the trusted comment is a double relay; the review is sent as
+  a file with `gh api --input` (no `-f` fields), rebuilt from the checked
+  fields, defanged, with the footer and the head it was mapped against;
+  `APPROVE` and malformed reviews are refused; a reference to another
+  upstream issue or PR (by a stand-in for GitHub's renderer) is refused
+  unless allowed; a changed findings comment, a moved head or a closed PR
+  refuses the post; the audit comment names both the review and the
+  findings comment.
 - `test_skill_resolution.py` — the trust rule in `skills/checkout/checkout.sh`
   and `skills/promote/promote.sh`, run against a stub `gh` that answers from
   fixtures and logs every call: a chip from a personal fork or an untrusted
@@ -381,6 +459,15 @@ Testing a change).
   no marker, no substitution run, the worktree gone and pruned, unrelated
   sibling files intact; the plain in-worktree status the skill no longer
   recommends does run the clean filter. Promotions keep `gh pr checkout`.
+  promote's ts-mono companion counts only from `meridianlabs-ai/ts-mono` by
+  a trusted author, looked up on ts-mono (a same-named PR from a personal
+  fork, or by an untrusted author, is refused and noted; two that qualify
+  are exit 6 before any write, and a failed or truncated listing is exit 5
+  before any write), and on the create path the branch's commit
+  messages (upstream `main...<branch tip>`, compared in the fork) are
+  refused with exit 5 before any write when one references an upstream
+  issue or PR other than the import's, or when the listing fails or is
+  incomplete; the adopt path lists none.
 - `test_review_fix_gate.py` — `claude-auto-review.yml`'s `Gate and count`
   and `Converged handoff` steps, lifted the
   same way and run against a stub `gh`: the loop state each reads back from
@@ -420,10 +507,14 @@ Testing a change).
   expression in the workflow or the stubs reads the PR-event payload.
 - `test_pr_feedback_context.py` — the `pr-feedback-context` composite's
   step, lifted and run against a stub `gh`: a review round is anchored only
-  on a marker-bearing comment (the review-comment marker or the codex
-  footer) by the machine account's two logins; `claude[bot]` or any other
-  Bot does not anchor one, and the section falls back to the last 8
-  comments (design/untrusted-agent-job.md).
+  on a comment carrying the review-comment marker by the machine account's
+  two logins; `claude[bot]` or any other Bot does not anchor one, nor does
+  the codex reviewer's old `engine: codex` footer without the marker, and
+  the section falls back to the last 8 comments
+  (design/untrusted-agent-job.md). The dev agent's status comment is
+  dropped, and `trigger-time` leaves out comments and thread comments
+  created or edited at or after it (a thread with none left too); without
+  it nothing is filtered.
 - `test_codex_path.py` — the codex path's runner-side search path (Claude
   Security 4628448): the `assert-runner-only-path` check `create-codex-user`
   runs before its grant and `reclaim-codex-workspace` runs after codex
@@ -490,11 +581,12 @@ Testing a change).
   malformed and file-path `--mcp-config`, `plugin` and a second
   `--settings` refused; `--version` and non-action calls passed through;
   the env allow-list; the origin URL reset and the snapshot retaken; and
-  the new-branch precondition for an issue run, closed and merged PRs, a
-  PR closed after the gate and the fixed-clock collision (only "no such
-  ref" proceeds), with no lookup for an open-PR follow-up or a detached
-  review. `agent_ns.py`'s pure parts: the handoff format, the bind plan per
-  grant mode, the POSIX ACL encoding, the action-process check against a
+  no lookup on origin whatever branch is checked out (launch step 6 is
+  retired). The composite's `context-dir` check, lifted: a plain
+  runner-owned directory under `$RUNNER_TEMP` the agent user cannot write,
+  and not one the launch already binds. `agent_ns.py`'s pure parts: the
+  handoff format, the bind plan per grant mode and with a context
+  directory (read-only, last), the POSIX ACL encoding, the action-process check against a
   fake `/proc`, the run-file and handoff-file checks. The composite as
   text (order, root-owned installs, every value the wrapper and the
   namespace read is recorded, the pinned-version pattern against sample
@@ -568,14 +660,19 @@ Testing a change).
   the same `recipe`, then runs the pre-agent reclaim and the launcher before
   the claude-code-action step, which names the launcher's executable and
   sets `classify_inline_comments: "false"` (every claude-code-action step
-  does; in the reviewer and the loops each also passes `github_token: ${{
-  github.token }}` and no `additional_permissions`, and only the Claude job
-  requests `id-token: write`, never the codex job); the post-agent reclaim is the first step after it, and every later
-  git step (the origin reset, the import — which also needs a successful
+  does; each also passes `github_token: ${{ github.token }}` and no
+  `additional_permissions`, `trigger_phrase` or `label_trigger`, and only
+  the Claude job requests `id-token: write`, never the codex job); the
+  post-agent reclaim is the first step after it, no post-agent origin
+  reset runs, and every later
+  git step (the import — which also needs a successful
   launcher and an entered Claude step — the Surface tree check, the
   composers, the reviewer's re-plant check and landing prep, emit-landing's
   read-only) is gated on it; the Surface step names each boundary step's
-  failure; the reviewer's sandboxed paths create the user and launch with
+  failure, and, lifted and run with an `is_error` result beside a failed
+  reclaim (and in the reviewer a failed re-plant check or landing prep),
+  reports fixed text only (Claude Security 4773889); each land job has a
+  `timeout-minutes` under 30 (4773341); the reviewer's sandboxed paths create the user and launch with
   `grant: none`, hand it the scratch copy and drop the overlay's
   `.git/config` mask. `provision` and `codex_provision` are declared with a
   type and reach only the two provisioning steps. The tier-2 opt-in

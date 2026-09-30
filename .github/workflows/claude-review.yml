@@ -2011,22 +2011,16 @@ jobs:
           elif [ "${LAUNCHER_OUTCOME:-}" = "failure" ]; then
             err="preparing the reviewer's launch failed before it started — installing Claude Code at the version claude-code-action pins, the check that the agent user has no sudo, no Docker access and Yama ptrace_scope 1 or more, or a process still running as the agent user (see the job logs); no review ran. Re-trigger if it was the download, otherwise the runner image changed."
           fi
-          # The agent's own error text is free-form (and unbounded — it is
-          # the final message when is_error is set); cap it so the manifest's
-          # error.message stays well under the validator's 64 KiB limit.
-          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
-          if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
-            err="the review step failed before producing a result (see the job logs)."
-          fi
+          # The withheld shapes come before the agent's own error text: a
+          # review that was withheld (the reclaim failed, the re-plant check
+          # tripped, or its landing prep failed) reports only fixed text,
+          # never what the agent wrote (Claude Security 4773889).
           # A reclaim that did not succeed withholds the review (the landing
           # prep and the re-plant check are gated on it), so it needs its own
           # clause or the review would vanish silently. `!= success` so a
           # cancel mid-reclaim is named too.
           if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then
-            err="the reviewer finished but the workspace could not be reclaimed from it (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, an embedded git repository appeared in the tree, the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); the review was withheld."
-          fi
-          if [ -z "$err" ] && [ "${CLAUDEPOST_OUTCOME:-}" = "failure" ]; then
-            err="the reviewer finished but preparing its review files for landing failed — no review or verdict reached the PR (see the job logs)."
+            err="the reviewer finished but the workspace could not be reclaimed from it (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — a job PATH entry writable by or owned by the agent user (a directory added to the job PATH after the Create agent user step checked it, most likely by a runner-image change; the reclaim refuses it and does not repair it), processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, an embedded git repository appeared in the tree, the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); the review was withheld."
           fi
           cc=""
           [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
@@ -2042,6 +2036,16 @@ jobs:
             echo "::error::Project configuration reappeared in the untrusted checkout after the reviewer ran (see the job log); the review is withheld and the land job posts the note and fails the run."
             printf '⚠️ The review was withheld: after the reviewer ran, the untrusted checkout was not what the workflow left before the run — Claude Code project configuration (a `CLAUDE.md`, `AGENTS.md`, `.claude/` or `.mcp.json`) had appeared or changed, or other files had — although the sandbox makes that tree read-only to every command the reviewer runs. Something wrote where nothing should have been able to — the job log names the paths — and the reviewer may have been steered by it, so nothing it wrote was posted. Not transient: inspect the run and the PR before re-triggering.%s\n' "$cc" >"$ERROR_FILE"
             exit 0
+          fi
+          if [ -z "$err" ] && [ "${CLAUDEPOST_OUTCOME:-}" = "failure" ]; then
+            err="the reviewer finished but preparing its review files for landing failed — no review or verdict reached the PR (see the job logs)."
+          fi
+          # The agent's own error text is free-form (and unbounded — it is
+          # the final message when is_error is set); cap it so the manifest's
+          # error.message stays well under the validator's 64 KiB limit.
+          [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
+          if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
+            err="the review step failed before producing a result (see the job logs)."
           fi
           # The sandbox version check is a different shape of failure: the
           # review DID post; what is in doubt is whether the exclusion of the
@@ -2886,6 +2890,11 @@ jobs:
     needs: [gate, review, review-codex]
     if: always() && needs.gate.outputs.ok == 'true' && needs.review.result != 'cancelled' && needs.review-codex.result != 'cancelled'
     runs-on: ubuntu-latest
+    # Land runs take 10-50 s (56 land jobs across five caller repositories,
+    # 2026-09-30); the retries' backoff adds minutes at most. Well under
+    # the 6 h default, so a stuck post cannot hold the run (Claude
+    # Security 4773341).
+    timeout-minutes: 15
     permissions:
       contents: read
       # Reads only (issue #114): the `land` composite's PR head-ref /

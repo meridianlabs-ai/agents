@@ -37,6 +37,8 @@ are pushed by a separate job after its run ends.
 
 `skills/` holds the six shared skills. Both `.agents/skills` and `.claude/skills` link to it, so Codex and Claude Code discover the same files when working in this repo. Use `$skill-name` in Codex or `/skill-name` in Claude Code.
 
+The skills act with your `gh` login on text and branches outsiders control. [skills/THREAT_MODEL.md](skills/THREAT_MODEL.md) says what they trust and the rules they follow. `skills/lib/` holds the helpers the skills' scripts share; it is not a skill and needs no link. The scripts find it through their real path, so link whole skill directories as below rather than copying them.
+
 For use from other repos, link each desired skill into both user skill directories. For example, from this checkout:
 
 ```sh
@@ -138,6 +140,14 @@ Notes:
   account is retired separately. Commits do not appear mid-run;
   to iterate on CI failures use `@auto`, whose loop re-runs the agent on each
   red CI run.
+- The machine account posts a status comment when the run starts and
+  updates it when the run ends, with a link to the run and the outcome (the
+  PR, the pushed branch, no changes, or a failure).
+- The agent reads the issue or PR as it was when you triggered it: its
+  title, body and the comments and reviews posted before your request.
+  Anything written or edited after that is left out.
+- On a closed PR whose branch still exists, the agent continues that branch.
+  If the branch is gone, it answers with a comment and changes no code.
 - PR follow-ups first merge the base branch into the PR branch on the runner,
   and that merge lands with the run's push even if nothing else changes — so
   a behind branch may gain a merge commit from the machine account after any

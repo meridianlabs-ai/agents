@@ -17,9 +17,9 @@ description: >-
   #392, 2026-09-01) or silently degrades the prompt. The caller decides what
   an empty comments section means (the review-fix loop fails the round; the
   dev verb on a PR proceeds) and applies its own head cap and marker de-fang
-  over the finished prompt. Shared by claude.yml (dev verb on a PR) and
-  claude-auto-review.yml (review-fix rounds) so the two jq programs cannot
-  drift. Referenced fully-qualified
+  over the finished prompt. Shared by claude.yml (dev verb on a PR, through
+  dev-agent-context, which passes `trigger-time`) and claude-auto-review.yml
+  (review-fix rounds) so the two jq programs cannot drift. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/pr-feedback-context@main); NO post
   step (local composite actions with post steps break teardown on the fork).
 
@@ -41,6 +41,17 @@ inputs:
       Path to write the two sections to (overwritten). The caller cats it
       into its prompt scratch file; nothing else is written there.
     required: true
+  trigger-time:
+    description: >-
+      An ISO 8601 UTC time (`2026-09-30T10:00:00Z`, the form GitHub's API
+      uses): every top-level comment and review-thread comment created or
+      last edited at or after it is left out, and so is a thread left with
+      no comment. claude.yml's dev agent passes the time its trigger was
+      posted, so text written after a maintainer started the run cannot
+      change what the agent reads (design/untrusted-agent-job.md → Context
+      prompt). Empty (the default) filters nothing.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -51,6 +62,7 @@ runs:
         REPO: ${{ inputs.repo }}
         PR: ${{ inputs.pr }}
         OUT: ${{ inputs.out }}
+        TRIGGER_TIME: ${{ inputs.trigger-time }}
       run: |
         set -euo pipefail
         # Retry-then-fail on context fetches — never swallow (see the
@@ -72,6 +84,11 @@ runs:
           done
         }
         owner="${REPO%%/*}"; name="${REPO##*/}"
+        # A malformed time would compare wrongly against GitHub's; refuse it.
+        if [ -n "$TRIGGER_TIME" ] && ! [[ "$TRIGGER_TIME" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+          echo "::error::trigger-time '$TRIGGER_TIME' is not a UTC time of the form 2026-09-30T10:00:00Z" >&2
+          exit 1
+        fi
         {
           # --slurp is incompatible with gh's own --jq (gh rejects the
           # combination outright), so standalone jq over the fetched file.
@@ -83,12 +100,15 @@ runs:
           # are the BARE verdict line — under 200 chars once the HTML markers
           # are stripped — so a reviewer run that folds its summary into the
           # verdict comment against its prompt still has its review embedded
-          # rather than filtered out; and BARE triggers — the token followed
+          # rather than filtered out; the dev agent's status comment; and
+          # BARE triggers — the token followed
           # by nothing but whitespace or punctuation; a short human
           # instruction that opens with the token is an adjudication and
-          # stays), find the newest review round (Claude's comments carry the
-          # claude-review-comment marker, and so do codex's since 2026-09-30;
-          # older codex reviews carry the engine footer) and keep
+          # stays), find the newest review round (Claude's and codex's review
+          # comments carry the claude-review-comment marker, which land
+          # appends after its de-fang; codex reviews from before 2026-09-30
+          # carried an engine footer instead and anchor nothing now:
+          # decision: Ransom, 2026-09-30) and keep
           # it plus everything after it, plus the last 5 HUMAN comments
           # before it (an adjudication that preceded the review is context;
           # older review rounds are stale by construction — their findings
@@ -103,10 +123,10 @@ runs:
           # since the filter drops them). Anchors are taken from the machine
           # account's two logins only (i-am-marvin and its App login
           # meridian-marvin[bot], which land posts every review as): the
-          # Claude fix prompt forbids echoing either pattern and the codex
-          # landing de-fangs them, but a caller's human commenters are under
-          # no such rule, and one quoting the footer would otherwise demote
-          # the real review to pre-anchor. No other Bot anchors a round, not
+          # Claude fix prompt forbids echoing the marker and land de-fangs
+          # it, but a caller's human commenters are under no such rule, and
+          # one quoting the marker would otherwise demote the real review to
+          # pre-anchor. No other Bot anchors a round, not
           # claude[bot] either (design/untrusted-agent-job.md → Stop trusting
           # claude[bot]; before 2026-09-30 any Bot-type author did).
           # The post-anchor tail is bounded too — over 30 comments, keep the
@@ -116,17 +136,20 @@ runs:
           # (which keeps the START of the prompt, so the threads at the end
           # are what it trims first; the bounds here keep the cap a backstop,
           # not the working limit). No review found: last 8 substantive
-          # comments.
+          # comments. With a trigger time, comments created or edited at or
+          # after it are gone before any of this.
           echo "RECENT PR COMMENTS (newest last; the review feedback is here):"
           fetch "$RUNNER_TEMP/pr-feedback-comments.json" api "repos/$REPO/issues/$PR/comments" --paginate --slurp
-          jq -r '(add // []) | . as $raw
+          jq -r --arg tt "$TRIGGER_TIME" '(add // [])
+            | map(select($tt == "" or (.created_at < $tt and (.updated_at // .created_at) < $tt)))
+            | . as $raw
             | map(select(
-                (.body | test("<!-- (auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head:[^>]*|model-provenance) -->") | not)
+                (.body | test("<!-- (auto-review-rounds|auto-fix-attempts|auto-converged|auto-review-head:[^>]*|model-provenance|dev-agent-status) -->") | not)
                 and (((.body | test("<!-- claude-review-summary -->")) and ((.body | gsub("<!--[^>]*-->"; "") | length) <= 200)) | not)
                 and (.body | test("^\\s*@(review|auto|claude)\\b[\\s[:punct:]]*$") | not)
                 and (.body | test("^\\*\\*Claude finished") | not)))
             | . as $all
-            | ([ $all | to_entries[] | select((.value.user.login == "i-am-marvin" or .value.user.login == "meridian-marvin[bot]") and (.value.body | test("<!-- claude-review-comment -->|🤖 engine: codex"))) ]) as $marks
+            | ([ $all | to_entries[] | select((.value.user.login == "i-am-marvin" or .value.user.login == "meridian-marvin[bot]") and (.value.body | test("<!-- claude-review-comment -->"))) ]) as $marks
             | (if ($marks | length) == 0 then []
                else ([ $raw[] | select((.body | test("<!-- claude-review-summary -->")) and .created_at < $marks[-1].value.created_at) | .created_at ] | last // "") as $pv
                   | ($marks | map(select(.value.created_at > $pv)) | map(.key)) end) as $rk
@@ -147,12 +170,16 @@ runs:
           # threads, first 20 comments of each) are announced when hit — a
           # one-line note at the top of the section, one under the thread —
           # so a truncation is visible to the agent and in the log rather
-          # than silently absent.
+          # than silently absent. A trigger time drops the thread comments
+          # written or edited at or after it, and a thread with none left.
           echo "REVIEW THREADS (OPEN threads are this round's inline feedback; each comment oldest first):"
           fetch "$RUNNER_TEMP/pr-feedback-threads.json" api graphql \
             -F owner="$owner" -F name="$name" -F number="$PR" \
-            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){pageInfo{hasPreviousPage} nodes{id isResolved isOutdated path line originalLine comments(first:20){pageInfo{hasNextPage} nodes{author{login} createdAt body}}}}}}}'
-          jq -r '.data.repository.pullRequest.reviewThreads
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(last:100){pageInfo{hasPreviousPage} nodes{id isResolved isOutdated path line originalLine comments(first:20){pageInfo{hasNextPage} nodes{author{login} createdAt lastEditedAt updatedAt body}}}}}}}'
+          jq -r --arg tt "$TRIGGER_TIME" '.data.repository.pullRequest.reviewThreads
+            | .nodes |= (if $tt == "" then .
+                         else map(.comments.nodes |= map(select(.createdAt < $tt and (.lastEditedAt // .updatedAt // .createdAt) < $tt)))
+                              | map(select(.comments.nodes | length > 0)) end)
             | (if .pageInfo.hasPreviousPage then "(this PR has more than 100 review threads; only the newest 100 are shown — older threads may still be open)" else empty end),
               (.nodes
                 | map(select((.isResolved and .isOutdated) | not))

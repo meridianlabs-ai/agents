@@ -10,7 +10,8 @@ The inverse of /promote's entry point: an issue reported in
 The agents have no upstream write access and the workflows live on the fork
 (`meridianlabs-ai/inspect_ai`), so `@auto` needs a fork issue to anchor on.
 This skill creates that mirror. See design/atlas-tracking.md → "Imported
-upstream issues".
+upstream issues". The upstream text is untrusted; how the skill guards it
+is in [the skills' trust model](../THREAT_MODEL.md).
 
 ## Fast path
 
@@ -33,7 +34,8 @@ fork context they'd rebind to unrelated fork issues); adds it to Atlas with
 The copied title and snapshot are **de-fanged**: `@claude`, `@i-am-marvin`,
 `@auto` and `@review` become `` `claude` `` etc. and the loops' `<!-- … -->`
 markers are split, case-insensitively — the same rewrite the land composite
-applies to every body the machine account republishes. The fork issue is
+applies to every body the machine account republishes (the skills' shared
+copy is `skills/lib/outbound.py`). The fork issue is
 created under *your* login, and the fork's stubs fire on an opened issue
 whose body or title contains a phrase, with the gate authorizing the actor:
 without the rewrite, an outsider's `@auto <task>` in the upstream text would

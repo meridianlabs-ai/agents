@@ -14,8 +14,11 @@ The launcher (step 5) and the wrapper, → The agent namespace).
   file-path --mcp-config, a `plugin` argv and a second --settings refuse;
   --version and a call from outside the action step pass through; the env
   is the allow-list; the origin URL is reset and the snapshot retaken; and
-  the new-branch precondition (a branch the action's prepare checked out
-  must be absent on origin) in each case the design lists.
+  nothing is looked up on origin whatever branch is checked out (launch
+  step 6 is retired, design/untrusted-agent-job.md).
+- The composite's `context-dir` check, lifted: a plain runner-owned
+  directory under `$RUNNER_TEMP` that the agent user cannot write, and not
+  one the launch already binds.
 - agent_ns.py's pure parts: the handoff format, the bind plan per grant
   mode, the POSIX ACL encoding, the action-process check against a fake
   /proc, the run-file and handoff-file checks, exit codes.
@@ -129,7 +132,7 @@ def w(tmp_path):
     run = {
         "grant": "workspace", "cli": str(cli), "workspace": str(ws), "runner-temp": str(rt),
         "path": "/ws/.venv/bin:/opt/meridian-agent/claude/.local/bin:/usr/bin:/bin",
-        "runner-root": "/runner-root", "head": "refs/heads/main",
+        "runner-root": "/runner-root", "context-dir": "",
         "system-path": ":".join([str(stub), *sorted(tools), "/usr/bin", "/bin"]),
     }
     for k, v in run.items():
@@ -347,56 +350,71 @@ def test_an_unknown_grant_mode_refuses(w):
     assert r.returncode == 1 and "unknown grant mode" in r.stderr
 
 
-# --- the new-branch precondition --------------------------------------------------
+# --- no new-branch precondition ------------------------------------------------
+#
+# Launch step 6 is retired (design/untrusted-agent-job.md → What stays in the
+# untrusted job): every Claude job runs the action in agent mode with the job
+# token, so no post-CLI branch cleanup can push, and the wrapper looks
+# nothing up on origin whatever branch the workspace is on.
 
 
 def checkout(w, ref):
     git("checkout", "-q", "-b", ref, cwd=w["ws"])
 
 
-@pytest.mark.parametrize("case,recorded,new", [
-    ("issue run", "refs/heads/main", "claude/issue-12-20260924-1500"),
-    ("closed PR", "refs/heads/feature", "claude/pr-7-20260924-1500"),
-    ("merged PR", "refs/heads/feature", "claude/pr-8-20260924-1500"),
-    ("PR closed between the gate and the prepare", "refs/heads/feature", "claude/pr-9-20260924-1500"),
-])
-@pytest.mark.parametrize("rc,ok", [(2, True), (0, False), (128, False)])
-def test_a_branch_the_prepare_created_must_be_absent_on_origin(w, case, recorded, new, rc, ok):
-    (w["opt"] / "run" / "head").write_text(recorded + "\n")
-    checkout(w, new)
-    r = launch(w, *BASE, LS_REMOTE_RC=str(rc))
+@pytest.mark.parametrize("new", ["claude/issue-12-40", "feature", None])
+def test_the_launch_looks_nothing_up_on_origin(w, new):
+    if new:
+        checkout(w, new)
+    else:
+        git("checkout", "-q", "--detach", cwd=w["ws"])
+    r = launch(w, *BASE, GH_TOKEN=JOB, GITHUB_TOKEN=JOB, LS_REMOTE_RC="0")
+    assert r.returncode == 0, r.stderr
     log = stub_log(w)
-    assert f"ls-remote refs/heads/{new} token={JOB} count=2" in log, (case, log)
-    assert (r.returncode == 0) is ok, (case, r.stderr)
-    assert ("agent-ns-launch" in log) is ok
-    if rc == 0:
-        assert "already exists on origin" in r.stderr
-    if rc == 128:
-        assert "exit 128" in r.stderr
+    assert "ls-remote" not in log and "agent-ns-launch" in log
+    assert not (w["opt"] / "run" / "head").exists()
 
 
-def test_the_fixed_clock_fallback_collision_refuses(w):
-    # setupBranch's fallback name equals its first name within one minute,
-    # and both exist on origin: the lookup finds the ref, the launch refuses.
-    checkout(w, "claude/issue-12-20260924-1500")
-    r = launch(w, *BASE, LS_REMOTE_RC="0")
-    assert r.returncode == 1 and "already exists on origin" in r.stderr
+# --- the context directory ---------------------------------------------------------
 
 
-def test_an_open_pr_follow_up_and_a_detached_review_do_no_lookup(w):
-    assert launch(w, *BASE, LS_REMOTE_RC="0").returncode == 0
-    sha = git("rev-parse", "HEAD", cwd=w["ws"]).stdout.strip()
-    git("checkout", "-q", "--detach", cwd=w["ws"])
-    (w["opt"] / "run" / "head").write_text(f"detached:{sha}\n")
-    assert launch(w, *BASE, LS_REMOTE_RC="0").returncode == 0
-    assert "ls-remote" not in stub_log(w)
+def context_check(tmp_path, context_dir, *, owner_ok=True, writable=False):
+    """The composite's context-dir validation, lifted and run with `sudo`,
+    `stat` and `id` stubbed: the owner test compares `stat -c %u` with `id -u`,
+    and `sudo -n -u claude-agent test -w` answers WRITABLE."""
+    body = composite_runs(ACTION)[0]
+    start = body.index('if [ -n "$CONTEXT_DIR" ]; then')
+    end = body.index("\nfi\n", start) + len("\nfi\n")
+    stub = f"""
+user=claude-agent
+err() {{ echo "ERR: $*"; exit 1; }}
+one_line() {{ case "$2" in *$'\\n'*) err "$1 holds a line break" ;; esac; }}
+id() {{ echo 1001; }}
+stat() {{ echo {1001 if owner_ok else 0}; }}
+sudo() {{ {'return 0' if writable else 'return 1'}; }}
+"""
+    rt = tmp_path / "temp"
+    return subprocess.run(["bash", "-c", stub + body[start:end] + 'echo OK\n'], capture_output=True, text=True,
+                          check=False, env={"PATH": os.environ["PATH"], "RUNNER_TEMP": str(rt), "CONTEXT_DIR": context_dir})
 
 
-def test_a_moved_detached_head_refuses(w):
-    (w["opt"] / "run" / "head").write_text("detached:" + "0" * 40 + "\n")
-    git("checkout", "-q", "--detach", cwd=w["ws"])
-    r = launch(w, *BASE)
-    assert r.returncode == 1 and "neither the checkout the launcher recorded" in r.stderr
+def test_the_context_dir_is_recorded_and_checked(tmp_path):
+    rt = tmp_path / "temp"
+    (rt / "agent-context").mkdir(parents=True)
+    assert context_check(tmp_path, str(rt / "agent-context")).stdout.strip() == "OK"
+    assert context_check(tmp_path, "").stdout.strip() == "OK"
+    (rt / "link").symlink_to(rt / "agent-context")
+    for bad, why in ((str(tmp_path / "elsewhere"), "not a directory under"),
+                     (str(rt / "agent-context" / ".." / "agent-context"), "not a normalised path"),
+                     (str(rt / "claude-agent"), "already binds"),
+                     (str(rt / "claude-workload-identity"), "already binds"),
+                     (str(rt / "missing"), "not a plain directory"),
+                     (str(rt / "link"), "not a plain directory")):
+        r = context_check(tmp_path, bad)
+        assert "ERR:" in r.stdout and why in r.stdout, (bad, r.stdout, r.stderr)
+    assert "not owned by the runner" in context_check(tmp_path, str(rt / "agent-context"), owner_ok=False).stdout
+    assert "writable by claude-agent" in context_check(tmp_path, str(rt / "agent-context"), writable=True).stdout
+    assert "\nrecord context-dir \"$CONTEXT_DIR\"\n" in composite_runs(ACTION)[0]
 
 
 # --- agent_ns.py ----------------------------------------------------------------
@@ -443,6 +461,9 @@ def test_bind_plan_per_grant_mode():
     assert agent_ns.bind_plan("none", "/h/r/work/a/a", "/h/r/work/_temp") == [
         ("/h/r/work/a/a", False), ("/h/r/work/_temp/claude-agent", True), ("/h/r/work/_temp/scratch", True),
         ("/h/r/work/_temp/claude-workload-identity", False)]
+    # The caller's context directory, read-only, last.
+    assert agent_ns.bind_plan("workspace", "/h/r/w", "/h/r/t", "/h/r/t/agent-context")[-1] == ("/h/r/t/agent-context", False)
+    assert agent_ns.bind_plan("workspace", "/h/r/w", "/h/r/t", "") == agent_ns.bind_plan("workspace", "/h/r/w", "/h/r/t")
     agent_ns.check_plan(agent_ns.bind_plan("none", "/h/r/w", "/h/r/t"), "/h/r")
     for bad in ("/elsewhere/w", "/h/r/../x", "/h/r"):
         with pytest.raises(agent_ns.Refused):
@@ -628,6 +649,15 @@ def test_the_isolation_check_refuses_bad_arguments(args, why):
     assert r.returncode == 2 and why in r.stdout
 
 
+def test_the_isolation_check_takes_a_context_dir_and_requires_it_read_only():
+    r = subprocess.run(["bash", str(CHECK), "--phase", "pre", "--context", "/x"], capture_output=True, text=True, check=False)
+    assert "unknown argument" not in r.stdout
+    text = CHECK.read_text()
+    assert 'fail "the context dir $context is writable by the agent"' in text
+    ns = AGENT_NS.read_text()
+    assert 'check += ["--context", context_dir]' in ns and 'context_dir = read_run(root, "context-dir")' in ns
+
+
 def test_the_isolation_check_fails_as_anyone_but_the_agent_user():
     r = subprocess.run(["bash", str(CHECK), "--phase", "pre"], capture_output=True, text=True, check=False)
     assert r.returncode == 1 and "not claude-agent" in r.stdout
@@ -679,8 +709,12 @@ def test_the_canary_runs_the_launcher_per_grant_mode_without_the_action():
     assert "grant: [workspace, none]" in job
     # claude-code-action is named (so the runner downloads it) and never run.
     assert "        if: false\n        uses: anthropics/claude-code-action@v1\n" in job
+    # The launcher checks a real context directory there.
+    assert "          context-dir: ${{ runner.temp }}/agent-context\n" in job
+    assert '"context-dir=$RUNNER_TEMP/agent-context"' in job and "run/head" in job
     order = ["uses: ./.github/actions/create-codex-user", "uses: ./.github/actions/reclaim-codex-workspace",
-             "uses: ./.github/actions/claude-agent-launcher", "uses: ./.github/actions/assert-runner-only-path",
+             "name: Context directory", "uses: ./.github/actions/claude-agent-launcher",
+             "uses: ./.github/actions/assert-runner-only-path",
              "A launch from outside the action is refused", "Post-agent reclaim"]
     assert [job.index(o) for o in order] == sorted(job.index(o) for o in order)
     assert '      - ".github/actions/claude-agent-launcher/**"\n' in text

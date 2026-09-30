@@ -445,13 +445,17 @@ strict value. The defaults flip once the direct callers are checked, as
      (land/action.yml:1020), exactly as for a Claude review.
    - pr-feedback-context keeps accepting the footer as an anchor. After
      this step no new machine-account comment can carry it, so it matches
-     only codex reviews posted before the change. Its anchor authors
+     only codex reviews posted before the change. (Dropped after step 3
+     merged: the marker alone anchors, and those older codex reviews are
+     not supported. Decision: Ransom, 2026-09-30.) Its anchor authors
      narrow from "any Bot type or `i-am-marvin`" to the machine account's
      two logins. The Bot clause only ever meant `claude[bot]` and the
      machine App, and `claude[bot]` stops being trusted in step 1.
    - This fixes the root of 4773878, its is_error siblings (4773339,
      4773881, 4773886, 4773889) and 4773875 on the trusted side. The
-     composers' own footer seds stay as harmless duplicates.
+     composers' own footer seds stay as harmless duplicates. (Removed with
+     the legacy anchor: `land` is the one place that splits the footer.
+     Decision: Ransom, 2026-09-30.)
    - A test pins the class. Every string a consumer keys on in a
      machine-account comment must be in defang's list or appended by land
      after it. The consumers are pr-feedback-context's anchors,
@@ -595,10 +599,11 @@ itself**, which is what its codex job already does.
 
     The launcher gains an optional `context-dir` input, which it binds
     read-only into the agent's namespace. The context names each file
-    beside the link it replaced. Whether the job token resolves a
-    *private* repository's attachments is checked on a private test
-    repository in step 4. If it cannot, the fallback is links only, which
-    goes to Ransom as a regression before step 4 merges.
+    beside the link it replaced. The image path is verified on public
+    repositories only: Meridian has no private caller repositories, so
+    private repositories are out of scope and no private-repository check
+    is run (decision: Ransom, 2026-09-30). If the job token cannot read a
+    private attachment, its link stays in the context.
   - **Fetch failures.** Every fetch is retried three times, then fails the
     step, as the codex prompt's fetches do (claude.yml:2646-2656): the
     agent is skipped, and the Surface step names the failed fetch. A
@@ -1137,7 +1142,7 @@ text is updated to name the job-level premise.
   - The defang additions apply to their bodies too: the codex footer and
     the reopen prefix now read as `engine  codex` and a broken prefix.
     None of them relies on the footer, since only the codex reviewer
-    writes it.
+    wrote it, and nothing anchors on it now.
   - Flipping the `comment-numbers` and cap defaults later is a separate,
     announced change.
 - **Loop behaviour.** Removing the refunds means an infra failure before
@@ -1159,9 +1164,9 @@ text is updated to name the job-level premise.
   - The status comment is posted by the machine account, not
     `claude[bot]`, and is top-level on review-comment triggers.
   - The context now follows tag mode's (the trigger-time snapshot, the
-    issue history, the images), so what the agent sees is unchanged,
-    unless step 4's private-repository check shows that the job token
-    cannot fetch attachments (Design → Context prompt).
+    issue history, the images), so what the agent sees is unchanged. On
+    a private repository, which no Meridian caller is, an image the job
+    token cannot read stays a link (Design → Context prompt).
   - A closed PR with a live head branch is continued on that branch,
     where tag mode cut a new branch that could not land. One with a
     deleted branch gets a comment-only run.
@@ -1182,8 +1187,9 @@ text is updated to name the job-level premise.
   comments stay but are no longer trusted.
 - **Stored formats.** None. The manifest schema gains no field.
   `comments[].review` on the codex review uses an existing field.
-  Existing codex reviews keep their footer, and pr-feedback-context keeps
-  anchoring on it.
+  Existing codex reviews keep their footer, but pr-feedback-context no
+  longer anchors on it (decision: Ransom, 2026-09-30): a fix round on a PR
+  whose newest review predates step 3 sees the last 8 comments instead.
 
 ## Security
 
@@ -1417,9 +1423,9 @@ model or a real secret):
     - a job on an event outside the list.
   - Usage from the canary appears on the CI project's usage page, under
     its spend limit. That is the spend-limit verification.
-- **A private test repository** (step 4). A `@claude` run on an issue
-  with an uploaded image checks that the job token resolves the
-  attachment and that the agent sees the file.
+- **Images** (step 4). Verified on public repositories only; no
+  private-repository check (decision: Ransom, 2026-09-30, Design →
+  Context prompt).
 - **Live runs** on the inspect_ai fork and this repository after steps 1
   and 4: a `@claude` issue run and a PR follow-up (the status comment,
   branch and PR), a `@review` on each engine, and a loop round of each
@@ -1607,6 +1613,16 @@ THREAT_MODEL.md text that its change makes true.
        pass the validator with `--comment-numbers event`. actions' triage
        carries no `comments[]` and keeps `*`. ts-mono had no continuation
        run in the window, so its comment path was checked from its source.
+     - The legacy anchor was removed after merge (decision: Ransom,
+       2026-09-30): pr-feedback-context no longer takes the codex
+       reviewer's old `engine: codex` footer as a review anchor, only
+       `<!-- claude-review-comment -->` from the machine account, which
+       land appends after the de-fang under `allow-review`. That completes
+       4773878's second criterion. Codex reviews posted before 2026-09-30
+       are not supported: a fix round whose newest review is one of them
+       falls back to the last 8 comments. The composers' footer seds went
+       with it; `land`'s `defang` is the one place that still splits the
+       footer, for bodies quoting an older codex review.
 4. **claude.yml to agent mode.**
    - The `dev-agent-context` composite, used by both jobs, with the gate's
      `trigger_time` output.
@@ -1614,8 +1630,8 @@ THREAT_MODEL.md text that its change makes true.
    - The launcher's read-only `context-dir` bind.
    - The `Prepare branch` step, `base_branch` from the PR's base, the
      prompt input and `github_token`.
-   - The private-repository image check. If the job token cannot fetch
-     attachments there, stop and ask Ransom before merging.
+   - Images verified on public repositories only; private repositories
+     are out of scope (decision: Ransom, 2026-09-30).
    - The gate's status comment and land's finishing step.
    - pr-feedback-context's `dev-agent-status` filter.
    - Launch step 6 and the post-agent `reset-origin-url` retired, in all
@@ -1624,6 +1640,44 @@ THREAT_MODEL.md text that its change makes true.
      for a caller that still passes no `github_token`.
    - After this step, check that no `claude[bot]` post appears on any
      Meridian repository for a week of normal use.
+   - As built (2026-09-30):
+     - The context file is capped at 100,000 bytes, which keeps the
+       Claude prompt under the 128 KiB limit on one environment value (the
+       action passes `prompt` as one). PR runs carry the newest 10 review
+       summaries submitted before the trigger (at most 20,000 characters)
+       ahead of pr-feedback-context's sections. With `trigger-time`,
+       pr-feedback-context also drops a review thread left with no
+       comment.
+     - The land composite gained a `pushed_branch` output for the status
+       comment. `dev-agent-status` joined `defang`'s list, since
+       pr-feedback-context now keys on it (the registry test).
+     - `Prepare branch` refuses an open PR whose HEAD is not on the head
+       branch sync-branch checked out. For a closed PR it goes by the
+       gate's pin and asks origin (`git ls-remote --exit-code`) whether the
+       branch is still there: only "no such ref" makes the run
+       comment-only, and a failed lookup fails the step. sync-branch now
+       emits the PR's `base` before its closed-PR exit, so a closed PR's
+       issue-comment run restores `.claude/` and `.mcp.json` from the PR's
+       own base. The launcher no longer records HEAD: only launch step 6
+       read it.
+     - The image path is verified on public repositories only: the code
+       was run against a real public attachment (meridianlabs-ai/ts-mono#270,
+       two PNGs). No private-repository check is run, before or after
+       merge: Meridian has no private caller repositories, so they are out
+       of scope (decision: Ransom, 2026-09-30). If the job token cannot
+       read a private attachment, the link stays in the context.
+     - Folded in (decision: Ransom, 2026-09-30): the four land jobs have
+       `timeout-minutes: 15` (56 land runs across five repositories took
+       10-49 s), and the land composite stops posting inline review
+       comments after a 403 or 429, or after three failures in a row, and
+       folds the rest into the follow-up comment (4773341, criterion 2).
+       The Claude jobs' Surface steps decide a withheld run (the reclaim,
+       and in the reviewer the re-plant check and the landing prep) before
+       they read the agent's `is_error` text, so a withheld run reports
+       fixed text only (4773889, criterion 2), and their reclaim message
+       names the PATH check.
+     - After it merges: a week of normal use with no `claude[bot]` post on
+       any Meridian repository (step 5's search).
 5. **Check nothing else relies on the App.** A checklist in the step-6
    PR, each item with its evidence:
    - Claude Code on the web: who uses browser-onboarded sessions on

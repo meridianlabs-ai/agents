@@ -9,26 +9,16 @@
 # issue (closed, a PR, or missing).
 set -euo pipefail
 
-# defang — stdin to stdout with the agents' trigger phrases backticked
-# (`@auto` -> `` `auto` ``) and the loops' `<!-- … -->` markers split,
-# case-insensitively: the rewrite land/lib.sh defang() applies to every body
-# the machine account republishes, plus `@i-am-marvin`, the dev stub's other
-# phrase. The fork issue is created under the IMPORTING maintainer's login,
-# and the fork's stubs fire on an opened issue whose body or title contains a
-# phrase (GitHub's contains() ignores case) with the gate authorizing
-# github.actor — so a bare `@claude <task>` an outsider wrote upstream would
-# run as the maintainer's directive the moment they imported it (Claude
-# Security 4629154). Python, not GNU sed's `I` flag: this runs on a
-# maintainer's Mac. The list is the land composite's; keep them in step.
-defang() {
-  python3 -c '
-import re, sys
-s = sys.stdin.read()
-s = re.sub(r"@(review|claude|auto|i-am-marvin)", r"`\1`", s, flags=re.I)
-s = re.sub(r"claude-review-(summary|verdict|comment|nudge)", r"claude-review \1", s, flags=re.I)
-s = re.sub(r"auto-(handoff|converged|review-rounds|review-head|fix-attempts)", r"auto \1", s, flags=re.I)
-sys.stdout.write(s)'
-}
+# defang (the skills' shared copy, skills/lib/outbound.py; see
+# skills/THREAT_MODEL.md rule (d)): stdin to stdout with the agents' trigger
+# phrases backticked (`@auto` -> `` `auto` ``) and the loops' `<!-- … -->`
+# markers split, case-insensitively. The fork issue is created under the
+# IMPORTING maintainer's login, and the fork's stubs fire on an opened issue
+# whose body or title contains a phrase (GitHub's contains() ignores case)
+# with the gate authorizing github.actor — so a bare `@claude <task>` an
+# outsider wrote upstream would run as the maintainer's directive the moment
+# they imported it (Claude Security 4629154).
+. "$(dirname "$(realpath "$0")")/../lib/common.sh"
 
 FORK=meridianlabs-ai/inspect_ai
 UPSTREAM=UKGovernmentBEIS/inspect_ai
