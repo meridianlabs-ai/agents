@@ -13,11 +13,14 @@ diffing:
 `<result>` is `--cached` (the index) or a commit. For every path whose
 content in the result differs from either parent, it counts the marker
 lines in the result — `<`, `=`, `>` and `|` runs of the path's
-conflict-marker-size (its attribute, and git's default of 7 as well),
-alone or followed by a space and a label — and reports the path when some
+conflict-marker-size, alone or followed by a space and a label — and
+reports the path when some
 marker line occurs more often than in either parent's version. A marker
 line a parent already carries (a test fixture, a doc about conflicts) is
-not residue. Exit 0 and no output when there is none; exit 1 with one
+not residue. The sizes are every one git may have used: the path's
+attribute in the result and in each parent (a resolution can change
+`.gitattributes` after git wrote the markers), read as git reads it, and
+the default of 7. Exit 0 and no output when there is none; exit 1 with one
 `<path>:<line>` per residue line (the first extra occurrence of each);
 exit 2 when git fails. Runs git with whatever pins the caller exported.
 """
@@ -85,33 +88,51 @@ def contents(shas: set[bytes]) -> dict[bytes, bytes]:
     return out
 
 
-def marker_sizes(paths: list[bytes], cached: bool) -> dict[bytes, set[int]]:
-    """path -> the marker sizes to look for: its conflict-marker-size attribute, and 7."""
+SIZE_RE = re.compile(rb"^[+-]?[0-9]+$")
+INT_MAX = 2**31 - 1
+
+
+def parse_size(value: bytes) -> int:
+    """A conflict-marker-size attribute value as git reads it: the whole
+    value a (signed) decimal int, else, or when not positive, the default."""
+    if SIZE_RE.match(value):
+        n = int(value)
+        if 0 < n <= INT_MAX:
+            return n
+    return DEFAULT_SIZE
+
+
+def marker_sizes(paths: list[bytes], sources: list[list[str]]) -> dict[bytes, set[int]]:
+    """path -> every marker size git may have used for it: its
+    conflict-marker-size attribute in each source (the result, and each
+    parent — the merge read the attributes in force then, which the
+    resolution may have changed), and git's default of 7."""
     sizes = {p: {DEFAULT_SIZE} for p in paths}
     if not paths:
         return sizes
-    args = ["check-attr", "-z", "--stdin"] + (["--cached"] if cached else []) + ["conflict-marker-size"]
-    fields = git(*args, stdin=b"".join(p + b"\0" for p in paths)).split(b"\0")
-    for i in range(0, len(fields) - 2, 3):
-        path, _, value = fields[i : i + 3]
-        if value.isdigit() and 0 < int(value) <= 1000:
-            sizes.setdefault(path, {DEFAULT_SIZE}).add(int(value))
+    for source in sources:
+        fields = git("check-attr", "-z", "--stdin", *source, "conflict-marker-size",
+                     stdin=b"".join(p + b"\0" for p in paths)).split(b"\0")
+        for i in range(0, len(fields) - 2, 3):
+            path, _, value = fields[i : i + 3]
+            if value not in (b"unspecified", b"set", b"unset"):
+                sizes.setdefault(path, {DEFAULT_SIZE}).add(parse_size(value))
     return sizes
 
 
 def marker_lines(data: bytes, sizes: set[int]) -> list[tuple[int, bytes]]:
-    """(line number, line) for each conflict-marker line of `data`."""
-    alts = []
-    for n in sorted(sizes):
-        for char in (b"<", b">", b"|"):
-            c = re.escape(char)
-            alts.append(rb"%s{%d}(?!%s)(?: .*)?" % (c, n, c))
-        alts.append(rb"={%d}(?!=)" % n)
-    pattern = re.compile(rb"^(?:" + rb"|".join(alts) + rb")$")
+    """(line number, line) for each conflict-marker line of `data`: a run of
+    one of `<`, `>`, `|` (alone, or followed by a space and a label) or `=`
+    (alone) whose length is one of `sizes`."""
     found = []
     for number, line in enumerate(data.split(b"\n"), 1):
         line = line.rstrip(b"\r")
-        if pattern.match(line):
+        char = line[:1]
+        if char not in (b"<", b">", b"|", b"="):
+            continue
+        run = len(line) - len(line.lstrip(char))
+        rest = line[run:]
+        if run in sizes and (rest == b"" or (char != b"=" and rest.startswith(b" "))):
             found.append((number, line))
     return found
 
@@ -120,7 +141,9 @@ def residue(parent1: str, parent2: str, result: str) -> list[str]:
     trees = [blobs(parent1), blobs(parent2)]
     final = blobs(result)
     changed = sorted(p for p, sha in final.items() if any(t.get(p) != sha for t in trees))
-    sizes = marker_sizes(changed, result == "--cached")
+    sources = [["--cached"] if result == "--cached" else [f"--source={result}"],
+               [f"--source={parent1}"], [f"--source={parent2}"]]
+    sizes = marker_sizes(changed, sources)
     wanted = {final[p] for p in changed} | {t[p] for p in changed for t in trees if p in t}
     data = contents(wanted)
     report: list[str] = []

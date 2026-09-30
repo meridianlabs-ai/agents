@@ -495,3 +495,51 @@ def load_residue():
 ])
 def test_marker_lines_matches_git_markers_of_the_given_sizes(text, sizes, lines):
     assert [n for n, _ in load_residue().marker_lines(text, sizes)] == lines
+
+
+# --- review round 3, B1: every marker size git may have used ---
+
+
+def refused_at_commit_and_push(q, stage):
+    """Unresolved content is refused at `commit`, and at `push` after a commit made around the script."""
+    r = q.run("commit")
+    assert r.returncode == 3 and "conflict.py:" in r.stderr, r.stderr + r.stdout
+    assert git("rev-parse", "HEAD", cwd=q.queue).stdout.strip() == q.approved
+    for path in stage:
+        assert q.run("git", "add", path).returncode == 0
+    assert q.run("git", "commit", "-q", "--no-edit").returncode == 0
+    before = q.fork_tip()
+    r = q.run("push", "42", q.approved)
+    assert r.returncode == 3 and "conflict.py:" in r.stderr, r.stderr + r.stdout
+    assert q.fork_tip() == before
+    assert q.ran() == ""
+
+
+@pytest.mark.parametrize("size,width", [("1001", 1001), ("+12", 12), ("0012", 12)])
+def test_markers_of_any_size_git_accepts_are_refused(one_queue, size, width):
+    q = one_queue
+    make_conflict(q, "conflict.py", attrs=f"conflict.py conflict-marker-size={size}\n")
+    assert q.run("start", "42", q.approved).returncode == 3
+    assert ("<" * width + " HEAD") in (q.queue / "conflict.py").read_text()
+    refused_at_commit_and_push(q, ["conflict.py"])
+
+
+def test_markers_written_at_a_size_the_resolution_then_changed_are_refused(one_queue):
+    # Main sets 18, the contributor 12; git wrote conflict.py's markers at 12,
+    # and resolving only .gitattributes to main's version leaves 18 in force.
+    q = one_queue
+    main_attrs = "conflict.py conflict-marker-size=18\n"
+    make_conflict(q, "conflict.py", attrs="conflict.py conflict-marker-size=12\n",
+                  main_extra={".gitattributes": main_attrs})
+    assert q.run("start", "42", q.approved).returncode == 3
+    assert ("<" * 12 + " HEAD") in (q.queue / "conflict.py").read_text()
+    (q.queue / ".gitattributes").write_text(main_attrs)
+    refused_at_commit_and_push(q, ["conflict.py", ".gitattributes"])
+
+
+@pytest.mark.parametrize("value,size", [
+    (b"12", 12), (b"+12", 12), (b"0012", 12), (b"1001", 1001), (b"2147483647", 2147483647),
+    (b"0", 7), (b"-12", 7), (b"12suffix", 7), (b"1_2", 7), (b"0x10", 7), (b"nonsense", 7), (b"2147483648", 7),
+])
+def test_parse_size_reads_the_attribute_as_git_does(value, size):
+    assert load_residue().parse_size(value) == size

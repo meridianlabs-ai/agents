@@ -296,8 +296,9 @@ Testing a change).
   after an existing local branch, the clone's branches, HEAD and
   `.git/config` are unchanged and the merge lands on their fork through
   `HEAD:refs/heads/<branch>`; conflicts (a hostile file name among them)
-  are listed and the commit waits for their markers to go — of any
-  configured size, staged first, committed around the script, or in a path
+  are listed and the commit waits for their markers to go — of any size
+  git accepts (`1001`, `+12`, `0012`; the attribute parsed as git parses
+  it) or a size the resolution then changed in `.gitattributes`, staged first, committed around the script, or in a path
   whose attributes (`-diff`, a `binary` diff driver) make `git diff
   --check` skip it (`conflict_residue.py` reads the blobs), while a marker
   line main already carries passes; file names with pathspec magic are
