@@ -22,7 +22,7 @@ until a human approves) is PR #149. #149 refuses bundles that change the
 dependency configuration at any depth, plus symlink targets and `@path`
 imports reached from them.
 
-The residual, which #149 accepts and documents in SECURITY.md → Guarantees
+The residual, which #149 accepts and documents in THREAT_MODEL.md → Guarantees
 (decision: Ransom, 2026-09-23): the list names entry points, not the code
 they run. An agent's edit to an ordinary file that UNCHANGED configuration
 executes still lands. Examples are a script a `claude-setup` step runs, a
@@ -33,7 +33,7 @@ hand-back starts, a loop round, or a `@claude` follow-up. On codex jobs it
 runs as the `codex` user. On Claude jobs it runs as `runner`, which has
 passwordless sudo, the OIDC request token and, during the action step, the
 Claude App's installation token. The Claude agent in those jobs also runs
-the tree's own code (tests, `conftest.py`) as `runner`, which SECURITY.md
+the tree's own code (tests, `conftest.py`) as `runner`, which THREAT_MODEL.md
 concedes for same-repo heads. After #149 that concession now covers heads
 the pipeline wrote itself from an outsider's issue text.
 
@@ -65,7 +65,7 @@ Non-goals:
 - Keeping the model credential from the agent. The Claude CLI performs the
   Workload Identity exchange itself, so the agent user can read the
   audience-bound OIDC JWT and the Anthropic access token it yields. That is
-  the declared exception (SECURITY.md → Adding or changing a workflow) and
+  the declared exception (AGENTS.md → Adding or changing a workflow) and
   what the agent holds today. Accepted as such for now (decision: Ransom,
   2026-09-23). A broker is a separate change (Not this design).
 - Callers' own CI on agent PRs. A same-repo PR's CI runs the branch's code
@@ -965,7 +965,7 @@ opt-in, such files land. Every automated job that executes them does so
 only as an unprivileged user holding nothing but the read-only job token.
 That is criterion 1's remedy, and it is accepted as meeting criterion 2
 for tier 2. Tier 1 still meets criterion 2 literally, by refusal. The
-implementation PR (plan step 6) records this in SECURITY.md → Guarantees
+implementation PR (plan step 6) records this in THREAT_MODEL.md → Guarantees
 with the finding number, and on the finding's Security board item.
 
 A land job may pass the opt-in only when **every automated consumer of the
@@ -1135,7 +1135,7 @@ but its tools are missing, as on codex today.
   the App token. The same goes for every other channel to a `claude[bot]`
   write that the agent can drive: MCP servers dropped, buffered inline
   comments disabled, the URL reset, and the branch cleanup's git gated on
-  a branch the agent cannot create. So the `claude[bot]` write channel SECURITY.md → By design
+  a branch the agent cannot create. So the `claude[bot]` write channel THREAT_MODEL.md → By design
   describes ends, and that entry shrinks to "the action's token, used by
   the action's own runner-side code only".
 - In `claude.yml` the tracking comment is not updated mid-run, and thread
@@ -1179,9 +1179,9 @@ No viewer types or eval logs are involved.
 
 **Docs.** The implementer updates:
 
-- SECURITY.md → Guarantees: the codex-job bullet becomes both engines;
+- THREAT_MODEL.md → Guarantees: the codex-job bullet becomes both engines;
   the #149 residual note is closed; the opt-in is described.
-- SECURITY.md → By design (the App token).
+- THREAT_MODEL.md → By design (the App token).
 - design/credential-separation.md (I4, 3.5, 7).
 - design/codex-engine.md (the boundary is now shared).
 - design/architecture.md (the provisioning convention).
@@ -1554,7 +1554,7 @@ Untrusted input reaching the new code, and how each is handled:
    the landing import, the gating and env pins,
    `classify_inline_comments: "false"`, the reviewer's fork and external
    setup order (`grant: "none"`, the scratch chown, the overlay without the
-   mask), and `claude.yml`'s `resolve_threads` and prompt sentence. The same PR updates SECURITY.md,
+   mask), and `claude.yml`'s `resolve_threads` and prompt sentence. The same PR updates THREAT_MODEL.md,
    credential-separation.md, codex-engine.md, architecture.md, README.md
    and AGENTS.md, and extends `test_engine_job_isolation.py`. Then do the
    real-model runs.
@@ -1581,7 +1581,7 @@ Untrusted input reaching the new code, and how each is handled:
 6. **Tier-2 opt-in** (after #149 and step 5 have merged). Add `land`'s
    `allow-build-config` and the `lib.sh` split, and the reusable workflows'
    `allow_build_config` input (default `false`) that their land jobs pass
-   through. Update tests and examples/. Update SECURITY.md, recording
+   through. Update tests and examples/. Update THREAT_MODEL.md, recording
    there, and on the finding's Security board item, that criterion 2 is met
    for tier 2 by the opt-in (decision: Ransom, 2026-09-23). Then open the companion
    PRs that opt in: inspect_flow (its stubs and its two direct workflows),

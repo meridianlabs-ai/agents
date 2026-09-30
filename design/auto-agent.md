@@ -412,7 +412,7 @@ scope stop).**
    `claude[bot]` is not added to the run-actor trusted logins. A push the
    Claude App made itself therefore ends the automatic continuation for
    that branch until the machine account or a write-access human pushes;
-   SECURITY.md and credential-separation.md disclose it. This is stricter
+   THREAT_MODEL.md and credential-separation.md disclose it. This is stricter
    than either engine's own actor check — the Claude action's checker
    admits any `[bot]` actor and the Codex step's allow-list named `claude`
    — so it is Ransom's chosen restriction, not the engines' rule moved
