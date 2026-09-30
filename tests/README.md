@@ -417,8 +417,10 @@ Testing a change).
   checked, then granted, and `create-codex-user`'s `reset-home` mode
   re-checks and pins PATH (and is codex-only); each codex job runs
   codex-action's own setup-node (same pin, node-version "24") before
-  `Create codex user`, the codex reclaim's Surface message names the PATH
-  check, and the canary's `codex-action-path` job runs the real
+  `Create codex user`, whose first step strips ACLs from and makes
+  runner-only each toolcache tree on the job PATH (once per tree, nothing
+  outside the toolcache), the codex reclaim's Surface message names the
+  PATH check, and the canary's `codex-action-path` job runs the real
   codex-action, with no key or prompt, between the user and the reclaim. `create-codex-user`'s create
   steps run against a logging `sudo` for its `user` and `grant` inputs: the
   codex sequence unchanged by default, `claude-agent` with its landing dir,

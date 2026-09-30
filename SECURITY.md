@@ -202,9 +202,11 @@ text are checked by the tests under `tests/`.
   does add one: its Node setup puts the toolcache's Node bin on the job
   PATH, and the image ships that directory writable by the codex user. So
   the codex jobs run the same Node setup, same pin and version, before
-  the codex user exists, and the check makes that directory runner-only
-  before codex-action installs the CLI into it. A hosted canary runs the
-  real codex-action, with no key or prompt, between the two checks. A hosted smoke workflow
+  the codex user exists, and the whole toolcache tree of that Node (which
+  the image ships codex-writable, with default ACLs) is made runner-only,
+  ACLs removed, before codex-action installs the CLI into it. A hosted
+  canary runs the real codex-action, with no key or prompt, between the
+  two checks, and fails if anything in that tree is codex-writable. A hosted smoke workflow
   runs the check and the post-codex steps against a planted venv with the
   real codex user (Claude Security finding 4628448, 2026-09-22;
   design/codex-engine.md → Runner-side search path). The Claude jobs run

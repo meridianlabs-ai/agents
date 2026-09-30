@@ -633,10 +633,11 @@ jobs:
           echo "runner umask: $(umask); setfacl: $(command -v setfacl || echo none); ACLs on lib/node_modules:"
           getfacl -p "$prefix/lib/node_modules" "$prefix/lib/node_modules/@openai" 2>&1 | head -24 || true
           echo "what npm created:"
-          find "$prefix/lib/node_modules/@openai" -maxdepth 2 -printf '%M %u:%g %p\n' 2>/dev/null | head -8
+          # `|| true`: under pipefail, head closing a long listing is SIGPIPE.
+          find "$prefix/lib/node_modules/@openai" -maxdepth 2 -printf '%M %u:%g %p\n' 2>/dev/null | head -8 || true
           writable=$(sudo -u codex find "$prefix" -writable 2>/dev/null | wc -l)
           echo "files and directories under $prefix the codex user can write: $writable"
-          sudo -u codex find "$prefix" -writable 2>/dev/null | head -20
+          sudo -u codex find "$prefix" -writable 2>/dev/null | head -20 || true
           if [ "$NODE_FIRST" = true ]; then
             [ "$RECLAIM" = success ] || { echo "::error::the reclaim failed with the Node step in place (outcome: $RECLAIM); see its PATH check above"; exit 1; }
             if sudo -u codex test -w "$node_bin"; then echo "::error::$node_bin is writable by the codex user"; exit 1; fi

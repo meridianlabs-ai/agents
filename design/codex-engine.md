@@ -493,7 +493,8 @@ three layers:
   inside each entry — a tool a later step may call, or the runner may pick
   as an interpreter — are found in one `find` pass (every symlink,
   everything codex owns, everything codex could write through its groups or
-  the world; nothing else is codex's to change, the image has no ACLs) and
+  the world; nothing else is codex's to change: the image's only ACLs
+  found so far are the toolcache's, stripped before the check, below) and
   settled the same way, a symlink followed as written: its target's
   directory chain is walked like an entry and the target checked in turn,
   so `bash -> $GITHUB_WORKSPACE/.venv/bin/bash` in a runner-only directory
@@ -543,7 +544,24 @@ three layers:
   version and adds the same, already runner-only, directory. With that,
   the PATH the pre-grant check accepted is the PATH every post-codex step
   gets. The step sets `package-manager-cache: false`, so it restores and
-  saves no cache. If a codex-action release changes the version or the
+  saves no cache.
+
+  Protecting the directory's hops and files was not enough, as the
+  canary's first runs on this change showed (2026-09-30). The image ships
+  the whole Node tree codex-writable (about 6,000 entries, npm's own
+  `lib/` among them), and the check reaches only an entry's hops, its
+  files and their link targets, not the code those files load: a build
+  backend running as codex during provisioning could rewrite npm's
+  `lib/cli.js`, which codex-action's `npm install -g` then runs as
+  runner. And the toolcache directories carry default ACLs
+  (`default:other::rwx`, `default:user:runner:rwx`), so what npm creates
+  there comes out 777/666 whatever the runner's umask (0022), and the
+  reclaim refused `lib/node_modules/@openai/codex`. So `create-codex-user`,
+  before it creates the user, takes each toolcache tree with an entry on
+  the job PATH (`$RUNNER_TOOL_CACHE/<tool>/<version>`) as a whole:
+  `setfacl -R -b`, `chown -R runner`, `chmod -R go-w`. Nothing in the tree
+  is then codex-writable, and what npm adds later gets the runner's
+  umask. If a codex-action release changes the version or the
   pin, the action's step adds a directory the check never saw, and the
   reclaim refuses it; the `codex-action-path` job of
   `.github/workflows/engine-isolation-canary.yml` runs the real action

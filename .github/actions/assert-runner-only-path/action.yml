@@ -43,7 +43,9 @@ description: >-
   the runner may pick as an interpreter — found in one `find` pass: every
   symlink, everything the user owns, everything the user could write
   through its group or the world (nothing else is the user's to change; the
-  hosted image carries no ACLs). A symlink is followed as written — its
+  hosted image's toolcache does carry default ACLs, which `create-codex-user`
+  strips from every toolcache tree on the job PATH before this check runs).
+  A symlink is followed as written — its
   target's directory chain is walked like an entry and the target checked
   in turn, recursively — so `bash -> $GITHUB_WORKSPACE/.venv/bin/bash` in a
   runner-only directory, or a link to a file the user owns or can write or
