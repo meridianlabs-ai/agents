@@ -151,6 +151,16 @@ on:
       - "tests/fixtures/hostile-checkout/**"
       - "tests/fixtures/callers/**"
 
+# One run per branch and trigger. An implement loop can push several commits
+# to its branch in a few minutes, and each used to queue a full canary run;
+# a newer push to the same branch now cancels the older run, since only the
+# branch's latest revision matters. Runs on main (the post-merge evidence),
+# the weekly schedule and manual dispatches are never cancelled: they queue
+# behind a run in their own group instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
