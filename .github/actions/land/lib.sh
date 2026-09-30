@@ -382,7 +382,9 @@ logical_names() {
 # from escaped backticks or backticks in separate blocks takes the CLI's
 # own lexer, and a wrong guess would drop a real import — review round 1);
 # any `@` not right after a letter or digit starts a token (a text token
-# also starts after inline markup, as in `**@x**`); and each token is also
+# also starts after inline markup, as in `**@x**`), even one inside an
+# earlier token (the matches overlap, so `**@a**@b` yields `b` too —
+# review round 2); and each token is also
 # tried cut at the first markup character (*~`[]<>!()) and with trailing
 # markup and punctuation removed. A candidate that names no file protects
 # nothing. Python for the Unicode classes (the land job and the tests have
@@ -393,7 +395,7 @@ import re, sys
 ws = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 text = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
 seen = []
-for m in re.finditer("(?<![A-Za-z0-9])@((?:[^" + ws + "\\\\]|\\\\ )+)", text):
+for m in re.finditer("(?<![A-Za-z0-9])@(?=((?:[^" + ws + "\\\\]|\\\\ )+))", text):
     tok = m.group(1)
     for cand in (tok, re.split("[*~`\\[\\]<>!()]", tok)[0], tok.rstrip("*_~`[](){}<>!?.,;:\"\x27")):
         cand = cand.split("#", 1)[0].replace("\\ ", " ")

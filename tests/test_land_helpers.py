@@ -2389,9 +2389,13 @@ def test_import_candidates(tmp_path):
 # escaped pair, or unmatched ones in separate blocks) must not hide the
 # import between them. Each instruction kind, a rule's import outside
 # `.claude/`, and an import of an imported file.
+# Round 2 (B1): an import right after an earlier token's markup, which the
+# CLI reads as a text token of its own.
 BACKTICK_CASES = {
     "escaped": "\\` @policy.md \\`\n",
     "blocks": "`unmatched\n# Rules\n@policy.md\n# End\n`\n",
+    "after-code-span": "`@example.md`@policy.md\n",
+    "after-bold": "**@example.md**@policy.md\n",
 }
 
 
