@@ -117,7 +117,7 @@ tests them and fails when a skill script defines its own copy.
 |---|---|---|
 | checkout | `checkout.sh` | b: the chip's head repository and author; c: an External PR lands detached, pinned, in a worktree outside the clone |
 | import | `import.sh` | d: the copied title and body are defanged before the fork issue is created under the maintainer's name |
-| merge-approved-prs | `approval_at_head.py`, `checks_at_head.py`, `companion_mergeable.py`, `external.sh`, `changelog_check.sh`, `conflicts.sh` | b: approvals and companions by write-access reviewers at the head; c: the External flow; a: CHANGELOG entries and conflicted file names |
+| merge-approved-prs | `approval_at_head.py`, `checks_at_head.py`, `companion_mergeable.py`, `external.sh`, `conflict_residue.py`, `changelog_check.sh`, `conflicts.sh` | b: approvals and companions by write-access reviewers at the head; c: the External flow; a: CHANGELOG entries and conflicted file names |
 | post-upstream-review | `gather.sh`, `post.sh` | b: the proxy and the findings comment by author; a and d: the review sent as a file, defanged, footer added, references checked |
 | promote | `promote.sh` | b: the fork PR, the import header, the review verdict and the ts-mono companion by author; d: the upstream PR body and the branch's commit messages |
 | resolve-board | none | Reads only the workflow run and runs the chip sweep |

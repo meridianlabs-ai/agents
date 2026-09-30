@@ -304,14 +304,51 @@ def test_the_primary_clone_and_a_branch_worktree_are_refused(queue):
     assert git("rev-parse", "HEAD", cwd=q.clone).stdout == q.before[1]
 
 
-def test_a_worktree_a_promotion_left_on_its_branch_detaches_and_starts(one_queue):
-    # The SKILL.md step for a queue that handled a promotion first.
+SKILL = ROOT / "skills" / "merge-approved-prs" / "SKILL.md"
+
+
+def external_block():
+    """The fenced block of SKILL.md's External Checkout/push bullet."""
+    text = SKILL.read_text()
+    start = text.index("- **Checkout/push**")
+    opened = text.index("```bash\n", start) + len("```bash\n")
+    return text[opened : text.index("```", opened)]
+
+
+def run_external_block(q):
+    """Run the bullet's block as the agent would, with its placeholders filled in."""
+    block = external_block().replace("<skill-base-dir>", str(EXTERNAL.parent)).replace("<n>", "42")
+    env = {"PATH": f"{q.tmp / 'bin'}:{os.environ['PATH']}", "STUB": str(q.stub), "APPROVED": q.approved}
+    return sh("bash", "-c", block, cwd=q.queue, env=env, check=False)
+
+
+def test_the_skills_external_block_runs_every_git_command_through_the_script():
+    lines = [l.split("#", 1)[0].strip() for l in external_block().splitlines()]
+    assert lines and all(l.startswith("bash <skill-base-dir>/external.sh ") for l in lines if l), lines
+
+
+def test_the_block_after_a_promotion_left_the_worktree_on_its_branch(one_queue):
     q = one_queue
     git("checkout", "-q", "-b", "claude/issue-1-promotion", "origin/main", cwd=q.queue)
-    assert q.run("start", "42", q.approved).returncode == 1
-    git("checkout", "-q", "--detach", "origin/main", cwd=q.queue)
-    r = q.run("start", "42", q.approved)
-    assert r.returncode == 0, r.stderr
+    assert q.run("start", "42", q.approved).returncode == 1  # never on a branch
+    r = run_external_block(q)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert git("rev-parse", "HEAD", cwd=q.queue).stdout.strip() == q.approved
+    assert q.ran() == ""
+
+
+def test_the_block_after_an_earlier_external_item_runs_nothing_of_its_tree(one_queue):
+    q = one_queue
+    assert q.run("start", "42", q.approved).returncode == 0
+    assert q.run("commit").returncode == 0
+    assert q.run("push", "42", q.approved).returncode == 0
+    # The next External item, from the previous contributor's merged tree.
+    r = run_external_block(q)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert q.ran() == ""
+    # Potent: the bare checkout the block used to carry runs their fsmonitor from here.
+    git("checkout", "-q", "--detach", "origin/main", cwd=q.queue, check=False)
+    assert "fsmon.sh" in q.ran()
 
 
 def test_the_git_passthrough_is_pinned(queue):
@@ -386,6 +423,33 @@ def test_a_push_refuses_markers_committed_around_the_script(one_queue):
     assert q.fork_tip() == before
 
 
+@pytest.mark.parametrize("attrs,config", [
+    ("conflict.py -diff\n", {}),
+    ("conflict.py diff=custom\n", {"diff.custom.binary": "true"}),
+    ("conflict.py -diff conflict-marker-size=12\n", {}),
+], ids=["minus-diff", "binary-diff-driver", "minus-diff-size-12"])
+def test_markers_in_a_path_its_attributes_call_binary_are_still_refused(one_queue, attrs, config):
+    # Review round 2, B1: `git diff --check` skips a path the contributor's
+    # attributes (or a driver they select) classify as binary, while the
+    # merge still writes text markers into it.
+    q = one_queue
+    for key, value in config.items():
+        git("config", key, value, cwd=q.clone)
+    make_conflict(q, "conflict.py", attrs=attrs)
+    assert q.run("start", "42", q.approved).returncode == 3
+    r = q.run("commit")
+    assert r.returncode == 3 and "conflict.py:" in r.stderr, r.stderr + r.stdout
+    assert git("rev-parse", "HEAD", cwd=q.queue).stdout.strip() == q.approved
+    # Committed around the script, the push still refuses it.
+    assert q.run("git", "add", "conflict.py").returncode == 0
+    assert q.run("git", "commit", "-q", "--no-edit").returncode == 0
+    before = q.fork_tip()
+    r = q.run("push", "42", q.approved)
+    assert r.returncode == 3 and "conflict.py:" in r.stderr, r.stderr + r.stdout
+    assert q.fork_tip() == before
+    assert q.ran() == ""
+
+
 def test_a_marker_line_main_carries_is_not_residue(one_queue):
     q = one_queue
     fixture = "<<<<<<< ours\nfixture\n=======\ntheirs\n>>>>>>> theirs\n"
@@ -412,3 +476,22 @@ def test_file_names_from_the_tree_are_literal_pathspecs(one_queue, name):
     assert r.returncode == 0, r.stderr + r.stdout
     assert git("show", f"HEAD:{name}", cwd=q.queue).stdout == "resolved\n"
     assert q.ran() == ""
+
+
+def load_residue():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("conflict_residue", EXTERNAL.parent / "conflict_residue.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("text,sizes,lines", [
+    (b"a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> origin/main\n", {7}, [2, 4, 6]),
+    (b"<<<<<<< ours\r\n||||||| base\r\n=======\r\n>>>>>>>\r\n", {7}, [1, 2, 3, 4]),  # diff3 style, CRLF
+    (b"<<<<<<<<<<<< HEAD\n============\n>>>>>>>>>>>> m\n", {7, 12}, [1, 2, 3]),
+    (b"<<<<<<<<<<<< HEAD\n", {7}, []),  # a 12-wide run is not a 7-wide marker
+    (b"<<<>>>| x\n=======x\n <<<<<<< indented\n# =======\n", {7}, []),
+])
+def test_marker_lines_matches_git_markers_of_the_given_sizes(text, sizes, lines):
+    assert [n for n, _ in load_residue().marker_lines(text, sizes)] == lines

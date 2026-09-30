@@ -317,12 +317,15 @@ Same flow as above with these substitutions — the branch lives on the
   goes through it (skills/THREAT_MODEL.md rule (c); Claude Security
   4773883, 4773882). Instead of the fetch/checkout block of section 2:
   ```bash
-  git checkout -q --detach origin/main                      # only when an earlier promotion left the worktree on its branch (our own tree)
-  bash <skill-base-dir>/external.sh start <n> "$APPROVED"   # 5: the head is not the approved commit — SKIP, report both SHAs; 3: conflicts, listed
+  bash <skill-base-dir>/external.sh git checkout -q --detach origin/main   # leave the previous item's tree (a promotion's branch, or the last External merge), pinned
+  bash <skill-base-dir>/external.sh start <n> "$APPROVED"                  # 5: the head is not the approved commit — SKIP, report both SHAs; 3: conflicts, listed
   ```
   It fetches `refs/pull/<n>/head` without checking it out, refuses it
   unless it is `$APPROVED`, checks that commit out **detached** and merges
-  `origin/main` without committing. Resolve conflicts by editing the files
+  `origin/main` without committing. The first line leaves whatever tree the
+  previous queue item left (a promotion's branch, or the last External
+  merge) through the script's pins: a bare `git checkout` there would run
+  that tree's inherited fsmonitor. Resolve conflicts by editing the files
   (never paste a file name from the tree into a command), then
   `external.sh commit --trailer "Co-Authored-By: <you>"` and
   `external.sh push <n> "$APPROVED"`. Every git call it makes runs with

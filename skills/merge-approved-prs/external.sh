@@ -36,8 +36,9 @@
 #       also get --no-ext-diff --no-textconv).
 #   external.sh commit [--trailer <line>]
 #       stage the resolution (every conflicted path and every tracked
-#       change), refuse a conflict marker anywhere in it (git diff --check,
-#       any marker size), refuse a net change to
+#       change), refuse a conflict marker anywhere in it that neither side
+#       has (conflict_residue.py: any marker size, read from the blobs
+#       whatever the tree's diff attributes say), refuse a net change to
 #       the ts-mono gitlink, commit the merge with git's merge message plus
 #       the trailer, then run check.
 #   external.sh check
@@ -131,32 +132,20 @@ gitlink_unchanged() {
     git diff --quiet --no-ext-diff origin/main "$1" -- "$GITLINK"
   fi
 }
-# markers_vs <base> <result>: set MARKERS to the conflict markers git finds
-# in <result> (`--cached` for the index, or a commit) that <base> does not
-# have — `git diff --check`, which honours a path's conflict-marker-size
-# attribute — one `path:line` per line, "" when none. A diff that fails is
-# exit 1, never "none".
-markers_vs() {
-  local out rc=0
-  if [ "$2" = "--cached" ]; then
-    out=$(git diff --no-ext-diff --check --cached "$1" 2>&1) || rc=$?
-  else
-    out=$(git diff --no-ext-diff --check "$1" "$2" 2>&1) || rc=$?
-  fi
-  case "$rc" in
-    0|2) MARKERS=$({ grep -F ': leftover conflict marker' <<<"$out" || true; } | sed 's/: leftover conflict marker$//') ;;
-    *) echo "external.sh: git diff --check failed:" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
-  esac
-}
 # conflict_residue <parent1> <parent2> <result>: set MARKERS to the conflict
-# markers in <result> that neither parent has — what an unfinished
-# resolution leaves, of any marker size, staged or not — and not a marker
-# line either side legitimately carries (a test fixture, a doc).
+# markers in <result> (`--cached` for the index, or a commit) that neither
+# parent has — what an unfinished resolution leaves, of any marker size,
+# staged or not, whatever the tree's attributes say about diffing it — one
+# `path:line` per line, "" when none (conflict_residue.py). A marker line
+# either side legitimately carries (a test fixture, a doc) is not residue.
+# A check that fails is exit 1, never "none".
 conflict_residue() {
-  local a
-  markers_vs "$1" "$3"; a=$MARKERS
-  markers_vs "$2" "$3"
-  MARKERS=$(comm -12 <(sort <<<"$a") <(sort <<<"$MARKERS") | grep . || true)
+  local rc=0
+  MARKERS=$(python3 "$HERE/conflict_residue.py" "$1" "$2" "$3") || rc=$?
+  case "$rc" in
+    0|1) ;;
+    *) echo "external.sh: the conflict-marker check failed — not continuing" >&2; exit 1 ;;
+  esac
 }
 check() {
   local rc=0

@@ -296,7 +296,14 @@ Testing a change).
   after an existing local branch, the clone's branches, HEAD and
   `.git/config` are unchanged and the merge lands on their fork through
   `HEAD:refs/heads/<branch>`; conflicts (a hostile file name among them)
-  are listed and the commit waits for their markers to go; a CHANGELOG
+  are listed and the commit waits for their markers to go — of any
+  configured size, staged first, committed around the script, or in a path
+  whose attributes (`-diff`, a `binary` diff driver) make `git diff
+  --check` skip it (`conflict_residue.py` reads the blobs), while a marker
+  line main already carries passes; file names with pathspec magic are
+  literal; the SKILL.md block's detach step runs pinned after a promotion
+  and after an earlier External item (a bare checkout there runs the
+  previous tree's fsmonitor); a CHANGELOG
   entry under a release fails the commit and the push; a rejected push is
   reported, never forced; the push needs `maintainerCanModify` and a HEAD
   built on the approved commit; the primary clone and a branch worktree
