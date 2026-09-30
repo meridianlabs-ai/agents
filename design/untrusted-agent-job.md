@@ -599,10 +599,11 @@ itself**, which is what its codex job already does.
 
     The launcher gains an optional `context-dir` input, which it binds
     read-only into the agent's namespace. The context names each file
-    beside the link it replaced. Whether the job token resolves a
-    *private* repository's attachments is checked on a private test
-    repository in step 4. If it cannot, the fallback is links only, which
-    goes to Ransom as a regression before step 4 merges.
+    beside the link it replaced. The image path is verified on public
+    repositories only: Meridian has no private caller repositories, so
+    private repositories are out of scope and no private-repository check
+    is run (decision: Ransom, 2026-09-30). If the job token cannot read a
+    private attachment, its link stays in the context.
   - **Fetch failures.** Every fetch is retried three times, then fails the
     step, as the codex prompt's fetches do (claude.yml:2646-2656): the
     agent is skipped, and the Surface step names the failed fetch. A
@@ -1156,9 +1157,9 @@ text is updated to name the job-level premise.
   - The status comment is posted by the machine account, not
     `claude[bot]`, and is top-level on review-comment triggers.
   - The context now follows tag mode's (the trigger-time snapshot, the
-    issue history, the images), so what the agent sees is unchanged,
-    unless step 4's private-repository check shows that the job token
-    cannot fetch attachments (Design → Context prompt).
+    issue history, the images), so what the agent sees is unchanged. On
+    a private repository, which no Meridian caller is, an image the job
+    token cannot read stays a link (Design → Context prompt).
   - A closed PR with a live head branch is continued on that branch,
     where tag mode cut a new branch that could not land. One with a
     deleted branch gets a comment-only run.
@@ -1415,9 +1416,9 @@ model or a real secret):
     - a job on an event outside the list.
   - Usage from the canary appears on the CI project's usage page, under
     its spend limit. That is the spend-limit verification.
-- **A private test repository** (step 4). A `@claude` run on an issue
-  with an uploaded image checks that the job token resolves the
-  attachment and that the agent sees the file.
+- **Images** (step 4). Verified on public repositories only; no
+  private-repository check (decision: Ransom, 2026-09-30, Design →
+  Context prompt).
 - **Live runs** on the inspect_ai fork and this repository after steps 1
   and 4: a `@claude` issue run and a PR follow-up (the status comment,
   branch and PR), a `@review` on each engine, and a loop round of each
@@ -1622,8 +1623,8 @@ THREAT_MODEL.md text that its change makes true.
    - The launcher's read-only `context-dir` bind.
    - The `Prepare branch` step, `base_branch` from the PR's base, the
      prompt input and `github_token`.
-   - The private-repository image check. If the job token cannot fetch
-     attachments there, stop and ask Ransom before merging.
+   - Images verified on public repositories only; private repositories
+     are out of scope (decision: Ransom, 2026-09-30).
    - The gate's status comment and land's finishing step.
    - pr-feedback-context's `dev-agent-status` filter.
    - Launch step 6 and the post-agent `reset-origin-url` retired, in all
@@ -1652,14 +1653,12 @@ THREAT_MODEL.md text that its change makes true.
        issue-comment run restores `.claude/` and `.mcp.json` from the PR's
        own base. The launcher no longer records HEAD: only launch step 6
        read it.
-     - The private-repository image check has not been run: no Meridian
-       caller repository is private, and a private test repository has to
-       be made for it. The image code was run against a real public
-       attachment (meridianlabs-ai/ts-mono#270, two PNGs, with a user
-       token). Before this step merges, a `@claude` run on a private test
-       repository issue with an uploaded image must show the job token
-       fetching it; if it cannot, the fallback is links only and goes to
-       Ransom first.
+     - The image path is verified on public repositories only: the code
+       was run against a real public attachment (meridianlabs-ai/ts-mono#270,
+       two PNGs). No private-repository check is run, before or after
+       merge: Meridian has no private caller repositories, so they are out
+       of scope (decision: Ransom, 2026-09-30). If the job token cannot
+       read a private attachment, the link stays in the context.
      - Folded in (decision: Ransom, 2026-09-30): the four land jobs have
        `timeout-minutes: 15` (56 land runs across five repositories took
        10-49 s), and the land composite stops posting inline review
