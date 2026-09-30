@@ -384,23 +384,29 @@ logical_names() {
 # any `@` not right after a letter or digit starts a token (a text token
 # also starts after inline markup, as in `**@x**`), even one inside an
 # earlier token (the matches overlap, so `**@a**@b` yields `b` too —
-# review round 2); and each token is also
-# tried cut at the first markup character (*~`[]<>!()) and with trailing
-# markup and punctuation removed. A candidate that names no file protects
+# review round 2); each token is also tried cut before every markup
+# character (*_~`[]<>!()), since a name may hold one before the real
+# boundary (`@a!b.md**x**` imports `a!b.md`), and with trailing markup and
+# punctuation removed; and the text is scanned again with HTML comments
+# removed (<!--[\s\S]*?-->, the CLI's rule for comment blocks), so
+# `@po<!-- x -->licy.md` yields `policy.md` (review round 3). A candidate that names no file protects
 # nothing. Python for the Unicode classes (the land job and the tests have
 # it); returns non-zero when it fails, so the caller can refuse unchecked.
 import_candidates() {
   python3 -c '
 import re, sys
 ws = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-text = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+raw = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
 seen = []
-for m in re.finditer("(?<![A-Za-z0-9])@(?=((?:[^" + ws + "\\\\]|\\\\ )+))", text):
-    tok = m.group(1)
-    for cand in (tok, re.split("[*~`\\[\\]<>!()]", tok)[0], tok.rstrip("*_~`[](){}<>!?.,;:\"\x27")):
-        cand = cand.split("#", 1)[0].replace("\\ ", " ")
-        if cand and cand not in seen:
-            seen.append(cand)
+for text in (raw, re.sub("<!--[\\s\\S]*?-->", "", raw)):
+    for m in re.finditer("(?<![A-Za-z0-9])@(?=((?:[^" + ws + "\\\\]|\\\\ )+))", text):
+        tok = m.group(1)
+        cands = [tok, tok.rstrip("*_~`[](){}<>!?.,;:\"\x27")]
+        cands += [tok[:i] for i, c in enumerate(tok) if c in "*_~`[]<>!()"]
+        for cand in cands:
+            cand = cand.split("#", 1)[0].replace("\\ ", " ")
+            if cand and cand not in seen:
+                seen.append(cand)
 sys.stdout.buffer.write(b"".join(c.encode("utf-8", "surrogateescape") + b"\0" for c in seen))
 '
 }

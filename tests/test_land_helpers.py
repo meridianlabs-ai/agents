@@ -2390,30 +2390,37 @@ def test_import_candidates(tmp_path):
 # import between them. Each instruction kind, a rule's import outside
 # `.claude/`, and an import of an imported file.
 # Round 2 (B1): an import right after an earlier token's markup, which the
-# CLI reads as a text token of its own.
-BACKTICK_CASES = {
-    "escaped": "\\` @policy.md \\`\n",
-    "blocks": "`unmatched\n# Rules\n@policy.md\n# End\n`\n",
-    "after-code-span": "`@example.md`@policy.md\n",
-    "after-bold": "**@example.md**@policy.md\n",
+# CLI reads as a text token of its own. Round 3: a name holding a markup
+# character before the real markup boundary (B1), and a path joined across
+# an HTML comment, which the CLI removes before it scans (B2).
+# shape -> (instruction text, `{dir}` standing for the importer's relative
+# prefix, and the imported file's name).
+IMPORT_CASES = {
+    "escaped": ("\\` @{dir}policy.md \\`\n", "policy.md"),
+    "blocks": ("`unmatched\n# Rules\n@{dir}policy.md\n# End\n`\n", "policy.md"),
+    "after-code-span": ("`@example.md`@{dir}policy.md\n", "policy.md"),
+    "after-bold": ("**@example.md**@{dir}policy.md\n", "policy.md"),
+    "comment-joined": ("<!-- x -->@{dir}po<!-- y -->licy.md\n", "policy.md"),
+    **{f"punct-{c}": (f"@{{dir}}policy{c}v2.md**bold**\n", f"policy{c}v2.md") for c in "!~`[]<>()"},
 }
 
 
-@pytest.mark.parametrize("shape", sorted(BACKTICK_CASES))
-@pytest.mark.parametrize("importer,target", [
-    ("CLAUDE.md", "policy.md"), ("CLAUDE.local.md", "policy.md"), ("AGENTS.md", "policy.md"),
-    ("sub/CLAUDE.md", "sub/policy.md"), (".claude/rules/r.md", "policy.md"), ("transitive", "docs/policy.md"),
+@pytest.mark.parametrize("shape", sorted(IMPORT_CASES))
+@pytest.mark.parametrize("importer,where", [
+    ("CLAUDE.md", ""), ("CLAUDE.local.md", ""), ("AGENTS.md", ""),
+    ("sub/CLAUDE.md", "sub/"), (".claude/rules/r.md", ""), ("transitive", "docs/"),
 ])
-def test_imports_behind_backticks_are_protected(repos, shape, importer, target):
+def test_imports_the_cli_loads_through_markup_are_protected(repos, shape, importer, where):
     r = repos
-    text = BACKTICK_CASES[shape]
+    template, name = IMPORT_CASES[shape]
+    target = where + name
     if importer == "transitive":
         commit_path(r, "CLAUDE.md", "See @docs/imported.md\n")
-        commit_path(r, "docs/imported.md", text)
+        commit_path(r, "docs/imported.md", template.format(dir=""))
     elif importer == ".claude/rules/r.md":
-        commit_path(r, importer, text.replace("@policy.md", "@../../policy.md"))
+        commit_path(r, importer, template.format(dir="../../"))
     else:
-        commit_path(r, importer, text)
+        commit_path(r, importer, template.format(dir=""))
     commit_path(r, target, "safe\n")
     on_base(r)
     commit_path(r, target, "hostile instructions\n")
@@ -2421,7 +2428,9 @@ def test_imports_behind_backticks_are_protected(repos, shape, importer, target):
     repo = land_fetch(r)
     res, outputs = run_workflows_step(r, repo)
     assert res.returncode != 0, res.stdout
-    assert outputs["files"] == f"`{target}`"
+    # The file list is shell-quoted (%q), so a name with markup in it is escaped.
+    quoted = sh("bash", "-c", 'printf %q "$1"', "_", target).stdout
+    assert outputs["files"] == f"`{quoted}`"
 
 
 def test_a_failed_import_tokenizer_refuses_the_bundle_unchecked(repos):
