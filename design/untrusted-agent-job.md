@@ -832,7 +832,10 @@ proxy's `responses-api-endpoint` at a renewing forwarder of our own:
 - **New composite `openai-wif-proxy`**, with its script at
   `.github/actions/openai-wif-proxy/openai_wif_proxy.py` (stdlib only).
   - **Where it runs.** It runs as `runner`, started in a step before
-    `Create codex user`, as a background process in the runner's session.
+    `Create codex user` and after `Set up Node for codex-action`, which
+    must run before `Create codex user` (design/codex-engine.md →
+    Runner-side search path), as a background process in the runner's
+    session.
     It gets the step's `ACTIONS_ID_TOKEN_REQUEST_*` environment. The codex
     user never shares its uid, environment or memory: the launcher's
     and `create-codex-user`'s process-isolation checks already cover
@@ -1598,7 +1601,8 @@ THREAT_MODEL.md text that its change makes true.
        `true`.
    - This repository:
      - the `openai-wif-proxy` composite and its test;
-     - the four codex jobs: the forwarder step before `Create codex user`,
+     - the four codex jobs: the forwarder step before `Create codex user`
+       (and after the Node setup step),
        the codex-action inputs, `id-token: write` restored and every
        `OPENAI_API_KEY` reference removed;
      - the negative canaries: a job outside a reusable workflow, another

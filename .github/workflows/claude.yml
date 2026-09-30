@@ -2472,6 +2472,25 @@ jobs:
           pr: ${{ github.event.issue.number || github.event.pull_request.number }}
           out: ${{ runner.temp }}/codex-feedback.md
 
+      # Node on the job PATH BEFORE the codex user exists (design/codex-engine.md
+      # → Runner-side search path). openai/codex-action runs this same
+      # setup-node, pinned to this commit, with node-version "24", then
+      # `npm install -g` for the CLI and its proxy into that Node's prefix.
+      # Run only there, it adds the toolcache's Node bin directory to the
+      # job PATH after `Create codex user` has checked and repaired the
+      # PATH, and the image ships that directory writable by the codex user,
+      # so the reclaim's check refused every run (run 36738559681, PR #180,
+      # 2026-09-30). Run here first, the directory is on the PATH when
+      # `Create codex user` makes it runner-only, and the action's own
+      # setup-node finds the same cached version. Keep the pin and the
+      # version equal to the action's. No package cache: nothing restored
+      # from the caller's caches, no post-step save.
+      - name: Set up Node for codex-action
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
       # codex-action's default safety-strategy (drop-sudo) chmods root-owned
       # service sockets under /run, breaking D-Bus -> systemd-resolved -> DNS;
       # the hosted runner then dies with "lost communication" 52-65 minutes
@@ -3090,7 +3109,7 @@ jobs:
             err="resetting the codex home after provisioning failed before the agent started — processes were still running as codex after repeated kills (a provisioning survivor?) or the home could not be re-created (see the job logs); nothing was attempted."
           fi
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
-            err="the codex user setup failed before the agent started (a job PATH entry inside the workspace or writable by the codex user — nothing in this job adds to the job PATH before it, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
+            err="the codex user setup failed before the agent started (a job PATH entry inside the workspace or writable by the codex user — only the Node setup step adds to the job PATH before it, and this check makes that directory runner-only, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
             err="the codex step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
@@ -3103,7 +3122,7 @@ jobs:
           # job cancel that landed mid-reclaim is named too; the codexuser
           # test keeps the Claude path's `skipped` reclaim from tripping it.
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "success" ] && [ "${CODEXRECLAIM_OUTCOME:-}" != "success" ]; then
-            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed. Inspect the codex run's transcript before re-triggering."
+            err="codex finished but the workspace could not be reclaimed from it (reclaim step outcome: ${CODEXRECLAIM_OUTCOME:-unknown}) — a job PATH entry writable by or owned by the codex user (a directory added to the job PATH after the Create codex user step checked it, most likely by a codex-action or runner-image change; the reclaim refuses it and does not repair it), processes were still running as codex after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, codex left an embedded git repository in the tree (a git init or git worktree add under the checkout — the false-alarm case in design/codex-engine.md → Hook-safe landing), the pre-codex git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed. Inspect the codex run's transcript before re-triggering."
           fi
           # A failed guard SKIPS the commit step, so it needs its own check.
           # "nothing was landed" holds because the manifest composer and

@@ -24,7 +24,9 @@ executables that log `HIJACKED` when run, first on the job PATH:
 - The wiring: the four workflows pass `add-to-path` from the gate's engine,
   the four compose steps discover the tools from `.venv/bin` first, the
   three commit steps pin PATH, and `create-codex-user` creates the user,
-  runs the check, then grants — in that order.
+  runs the check, then grants — in that order. Each codex job runs
+  codex-action's own setup-node before `Create codex user`, and the hosted
+  canary runs the real codex-action between the user and the reclaim.
 
 `sudo` is a stub in the tests' "system" directory (no codex user and no
 root here): it runs the command as the current user; a `-u <user> test -w`
@@ -766,7 +768,10 @@ def test_create_codex_user_checks_the_path_after_the_user_and_before_the_grant()
     assert f"SYSTEM_PATH: {SYSTEM_DIRS}" in reset and reset.index('export PATH="$SYSTEM_PATH"') < reset.index("sudo ")
     assert 'sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"' in first
     assert 'sudo usermod -a -G runner "$AGENT_USER"' in first
-    assert "chown" not in first and "chmod" not in first
+    # No grant in the first step: its only chown/chmod are the toolcache
+    # trees' repair, which never names the workspace.
+    assert all("GITHUB_WORKSPACE" not in l for l in first.splitlines() if "chown" in l or "chmod" in l)
+    assert first.index('sudo chown -R runner "$tree"') < first.index("sudo adduser")
     # The check probes as the user being created, whichever it is.
     assert ASSERT_USES in check_step and "user: ${{ inputs.user }}" in check_step and 'protect: "true"' in check_step
     assert 'sudo chown -R "runner:$AGENT_USER" "$GITHUB_WORKSPACE"' in grant
@@ -808,16 +813,18 @@ def create_world(tmp_path):
     for f in (bins / "sudo", bins / "stat"):
         f.chmod(0o755)
     log = tmp_path / "sudo.log"
+    # The test's own toolcache: a hosted runner's PATH holds entries under
+    # the real one (setup-python's), which the create step would repair.
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "GITHUB_WORKSPACE": str(ws), "RUNNER_TEMP": str(temp),
-           "SUDO_LOG": str(log), "HOME_SCRIPT": str(home_script)}
+           "SUDO_LOG": str(log), "HOME_SCRIPT": str(home_script), "RUNNER_TOOL_CACHE": str(tmp_path / "toolcache")}
     return ws, temp, log, env
 
 
-def run_create(tmp_path, user, grant="workspace"):
+def run_create(tmp_path, user, grant="workspace", path_prefix=""):
     """The create mode's two run blocks (the PATH check between them is its
     own composite, tested above), as the composite runs them."""
     ws, temp, log, env = create_world(tmp_path)
-    env = {**env, "AGENT_USER": user, "GRANT": grant}
+    env = {**env, "AGENT_USER": user, "GRANT": grant, "PATH": path_prefix + env["PATH"]}
     first, grant_step = composite_runs(CREATE)[:2]
     results = []
     for script in (first, grant_step):
@@ -868,6 +875,31 @@ def test_create_codex_user_for_claude_agent(tmp_path, grant):
     # None of the codex-only parts: no output dir, no codex home, nothing in
     # the user's global git config.
     assert not any(f"{temp}/codex" in c or "-u codex" in c or "--global" in c or c.startswith("home ") for c in calls)
+
+
+def test_create_codex_user_makes_each_toolcache_tree_on_the_path_runner_only(tmp_path):
+    # The image ships the toolcache Node tree writable by the agent user, and
+    # the PATH check reaches only an entry's hops and files; the whole tree
+    # of every toolcache entry on the job PATH is repaired, once per tree,
+    # before the user exists. Entries outside the toolcache, the toolcache
+    # root and a tool directory with no version are left alone.
+    tc = tmp_path / "toolcache"
+    node = tc / "node" / "24.21.0" / "x64"
+    for d in (node / "bin", node / "lib" / "node_modules" / "npm" / "bin", tc / "Python", tmp_path / "elsewhere"):
+        d.mkdir(parents=True)
+    prefix = f"{node / 'bin'}:{tmp_path / 'elsewhere'}:{tc}:{tc / 'Python'}:{node / 'lib' / 'node_modules' / 'npm' / 'bin'}:"
+    results, calls, ws, temp = run_create(tmp_path, "codex", path_prefix=prefix)
+    assert [r.returncode for r in results] == [0, 0], [r.stderr for r in results]
+    tree = str((tc / "node" / "24.21.0").resolve())
+    repair = [f"chown -R runner {tree}", f"chmod -R go-w {tree}"]
+    # `setfacl -R -b` first where the host has setfacl (the hosted image).
+    acl = [c for c in calls if c.startswith("setfacl ")]
+    assert acl in ([], [f"setfacl -R -b {tree}"])
+    calls = [c for c in calls if not c.startswith("setfacl ")]
+    assert calls[:4] == [f"find {ws} -mindepth 2 -name .git", *repair,
+                         "adduser --system --home /home/codex --shell /bin/bash --group codex"], calls
+    assert sum(c.startswith("chown -R runner ") for c in calls) == 1
+    assert f"toolcache tree {tree}: now runner-owned" in results[0].stdout
 
 
 @pytest.mark.parametrize("user,grant", [("root", "workspace"), ("", "workspace"), ("codex", "partial")])
@@ -1238,3 +1270,73 @@ def test_post_codex_composites_take_a_system_path_and_pin_it():
 @pytest.mark.parametrize("name", sorted(WORKFLOWS))
 def test_surface_names_the_path_refusal_as_a_user_setup_cause(name):
     assert "a job PATH entry inside the workspace or writable by the codex user" in WORKFLOWS[name].read_text()
+
+
+# --- the Node openai/codex-action puts on the job PATH -------------------------------
+
+# openai/codex-action@v1's own "Ensure Node.js available" step (at 86365089,
+# 2026-08-20): the codex jobs run the same one first, so its toolcache
+# directory is on the job PATH when `Create codex user` protects it.
+NODE_STEP = ("uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0\n"
+             "        with:\n"
+             '          node-version: "24"\n'
+             "          package-manager-cache: false\n")
+
+
+def job_steps(block: str) -> list:
+    body = block[block.index("    steps:\n") + len("    steps:\n"):]
+    starts = [m.start() for m in re.finditer(r"^      - ", body, re.M)]
+    return [body[s:(starts[i + 1] if i + 1 < len(starts) else len(body))] for i, s in enumerate(starts)]
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOWS))
+def test_the_codex_job_puts_node_on_the_job_path_before_the_codex_user(name):
+    codex = job_steps(job_text(WORKFLOWS[name], CODEX_JOB[name]))
+    node = [i for i, s in enumerate(codex) if "actions/setup-node@" in s]
+    assert len(node) == 1, "exactly one setup-node step"
+    user = next(i for i, s in enumerate(codex) if "\n        id: codexuser\n" in s)
+    assert node[0] < user, "the Node step runs before Create codex user"
+    # Nothing between them is a third-party action (the only kind that could
+    # add to the job PATH after the Node step and before the check).
+    for s in codex[node[0] + 1:user]:
+        uses = [l.strip() for l in s.splitlines() if l.strip().startswith("uses: ")]
+        assert all(u.startswith("uses: meridianlabs-ai/agents/.github/actions/") for u in uses), s[:80]
+    step = codex[node[0]]
+    assert step.startswith("      - name: Set up Node for codex-action\n")
+    assert NODE_STEP in step
+    # Same condition as the step after it: it runs whenever the user is created.
+    cond = lambda s: [l for l in s.splitlines() if l.startswith("        if: ")]
+    assert cond(step) == cond(codex[user])
+    # The Claude job never runs it: codex-action is the only reason for it.
+    assert "actions/setup-node@" not in job_text(WORKFLOWS[name], CLAUDE_JOB[name])
+
+
+@pytest.mark.parametrize("name", ["claude.yml", "claude-auto.yml", "claude-auto-review.yml"])
+def test_surface_names_the_path_check_among_the_codex_reclaim_causes(name):
+    text = WORKFLOWS[name].read_text()
+    line = next(l for l in text.splitlines() if 'err="codex finished but the workspace could not be reclaimed' in l)
+    assert "a job PATH entry writable by or owned by the codex user" in line
+    assert "the reclaim refuses it and does not repair it" in line
+    # The codex user setup message no longer says nothing adds to the PATH.
+    assert "nothing in this job adds to the job PATH before it" not in job_text(WORKFLOWS[name], CODEX_JOB[name])
+
+
+def test_the_canary_runs_the_real_codex_action_between_the_user_and_the_reclaim():
+    text = (ROOT / ".github" / "workflows" / "engine-isolation-canary.yml").read_text()
+    job = text[text.index("\n  codex-action-path:\n"):]
+    assert "node-first: [true, false]" in job
+    order = ["      - name: Set up Node for codex-action\n        if: matrix.node-first\n        " + NODE_STEP,
+             "uses: ./.github/actions/create-codex-user\n",
+             "uses: ./.github/actions/create-codex-user\n        with:\n          mode: reset-home\n",
+             "uses: openai/codex-action@v1\n        with:\n          safety-strategy: unprivileged-user\n"
+             "          codex-user: codex\n\n",
+             "continue-on-error: ${{ !matrix.node-first }}\n",
+             "uses: ./.github/actions/reclaim-codex-workspace\n",
+             "      - name: The job PATH after codex-action\n"]
+    at = [job.index(o) for o in order]
+    assert at == sorted(at)
+    # No key and no prompt: the action stops after its installs.
+    action = job[at[3]:at[4]]
+    assert "openai-api-key" not in action and "prompt" not in action
+    # The job PATH check's own changes run the canary too.
+    assert '      - ".github/actions/assert-runner-only-path/**"\n' in text
