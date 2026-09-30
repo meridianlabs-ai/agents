@@ -1475,8 +1475,27 @@ SECURITY.md text that its change makes true.
        success. `review-codex` ran and `review` was skipped; the review
        and verdict were posted by `meridian-marvin[bot]`; nothing was
        posted as `claude[bot]`.
-     - CI-fix round (Claude): pending, exercised on this PR.
-     - Review-fix round (codex): pending, exercised on this PR.
+     - CI-fix round (Claude): #180, triggered by a deliberately failing
+       probe test ([tests run 36731690917](https://github.com/meridianlabs-ai/agents/actions/runs/36731690917)),
+       [run 36732043829](https://github.com/meridianlabs-ai/agents/actions/runs/36732043829),
+       success. The gate bound the failed run to #180. The `fix` job's
+       action logged `Using provided GITHUB_TOKEN for authentication`
+       and skipped `Revoke app token`; the agent's output is hidden, but
+       its commit (888ca63) deleted exactly the failing probe, which it
+       could only find from the failed run. The land job pushed 888ca63,
+       and the attempts counter, the `@review` re-review request and the
+       review that followed were all posted by `meridian-marvin[bot]`. The
+       tests run the push triggered
+       ([36733176986](https://github.com/meridianlabs-ai/agents/actions/runs/36733176986))
+       has `meridian-marvin[bot]` as actor and passed. The commit's git
+       author is `claude[bot]`: that is the action's default commit
+       identity (earlier loop commits on `main` carry it too), not the
+       push actor, so it does not fail this check, which is about who
+       pushed and posted.
+     - Review-fix round (codex): pending. `engine:codex` was added to
+       #180 after its first review round, so that round and its fix
+       round ran on the Claude engine; the codex review and the fix
+       round anchored on it are still to run on this PR.
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
    maintainer's machine. It can merge before or after step 1.
