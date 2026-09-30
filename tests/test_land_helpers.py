@@ -2332,12 +2332,14 @@ def test_protected_link_leaving_the_tree_protects_only_the_link(repos):
 
 
 def test_unimported_docs_and_mentions_in_code_do_not_protect_ordinary_files(repos):
-    # An e-mail address or a backticked `@name` is not an import, and a doc
-    # nobody imports is ordinary.
+    # An e-mail address is not an import, and a doc nobody imports is
+    # ordinary. (A backticked `@name` is taken: land cannot tell a code span
+    # from escaped backticks without the CLI's lexer, so it over-protects;
+    # see test_imports_behind_backticks_are_protected.)
     r = repos
     commit_path(r, "CLAUDE.md", "Mail ransom@example.com; run `@review` on the PR.\n")
     on_base(r)
-    commit_path(r, "review", "x\n")
+    commit_path(r, "example.com", "x\n")
     commit_path(r, "docs/other.md", "x\n")
     emit(r)
     repo = land_fetch(r)
@@ -2375,11 +2377,47 @@ def test_import_candidates(tmp_path):
     r = bash_lib(f"import_candidates <'{tmp_path / 'in.md'}'")
     assert r.returncode == 0, r.stderr
     cands = r.stdout.split("\0")[:-1]
-    for want in ("a.md", "my file.md", "b.md", "d", "e", "h.md", "i.md"):
+    # A backticked name is taken too (over-protection; B1 of review round 1).
+    for want in ("a.md", "my file.md", "b.md", "d", "e", "g.md", "h.md", "i.md"):
         assert want in cands, (want, cands)
-    # Code spans and e-mail addresses are not imports (as to the CLI).
-    for not_one in ("g.md", "c.md", "example.com"):
+    # E-mail addresses are not imports (as to the CLI).
+    for not_one in ("c.md", "example.com"):
         assert not_one not in cands, (not_one, cands)
+
+
+# Review round 1 (B1): backticks the CLI does not read as a code span (an
+# escaped pair, or unmatched ones in separate blocks) must not hide the
+# import between them. Each instruction kind, a rule's import outside
+# `.claude/`, and an import of an imported file.
+BACKTICK_CASES = {
+    "escaped": "\\` @policy.md \\`\n",
+    "blocks": "`unmatched\n# Rules\n@policy.md\n# End\n`\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(BACKTICK_CASES))
+@pytest.mark.parametrize("importer,target", [
+    ("CLAUDE.md", "policy.md"), ("CLAUDE.local.md", "policy.md"), ("AGENTS.md", "policy.md"),
+    ("sub/CLAUDE.md", "sub/policy.md"), (".claude/rules/r.md", "policy.md"), ("transitive", "docs/policy.md"),
+])
+def test_imports_behind_backticks_are_protected(repos, shape, importer, target):
+    r = repos
+    text = BACKTICK_CASES[shape]
+    if importer == "transitive":
+        commit_path(r, "CLAUDE.md", "See @docs/imported.md\n")
+        commit_path(r, "docs/imported.md", text)
+    elif importer == ".claude/rules/r.md":
+        commit_path(r, importer, text.replace("@policy.md", "@../../policy.md"))
+    else:
+        commit_path(r, importer, text)
+    commit_path(r, target, "safe\n")
+    on_base(r)
+    commit_path(r, target, "hostile instructions\n")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo)
+    assert res.returncode != 0, res.stdout
+    assert outputs["files"] == f"`{target}`"
 
 
 def test_a_failed_import_tokenizer_refuses_the_bundle_unchecked(repos):

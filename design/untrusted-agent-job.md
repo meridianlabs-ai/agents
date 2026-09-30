@@ -1489,8 +1489,11 @@ SECURITY.md text that its change makes true.
      composite's protected-path check. `entry()` compares mode, type and
      object id (4773337) and reads the path as a literal pathspec
      (4773336). The `@path` import tokenizer follows the CLI's own rule
-     (Unicode whitespace, `\ ` unescaped, the `#` cut, code spans
-     skipped) and adds over-protective candidates (4774319).
+     (Unicode whitespace, `\ ` unescaped, the `#` cut) and adds
+     over-protective candidates (4774319). It skips nothing as code:
+     telling a code span from escaped backticks, or from backticks in
+     separate blocks, takes the CLI's own lexer, and a wrong guess drops a
+     real import. So a backticked `@name` is protected too.
    - As built (2026-09-30):
      - The reviewer's `who` read moved to its **gate**, not its land job.
        The review jobs' Surface steps cc the same login in their error

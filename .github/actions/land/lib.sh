@@ -373,40 +373,25 @@ logical_names() {
 
 # import_candidates — read an instruction file on stdin and print,
 # NUL-terminated, every path an `@` import in it may name. Claude Code (read
-# at 2.1.285) skips code spans and code blocks, scans each markdown text
-# token with /(?:^|\s)@((?:[^\s\\]|\\ )+)/g, cuts the match at `#`, and
-# turns `\ ` into a space; JavaScript's \s is Unicode whitespace, not just
-# the ASCII space the grep here used to split on, and `\ ` was not
-# unescaped (Claude Security 4774319). This takes the same tokens and errs
-# towards more, never fewer: code spans are dropped per paragraph (a lone
-# backtick stays literal), but fenced blocks are kept; any `@` not right
-# after a letter or digit starts a token (a text token also starts after
-# inline markup, as in `**@x**`); and each token is also tried cut at the
-# first markup character (*~`[]<>!()) and with trailing markup and
-# punctuation removed. A candidate that names no file protects nothing.
-# Python for the Unicode classes (the land job and the tests have it);
-# returns non-zero when it fails, so the caller can refuse unchecked.
+# at 2.1.285) scans each markdown text token with
+# /(?:^|\s)@((?:[^\s\\]|\\ )+)/g, cuts the match at `#`, and turns `\ `
+# into a space; JavaScript's \s is Unicode whitespace, not just the ASCII
+# space the grep here used to split on, and `\ ` was not unescaped (Claude
+# Security 4774319). This takes the same tokens from the raw text and errs
+# towards more, never fewer: nothing is skipped as code (telling a code span
+# from escaped backticks or backticks in separate blocks takes the CLI's
+# own lexer, and a wrong guess would drop a real import — review round 1);
+# any `@` not right after a letter or digit starts a token (a text token
+# also starts after inline markup, as in `**@x**`); and each token is also
+# tried cut at the first markup character (*~`[]<>!()) and with trailing
+# markup and punctuation removed. A candidate that names no file protects
+# nothing. Python for the Unicode classes (the land job and the tests have
+# it); returns non-zero when it fails, so the caller can refuse unchecked.
 import_candidates() {
   python3 -c '
 import re, sys
-ws = "\t\n\v\f\r    -     　﻿"
-
-def no_code_spans(block):
-    # A run of n backticks up to the next run of exactly n is a code span.
-    runs = [m.span() for m in re.finditer("`+", block)]
-    out, pos, k = [], 0, 0
-    while k < len(runs):
-        n = runs[k][1] - runs[k][0]
-        j = next((j for j in range(k + 1, len(runs)) if runs[j][1] - runs[j][0] == n), None)
-        if j is None:
-            k += 1
-            continue
-        out += [block[pos:runs[k][0]], " "]
-        pos, k = runs[j][1], j + 1
-    return "".join(out) + block[pos:]
-
+ws = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 text = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
-text = "\n\n".join(no_code_spans(b) for b in re.split("\n[ \t]*\n", text))
 seen = []
 for m in re.finditer("(?<![A-Za-z0-9])@((?:[^" + ws + "\\\\]|\\\\ )+)", text):
     tok = m.group(1)
