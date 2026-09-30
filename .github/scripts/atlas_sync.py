@@ -697,7 +697,7 @@ def reopen_marker(url: str) -> str:
     """Shared prefix of the sync's own recovery-reopen comments.
 
     Load-bearing: field_is_stale keys on this prefix, together with the
-    reopen_tag the comment ends with, to tell the sync's own reopen (which
+    reopen_tag the sync's edit adds, to tell the sync's own reopen (which
     exists to decide THIS PR's fate) from a reopen that starts a new
     generation of work — change it and the closed-early recovery path
     starts retiring its own field an hour later.
@@ -705,18 +705,22 @@ def reopen_marker(url: str) -> str:
     return f"Reopened — upstream PR {url} "
 
 
-def reopen_tag(event_id: str) -> str:
-    """The hidden line that binds a recovery-reopen comment to its reopen.
+def reopen_tag(event_id: str, comment_id) -> str:
+    """The hidden line the sync's edit adds to its recovery-reopen comment.
 
-    `event_id` is the node id of the ReopenedEvent the sync's own PATCH
-    created, read back right after it (last_reopen). Text alone proves
-    nothing (finding 4773875): the land composite posts agent-written
-    comments as the machine account, and the fork's reviewer can reopen an
-    issue through its manifest (`issues[].comment_on` + `reopen`). An agent
-    writes its manifest before its landing reopens anything, so no single
-    landing can name the event its own reopen creates.
+    It names the ReopenedEvent the sync's own PATCH created (node id) and
+    the comment itself (REST id). The comment's id exists only once the
+    comment does, so the line can only be added by editing it, and
+    field_is_stale also requires the comment's last editor to be the
+    machine account. That is what no landing can produce (finding
+    4773875): land posts agent-written comments as the machine account and
+    the fork reviewer's land job can reopen an issue (`issues[].comment_on`
+    + `reopen`), but land never edits a comment. The only other
+    machine-account comment edits (the loops' counter comments) write
+    fixed bodies to comments carrying a counter marker, which land's
+    defang strips; tests/test_atlas_sync.py pins that list.
     """
-    return f"<!-- atlas-sync-reopen {event_id} -->"
+    return f"<!-- atlas-sync-reopen event={event_id} comment={comment_id} -->"
 
 
 def last_reopen(issue: int):
@@ -739,26 +743,70 @@ def last_reopen(issue: int):
     return n.get("id") or "", n.get("createdAt") or "", graphql_login(n.get("actor"))
 
 
-def reopen_issue(issue: int) -> str:
-    """Reopen a fork issue as the sync; returns the reopen_tag for its
-    marker comment ("" when the new ReopenedEvent cannot be read back).
+def edited_by_machine_account(comment) -> bool:
+    """Whether a REST issue comment was last edited by the machine account,
+    read from GraphQL (REST carries no editor). An origin check, so a failed
+    lookup fails closed: not edited."""
+    try:
+        node = gql(
+            """query($id:ID!){ node(id:$id){ ... on IssueComment{
+                 databaseId lastEditedAt editor{login __typename} }}}""",
+            id=comment.get("node_id") or "",
+        )["node"] or {}
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:
+        print(f"::warning::comment edit lookup failed for {comment.get('id')}: {e}")
+        return False
+    return (
+        node.get("databaseId") == comment.get("id")
+        and bool(node.get("lastEditedAt"))
+        and graphql_login(node.get("editor")) in TRUSTED_LOGINS
+    )
 
-    An untagged marker is not recognised, so a failed read-back leaves the
-    reopen looking like anyone's: the next run retires the field instead of
-    keeping it (the known gap field_is_stale describes). A read-back that
-    returns an older event names an id that is no longer the last reopen,
-    so it fails the same way, never toward the exemption.
+
+def recovery_reopen(issue: int, body: str) -> None:
+    """The closed-early recovery: reopen the issue, post `body` (which
+    starts with reopen_marker) and edit it to add reopen_tag.
+
+    The tag is added only when the read-back finds a machine-account
+    reopen that is not the one the timeline showed before the PATCH, so a
+    PATCH that was a no-op (someone else reopened first) is not claimed.
+    Left untagged (a failed read, or an edit that fails), the reopen looks
+    like anyone's: the next run retires the field instead of keeping it
+    (the known gap field_is_stale describes), never the other way round.
+    Residual race: a machine-account reopen that lands between the
+    pre-read and the PATCH, on an issue the sync was reopening anyway, is
+    tagged as the sync's.
     """
+    try:
+        before = last_reopen(issue)
+    except Exception as e:  # noqa: BLE001 — reopen anyway, untagged
+        print(f"::warning::reopen pre-read failed for #{issue}: {e}")
+        before = False
     gh("api", "-X", "PATCH", f"repos/{FORK}/issues/{issue}", "-f", "state=open")
+    posted = gh_json("api", f"repos/{FORK}/issues/{issue}/comments", "-f", f"body={body}")
+    if before is False:
+        return
     try:
         ev = last_reopen(issue)
-    except Exception as e:  # noqa: BLE001 — the comment still posts, untagged
-        print(f"::warning::reopen read-back failed for #{issue}: {e}")
-        return ""
-    if not ev or not ev[0] or ev[2] not in TRUSTED_LOGINS:
-        print(f"::warning::reopen read-back for #{issue} found no reopen by the sync")
-        return ""
-    return "\n\n" + reopen_tag(ev[0])
+        if (
+            not ev
+            or not ev[0]
+            or ev[2] not in TRUSTED_LOGINS
+            or (before and before[0] == ev[0])
+        ):
+            print(f"::warning::reopen read-back for #{issue} found no new reopen by the sync")
+            return
+        cid = posted["id"]
+        gh(
+            "api",
+            "-X",
+            "PATCH",
+            f"repos/{FORK}/issues/comments/{cid}",
+            "-f",
+            f"body={body}\n\n{reopen_tag(ev[0], cid)}",
+        )
+    except Exception as e:  # noqa: BLE001 — the comment stays, untagged
+        print(f"::warning::reopen tagging failed for #{issue}: {e}")
 
 
 def field_is_stale(issue: int, pr, url: str) -> bool:
@@ -774,26 +822,25 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
     PR's terminal timestamp — EXCEPT when that reopen is the sync's own
     closed-early recovery: it postdates the terminal by construction but
     exists to decide this same PR's fate, not to start a new generation.
-    The sync's own reopen is recognised by two facts together (finding
-    4773875): the ReopenedEvent's actor is the machine account, and a
+    The sync's own reopen is recognised by three facts together (finding
+    4773875): the ReopenedEvent's actor is the machine account; a
     machine-account comment at/after it starts with reopen_marker and
-    carries reopen_tag with THAT event's id. The actor alone is not enough:
-    the fork reviewer's land job reopens issues as the machine account too.
-    The marker text alone is not enough: land posts agent-written comments
-    under the same login, and a human's reopen event id is public. A
-    landing cannot tag its own reopen, whose id does not exist when its
-    manifest is written; a second landing in the same hour that reads the
-    first one's event could, on an issue already closed (land cannot
-    close one) — accepted, the next run otherwise retires the field. The
-    pagination-safe fetch keeps the marker from aging out of a fixed
-    window. Known gap: the marker posts in the API calls right after the
-    recovery's reopen PATCH, so a transient failure there (the comment,
-    or the read-back that tags it) leaves that reopen unrecognised and the
+    carries reopen_tag naming THAT event and the comment's own id; and the
+    comment's last editor is the machine account (recovery_reopen posts,
+    then edits). The actor alone is not enough: the fork reviewer's land
+    job reopens issues as the machine account too. Text alone is not
+    enough: land posts agent-written comments under the same login, and
+    event ids are public. The edit is what land cannot do (see
+    reopen_tag). The pagination-safe fetch keeps the marker from aging out
+    of a fixed window. Known gap: the marker is tagged in the API calls
+    right after the recovery's reopen PATCH, so a transient failure there
+    (the comment, the read-back or the edit) leaves that reopen
+    unrecognised and the
     next run retires the field instead of re-running the recovery's Review
     park — accepted: the window is consecutive calls in one run, and the
     outcome self-announces (the retire comment lands on the issue, naming
-    the PR). Best-effort: unreadable timeline -> not stale (the old
-    behavior).
+    the PR). Best-effort: unreadable timeline or comments -> not stale
+    (the old behavior); an unreadable comment edit is not the sync's edit.
     """
     terminal_ts = pr.get("mergedAt") or pr.get("closedAt") or ""
     if not terminal_ts:
@@ -807,12 +854,14 @@ def field_is_stale(issue: int, pr, url: str) -> bool:
             return False
         if not event_id or actor not in TRUSTED_LOGINS:
             return True
-        marker, tag = reopen_marker(url), reopen_tag(event_id)
+        marker = reopen_marker(url)
         return not any(
             (c.get("body") or "").startswith(marker)
-            and tag in (c.get("body") or "")
+            and reopen_tag(event_id, c.get("id")) in (c.get("body") or "")
             and (c.get("created_at") or "") >= reopened_ts
             and (c.get("user") or {}).get("login") in TRUSTED_LOGINS
+            # last: one GraphQL read, only for a comment that passed the rest
+            and edited_by_machine_account(c)
             for c in issue_comments(FORK, issue)
         )
     except Exception as e:  # noqa: BLE001
@@ -938,7 +987,6 @@ def sync_item(row) -> None:
                 "-> left closed, Stage cleared"
             )
             return
-        tag = reopen_issue(issue)
         escape_hatch = (
             "If the close was deliberate, close it again (any reason), or "
             "clear the item's Upstream PR field — the sync respects both. "
@@ -952,13 +1000,13 @@ def sync_item(row) -> None:
             # takes the open path, whose TAIL_STAGES gate keeps Review
             # parked — and whose staleness gate stays quiet, because
             # field_is_stale recognizes this reopen by its actor and the
-            # tagged marker comment, and knows the field still names the PR
-            # under decision.
-            comment(
+            # marker comment the sync tagged by editing it, and knows the
+            # field still names the PR under decision.
+            recovery_reopen(
                 issue,
                 reopen_marker(row["url"]) + "was closed unmerged and "
                 "needs a human decision; this issue was closed early (most "
-                f"likely by a linked companion PR merging). {escape_hatch}{tag}",
+                f"likely by a linked companion PR merging). {escape_hatch}",
             )
             if not set_stage(item, "Review", stage):
                 # already at Review: set_stage no-oped, but the panel
@@ -968,11 +1016,11 @@ def sync_item(row) -> None:
                 f"#{issue}: closed with upstream closed unmerged -> reopened (Review)"
             )
             return
-        comment(
+        recovery_reopen(
             issue,
             reopen_marker(row["url"]) + "is still open; this issue "
             "was closed early (most likely by a linked companion PR merging). "
-            f"{escape_hatch}{tag}",
+            f"{escape_hatch}",
         )
         set_single_select(item, STATUS_FIELD, STATUS_OPTIONS["In progress"])
         actions.append(f"#{issue}: closed while upstream PR open -> reopened")

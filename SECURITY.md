@@ -143,9 +143,9 @@ text are checked by the tests under `tests/`.
   hourly Atlas sync counts a ts-mono companion's loop markers only from
   such an author, on a same-repository PR such an author opened. The
   machine account's login alone does not make a comment the sync's own:
-  land posts agent text under it, so the sync recognises its own recovery
-  reopen by the reopen event's actor and a comment naming that event's id,
-  which no single landing can know. Text a
+  land posts agent text under it. The sync recognises its own recovery
+  reopen by the reopen event's actor and by a comment it posted and then
+  edited to name that event and itself. Land never edits a comment. Text a
   maintainer republishes from the public upstream tracker (`/import`) is
   de-fanged before it is posted under their login, and `claude.yml`'s trigger
   check reads no body or title text on an opened issue whose first line is

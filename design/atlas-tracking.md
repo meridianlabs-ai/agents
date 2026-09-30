@@ -379,13 +379,16 @@ because the field still named a PR merged weeks earlier (#46 — the field
 is *generational*: it describes one promotion, and a reopen after that
 PR's terminal state starts a new generation the field no longer
 represents — except the sync's *own* recovery reopen, which exists to
-decide that same PR's fate. It is recognized by two facts together: the
-ReopenedEvent's actor is the machine account, and a machine-account
-marker comment after it names that event's node id, which the sync reads
-back right after its reopen. Neither is enough alone: the land composite
-posts agent-written comments as the machine account, and the fork
-reviewer's land job can reopen an issue through its manifest. A landing
-cannot name the event its own reopen creates (finding 4773875).
+decide that same PR's fate. The sync posts its marker comment right
+after the reopen, then edits it to add a line naming the new
+ReopenedEvent and the comment's own id. The reopen counts as the sync's
+only when the event's actor is the machine account and a machine-account
+comment after it carries that line and was last edited by the machine
+account. The land composite posts agent-written comments as the machine
+account, and the fork reviewer's land job can reopen an issue through its
+manifest, but land never edits a comment. The loops' counter comments are
+the only other machine-account edits, and they write fixed text (finding
+4773875).
 Retiring the stale field also resets the old generation's Stage to
 Agent (Review for External proxies, whose lifecycle has no Agent): a
 parked Sign-off/Merge is the same kind of stale claim, and with the
