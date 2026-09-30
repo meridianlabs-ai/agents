@@ -630,7 +630,10 @@ Testing a change).
   an opened issue whose first line is `/import`'s `Upstream issue:` line
   is no text trigger, body or title (Claude Security 4629154), while the
   same text in a human's own issue and a label on an import still are;
-  the workflow's agent steps carry no bot allow-list; and the dev stubs
+  an opened issue whose author is not the actor, or whose payload is a
+  transfer, is no text trigger either and looks nobody up (Claude Security
+  4774320), while a label or a later comment on it is judged by its own
+  actor; the workflow's agent steps carry no bot allow-list; and the dev stubs
   exclude both machine logins on the label path like everywhere else.
 - `test_engine_job_isolation.py` — one untrusted job per engine (Claude
   Security findings 4628446 and 4629153): in each reusable workflow the

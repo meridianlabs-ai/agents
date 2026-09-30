@@ -146,7 +146,12 @@ text are checked by the tests under `tests/`.
   maintainer republishes from the public upstream tracker (`/import`) is
   de-fanged before it is posted under their login, and `claude.yml`'s trigger
   check reads no body or title text on an opened issue whose first line is
-  the import's `Upstream issue:` line.
+  the import's `Upstream issue:` line. Nor does it on an issue transferred
+  into the repository, whose `opened` event names the transferring account
+  as the actor while the text is the original author's: it reads an opened
+  issue's body and title only when their author is the actor and the event
+  is no transfer, and checks that author's write access. A label or a later
+  comment on such an issue is judged by its own author.
 - A label the machine account applies is a write, not a decision, and never
   starts the dev agent: `claude.yml`'s trigger check refuses both of its
   logins on the `auto`/`claude` label path as it does on text. The machine
