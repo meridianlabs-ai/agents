@@ -445,13 +445,17 @@ strict value. The defaults flip once the direct callers are checked, as
      (land/action.yml:1020), exactly as for a Claude review.
    - pr-feedback-context keeps accepting the footer as an anchor. After
      this step no new machine-account comment can carry it, so it matches
-     only codex reviews posted before the change. Its anchor authors
+     only codex reviews posted before the change. (Dropped after step 3
+     merged: the marker alone anchors, and those older codex reviews are
+     not supported. Decision: Ransom, 2026-09-30.) Its anchor authors
      narrow from "any Bot type or `i-am-marvin`" to the machine account's
      two logins. The Bot clause only ever meant `claude[bot]` and the
      machine App, and `claude[bot]` stops being trusted in step 1.
    - This fixes the root of 4773878, its is_error siblings (4773339,
      4773881, 4773886, 4773889) and 4773875 on the trusted side. The
-     composers' own footer seds stay as harmless duplicates.
+     composers' own footer seds stay as harmless duplicates. (Removed with
+     the legacy anchor: `land` is the one place that splits the footer.
+     Decision: Ransom, 2026-09-30.)
    - A test pins the class. Every string a consumer keys on in a
      machine-account comment must be in defang's list or appended by land
      after it. The consumers are pr-feedback-context's anchors,
@@ -1130,7 +1134,7 @@ text is updated to name the job-level premise.
   - The defang additions apply to their bodies too: the codex footer and
     the reopen prefix now read as `engine  codex` and a broken prefix.
     None of them relies on the footer, since only the codex reviewer
-    writes it.
+    wrote it, and nothing anchors on it now.
   - Flipping the `comment-numbers` and cap defaults later is a separate,
     announced change.
 - **Loop behaviour.** Removing the refunds means an infra failure before
@@ -1175,8 +1179,9 @@ text is updated to name the job-level premise.
   comments stay but are no longer trusted.
 - **Stored formats.** None. The manifest schema gains no field.
   `comments[].review` on the codex review uses an existing field.
-  Existing codex reviews keep their footer, and pr-feedback-context keeps
-  anchoring on it.
+  Existing codex reviews keep their footer, but pr-feedback-context no
+  longer anchors on it (decision: Ransom, 2026-09-30): a fix round on a PR
+  whose newest review predates step 3 sees the last 8 comments instead.
 
 ## Security
 
@@ -1600,6 +1605,16 @@ THREAT_MODEL.md text that its change makes true.
        pass the validator with `--comment-numbers event`. actions' triage
        carries no `comments[]` and keeps `*`. ts-mono had no continuation
        run in the window, so its comment path was checked from its source.
+     - The legacy anchor was removed after merge (decision: Ransom,
+       2026-09-30): pr-feedback-context no longer takes the codex
+       reviewer's old `engine: codex` footer as a review anchor, only
+       `<!-- claude-review-comment -->` from the machine account, which
+       land appends after the de-fang under `allow-review`. That completes
+       4773878's second criterion. Codex reviews posted before 2026-09-30
+       are not supported: a fix round whose newest review is one of them
+       falls back to the last 8 comments. The composers' footer seds went
+       with it; `land`'s `defang` is the one place that still splits the
+       footer, for bodies quoting an older codex review.
 4. **claude.yml to agent mode.**
    - The `dev-agent-context` composite, used by both jobs, with the gate's
      `trigger_time` output.

@@ -699,19 +699,21 @@ counterpart.
   each compose step; the compose cats its file), so the dev verb and the
   review-fix loop run one jq program rather than two copies; its fetches
   are retry-then-fail, and a failure is surfaced as a pre-agent error
-  (and counted, in the loop) like a failed prep. Both anchor
-  patterns — the Claude marker and the codex reviewer's `engine: codex`
-  footer — join the de-fanged substrings on both the prompt and the
-  output side (every codex summary that posts as marvin, the CI-fix
-  loop's included), so a codex summary echoing either cannot become a
-  false anchor (until 2026-09-30 the reviewer's own footer was appended
-  after its sed and its comment-size cap; since step 3 of
-  design/untrusted-agent-job.md the codex review lands flagged `review`
-  and gets the Claude marker from `land`, and `land` splits the footer in
-  every body), and the Claude-path prompts that post on a PR — the fix
-  prompt's forbidden-substring list and the dev verb's review-etiquette
-  rule — name them too; the author restriction covers a caller's human
-  commenters, who are under neither rule. The
+  (and counted, in the loop) like a failed prep. The anchor pattern,
+  the review-comment marker, joins the de-fanged substrings on both the
+  prompt and the output side (every codex summary that posts as marvin,
+  the CI-fix loop's included), so a codex summary echoing it cannot
+  become a false anchor, and the Claude-path prompts that post on a PR —
+  the fix prompt's forbidden-substring list and the dev verb's
+  review-etiquette rule — name it too; the author restriction covers a
+  caller's human commenters, who are under neither rule. Until
+  2026-09-30 the codex reviewer's `engine: codex` footer was a second
+  anchor, appended after its sed and its comment-size cap. Since step 3
+  of design/untrusted-agent-job.md the codex review lands flagged
+  `review` and gets the marker from `land`, and the footer anchors
+  nothing (decision: Ransom, 2026-09-30: codex reviews posted before then
+  are not supported). `land`'s `defang` is the one place that still splits
+  the footer; the composers' seds no longer do. The
   reviewer is also told not to restate regression-accepted notes an
   earlier round already posted.
 - **Codex reviews get the PR thread since 2026-09-09**: the Claude

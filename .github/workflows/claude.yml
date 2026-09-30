@@ -1434,7 +1434,7 @@ jobs:
           MERGE_SHA: ${{ steps.sync.outputs.merge_sha }}
           SYNC_BASE: ${{ steps.sync.outputs.base }}
           SYNC_APPEND: ${{ inputs.branch_sync_append }}
-          REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, have each review thread you fully address in code resolved so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id (the PRRT_… `id`), then append that id to the `resolve_threads` array in the same manifest-extra.json as your comments — your gh cannot resolve threads, and the workflow resolves exactly the ones you list after it lands your commits. Leave unresolved, and explain in a comment, any comment you deliberately decline; never list a thread you did not actually address. In any comment you write, never write the review-comment HTML marker or the codex reviewer''s footer ''engine: codex'' verbatim: they are how the codex fix rounds locate the newest review, so a comment of yours carrying either would be mistaken for the review.' || '' }}"
+          REVIEW_ETIQUETTE: "${{ (github.event.issue.pull_request != '' || github.event.pull_request != '') && 'When your task involves addressing inline pull-request review comments, have each review thread you fully address in code resolved so settled feedback is visibly closed: query repository.pullRequest.reviewThreads via gh api graphql to get each thread id (the PRRT_… `id`), then append that id to the `resolve_threads` array in the same manifest-extra.json as your comments — your gh cannot resolve threads, and the workflow resolves exactly the ones you list after it lands your commits. Leave unresolved, and explain in a comment, any comment you deliberately decline; never list a thread you did not actually address. In any comment you write, never write the review-comment HTML marker verbatim: it is how the codex fix rounds locate the newest review, so a comment of yours carrying it would be mistaken for the review.' || '' }}"
           EXTRA: ${{ inputs.append_system_prompt }}
         run: |
           # The landing directory exists before the agent starts (runner-owned,
@@ -1727,13 +1727,10 @@ jobs:
             if [ -n "$dirty" ]; then
               head=$(git rev-parse HEAD 2>/dev/null || echo "$START_SHA")
               if [ "$head" = "$START_SHA" ] || { [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ]; }; then
-                # Strip the @ from trigger tokens in agent-authored text and
-                # split the codex reviewer's footer — this is embedded in a
-                # marvin-authored comment, which pr-feedback-context would
-                # take for the newest review if it carried the footer (the
-                # land job de-fangs triggers and markers again, but not the
-                # footer: see the codex summary step's comment).
-                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' -e 's/engine: codex/engine  codex/g' || true)
+                # Strip the @ from trigger tokens in agent-authored text —
+                # this is embedded in a marvin-authored comment (the land job
+                # de-fangs triggers and markers again).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' || true)
                 err="the agent finished but left edits to tracked files uncommitted, so none of its work landed (only the runner's base merge, if there was one) — whatever its summary reports, no code change reached the branch. The runner is ephemeral, so those edits are gone; re-trigger to redo the task."
                 [ -n "$summary" ] && err="$err Agent summary: $summary"
               else
@@ -1851,16 +1848,12 @@ jobs:
       #     (the validator refuses the WHOLE manifest — commits included —
       #     over one bad reference, so a bad entry is dropped with a warning
       #     instead), at most five, and de-fanged in place with the codex
-      #     summary's sed, footer rule included — `land` breaks triggers
-      #     and markers again but leaves the codex reviewer's footer alone,
-      #     so an agent body quoting `engine: codex`, posted as marvin
-      #     after a review verdict, would be pr-feedback-context's newest
-      #     review anchor for the next codex fix round (review round 1 of
-      #     #84 reproduced it). A no-change Claude run that left no
-      #     comment relays its final message instead (de-fanged with the
-      #     codex summary's sed, footer rule included), so a run that
-      #     answered a question or gave up leaves its answer on the thread
-      #     as the machine account — the codex summary's Claude analogue.
+      #     summary's sed (`land` breaks triggers and markers again). A
+      #     no-change Claude run that left no comment relays its final
+      #     message instead (de-fanged with the codex summary's sed), so a
+      #     run that answered a question or gave up leaves its answer on the
+      #     thread as the machine account — the codex summary's Claude
+      #     analogue.
       #   resolve_threads — PR run, real commits: the agent's own
       #     `resolve_threads` from its manifest-extra.json (its gh holds the
       #     read-only job token since the launcher, so it cannot resolve a
@@ -2096,7 +2089,6 @@ jobs:
             # re-caps at 60,000 with its own note).
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                   -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$DIR/$file" >"$DIR/$file.defanged" && mv "$DIR/$file.defanged" "$DIR/$file"
             if [ "$(wc -c <"$DIR/$file")" -gt 59000 ]; then
@@ -2114,15 +2106,13 @@ jobs:
             # the final message so the answer (or the reason it changed
             # nothing) reaches the thread. Same de-fang as the codex
             # summary step: this posts as marvin, so a final message
-            # quoting a trigger, a loop marker or the codex reviewer's
-            # footer would fire a workflow, forge a verdict or pose as the
-            # newest review; `land` repeats the trigger and marker rules
-            # but deliberately not the footer.
+            # quoting a trigger or a loop marker would fire a workflow,
+            # forge a verdict or pose as the newest review; `land` repeats
+            # every rule here.
             file="${EXEC:-/home/runner/work/_temp/claude-execution-output.json}"
             summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 \
               | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                        -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                       -e 's/engine: codex/engine  codex/g' \
                        -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' || true)
             {
               printf '🤖 claude (dev agent): no code changes were made%s — the agent'"'"'s summary:\n\n' "${merge_only:+ (the base-branch merge from the workflow was committed and lands with this run)}"
@@ -2726,13 +2716,11 @@ jobs:
           # de-fang: the embedded comments can include reviewer verdict
           # comments, and a marker substring codex never sees is one it
           # cannot echo (length-neutral substitutions). The review-comment
-          # anchor marker and the codex reviewer's engine footer are in the
-          # list too: the pr-feedback-context composite has already anchored
-          # on them, and a posted summary that echoed either would be a false
-          # anchor for a later round on this PR.
+          # anchor marker is in the list too: the pr-feedback-context
+          # composite has already anchored on it, and a posted summary that
+          # echoed it would be a false anchor for a later round on this PR.
           head -c 120000 "$RUNNER_TEMP/codex-context.md" \
             | sed -E -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                     -e 's/engine: codex/engine  codex/g' \
                      -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >"$RUNNER_TEMP/codex-prompt.md"
 
       - name: Run Codex
@@ -2952,16 +2940,14 @@ jobs:
       # tokens would fire workflows, and the @auto loops match their
       # verdict/handoff markers with plain substring contains() — codex
       # QUOTING a marker would forge a verdict or suppress an owed hand-back,
-      # so break those substrings too. The review-comment anchor marker and
-      # the codex reviewer's engine footer are in the list as well: this body
-      # posts as marvin, an author pr-feedback-context trusts as a review
-      # anchor, so a summary echoing either would be taken for the newest
-      # review by the next codex fix round on the same PR (`land` de-fangs
-      # triggers and markers again but deliberately not the footer — it
-      # posts the codex reviewer's real one — so this is the footer's only
-      # layer). Gated on the parse step (which is gated on the commit step):
-      # the summary states the thread count, and OUT is the stripped copy it
-      # wrote — falling back to FINAL, the imported copy of codex's message
+      # so break those substrings too. The review-comment anchor marker is
+      # in the list as well: this body posts as marvin, an author
+      # pr-feedback-context trusts as a review anchor, so a summary echoing
+      # it would be taken for the newest review by the next codex fix round
+      # on the same PR (`land` de-fangs every rule here again). Gated on the
+      # parse step (which is gated on the commit step): the summary states
+      # the thread count, and OUT is the stripped copy it wrote — falling
+      # back to FINAL, the imported copy of codex's message
       # unstripped (never the codex-owned output file; finding 4628447), when
       # that copy is missing (the composite warned; a stray RESOLVED-THREADS line
       # in a comment beats the summary going unread — inspect_ai#428's ten
@@ -2988,7 +2974,6 @@ jobs:
             printf '🤖 codex (dev agent):\n\n'
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                   -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$src" 2>/dev/null || echo "(codex produced no final message)"
             [ -z "$COMMITTED" ] && printf '\n\n_No code changes were made._'
@@ -3254,16 +3239,12 @@ jobs:
       #     (the validator refuses the WHOLE manifest — commits included —
       #     over one bad reference, so a bad entry is dropped with a warning
       #     instead), at most five, and de-fanged in place with the codex
-      #     summary's sed, footer rule included — `land` breaks triggers
-      #     and markers again but leaves the codex reviewer's footer alone,
-      #     so an agent body quoting `engine: codex`, posted as marvin
-      #     after a review verdict, would be pr-feedback-context's newest
-      #     review anchor for the next codex fix round (review round 1 of
-      #     #84 reproduced it). A no-change Claude run that left no
-      #     comment relays its final message instead (de-fanged with the
-      #     codex summary's sed, footer rule included), so a run that
-      #     answered a question or gave up leaves its answer on the thread
-      #     as the machine account — the codex summary's Claude analogue.
+      #     summary's sed (`land` breaks triggers and markers again). A
+      #     no-change Claude run that left no comment relays its final
+      #     message instead (de-fanged with the codex summary's sed), so a
+      #     run that answered a question or gave up leaves its answer on the
+      #     thread as the machine account — the codex summary's Claude
+      #     analogue.
       #   resolve_threads — codex, PR run, real commits: the RESOLVED-THREADS
       #     ids (`land` intersects them with the PR's own threads).
       #   stage (was "Stage - Review (hand-back)") — Review: the one-shot dev

@@ -420,10 +420,11 @@ Testing a change).
   expression in the workflow or the stubs reads the PR-event payload.
 - `test_pr_feedback_context.py` — the `pr-feedback-context` composite's
   step, lifted and run against a stub `gh`: a review round is anchored only
-  on a marker-bearing comment (the review-comment marker or the codex
-  footer) by the machine account's two logins; `claude[bot]` or any other
-  Bot does not anchor one, and the section falls back to the last 8
-  comments (design/untrusted-agent-job.md).
+  on a comment carrying the review-comment marker by the machine account's
+  two logins; `claude[bot]` or any other Bot does not anchor one, nor does
+  the codex reviewer's old `engine: codex` footer without the marker, and
+  the section falls back to the last 8 comments
+  (design/untrusted-agent-job.md).
 - `test_codex_path.py` — the codex path's runner-side search path (Claude
   Security 4628448): the `assert-runner-only-path` check `create-codex-user`
   runs before its grant and `reclaim-codex-workspace` runs after codex
