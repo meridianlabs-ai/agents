@@ -23,7 +23,7 @@ agent-ns-launch <handoff> <action pid>
     with the pidfd as fd 3.
 
 agent-ns-init <handoff>
-    The namespace's PID 1, root. It builds the agent's view — the four bind
+    The namespace's PID 1, root. It builds the agent's view — the bind
     mounts staged, tmpfs over the runner's home and /tmp, the binds put back
     at their own paths, the staging detached — closes every other
     descriptor, runs the isolation check as the agent user inside the
@@ -442,16 +442,20 @@ def umount_detach(target):
         raise OSError(e, f"umount {target}: {os.strerror(e)}")
 
 
-def bind_plan(grant, workspace, runner_temp):
+def bind_plan(grant, workspace, runner_temp, context_dir=""):
     """(path, writable) for each directory the agent sees under the runner's
     home, fixed by the grant mode: the workspace (read-only in `none` mode),
-    the landing dir, the review scratch copy (`none` mode only) and the WIF
-    dir (read-only). Every one is required."""
+    the landing dir, the review scratch copy (`none` mode only), the WIF
+    dir (read-only) and, when the launcher recorded one, the caller's
+    context directory (read-only: the dev agent's downloaded images). Every
+    one is required."""
     plan = [(workspace, grant == "workspace"),
             (os.path.join(runner_temp, "claude-agent"), True)]
     if grant == "none":
         plan.append((os.path.join(runner_temp, "scratch"), True))
     plan.append((os.path.join(runner_temp, WIF_DIR_NAME), False))
+    if context_dir:
+        plan.append((context_dir, False))
     return plan
 
 
@@ -567,6 +571,7 @@ def init(argv):
     runner_temp = read_run(root, "runner-temp")
     runner_home = read_run(root, "runner-home")
     cli = read_run(root, "cli")
+    context_dir = read_run(root, "context-dir")
     # agent-ns-launch checked the handoff against sudo's invoking user; the
     # environment is gone here, so check it against its owner, which must be
     # neither root nor the agent.
@@ -576,7 +581,7 @@ def init(argv):
     handoff = parse_handoff(read_handoff(handoff_path, owner))
     os.unlink(handoff_path)
     env = handoff["env-map"]
-    plan = bind_plan(grant, workspace, runner_temp)
+    plan = bind_plan(grant, workspace, runner_temp, context_dir)
     check_plan(plan, runner_home)
     for path, _ in plan:
         if not os.path.isdir(path) or os.path.islink(path):
@@ -595,6 +600,8 @@ def init(argv):
               "--wif", os.path.join(runner_temp, WIF_DIR_NAME)]
     if grant == "none":
         check += ["--scratch", os.path.join(runner_temp, "scratch")]
+    if context_dir:
+        check += ["--context", context_dir]
     for p in handoff["unreachable"]:
         check += ["--unreachable", os.fsdecode(p)]
     pid = os.fork()

@@ -1026,8 +1026,11 @@ def test_a_machine_account_reopen_between_the_pre_read_and_the_patch_is_tagged_a
 def test_only_the_loops_counter_comments_are_edited_by_machine_account_code():
     """The proof above rests on land never editing a comment: the only
     comment edits in the machine account's trusted code are the loops'
-    counter rewrites, which write a fixed body. A new edit path must be
-    checked against reopen_tag before it joins this list."""
+    counter rewrites and claude.yml's status comment (the land job's last
+    step, on the comment the gate posted), each writing a fixed body that
+    can neither start with the reopen marker nor carry a reopen tag. A new
+    edit path must be checked against reopen_tag before it joins this
+    list."""
     import re
 
     edit = re.compile(r"PATCH[^\n]*issues/comments|updateIssueComment|--edit-last")
@@ -1037,10 +1040,18 @@ def test_only_the_loops_counter_comments_are_edited_by_machine_account_code():
         if f.is_file() and f != SCRIPT and edit.search(f.read_text(errors="ignore"))
     }
     assert found == {
+        ".github/workflows/claude.yml",
         ".github/workflows/claude-auto.yml",
         ".github/workflows/claude-auto-review.yml",
         ".github/actions/reset-auto-counters/action.yml",
     }
+    # claude.yml's one edit: the gate's own status comment, rewritten to a
+    # body that starts with the fixed "**Claude finished" line.
+    claude = (ROOT / ".github" / "workflows" / "claude.yml").read_text()
+    assert len(edit.findall(claude)) == 1
+    assert 'gh api -X PATCH "repos/$REPO/issues/comments/$COMMENT_ID"' in claude
+    assert "          COMMENT_ID: ${{ needs.gate.outputs.status_comment_id }}\n" in claude
+    assert "body=$(printf '**Claude finished @%s" in claude
 
 
 # ---------------------------------------------------- reflect_companion_loops

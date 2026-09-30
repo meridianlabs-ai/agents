@@ -28,9 +28,8 @@ description: >-
      PATH (`path-prefix` — the provisioning `bin` output — then the CLI's
      directory and the system directories), the workspace, the runner's
      temp and home directories, the runner's install directory (for the
-     isolation check), the wrapper's own PATH and the checkout's HEAD —
-     the symbolic ref, or `detached:<sha>` — against which the wrapper
-     recognises a branch the action's prepare created.
+     isolation check), the wrapper's own PATH and the caller's
+     `context-dir`, if any, which the namespace binds read-only.
   5. The pre-action user check (`check-isolation.sh --phase pre`) runs as
      the user with plain `sudo -n -u claude-agent`: no sudo, no Docker, Yama
      ptrace_scope 1 or more. What depends on the namespace, the action's
@@ -48,7 +47,7 @@ description: >-
      after the agent as the agent's own output. After the kill, so nothing
      can write it again before the agent starts.
 
-  Runs no git command against the checkout except the two reads of HEAD.
+  Runs no git command against the checkout.
   Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/claude-agent-launcher@main); NO
   post step.
@@ -69,6 +68,16 @@ inputs:
     description: >-
       Colon-separated absolute directories put first on the agent's PATH:
       `provision-fallback`'s `bin` output. Empty for none.
+    required: false
+    default: ""
+  context-dir:
+    description: >-
+      A directory under `$RUNNER_TEMP` the caller filled before this step
+      (claude.yml's dev agent: the images its context names), bound
+      read-only into the agent's namespace at the same path. It must be a
+      plain directory owned by the runner that the agent user cannot
+      write, and not the landing, WIF or scratch directory. Empty (the
+      default) binds nothing more.
     required: false
     default: ""
   system-path:
@@ -96,6 +105,7 @@ runs:
       env:
         GRANT: ${{ inputs.grant }}
         PATH_PREFIX: ${{ inputs.path-prefix }}
+        CONTEXT_DIR: ${{ inputs.context-dir }}
         SYSTEM_PATH: ${{ inputs.system-path }}
         SOURCE_DIR: ${{ github.action_path }}
       run: |
@@ -118,6 +128,21 @@ runs:
             case "$d" in /*) ;; *) err "path-prefix entry '$d' is not absolute" ;; esac
           done
           prefix="$PATH_PREFIX:"
+        fi
+        if [ -n "$CONTEXT_DIR" ]; then
+          one_line context-dir "$CONTEXT_DIR"
+          case "$CONTEXT_DIR" in
+            "$RUNNER_TEMP"/?*) ;;
+            *) err "context-dir '$CONTEXT_DIR' is not a directory under \$RUNNER_TEMP" ;;
+          esac
+          [ "$(realpath -ms -- "$CONTEXT_DIR")" = "$CONTEXT_DIR" ] || err "context-dir '$CONTEXT_DIR' is not a normalised path"
+          case "${CONTEXT_DIR#"$RUNNER_TEMP"/}" in
+            "$user"|"$user"/*|claude-workload-identity|claude-workload-identity/*|scratch|scratch/*|claude-agent-launch|claude-agent-launch/*)
+              err "context-dir '$CONTEXT_DIR' is a directory the launch already binds or keeps from the agent" ;;
+          esac
+          [ -d "$CONTEXT_DIR" ] && [ ! -L "$CONTEXT_DIR" ] || err "context-dir '$CONTEXT_DIR' is not a plain directory"
+          [ "$(stat -c '%u' "$CONTEXT_DIR")" = "$(id -u)" ] || err "context-dir '$CONTEXT_DIR' is not owned by the runner"
+          if sudo -n -u "$user" test -w "$CONTEXT_DIR"; then err "context-dir '$CONTEXT_DIR' is writable by $user"; fi
         fi
 
         # 2. The CLI, at the action's pinned version, root-owned.
@@ -157,8 +182,6 @@ runs:
 
         # 4. What the wrapper and the namespace trust.
         record() { one_line "$1" "$2"; printf '%s\n' "$2" | sudo tee "$opt/run/$1" >/dev/null; sudo chmod 644 "$opt/run/$1"; }
-        gitr() { GIT_CONFIG_GLOBAL=/dev/null git -C "$GITHUB_WORKSPACE" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
-        if head=$(gitr symbolic-ref -q HEAD); then :; else head="detached:$(gitr rev-parse --verify HEAD)"; fi
         runner_root=""
         for p in $(pgrep -x Runner.Worker || true); do
           exe=$(readlink -f "/proc/$p/exe" 2>/dev/null || true)
@@ -172,7 +195,7 @@ runs:
         record runner-home "$(getent passwd "$(id -un)" | cut -d: -f6)"
         record runner-root "$runner_root"
         record system-path "$SYSTEM_PATH"
-        record head "$head"
+        record context-dir "$CONTEXT_DIR"
 
         # 5. The pre-action user check.
         (cd / && sudo -n -u "$user" -H -- env -i PATH="$SYSTEM_PATH" HOME="/home/$user" \
@@ -193,4 +216,4 @@ runs:
         #    may pass for the agent's output.
         sudo rm -rf "$RUNNER_TEMP/$user"
         sudo install -d -o runner -g "$user" -m 2775 "$RUNNER_TEMP/$user"
-        echo "claude-agent launcher ready: Claude Code $version at $cli, grant mode $GRANT, HEAD $head; launch through $opt/bin/claude"
+        echo "claude-agent launcher ready: Claude Code $version at $cli, grant mode $GRANT${CONTEXT_DIR:+, context $CONTEXT_DIR read-only}; launch through $opt/bin/claude"

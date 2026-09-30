@@ -1,0 +1,87 @@
+name: dev-agent-context
+description: >-
+  Write claude.yml's dev agent context to one file under `$RUNNER_TEMP`,
+  for both engines' prompt steps to read (design/untrusted-agent-job.md →
+  claude.yml: agent mode → Context prompt). It holds what started the run,
+  the issue's or PR's title and body from the event payload, and the
+  discussion before the run started: an issue's comments (newest 30, at
+  most 40,000 characters, machine control comments dropped), or a PR's
+  review summaries and, through `pr-feedback-context`, its comments and
+  review threads. Everything created or edited at or after `trigger-time`
+  is left out, as claude-code-action's tag mode did, so an author cannot
+  change the context after a maintainer started the run. With
+  `images-dir`, the attachment images the text links to are downloaded
+  there (only from GitHub's signed attachment host, no redirects, at most
+  20 images, 10 MB each and 50 MB in all) and each link names its file.
+  Runs as the runner before the agent user exists. A failed API read fails
+  the step after three attempts; a failed image download leaves the link.
+  The script is `.github/scripts/dev_agent_context.py`. Referenced
+  fully-qualified
+  (meridianlabs-ai/agents/.github/actions/dev-agent-context@main); NO post
+  step.
+
+inputs:
+  token:
+    description: Token the API reads use (the job token; reads only).
+    required: true
+  repo:
+    description: owner/name of the issue or PR.
+    required: true
+  trigger-time:
+    description: >-
+      The gate's `trigger_time` output: when the triggering comment, review
+      or event was created, as GitHub's API writes times
+      (`2026-09-30T10:00:00Z`). Empty filters nothing, with a warning.
+    required: false
+    default: ""
+  out:
+    description: Path of the context file (overwritten).
+    required: true
+  images-dir:
+    description: >-
+      Directory under `$RUNNER_TEMP` for the downloaded images, re-created
+      empty, runner-owned 0755. The Claude job passes it and binds it
+      read-only into the agent's namespace (the launcher's `context-dir`).
+      Empty (the default) downloads nothing and leaves the links.
+    required: false
+    default: ""
+
+outputs:
+  file:
+    description: The context file (`out`).
+    value: ${{ inputs.out }}
+
+runs:
+  using: composite
+  steps:
+    - id: feedback
+      if: github.event.issue.pull_request != '' || github.event.pull_request != ''
+      uses: meridianlabs-ai/agents/.github/actions/pr-feedback-context@main
+      with:
+        token: ${{ inputs.token }}
+        repo: ${{ inputs.repo }}
+        pr: ${{ github.event.issue.number || github.event.pull_request.number }}
+        out: ${{ runner.temp }}/dev-agent-feedback.md
+        trigger-time: ${{ inputs.trigger-time }}
+
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        TRIGGER_TIME: ${{ inputs.trigger-time }}
+        OUT: ${{ inputs.out }}
+        IMAGES_DIR: ${{ inputs.images-dir }}
+        FEEDBACK: ${{ steps.feedback.outcome == 'success' && format('{0}/dev-agent-feedback.md', runner.temp) || '' }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/dev_agent_context.py
+      run: |
+        set -euo pipefail
+        if [ -n "$IMAGES_DIR" ]; then
+          case "$IMAGES_DIR" in
+            "$RUNNER_TEMP"/?*) ;;
+            *) echo "::error::dev-agent-context: images-dir '$IMAGES_DIR' is not under \$RUNNER_TEMP"; exit 1 ;;
+          esac
+          rm -rf -- "$IMAGES_DIR"
+          (umask 022 && mkdir -- "$IMAGES_DIR")
+        fi
+        python3 "$SCRIPT" --repo "$REPO" --out "$OUT" --trigger-time "$TRIGGER_TIME" \
+          --feedback "$FEEDBACK" --images-dir "$IMAGES_DIR"

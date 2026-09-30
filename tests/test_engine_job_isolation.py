@@ -62,6 +62,7 @@ job is dispatched, and a skipped job gets no job message at all.
   runs it only when it has bin directories to write.
 """
 
+import json
 import os
 import re
 import stat
@@ -166,16 +167,13 @@ def test_only_the_claude_job_requests_an_oidc_token(name):
     assert "      id-token: write         # WIF auth" in permissions(claude_job)
 
 
-# claude.yml's Claude job stays in tag mode, which needs a write token, until
-# step 4 of design/untrusted-agent-job.md moves it to agent mode.
-JOB_TOKEN_MODE = [name for name in REUSABLE if name != "claude.yml"]
-
-
-@pytest.mark.parametrize("name", JOB_TOKEN_MODE)
+@pytest.mark.parametrize("name", REUSABLE)
 def test_every_claude_action_step_runs_on_the_job_token(name):
     # github_token is the job token, so the action never exchanges the job's
     # OIDC token for a Claude App token (and runs no revoke post-step);
-    # additional_permissions, which only that exchange reads, is gone.
+    # additional_permissions, which only that exchange reads, is gone. Since
+    # step 4 of design/untrusted-agent-job.md this holds for claude.yml too:
+    # agent mode, with no trigger inputs (the gate's check is the trigger).
     found = 0
     for job, block in jobs(workflow_text(name)).items():
         for s in steps(block):
@@ -187,6 +185,16 @@ def test_every_claude_action_step_runs_on_the_job_token(name):
             for key in ("additional_permissions", "trigger_phrase", "label_trigger"):
                 assert f"          {key}:" not in code, (job, key)
     assert found == 1, name
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_land_job_has_a_short_timeout(name):
+    # Claude Security 4773341: a land job that hangs or keeps retrying into a
+    # rate limit ends well before the 6 h default (real runs take under a
+    # minute).
+    land = jobs(workflow_text(name))["land"]
+    found = re.findall(r"^    timeout-minutes: (\d+)$", land, re.M)
+    assert len(found) == 1 and 5 <= int(found[0]) <= 30, found
 
 
 @pytest.mark.parametrize("name", REUSABLE)
@@ -507,9 +515,10 @@ def test_the_post_agent_reclaim_is_first_after_the_action_and_gates_every_later_
     seen = set()
     for s in later:
         code = "\n".join(code_lines(s))
-        if "reset-origin-url@main" in code:
-            assert gate in step_if(s), s[:60]
-            seen.add("reset")
+        # The post-agent origin reset is retired (design/untrusted-agent-job.md
+        # → What stays in the untrusted job): with the job token as the
+        # action's token nothing after the reclaim fetches or pushes.
+        assert "reset-origin-url@main" not in code, s[:60]
         if "import-codex-final@main" in code:
             # ...and only for an agent that was launched: a provisioning or
             # launcher failure skips the agent, and what provisioning left in
@@ -528,8 +537,8 @@ def test_the_post_agent_reclaim_is_first_after_the_action_and_gates_every_later_
             assert "          AGENTRECLAIM_OUTCOME: ${{ steps.agentreclaim.outcome }}\n" in s
             assert '"${AGENTRECLAIM_OUTCOME:-}" != "success"' in code or '"${AGENTRECLAIM_OUTCOME:-}" = "success"' in code
             seen.add("landing")
-    expected = {"claude.yml": {"reset", "import", "surface", "landing"}, "claude-auto.yml": {"reset", "surface", "landing"},
-                "claude-auto-review.yml": {"reset", "import", "surface", "landing"}, "claude-review.yml": {"import"}}
+    expected = {"claude.yml": {"import", "surface", "landing"}, "claude-auto.yml": {"surface", "landing"},
+                "claude-auto-review.yml": {"import", "surface", "landing"}, "claude-review.yml": {"import"}}
     assert seen == expected[name], seen
     emit = next(s for s in later if "emit-landing@main" in s)
     read_only = next(l.strip() for l in code_lines(emit) if l.strip().startswith("read-only:"))
@@ -552,6 +561,43 @@ def test_the_surface_step_reports_each_boundary_step(name):
         assert f'[ "${{{var}_OUTCOME:-}}" = "failure" ]' in code, var
     assert '[ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]' in code
     assert "SETUPFB" not in code and "NOROOT" not in code
+
+
+AGENT_TEXT = "AGENT-AUTHORED error text"
+# The outcomes that withhold the run's work, per workflow: the post-agent
+# reclaim everywhere, and in the reviewer the re-plant check and the landing
+# prep too.
+WITHHELD = [(n, {"AGENTRECLAIM_OUTCOME": "failure"}) for n in REUSABLE] + [
+    ("claude-review.yml", {"REPLANT_OUTCOME": "failure"}),
+    ("claude-review.yml", {"CLAUDEPOST_OUTCOME": "failure"}),
+]
+
+
+@pytest.mark.parametrize("name, outcomes", WITHHELD)
+def test_a_withheld_run_reports_no_agent_text(name, outcomes, tmp_path):
+    # Claude Security 4773889: the Surface step, lifted and run with an
+    # execution file whose result is an is_error carrying agent text and an
+    # outcome that withholds the work. The report is fixed text only.
+    surface = next(s for s in claude_steps(name) if step_id(s) == "surface")
+    script = lift_run(surface, surface.splitlines()[0])
+    exec_file = tmp_path / "exec.json"
+    exec_file.write_text(json.dumps([{"type": "result", "is_error": True, "result": AGENT_TEXT}]))
+    error_file = tmp_path / "agent-error.md"
+    env = {"PATH": os.environ["PATH"], "EXEC": str(exec_file), "ERROR_FILE": str(error_file),
+           "CLAUDE_OUTCOME": "success", "CHECKOUT_OUTCOME": "success", "ASSERT_OUTCOME": "success",
+           "BASE_OUTCOME": "success", "AGENTUSER_OUTCOME": "success", "SETUP_OUTCOME": "success",
+           "AGENTPRERECLAIM_OUTCOME": "success", "LAUNCHER_OUTCOME": "success", "AGENTRECLAIM_OUTCOME": "success",
+           "REPLANT_OUTCOME": "success", "CLAUDEPOST_OUTCOME": "success", "IS_PR": "false", "NUM": "7",
+           "GITHUB_OUTPUT": str(tmp_path / "out"), **outcomes}
+    r = sh("bash", "-c", script, check=False, env=env)
+    assert r.returncode == 0, r.stderr
+    report = error_file.read_text()
+    assert report.startswith("⚠️")
+    assert AGENT_TEXT not in report and AGENT_TEXT not in r.stdout
+    # With nothing withheld the same file's error text is reported.
+    env.update({k: "success" for k in outcomes})
+    r = sh("bash", "-c", script, check=False, env=env)
+    assert AGENT_TEXT in error_file.read_text()
 
 
 def test_the_reviewer_launches_the_sandboxed_paths_with_no_grant():

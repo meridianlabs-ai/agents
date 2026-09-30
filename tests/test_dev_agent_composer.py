@@ -59,9 +59,9 @@ def repo(tmp_path):
 
 def on(r, branch):
     """Put HEAD on the run's branch — the evidence the composer requires
-    before it bundles anything (claude-code-action's setupBranch, the codex
-    prep step or sync-branch check it out; the initial checkout is on the
-    event's default ref, which is not agent work)."""
+    before it bundles anything (Prepare branch, the codex prep step or
+    sync-branch check it out; the initial checkout is on the event's default
+    ref, which is not agent work)."""
     git("checkout", "-qB", branch, cwd=r["work"])
 
 
@@ -79,7 +79,8 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
             claude_outcome="success", codex_commit="skipped", codex_guard=None, codex_ids="",
             codex_summary=None, final_message="Here is the answer.", error=None, req_review="false",
             base="", pr_labels=None, claude_branch=ISSUE_BRANCH, head_branch=PR_BRANCH,
-            merge_sha="", prov_note="", checkout_sha=None, sync_branch=None, agent_reclaim="success"):
+            merge_sha="", prov_note="", checkout_sha=None, sync_branch=None, agent_reclaim="success",
+            mode="commit"):
     # PR_LABELS as the gate composes it: `auto` exactly when the run is
     # autonomous (an @auto trigger or an `auto`-labelled item), unless a test
     # says otherwise.
@@ -113,7 +114,12 @@ def compose(r, *, is_pr, engine="claude", trigger="@claude", auto="false", agent
         "CHECKOUT_SHA": r["start"] if checkout_sha is None else checkout_sha,
         "SYNC_BRANCH": (head_branch if sync_branch is None else sync_branch) if is_pr else "",
         "START_SHA": r["start"], "MERGE_SHA": merge_sha,
-        "CLAUDE_BRANCH": claude_branch if (engine == "claude" and not is_pr) else "",
+        # Prepare branch's outputs (the Claude job): the issue run's new
+        # branch, or the PR head it checked out; `comment-only` for a closed
+        # PR whose head branch is gone.
+        "PREP_BRANCH": (claude_branch if not is_pr else (head_branch if sync_branch is None else sync_branch))
+                       if engine == "claude" else "",
+        "MODE": mode if engine == "claude" else "",
         "CODEX_BRANCH": CODEX_BRANCH if (engine == "codex" and not is_pr) else "",
         "EXEC": str(exec_file),
         "CLAUDE_OUTCOME": claude_outcome if engine == "claude" else "skipped",
@@ -361,9 +367,9 @@ def test_early_failure_on_an_alternate_base_bundles_nothing(repo):
 
 
 def test_commits_off_the_run_branch_are_not_bundled(repo):
-    # The action reported its branch, but it does not exist locally and HEAD
-    # is elsewhere: the action created the branch (its branch_name output
-    # names it) and the agent removed it — whatever sits on HEAD is not the
+    # Prepare branch reported its branch, but it does not exist locally and
+    # HEAD is elsewhere: the step created the branch (its output names it)
+    # and the agent removed it — whatever sits on HEAD is not the
     # run's work, the branch the action named must not receive foreign
     # history, and the run is an error, not a quiet no-change.
     on(repo, "somewhere-else")
@@ -377,7 +383,7 @@ def test_commits_off_the_run_branch_are_not_bundled(repo):
 
 def test_renamed_branch_after_a_successful_run_is_an_error(repo):
     # commit → `git branch -m` to a descriptive name → the agent finishes
-    # green. The action's branch_name output keeps the original name, so the
+    # green. Prepare branch's output keeps the original name, so the
     # named branch is gone: refused with an error, no relay, nothing bundled
     # — through emit-landing (read-only) and the validator (review round 3
     # of #84 reproduced a green "no code changes" run here).
@@ -456,15 +462,27 @@ def test_leaving_the_run_branch_appends_to_the_surface_error(repo):
     assert m["error"]["message"].startswith("⚠️ it broke\n\n---\n\n⚠️ The agent run finished but its work was NOT landed")
 
 
-def test_pr_run_with_head_off_the_pr_branch_lands_nothing(repo):
-    # A closed PR the sync skipped (no SYNC_BRANCH): HEAD is still the
-    # default ref, whose history may contain the PR's merged tip — never a
-    # push to the branch. The PR branch does not exist locally and HEAD is
-    # where the checkout left it, so this is the fence, not a rejection: no
-    # error of the composer's own.
-    m, _, _, out = compose(repo, is_pr=True, trigger="@auto", auto="true", sync_branch="")
+def test_a_comment_only_run_lands_nothing_and_relays_the_answer(repo):
+    # A closed PR whose head branch is gone (Prepare branch's `comment-only`):
+    # HEAD is still the default ref, whose history may contain the PR's
+    # merged tip — never a push. Nothing is bundled, not even a commit the
+    # agent made anyway, and that is no error: the answer is relayed.
+    commit(repo, subject="made anyway")
+    m, res, landing, out = compose(repo, is_pr=True, trigger="@auto", auto="true", mode="comment-only",
+                                   final_message="The branch is gone; here is the answer.")
     assert out["read_only"] == "true" and "handback" not in m and "error" not in m
     assert m["stage"] == "Review"                   # nothing handed back to the loop: the loop stopped here
+    assert "comment-only run" in res.stdout
+    assert "here is the answer" in (landing / "agent-summary.md").read_text()
+
+
+def test_a_closed_pr_with_a_live_head_is_continued(repo):
+    # Prepare branch checked the closed PR's head branch out at the gate's
+    # start (no merge): the commits land on it like an open PR's.
+    on(repo, PR_BRANCH)
+    commit(repo)
+    m, _, _, out = compose(repo, is_pr=True)
+    assert out["branch"] == PR_BRANCH and out["read_only"] == "false" and "error" not in m
 
 
 def test_rejected_autonomous_pr_run_hands_back_to_a_human(repo):
