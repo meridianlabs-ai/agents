@@ -105,6 +105,13 @@ text are checked by the tests under `tests/`.
   6), and the Claude launcher up to its launch; adversarial probing of the
   Claude agent's namespace is left to Claude Security scans (decision:
   Ransom, 2026-09-24).
+- A `settings` input that names a file is read only from inside the
+  workspace, as a regular file of at most 64 KiB with no `..` and no
+  symlink anywhere on its path, opened `O_NOFOLLOW`. Anything else fails
+  the compose step and the agent does not start. So a symlink committed in
+  the checkout cannot make a runner file outside it the agent's settings
+  (Claude Security finding 4773338; design/untrusted-agent-job.md →
+  Implementation plan → step 0).
 - The uid an agent runs as has no passwordless sudo and no other route to
   root when the agent step starts, on both engines: the agent is the
   `codex` or `claude-agent` user, which never has sudo and is in no group
