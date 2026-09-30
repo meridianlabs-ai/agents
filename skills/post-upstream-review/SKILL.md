@@ -14,13 +14,35 @@ marvin or the bot; upstream feedback comes from the maintainer personally.
 Arguments: the proxy issue number, plus optional instructions that shape the
 relay ("only the blocking one", "soften the tone", "also ask about X").
 
+The proxy is public and the findings quote the contributor's code and text,
+so the mechanics are two scripts next to this skill (substitute its base
+directory); the rules they follow are in
+[the skills' trust model](../THREAT_MODEL.md).
+
 ## Steps
 
-1. **Gather.** Read proxy issue `N` in `meridianlabs-ai/inspect_ai`: confirm
-   the `External` label; get the upstream PR URL (body template line); read
-   the latest review-findings comment (`claude[bot]`/machine account). Confirm
-   the upstream PR is still OPEN. If the user already posted an upstream
-   review NEWER than the findings comment, stop and ask — don't double-relay.
+1. **Gather.**
+
+   ```sh
+   bash <skill-base-dir>/gather.sh <N>
+   ```
+
+   It checks that proxy `N` in `meridianlabs-ai/inspect_ai` is labelled
+   `External` and was written by a verified author (the machine account, or
+   a write-access maintainer, who seeds new proxies by hand), reads the
+   upstream PR from its `Upstream PR:` line and confirms it is open, and
+   picks the findings comment to relay **by author, not recency**: only a
+   comment by the machine account or a write-access collaborator counts
+   (Claude Security 4773885). It prints `OK proxy=#N upstream=<url>
+   head=<sha> findings=<comment url> by <login> at <time>` and the paths of
+   `findings.md` (that comment's body) and `context.json` (for step 4).
+   Read the findings from `findings.md`. Exit codes: **3** nothing to relay
+   (not labelled External, written by someone else, no upstream PR line, the PR is closed, or no
+   trusted findings comment); **4** the newest findings-shaped comment is by
+   someone else — stderr names them and the newest trusted one: stop and
+   ask the user, never relay it; **5** a review of yours on the upstream PR
+   is newer than the findings comment — stop and ask, don't double-relay;
+   **2** a GitHub read failed.
 
 2. **Select and rewrite.** Apply the user's instructions (default: relay every
    finding). Rewrite each finding as direct maintainer-to-contributor
@@ -41,59 +63,72 @@ relay ("only the blocking one", "soften the tone", "also ask about X").
      request on the contributor's PR: it is out of scope for their change.
 
 3. **Map to diff lines.** For each finding with a file:line, check the line is
-   part of the PR diff (`gh pr diff <M> --repo <upstream>`; inline comments
-   can only attach to diff lines, RIGHT side for additions). Findings on lines
-   outside the diff go in the review body with a `path:line` reference
-   instead.
+   part of the PR diff (`gh pr diff <M> --repo UKGovernmentBEIS/inspect_ai`,
+   `M` from the `OK` line; inline comments can only attach to diff lines,
+   RIGHT side for additions). Findings on lines outside the diff go in the
+   review body with a `path:line` reference instead.
 
-4. **Post ONE review** (atomic — summary + inline comments together):
+4. **Post ONE review** (atomic — summary + inline comments together). Write
+   it as a JSON file with your file-writing tool, never through a shell
+   command or `-f` fields (the text quotes the contributor; rule (a)):
 
-   ```sh
-   gh api "repos/<upstream>/pulls/<M>/reviews" -X POST \
-     -f body="<summary>" -f event="<EVENT>" \
-     --input - <<'JSON'   # or build comments[] with -f comments[][path]= ...
-   JSON
+   ```json
+   {"body": "<summary>", "event": "REQUEST_CHANGES",
+    "comments": [{"path": "src/x.py", "line": 12, "side": "RIGHT", "body": "<finding>"}]}
    ```
 
-   REST shape: `{body, event, comments: [{path, line, side: "RIGHT", body}]}`
-   (use `start_line`+`line` for multi-line). `event`: `REQUEST_CHANGES` when
-   relaying any blocking finding, else `COMMENT` — overridable by the user's
-   instructions. Never `APPROVE` from this skill; approval is a separate
-   deliberate act.
+   Use `start_line` + `line` for a multi-line comment. `event`:
+   `REQUEST_CHANGES` when relaying any blocking finding, else `COMMENT` —
+   overridable by the user's instructions. Never `APPROVE` from this skill;
+   approval is a separate deliberate act, and the script refuses it. Then:
 
-   The review body MUST end with the AI-generation disclaimer footer:
+   ```sh
+   bash <skill-base-dir>/post.sh <context.json> <review.json>
+   ```
+
+   It runs `gather.sh` again and refuses when anything changed (a newer
+   trusted findings comment, an edit to the chosen one, a moved head:
+   exit 3), accepts only those
+   fields, backticks the agents' trigger phrases, appends the
+   AI-generation footer when the body does not end with it:
 
    ```
    ---
-   *This review was AI-generated, and reviewed by a maintainer before posting.*
+   *This review was AI-generated from findings a maintainer chose to relay; the maintainer did not review its wording.*
    ```
 
-5. **Bookkeeping.**
-   - Proxy stage → **Contributor** (ball is with them now):
+   and refuses (exit 4) a text that GitHub would link to an upstream issue
+   or PR other than `M` — the findings were written on the fork, where a
+   bare `#N` is a fork issue. Reword the reference (drop the `#`, or name
+   what it is); pass `--allow-ref <N>` only for one the user confirmed. It
+   prints the review as it will be posted, pins it to the head gather saw,
+   posts it with `gh api --input`, then notes the relay on the proxy
+   (`Relayed upstream as <review url> (<X> inline) from the findings
+   comment <comment url>. Awaiting contributor.`) and moves the proxy's
+   stage to **Contributor** (the ball is with them now). `--dry-run` runs
+   every check and prints the review without posting. Exit **6**: the
+   review is posted but a bookkeeping step failed (stderr says which; do it
+   by hand).
 
-     ```sh
-     # item id: issue -> projectItems (project 1), then:
-     gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
-       -f p=PVT_kwDOC7YMCM4BU68p -f i="$ITEM" \
-       -f f=PVTSSF_lADOC7YMCM4BU68pzhYZEwY -f o=39c05a50
-     ```
-
-   - Note the relay on the proxy issue for the audit trail:
-     `gh issue comment N --repo meridianlabs-ai/inspect_ai --body "Relayed upstream as <review url> (<X> inline, <Y> in body). Awaiting contributor."`
-
-6. **Report.** Review URL, what was relayed vs. dropped (and why), inline vs.
-   body placement, stage set. The hourly sync brings the proxy back to Human
-   Review when the contributor responds — posting this review also updates
-   your last-activity timestamp, which is exactly what that detector compares
-   against.
+5. **Report.** Review URL, the findings comment it relays (by URL), what was
+   relayed vs. dropped (and why), inline vs. body placement, stage set. The
+   hourly sync brings the proxy back to Human Review when the contributor
+   responds — posting this review also updates your last-activity
+   timestamp, which is exactly what that detector compares against.
 
 ## Cautions
 
 - Outward-facing: everything posted lands on a public PR under the user's
   name — and invoking this skill IS the authorization to post: the maintainer
   reviews the findings on the proxy before invoking, so compose and post
-  directly, no preview step. Stop and ask only when something is genuinely
-  unresolvable: no findings comment on the proxy, instructions that contradict
-  each other, or a finding that no longer matches the PR's current state.
+  directly, no preview step (decision: Ransom, 2026-09-30). The script prints
+  the review as it posts it; that is a record of the wording, not a chance
+  to approve it, and the footer tells the contributor the wording was not
+  reviewed by the maintainer.
+  Stop and ask when something is genuinely unresolvable: no trusted
+  findings comment on the proxy, a newer findings-shaped comment by someone
+  else, instructions that contradict each other, a finding that no longer
+  matches the PR's current state, or a reference the guard refused that the
+  relay needs.
 - Do not edit the contributor's PR, push to their branch, or touch labels /
   assignees upstream.

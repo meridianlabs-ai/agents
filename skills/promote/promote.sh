@@ -22,7 +22,10 @@
 # upstream's tracker, and the result is checked with GitHub's own renderer:
 # any other reference to an upstream issue or PR is refused, not published,
 # and so is a qualification that changed text GitHub does not read as a
-# reference (code, a link destination).
+# reference (code, a link destination). The branch's commit messages, which
+# upstream's squash merge copies onto main, are held to the same rule: a
+# reference to an upstream issue or PR in one is refused. A ts-mono
+# companion is accepted only from ts-mono itself, by a trusted author.
 # The body is printed as it will be published, in --dry-run and in the real
 # run.
 #
@@ -40,9 +43,12 @@
 # upstream or on the ts-mono companion's repo; the upstream PR body would
 # reference an upstream issue or PR other than the import's, qualifying its
 # bare refs would change text that is not a reference, or it could not be
-# rendered to check; a conflict merging upstream main into the branch);
-# 6 ambiguous — more than one fork PR qualifies;
-# re-run with --pr <number>.
+# rendered to check; a commit message in upstream main..<branch> references
+# an upstream issue or PR other than the import's, or the commits could not
+# be listed completely; the open ts-mono PRs on the branch could not be
+# listed completely; a conflict merging upstream main into the branch);
+# 6 ambiguous — more than one fork PR qualifies (re-run with --pr <number>),
+# or more than one open ts-mono PR on the branch passes the trust rule.
 set -euo pipefail
 
 FORK=meridianlabs-ai/inspect_ai
@@ -83,54 +89,15 @@ write() {  # guard every mutation; --dry-run prints instead
   if [ "$DRY" = "--dry-run" ]; then echo "DRY-RUN: $*"; else "$@"; fi
 }
 
-# Trusted identities (comma-separated), in REST form: the machine account's
-# User login (the PAT, today) and its GitHub App login (Phase 2; trusted by
-# name — the collaborators endpoint answers `none` for an App). The User
-# leaves this ONE value when the PAT is retired. Author logins are normalised
-# to this form by NORM_LOGIN before comparison.
-TRUSTED_LOGINS="i-am-marvin,meridian-marvin[bot]"
-# NORM_LOGIN: jq filter over an author object → its login in REST form. A
-# GraphQL Bot author (`__typename: Bot`) arrives bare (`meridian-marvin`) and
-# gets the `[bot]` suffix; `gh pr list/view --json author` renders an App as
-# `app/<slug>`. A deleted author (null) is "". A User's login is never
-# rewritten, so a User who registers an App's slug is not the App.
-NORM_LOGIN='if . == null then "" elif (.__typename // "") == "Bot" then "\(.login // "")[bot]" elif ((.login // "") | startswith("app/")) then "\(.login[4:])[bot]" else (.login // "") end'
-# Open fork PRs the fallback lists at most; a listing this long is treated
-# as truncated (uniqueness cannot be established) and refused.
+# TRUSTED_LOGINS, NORM_LOGIN, the trust helpers (trusted_login, check_pr)
+# and the Markdown reference check (render_markdown, rendered_refs) are the
+# skills' shared copies (skills/THREAT_MODEL.md).
+. "$(dirname "$(realpath "$0")")/../lib/common.sh"
+# Open PRs a listing reads at most (the fork PRs of the fallback, the ts-mono
+# PRs on the branch); a listing this long is treated as truncated
+# (uniqueness cannot be established) and refused.
 LIST_LIMIT=500
 
-# trusted_login <login>: 0 when <login> is in TRUSTED_LOGINS or has write
-# access on the fork (admin/maintain/write from the collaborator permission
-# API — a public repo answers `read` for everyone else). A failed or
-# unexpected lookup is untrusted (fail closed). Cached per login for the
-# run; call it in the main shell, not inside $(...), or the cache is lost.
-PERM_CACHE=""
-trusted_login() {
-  local login perm
-  login=$(tr 'A-Z' 'a-z' <<<"$1")
-  [ -n "$login" ] || return 1
-  case ",$(tr 'A-Z' 'a-z' <<<"$TRUSTED_LOGINS")," in *",$login,"*) return 0 ;; esac
-  case "$PERM_CACHE" in *"|$login=ok|"*) return 0 ;; *"|$login=no|"*) return 1 ;; esac
-  perm=$(gh api "repos/$FORK/collaborators/$login/permission" --jq .permission 2>/dev/null || true)
-  case "$perm" in
-    admin|maintain|write) PERM_CACHE="$PERM_CACHE|$login=ok|"; return 0 ;;
-    *) PERM_CACHE="$PERM_CACHE|$login=no|"; return 1 ;;
-  esac
-}
-# check_pr <pr-json>: applies the trust rule; sets REASON to "" when the PR
-# qualifies, else to why it was refused. Reads only headRepository and
-# author — never the PR's title, body or branch name.
-check_pr() {
-  local head login
-  head=$(jq -r '.headRepository.nameWithOwner // ""' <<<"$1")
-  login=$(jq -r ".author | $NORM_LOGIN" <<<"$1")
-  REASON=""
-  if [ "$head" != "$FORK" ]; then
-    REASON="head repository is '${head:-unknown}', not $FORK"
-  elif ! trusted_login "$login"; then
-    REASON="author '${login:-unknown}' is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $FORK"
-  fi
-}
 # fmt_pr <pr-json>: one listing line for the operator.
 fmt_pr() {
   jq -r '"  #\(.number) \(.state) head=\(.headRepository.nameWithOwner // "?"):\(.headRefName) author=\(.author.login // "?")"' <<<"$1"
@@ -176,7 +143,7 @@ if grep -qF 'Upstream issue:' <<<"$ISSUE_BODY"; then
     # pipefail, grep closing early makes tail die of SIGPIPE on a long body and
     # the whole pipeline read as "no rule")
     echo "note: issue #$N's 'Upstream issue:' header ignored — no \`---\` rule follows it (not /import's body); no upstream Fixes ref will be added" >&2
-  elif ! trusted_login "$ISSUE_AUTHOR"; then
+  elif ! trusted_login "$FORK" "$ISSUE_AUTHOR"; then
     echo "note: issue #$N's 'Upstream issue:' header ignored — issue author '${ISSUE_AUTHOR:-unknown}' is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $FORK; no upstream Fixes ref will be added" >&2
   else
     UP_ISSUE=$(grep -oE '[0-9]+' <<<"$UP_HEADER" | tail -1)
@@ -195,7 +162,7 @@ while IFS= read -r chip; do
   [ -n "$chip" ] || continue
   CHIP_NUMS="$CHIP_NUMS$(jq -r .number <<<"$chip") "
   line=$(fmt_pr "$chip")
-  check_pr "$chip"
+  check_pr "$FORK" "$chip"
   if [ -n "$REASON" ]; then
     LISTING="$LISTING$line — REFUSED: $REASON"$'\n'
   elif [ "$(jq -r .state <<<"$chip")" = "OPEN" ]; then
@@ -229,7 +196,7 @@ if [ -n "$PIN" ]; then
       --json number,state,isDraft,title,body,headRefName,headRefOid,author,headRepository,headRepositoryOwner 2>/dev/null \
     | jq -c --arg fork "$FORK" "$NORM" || true)
   [ -n "$PICK" ] || { echo "--pr $PIN is not a PR on $FORK" >&2; exit 3; }
-  check_pr "$PICK"
+  check_pr "$FORK" "$PICK"
   if [ -n "$REASON" ]; then
     echo "REFUSED --pr $PIN: $REASON" >&2
     fmt_pr "$PICK" >&2
@@ -271,7 +238,7 @@ if [ -z "$PICK" ]; then
     [ -n "$pr" ] || continue
     case "$CHIP_NUMS" in *" $(jq -r .number <<<"$pr") "*) continue ;; esac  # judged above
     line=$(fmt_pr "$pr")
-    check_pr "$pr"
+    check_pr "$FORK" "$pr"
     if [ -n "$REASON" ]; then
       LISTING="$LISTING$line — REFUSED: $REASON"$'\n'
     elif jq -e --arg n "$N" "$REF_TEST" <<<"$pr" >/dev/null; then
@@ -374,7 +341,42 @@ check_reviewer() {  # $1 = owner/repo; 204 ok, 404 exit 5, other → warn
 # look the companion up here and check it too, before any write. Unconditional
 # (default included): the promoting token has push on ts-mono, so this never
 # warns spuriously and catches a dropped collaborator for free.
-COMPANION=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+# `--head` matches the branch NAME in any repository, so anyone can open a
+# ts-mono PR from a personal fork under the same name: a candidate counts
+# only when it passes check_pr on ts-mono (its head is $TSMONO itself and
+# its author is trusted or has write access there), judged before anything
+# is written to it; two that pass are ambiguous (exit 6).
+# The listing must be complete and known-good before it decides anything (a
+# failed read, or one cut off at the limit, could hide the companion or a
+# second qualifying PR): either refuses with exit 5, before any write.
+COMPANION=""
+C_OK=""
+if ! C_ROWS=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open --limit "$LIST_LIMIT" \
+      --json number,state,headRefName,author,headRepository,headRepositoryOwner 2>/dev/null \
+    | jq -c --arg fork "$TSMONO" ".[] | $NORM"); then
+  echo "ABORT: could not list the open $TSMONO PRs on branch $BRANCH (gh pr list failed) — the companion cannot be decided; re-run. Nothing was written." >&2
+  exit 5
+fi
+if [ "$(jq -sc length <<<"$C_ROWS")" -ge "$LIST_LIMIT" ]; then
+  echo "ABORT: $TSMONO has $LIST_LIMIT or more open PRs on branch $BRANCH — the listing is truncated, so the companion cannot be decided. Nothing was written." >&2
+  exit 5
+fi
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  check_pr "$TSMONO" "$c"
+  if [ -n "$REASON" ]; then
+    echo "note: ts-mono PR $TSMONO#$(jq -r .number <<<"$c") on branch $BRANCH is not the companion — REFUSED: $REASON" >&2
+  else
+    C_OK="$C_OK$c"$'\n'
+  fi
+done <<<"$C_ROWS"
+case "$(jq -sc length <<<"$C_OK")" in
+  0) ;;
+  1) COMPANION=$(jq -sr '.[0].number' <<<"$C_OK") ;;
+  *) echo "AMBIGUOUS: more than one open $TSMONO PR on branch $BRANCH passes the trust rule — nothing was written; close the stray one or request the companion review by hand:" >&2
+     while IFS= read -r c; do [ -n "$c" ] && fmt_pr "$c" >&2; done <<<"$C_OK"
+     exit 6 ;;
+esac
 [ -n "$COMPANION" ] && check_reviewer "$TSMONO"
 # Idempotency probe for the assign/request steps: $1 = key (a|r) in the
 # state JSON $2. Case-insensitive on both sides (see REVIEWER above).
@@ -398,7 +400,7 @@ if VERDICT_ROWS=$(gh api --paginate "repos/$FORK/issues/$FPR/comments?per_page=1
     --jq '.[] | select(.body | contains("claude-review-verdict")) | [.user.login, (.body | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null); then
   while IFS=$'\t' read -r v_login v_body; do
     [ -n "$v_login" ] || continue
-    if trusted_login "$v_login"; then
+    if trusted_login "$FORK" "$v_login"; then
       VERDICT=$(grep -o 'verdict:[a-z]*' <<<"$v_body" | tail -1 || true)
       VERDICT=${VERDICT:-verdict:none}
     else
@@ -463,10 +465,6 @@ print(body)')
   # every closing reference included — before (dry-run) or as it is created.
   echo "upstream PR body (as published):"
   sed 's/^/  | /' <<<"$BODY"
-  render() {  # $1 = markdown, $2 = the repository its references resolve in
-    jq -n --arg t "$1" --arg c "$2" '{text: $t, mode: "gfm", context: $c}' \
-      | gh api markdown --input - 2>/dev/null
-  }
   stable() {  # blank the renderer's per-call identifiers (see step 3)
     sed -E -e 's/ data-run-id="[0-9a-f]+"/ data-run-id=""/g' \
       -e 's/ data-identity="[0-9a-f-]+"/ data-identity=""/g' \
@@ -476,17 +474,16 @@ print(body)')
     echo "ABORT: could not render the upstream PR body with GitHub's Markdown API (gh api markdown failed) — its references cannot be checked; re-run. Nothing was written." >&2
     exit 5
   }
-  RENDERED=$(render "$BODY" "$UPSTREAM") || render_failed
-  STRAY=$(grep -oiE "(data-url|href)=\"https://github\.com/$UPSTREAM/(issues|pull)/[0-9]+" <<<"$RENDERED" \
-    | grep -oE '[0-9]+$' | sort -un | grep -vxF "${UP_ISSUE:-none}" | sed 's/^/#/' | tr '\n' ' ' || true)
+  RENDERED=$(render_markdown "$BODY" "$UPSTREAM") || render_failed
+  STRAY=$(rendered_refs "$RENDERED" "$UPSTREAM" ${UP_ISSUE:+"$UP_ISSUE"})
   if [ -n "$STRAY" ]; then
     echo "ABORT: the upstream PR body references $UPSTREAM issue(s)/PR(s) ${STRAY% } (GitHub resolves them there; a closing keyword before one would close it on merge)." >&2
     echo "Qualify each as meridianlabs-ai/inspect_ai#M in fork PR #$FPR's body, or drop the upstream reference, and re-run — nothing was written." >&2
     exit 5
   fi
   if [ "$QUAL" != "$FPR_BODY" ]; then
-    R_ORIG=$(render "$FPR_BODY" "$FORK" | stable) || render_failed
-    R_QUAL=$(render "$QUAL" "$FORK" | stable) || render_failed
+    R_ORIG=$(render_markdown "$FPR_BODY" "$FORK" | stable) || render_failed
+    R_QUAL=$(render_markdown "$QUAL" "$FORK" | stable) || render_failed
     if [ "$R_ORIG" != "$R_QUAL" ]; then
       echo "ABORT: qualifying bare #M refs would change text in fork PR #$FPR's body that GitHub does not read as a reference to an existing $FORK issue (code, a link destination, a number with no issue behind it). The rendered lines that change:" >&2
       diff <(echo "$R_ORIG") <(echo "$R_QUAL") | grep '^[<>]' | head -20 >&2 || true
@@ -505,6 +502,30 @@ print(body)')
   # the PR branch is written — never main. A conflict aborts BEFORE any
   # upstream PR is opened, surfacing it (usually CHANGELOG) for a human.
   UP_SHA=$(gh api "repos/$UPSTREAM/commits/main" --jq .sha)
+  # The branch's commit messages reach upstream too: upstream squash-merges
+  # with the commit messages as the squash body, so on main GitHub links a
+  # reference in one against upstream's tracker, and a closing keyword
+  # before it closes that issue. Refuse (exit 5, before any write) when a
+  # commit in upstream main..$BRANCH references an upstream issue or PR
+  # other than <up>. Commit messages are plain text, so the scan is textual
+  # (outbound.py commit-refs), and it fails closed: a listing that failed or
+  # came back incomplete refuses too.
+  if ! COMMITS=$(gh api --paginate "repos/$FORK/compare/$UP_SHA...$BRANCH_SHA?per_page=100" \
+        --jq '.total_commits as $t | .commits[] | [$t, .sha, .commit.message] | @json' 2>/dev/null); then
+    echo "ABORT: could not list the commits in upstream main..$BRANCH (gh api compare failed) — their messages cannot be checked; re-run. Nothing was written." >&2
+    exit 5
+  fi
+  C_RC=0
+  C_REFS=$(python3 "$SKILLS_LIB/outbound.py" commit-refs --repo "$UPSTREAM" ${UP_ISSUE:+--allow "$UP_ISSUE"} <<<"$COMMITS") || C_RC=$?
+  if [ "$C_RC" -eq 1 ]; then
+    echo "ABORT: commit messages on $BRANCH reference $UPSTREAM issue(s)/PR(s) (upstream's squash merge copies them onto main, where GitHub resolves them, and a closing keyword before one closes it):" >&2
+    sed 's/^/  /' <<<"$C_REFS" >&2
+    echo "Reword each named commit on $FORK:$BRANCH (qualify a fork ref as meridianlabs-ai/inspect_ai#M, or drop it) and re-run — nothing was written." >&2
+    exit 5
+  elif [ "$C_RC" -ne 0 ]; then
+    echo "ABORT: the commit listing for upstream main..$BRANCH was incomplete or malformed — their messages cannot be checked; re-run. Nothing was written." >&2
+    exit 5
+  fi
   if [ "$DRY" = "--dry-run" ]; then
     echo "DRY-RUN: gh api repos/$FORK/merges -X POST -f base=$BRANCH -f head=$UP_SHA (merge upstream main into the branch)"
   elif MERGE_OUT=$(gh api "repos/$FORK/merges" -X POST \

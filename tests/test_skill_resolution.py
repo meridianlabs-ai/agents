@@ -48,7 +48,9 @@ case "$args" in
   "pr list --repo meridianlabs-ai/inspect_ai --state open "*)
     if [ -f "$STUB/prlist_fail" ]; then echo "gh: HTTP 500" >&2; exit 1; fi
     cat "$STUB/open_prs.json" 2>/dev/null || echo '[]' ;;
-  "pr list --repo meridianlabs-ai/ts-mono "*) cat "$STUB/tsmono_prs.json" 2>/dev/null || true ;;
+  "pr list --repo meridianlabs-ai/ts-mono "*)
+    if [ -f "$STUB/tsmono_fail" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+    cat "$STUB/tsmono_prs.json" 2>/dev/null || true ;;
   "pr checkout "*)
     # What gh does for a head repository that is not a configured remote
     # (the finding's layout): fetch refs/pull/M/head into the local branch
@@ -82,6 +84,14 @@ case "$args" in
     # A later page failing after the first returned rows: gh has already
     # streamed page one and exits non-zero.
     if [ -f "$STUB/comments_fail_$n" ]; then echo "gh: HTTP 502 fetching page 2" >&2; exit 1; fi ;;
+  "api --paginate repos/meridianlabs-ai/inspect_ai/compare/"*)
+    # upstream main...<branch sha>: the commits promote checks. Runs the
+    # caller's own --jq over $STUB/compare.json (none: no commits ahead).
+    printf '%s\n' "$*" >>"$STUB/compare_calls"
+    if [ -f "$STUB/compare_fail" ]; then echo "gh: HTTP 404" >&2; exit 1; fi
+    expr=""
+    while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && expr=$2; shift; done
+    { cat "$STUB/compare.json" 2>/dev/null || echo '{"total_commits":0,"commits":[]}'; } | jq -r "$expr" ;;
   "pr checks "*) ;;
   "api repos/UKGovernmentBEIS/inspect_ai/commits/main "*) echo "0123abcd" ;;
   "api markdown --input -")
@@ -325,16 +335,17 @@ def test_checkout_trusts_the_apps_login_by_name_from_graphqls_bare_bot_login(tmp
 
 
 def test_checkout_refuses_another_app_and_a_user_who_took_the_apps_slug(tmp_path):
-    # Another App is looked up under its REST login and refused (the stub
-    # answers `read`); a User's login is never rewritten, so a User named
-    # after the App's slug is not the App and gets an ordinary lookup.
+    # Another App is refused under its REST login without a lookup (an App
+    # is trusted by name or not at all: skills/lib/common.sh trusted_login);
+    # a User's login is never rewritten, so a User named after the App's
+    # slug is not the App and gets an ordinary lookup.
     s = Stub(tmp_path, issue([chip(400, author={"login": "foo", "__typename": "Bot"}),
                               chip(401, author={"login": "meridian-marvin", "__typename": "User"})]))
     r = s.run(CHECKOUT, str(N), "--dry-run")
     assert r.returncode == 3, r.stdout
     assert "author 'foo[bot]' is not in TRUSTED_LOGINS" in r.stderr
     assert "author 'meridian-marvin' is not in TRUSTED_LOGINS" in r.stderr
-    assert sum("collaborators/foo[bot]/permission" in c for c in s.calls()) == 1
+    assert not any("collaborators/foo[bot]/permission" in c for c in s.calls())
     assert sum("collaborators/meridian-marvin/permission" in c for c in s.calls()) == 1
 
 
@@ -1534,3 +1545,142 @@ def test_promote_real_run_prints_the_published_body_before_creating_anything(tmp
     assert body == f"Fixes meridianlabs-ai/inspect_ai#{N}\n\nCloses meridianlabs-ai/inspect_ai#7"
     assert f"#{UP_N}" not in body
     assert not any(c.startswith("api repos/UKGovernmentBEIS/inspect_ai/pulls") for c in s.calls())
+
+
+# --- promote: the ts-mono companion is chosen by trust, not by branch name (Claude Security 4773880) ---
+
+TSMONO = "meridianlabs-ai/ts-mono"
+BRANCH_A = "claude/issue-42-a"
+
+
+def companion(number, *, author=MARVIN, head_repo=TSMONO):
+    return open_pr(number, author=author, head_repo=head_repo, branch=BRANCH_A)
+
+
+def tsmono_writes(calls):
+    return [c for c in calls if "meridianlabs-ai/ts-mono/" in c and ("assignees" in c or "requested_reviewers" in c)]
+
+
+def test_promote_ignores_a_same_named_ts_mono_pr_from_a_personal_fork(tmp_path):
+    s = Stub(tmp_path, issue([chip(400, branch=BRANCH_A)]),
+             tsmono_prs=[companion(77, author="outsider", head_repo="outsider/ts-mono")])
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "ts-mono PR meridianlabs-ai/ts-mono#77" in r.stderr and "REFUSED: head repository is 'outsider/ts-mono'" in r.stderr
+    assert "companion " not in r.stdout
+    assert "DRY-RUN: gh api repos/meridianlabs-ai/ts-mono" not in r.stdout
+    assert not any("collaborators/outsider/permission" in c for c in s.calls())  # head repo refused first
+
+
+def test_promote_ignores_a_ts_mono_pr_by_an_untrusted_author_and_looks_it_up_on_ts_mono(tmp_path):
+    s = Stub(tmp_path, issue([chip(400, branch=BRANCH_A)]), tsmono_prs=[companion(77, author="stranger")])
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "REFUSED: author 'stranger' is not in TRUSTED_LOGINS" in r.stderr and "write access on meridianlabs-ai/ts-mono" in r.stderr
+    assert any(c.startswith("api repos/meridianlabs-ai/ts-mono/collaborators/stranger/permission") for c in s.calls())
+    assert "companion " not in r.stdout
+
+
+def test_promote_requests_review_on_the_trusted_companion_only(tmp_path):
+    s = Stub(tmp_path, issue([chip(400, branch=BRANCH_A)]), perms=[("colleague", "write")],
+             tsmono_prs=[companion(76, author="outsider", head_repo="outsider/ts-mono"),
+                         companion(77, author="colleague")])
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "companion meridianlabs-ai/ts-mono#77: dragonstyle assigned + review requested" in r.stdout
+    assert "DRY-RUN: gh api repos/meridianlabs-ai/ts-mono/issues/77/assignees" in r.stdout
+    assert "ts-mono/issues/76" not in r.stdout and "#76" in r.stderr
+
+
+def test_promote_refuses_two_trusted_companions_as_ambiguous_before_any_write(tmp_path):
+    s = Stub(tmp_path, issue([chip(400, branch=BRANCH_A)]),
+             tsmono_prs=[companion(77), companion(78, author="app/meridian-marvin")])  # gh --json renders the App so
+    r = s.run(PROMOTE, str(N))  # a real run
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert "AMBIGUOUS" in r.stderr and "#77" in r.stderr and "#78" in r.stderr
+    assert promote_calls_wrote_nothing(s.calls()) and not tsmono_writes(s.calls())
+
+
+def test_promote_refuses_when_the_ts_mono_listing_fails_or_is_truncated(tmp_path):
+    # A failed or cut-off read could hide the companion or a second one (review round 1, B4).
+    s = Stub(tmp_path, issue([chip(400, branch=BRANCH_A)]), tsmono_prs=[companion(77)])
+    (s.dir / "tsmono_fail").touch()
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 5 and "could not list the open meridianlabs-ai/ts-mono PRs" in r.stderr
+    assert "DRY-RUN" not in r.stdout  # stopped before planning any write
+    r = s.run(PROMOTE, str(N))
+    assert r.returncode == 5 and promote_calls_wrote_nothing(s.calls())
+    many = [companion(1000 + i, author="outsider", head_repo="outsider/ts-mono") for i in range(500)]
+    s2 = Stub(tmp_path / "b", issue([chip(400, branch=BRANCH_A)]), tsmono_prs=many)
+    r2 = s2.run(PROMOTE, str(N), "--dry-run")
+    assert r2.returncode == 5 and "listing is truncated" in r2.stderr
+    assert "DRY-RUN" not in r2.stdout
+    assert any(c.startswith("pr list --repo meridianlabs-ai/ts-mono ") and "--limit 500" in c for c in s2.calls())
+
+
+# --- promote: the branch's commit messages are checked like the body (Claude Security 4773879) ---
+
+
+def commits(*messages, total=None):
+    rows = [{"sha": f"{i:040x}", "commit": {"message": m}} for i, m in enumerate(messages, 1)]
+    return {"total_commits": len(rows) if total is None else total, "commits": rows}
+
+
+def promote_with_commits(tmp_path, compare, **kw):
+    s = Stub(tmp_path, issue([chip(400, branch=BRANCH_A)], **kw))
+    if compare is not None:
+        (s.dir / "compare.json").write_text(json.dumps(compare))
+    return s
+
+
+@pytest.mark.parametrize("message,refs", [
+    ("Fix the loop\n\nFixes #12", "#12"),
+    ("Fix the loop\n\nAgent involvement: authored by Claude Code from issue #514.", "#514"),
+    ("Fix (#7), see GH-8", "#7 #8"),
+    ("Closes UKGovernmentBEIS/inspect_ai#9", "#9"),
+    ("See https://github.com/UKGovernmentBEIS/inspect_ai/issues/10", "#10"),
+])
+def test_promote_refuses_a_commit_message_that_references_upstream_before_any_write(tmp_path, message, refs):
+    s = promote_with_commits(tmp_path, commits("Honest commit", message))
+    r = s.run(PROMOTE, str(N))  # a real run: the merges POST would be the first write
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "commit messages on claude/issue-42-a reference UKGovernmentBEIS/inspect_ai" in r.stderr
+    assert f"{2:040x} ({message.splitlines()[0]}): {refs}" in r.stderr
+    assert f"{1:040x}" not in r.stderr
+    assert promote_calls_wrote_nothing(s.calls())
+    assert not any("/merges" in c for c in s.calls())
+    # The range is upstream main...the branch tip, compared in the fork.
+    assert (s.dir / "compare_calls").read_text().startswith(
+        "api --paginate repos/meridianlabs-ai/inspect_ai/compare/0123abcd...sha-claude/issue-42-a?per_page=100")
+
+
+def test_promote_accepts_fork_qualified_refs_and_the_import_issue_in_commit_messages(tmp_path):
+    s = promote_with_commits(
+        tmp_path,
+        commits("Fix the loop\n\nFrom meridianlabs-ai/inspect_ai#514; see meridianlabs-ai/ts-mono#671.",
+                f"Fixes #{UP_N}\n\nhttps://github.com/meridianlabs-ai/inspect_ai/issues/42"),
+        author=MARVIN, body=import_body())
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "commit messages" not in r.stderr
+
+
+def test_promote_fails_closed_when_the_commits_cannot_be_listed_completely(tmp_path):
+    s = promote_with_commits(tmp_path, commits("Honest commit", total=3))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 5 and "incomplete or malformed" in r.stderr
+    s2 = promote_with_commits(tmp_path / "b", None)
+    (s2.dir / "compare_fail").touch()
+    r2 = s2.run(PROMOTE, str(N))
+    assert r2.returncode == 5 and "could not list the commits" in r2.stderr
+    assert promote_calls_wrote_nothing(s2.calls())
+
+
+def test_promote_checks_no_commits_when_it_adopts_an_existing_upstream_pr(tmp_path):
+    up = chip(5001, repo=UPSTREAM, branch=BRANCH_A)
+    s = promote_with_commits(tmp_path, commits("Fixes #12"))
+    (s.dir / "graphql.json").write_text(json.dumps(issue([chip(400, branch=BRANCH_A), up])))
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "ADOPTED existing upstream PR #5001" in r.stdout
+    assert not (s.dir / "compare_calls").exists()
