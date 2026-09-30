@@ -90,9 +90,9 @@ upstream. The text is printed as it will be posted, and `--dry-run` shows
 it without posting. Printing during the post is a record, not a review:
 promote shows the upstream PR body in `--dry-run`, and pauses on a verdict
 that is not clean. post-upstream-review posts the agent's rewrite in the
-same run that prints it; its control is the maintainer reading the source
-findings before invoking the skill (an open decision: whether the final
-wording should be shown for approval first).
+same run that prints it. Its control is the maintainer reading the source
+findings before invoking the skill; the final wording is not approved, and
+the review's footer says so (decision: Ransom, 2026-09-30).
 
 (e) Security mechanics live in tested scripts. A check that guards the
 maintainer's login or machine is a script next to the skill or a helper in

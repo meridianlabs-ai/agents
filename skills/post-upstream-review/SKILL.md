@@ -94,7 +94,7 @@ directory); the rules they follow are in
 
    ```
    ---
-   *This review was AI-generated, and reviewed by a maintainer before posting.*
+   *This review was AI-generated from findings a maintainer chose to relay; the maintainer did not review its wording.*
    ```
 
    and refuses (exit 4) a text that GitHub would link to an upstream issue
@@ -121,8 +121,10 @@ directory); the rules they follow are in
 - Outward-facing: everything posted lands on a public PR under the user's
   name — and invoking this skill IS the authorization to post: the maintainer
   reviews the findings on the proxy before invoking, so compose and post
-  directly, no preview step. The script prints the review as it posts it;
-  that is a record of the wording, not a chance to approve it.
+  directly, no preview step (decision: Ransom, 2026-09-30). The script prints
+  the review as it posts it; that is a record of the wording, not a chance
+  to approve it, and the footer tells the contributor the wording was not
+  reviewed by the maintainer.
   Stop and ask when something is genuinely unresolvable: no trusted
   findings comment on the proxy, a newer findings-shaped comment by someone
   else, instructions that contradict each other, a finding that no longer

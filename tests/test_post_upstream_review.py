@@ -31,6 +31,8 @@ UPSTREAM = "UKGovernmentBEIS/inspect_ai"
 N, M = 900, 5360
 HEAD = "a" * 40
 ME = "ransomr"
+FOOTER = "*This review was AI-generated from findings a maintainer chose to relay; the maintainer did not review its wording.*"
+OLD_FOOTER = "*This review was AI-generated, and reviewed by a maintainer before posting.*"
 FINDINGS = "Changes needed.\n\n- **blocking** `src/x.py:12`: the loop never ends.\n"
 
 GH_STUB = r"""#!/usr/bin/env bash
@@ -297,7 +299,8 @@ def test_post_sends_the_checked_review_by_file_and_does_the_bookkeeping(gathered
     posted = json.loads((s.dir / "posted.json").read_text())
     assert set(posted) == {"body", "event", "comments", "commit_id"}
     assert posted["commit_id"] == HEAD and posted["event"] == "REQUEST_CHANGES"
-    assert posted["body"].endswith("*This review was AI-generated, and reviewed by a maintainer before posting.*")
+    assert posted["body"].endswith("\n\n---\n" + FOOTER)
+    assert "reviewed by a maintainer before posting" not in posted["body"]
     assert "`claude`" in posted["body"] and "`Auto`" in posted["body"] and "@claude" not in posted["body"]
     assert "$(touch pwned)" in posted["body"]  # data, carried verbatim
     assert posted["comments"][0] == {"path": "src/x.py", "line": 12, "side": "RIGHT",
@@ -311,6 +314,21 @@ def test_post_sends_the_checked_review_by_file_and_does_the_bookkeeping(gathered
     assert "pullrequestreview-77" in audit and f"issues/{N}#issuecomment-1" in audit and "(2 inline)" in audit
     assert any("mutation" in c and "o=39c05a50" in c for c in s.calls())
     assert "review as it will be posted" in r.stdout and "OK review=" in r.stdout
+
+
+@pytest.mark.parametrize("ending", ["", "\n\n---\n" + FOOTER, "\n\n---\n" + OLD_FOOTER + "\n"],
+                         ids=["no-footer", "new-footer", "old-footer"])
+def test_post_ends_the_body_with_the_footer_once_and_drops_the_old_one(gathered, ending):
+    s = gathered
+    rv = write_review(s, {"body": "Thanks for the PR." + ending, "event": "COMMENT"})
+    assert s.run(POST, str(s.out / "context.json"), str(rv)).returncode == 0
+    body = json.loads((s.dir / "posted.json").read_text())["body"]
+    assert body == "Thanks for the PR.\n\n---\n" + FOOTER
+
+
+def test_the_skill_quotes_the_footer_the_script_appends():
+    assert FOOTER in (POST.parent / "SKILL.md").read_text()
+    assert f"FOOTER=$'---\\n{FOOTER}'" in POST.read_text()
 
 
 def test_post_dry_run_prints_the_review_and_posts_nothing(gathered):

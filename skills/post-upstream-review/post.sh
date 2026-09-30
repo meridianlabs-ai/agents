@@ -12,7 +12,8 @@
 # path fields. Before anything is sent (rule (d)): only those keys are
 # accepted, `event` is COMMENT or REQUEST_CHANGES (never APPROVE), the
 # agents' trigger phrases are backticked (outbound.py defang-review), the
-# AI-disclosure footer is appended when the body does not end with it,
+# AI-disclosure footer (AI-generated, wording not reviewed by the
+# maintainer) is appended when the body does not end with it,
 # every text is rendered by GitHub in upstream's context and refused when
 # it references an upstream issue or PR other than this one (the findings
 # were written on the fork, where a bare `#N` means a fork issue), and the
@@ -41,7 +42,11 @@ HERE=$(dirname "$(realpath "$0")")
 PROJECT=PVT_kwDOC7YMCM4BU68p
 STAGE_FIELD=PVTSSF_lADOC7YMCM4BU68pzhYZEwY
 CONTRIBUTOR_OPT=39c05a50
-FOOTER=$'---\n*This review was AI-generated, and reviewed by a maintainer before posting.*'
+FOOTER=$'---\n*This review was AI-generated from findings a maintainer chose to relay; the maintainer did not review its wording.*'
+# The footer this skill used before 2026-09-30, which claimed a review of
+# the wording that never happens: dropped from the end of a body that
+# still carries it, so it is never posted.
+OLD_FOOTER=$'---\n*This review was AI-generated, and reviewed by a maintainer before posting.*'
 
 usage() { echo "usage: post.sh <context.json> <review.json> [--dry-run] [--allow-ref <N>]..." >&2; exit 1; }
 CTX=""
@@ -120,8 +125,11 @@ if ! PAYLOAD=$(jq -c '
   exit 1
 fi
 PAYLOAD=$(python3 "$SKILLS_LIB/outbound.py" defang-review <<<"$PAYLOAD" \
-  | jq -c --arg footer "$FOOTER" --arg head "$HEAD_SHA" \
-      '.body |= (sub("\\s+$"; "") | if endswith($footer) then . else . + "\n\n" + $footer end) | .commit_id = $head')
+  | jq -c --arg footer "$FOOTER" --arg old "$OLD_FOOTER" --arg head "$HEAD_SHA" \
+      '.body |= (sub("\\s+$"; "")
+        | if endswith($old) then .[: length - ($old | length)] | sub("\\s+$"; "") else . end
+        | if endswith($footer) then . else . + "\n\n" + $footer end)
+       | .commit_id = $head')
 printf '%s\n' "$PAYLOAD" >"$WORK/payload.json"
 
 # References: every text, rendered in upstream's context.
