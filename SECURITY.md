@@ -139,7 +139,13 @@ text are checked by the tests under `tests/`.
   permissions that job uses, from the GitHub App's secrets, and are revoked at
   job end.
 - Whether a comment, label or issue-body line is believed is decided by its
-  author's login or verified write access, never by the text itself. Text a
+  author's login or verified write access, never by the text itself. The
+  hourly Atlas sync counts a ts-mono companion's loop markers only from
+  such an author, on a same-repository PR such an author opened. The
+  machine account's login alone does not make a comment the sync's own:
+  land posts agent text under it, so the sync recognises its own recovery
+  reopen by the reopen event's actor and a comment naming that event's id,
+  which no single landing can know. Text a
   maintainer republishes from the public upstream tracker (`/import`) is
   de-fanged before it is posted under their login, and `claude.yml`'s trigger
   check reads no body or title text on an opened issue whose first line is

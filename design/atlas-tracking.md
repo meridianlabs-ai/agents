@@ -379,7 +379,13 @@ because the field still named a PR merged weeks earlier (#46 — the field
 is *generational*: it describes one promotion, and a reopen after that
 PR's terminal state starts a new generation the field no longer
 represents — except the sync's *own* recovery reopen, which exists to
-decide that same PR's fate and is recognized by its marker comment).
+decide that same PR's fate. It is recognized by two facts together: the
+ReopenedEvent's actor is the machine account, and a machine-account
+marker comment after it names that event's node id, which the sync reads
+back right after its reopen. Neither is enough alone: the land composite
+posts agent-written comments as the machine account, and the fork
+reviewer's land job can reopen an issue through its manifest. A landing
+cannot name the event its own reopen creates (finding 4773875).
 Retiring the stale field also resets the old generation's Stage to
 Agent (Review for External proxies, whose lifecycle has no Agent): a
 parked Sign-off/Merge is the same kind of stale claim, and with the
@@ -580,7 +586,12 @@ stage, resolved by the hourly sync:
   reading ownership from the loop's ending-contract markers (continue:
   re-review trigger / verdict:suggestions; stop: auto-handoff /
   auto-converged / verdict:clean). Only items already in Agent/Review
-  move; parked stages stay parked.
+  move; parked stages stay parked. ts-mono is public, so a PR counts as
+  the companion only when its head is in ts-mono itself (not a fork),
+  its author is trusted (the machine account or a write-access human,
+  looked up on ts-mono) and its branch name has the dev agent's exact
+  shape before it goes into the fork-branch lookup; a marker counts only
+  from a commenter trusted the same way (finding 4773874).
 - **Single-writer discipline**: ts-mono's own agent workflows (dev,
   reviewer, auto loop) run on ts-mono PRs but never write Atlas stage;
   the sync is the only component that folds companion state into the
