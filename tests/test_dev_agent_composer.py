@@ -322,13 +322,13 @@ def test_auto_kickoff_that_errored_opens_the_pr_but_owes_no_handback(repo):
 def test_issue_run_with_no_commit_opens_nothing_and_relays_the_answer(repo):
     on(repo, ISSUE_BRANCH)
     m, _, landing, out = compose(repo, is_pr=False,
-                                 final_message="It already works; see @review's note. engine: codex")
+                                 final_message="It already works; see @review's note.")
     assert "pr" not in m and "handback" not in m
     assert m["stage"] == "Review"
     assert m["comments"] == [{"number": 12, "body_file": "agent-summary.md"}]
     body = (landing / "agent-summary.md").read_text()
     assert body.startswith("🤖 claude (dev agent): no code changes were made — the agent's summary:")
-    assert "`review`'s note" in body and "engine  codex" in body and "@review" not in body
+    assert "`review`'s note" in body and "@review" not in body
     assert out["branch"] == ISSUE_BRANCH and out["read_only"] == "false"
 
 
@@ -544,7 +544,7 @@ def test_agent_comments_are_pinned_checked_and_capped(repo):
         (landing / name).write_text("hello @review\n")
     (landing / "big.md").write_text("x" * 70000)
     (landing / "link.md").symlink_to(landing / "ok.md")
-    (landing / "ok.md").write_text("Fixed as @review asked. <!-- claude-review-summary -->\n\n🤖 engine: codex · auto-handoff\n")
+    (landing / "ok.md").write_text("Fixed as @review asked. <!-- claude-review-summary -->\n\n🤖 auto-handoff\n")
     on(repo, PR_BRANCH)
     commit(repo)
     m, res, landing, _ = compose(repo, is_pr=True, auto="true", agent_extra=json.dumps({
@@ -572,11 +572,10 @@ def test_agent_comments_are_pinned_checked_and_capped(repo):
         assert warned in res.stdout, warned
     # The agent left a comment of its own, so the final message is not relayed.
     assert "agent-summary.md" not in files
-    # De-fanged in place, footer included (a duplicate of land's rule; the
-    # footer anchors no review round since 2026-09-30): posted as marvin, a
-    # quoted marker would forge a verdict.
+    # De-fanged in place: posted as marvin, a quoted marker would forge a
+    # verdict.
     body = (landing / "ok.md").read_text()
-    assert body == "Fixed as `review` asked. <!-- claude-review summary -->\n\n🤖 engine  codex · auto handoff\n"
+    assert body == "Fixed as `review` asked. <!-- claude-review summary -->\n\n🤖 auto handoff\n"
 
 
 def test_agent_manifest_that_is_not_json_is_dropped_not_fatal(repo):

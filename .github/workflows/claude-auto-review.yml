@@ -1687,12 +1687,10 @@ jobs:
             if [ -n "$dirty" ]; then
               head=$(git rev-parse HEAD 2>/dev/null || echo "$BASE_SHA")
               if [ "$head" = "$BASE_SHA" ] || { [ -n "${MERGE_SHA:-}" ] && [ "$head" = "$MERGE_SHA" ]; }; then
-                # Strip the @ from trigger tokens in agent-authored text and
-                # split the codex reviewer's old footer — this is embedded in
-                # a marvin-authored comment (the land job de-fangs triggers,
-                # markers and the footer again; the footer anchors no review
-                # round since 2026-09-30).
-                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' -e 's/engine: codex/engine  codex/g' || true)
+                # Strip the @ from trigger tokens in agent-authored text —
+                # this is embedded in a marvin-authored comment (the land job
+                # de-fangs triggers and markers again).
+                summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 1000 | sed -E -e 's/@(review|claude|auto)/\1/g' || true)
                 err="the agent finished but left edits to tracked files uncommitted, so no fix landed on the branch (only the runner's base merge, if there was one) — whatever its summary reports, no code change reached the PR."
                 [ -n "$summary" ] && err="$err Agent summary: $summary"
               else
@@ -1948,14 +1946,12 @@ jobs:
             # header, the final message), de-fanged as the codex summary
             # step does — this posts as marvin, so a final message quoting a
             # trigger or a loop marker would fire a workflow, forge a verdict
-            # or pose as the newest review. `land` repeats every rule here,
-            # the old codex footer's included (the footer anchors no review
-            # round since 2026-09-30). The land job prepends the
-            # auto-handoff marker; nothing here writes it.
+            # or pose as the newest review. `land` repeats every rule here.
+            # The land job prepends the auto-handoff marker; nothing here
+            # writes it.
             summary=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result")) | last | .result // empty' "$file" 2>/dev/null | head -c 10000 \
               | sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                        -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                       -e 's/engine: codex/engine  codex/g' \
                        -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' || true)
             ping=""; [ -n "${MENTION:-}" ] && ping="@$MENTION "
             {
@@ -2435,11 +2431,9 @@ jobs:
           # review-comment anchor marker is in the list too: the
           # pr-feedback-context composite has already anchored on it, and a
           # fix summary that echoed it would be a false anchor for a later
-          # round on this PR. The codex reviewer's old engine footer anchors
-          # nothing since 2026-09-30; its rule is a harmless duplicate.)
+          # round on this PR.)
           head -c 120000 "$RUNNER_TEMP/codex-context.md" \
             | sed -E -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                     -e 's/engine: codex/engine  codex/g' \
                      -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' >"$RUNNER_TEMP/codex-prompt.md"
 
       - name: Run Codex fix
@@ -2690,9 +2684,7 @@ jobs:
           # so a summary echoing it would be taken for the newest review by
           # the next fix round on the same PR. The land job's `defang`
           # (land/lib.sh) repeats every rule here (two layers, so neither
-          # can drift to zero). The codex reviewer's old engine footer
-          # anchors nothing since 2026-09-30, and `land` splits it too; its
-          # rule here is a harmless duplicate.
+          # can drift to zero).
           src="$OUT"; [ -f "$src" ] || src="$FINAL"
           n_ids=$(wc -w <<<"${IDS:-}" | tr -d ' ')
           {
@@ -2704,7 +2696,6 @@ jobs:
             fi
             sed -E -e 's/@(review|claude|auto)/`\1`/g' \
                    -e 's/claude-review-(summary|verdict|comment)/claude-review \1/g' \
-                   -e 's/engine: codex/engine  codex/g' \
                    -e 's/auto-(handoff|review-rounds|review-head|fix-attempts)/auto \1/g' \
                    "$src" 2>/dev/null || echo "(codex produced no final message)"
           } >"$DIR/codex-comment.md"

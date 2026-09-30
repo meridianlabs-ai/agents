@@ -594,9 +594,8 @@ the model for the review-fix loop and the dev agent:
   clean base merge — a merge-only round, which lands and owes its hand-back
   but carries no agent commit; the relay's first line says so) the
   workflow relays its final message as a `comments[]` entry (de-fanged in
-  the fix job with the codex summary's sed, footer rule included; `land`
-  de-fangs triggers, markers and, since 2026-09-30, the footer again, and
-  the footer anchors no review round since then) — the Claude analogue
+  the fix job with the codex summary's sed; `land` de-fangs triggers and
+  markers again) — the Claude analogue
   of the codex summary that has always posted. Its first line, like the
   codex summary's, says "committed" / "base merge only", never "pushed":
   the fix job composes it before `emit-landing` runs, and a `git bundle`
@@ -866,14 +865,10 @@ the agent push mid-run:
   alone, pins `number` to the run's own issue/PR (an agent-chosen number
   would be a posting channel onto other threads), requires a plain,
   non-dot file name that is a regular file (no symlink) under the landing
-  directory, de-fangs it in place with the codex summary's sed (footer rule
-  included: until 2026-09-30 `land` left the codex reviewer's `engine:
-  codex` footer alone, and a marvin-posted body quoting it after a review
-  verdict would be `pr-feedback-context`'s newest review anchor for the
-  next codex fix round — review round 1 of #84 reproduced it; `land`
-  splits it too now), truncates it under the size
-  caps and keeps at most five — each dropped entry a warning, never a
-  validator refusal that would take the commits with it. A Claude run that
+  directory, de-fangs it in place with the codex summary's sed, truncates
+  it under the size caps and keeps at most five — each dropped entry a
+  warning, never a validator refusal that would take the commits with it.
+  A Claude run that
   succeeded, committed nothing and
   left no comment has its final message relayed as a comment (the CI-fix
   loop's relay; `🤖 claude (dev agent): no code changes were made`), so a

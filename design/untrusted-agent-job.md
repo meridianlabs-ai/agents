@@ -453,7 +453,9 @@ strict value. The defaults flip once the direct callers are checked, as
      machine App, and `claude[bot]` stops being trusted in step 1.
    - This fixes the root of 4773878, its is_error siblings (4773339,
      4773881, 4773886, 4773889) and 4773875 on the trusted side. The
-     composers' own footer seds stay as harmless duplicates.
+     composers' own footer seds stay as harmless duplicates. (Removed with
+     the legacy anchor: `land` is the one place that splits the footer.
+     Decision: Ransom, 2026-09-30.)
    - A test pins the class. Every string a consumer keys on in a
      machine-account comment must be in defang's list or appended by land
      after it. The consumers are pr-feedback-context's anchors,
@@ -1610,7 +1612,9 @@ THREAT_MODEL.md text that its change makes true.
        land appends after the de-fang under `allow-review`. That completes
        4773878's second criterion. Codex reviews posted before 2026-09-30
        are not supported: a fix round whose newest review is one of them
-       falls back to the last 8 comments.
+       falls back to the last 8 comments. The composers' footer seds went
+       with it; `land`'s `defang` is the one place that still splits the
+       footer, for bodies quoting an older codex review.
 4. **claude.yml to agent mode.**
    - The `dev-agent-context` composite, used by both jobs, with the gate's
      `trigger_time` output.

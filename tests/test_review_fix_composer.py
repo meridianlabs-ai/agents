@@ -179,12 +179,12 @@ def test_claude_both_set_without_a_commit_is_still_a_violation(repo):
 
 def test_claude_no_commit_no_decision_concludes_with_a_handoff(repo):
     m, res, landing, _ = compose(repo, engine="claude", agent_extra=json.dumps({"resolve_threads": ["PRRT_a"]}),
-                                 final_message="Nothing left; ping @review later. engine: codex")
+                                 final_message="Nothing left; ping @review later.")
     assert m["handoff_body_file"] == "agent-summary.md" and m["stage"] == "Review"
     assert "handback" not in m and "resolve_threads" not in m and "error" not in m
     body = (landing / "agent-summary.md").read_text()
     assert body.startswith("@someone auto (review round 3): no code changes this round")
-    assert "`review` later" in body and "engine  codex" in body and "@review" not in body
+    assert "`review` later" in body and "@review" not in body
     assert "auto-handoff" not in body
     assert "committed no change; resolving none" in res.stdout
 

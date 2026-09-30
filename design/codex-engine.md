@@ -710,9 +710,10 @@ counterpart.
   2026-09-30 the codex reviewer's `engine: codex` footer was a second
   anchor, appended after its sed and its comment-size cap. Since step 3
   of design/untrusted-agent-job.md the codex review lands flagged
-  `review` and gets the marker from `land`, `land` splits the footer in
-  every body, and the footer anchors nothing (decision: Ransom,
-  2026-09-30: codex reviews posted before then are not supported). The
+  `review` and gets the marker from `land`, and the footer anchors
+  nothing (decision: Ransom, 2026-09-30: codex reviews posted before then
+  are not supported). `land`'s `defang` is the one place that still splits
+  the footer; the composers' seds no longer do. The
   reviewer is also told not to restate regression-accepted notes an
   earlier round already posted.
 - **Codex reviews get the PR thread since 2026-09-09**: the Claude
