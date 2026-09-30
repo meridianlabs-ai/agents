@@ -38,10 +38,12 @@
 # Testing) before its scan, with the real jobs' OIDC permission: the Claude
 # job has `id-token: write` (Workload Identity Federation), the codex job
 # none. As `runner`, the probe asks the Claude App token exchange for a
-# token and revokes any it gets. Expected: the Claude job mints one (while
-# the App is installed on this repository; that is the evidence the design
-# rests on, and step 6 of the design flips it to `refused`), the codex job
-# cannot, having no OIDC request token.
+# token and revokes any it gets. Expected: on a dispatch from main the
+# Claude job mints one (while the App is installed on this repository;
+# that is the evidence the design rests on, and step 6 of the design flips
+# it to `refused`); on other runs its outcome is recorded only (the
+# exchange refuses push events and workflow files that differ from main's).
+# The codex job cannot mint on any run, having no OIDC request token.
 
 name: engine isolation canary (pipeline probe)
 
@@ -106,8 +108,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: OIDC exchange probe (expect an App token, revoked at once)
-        run: bash tests/app_token_exchange_probe.sh minted
+      # The exchange answers a `workflow_dispatch` run of this file as it is
+      # on the default branch; a push run, or a branch whose canary files
+      # differ from main's, is refused whatever the App, so there the
+      # outcome is only recorded.
+      - name: OIDC exchange probe (expect an App token on a dispatch from main, revoked at once)
+        run: bash tests/app_token_exchange_probe.sh ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'minted' || 'any' }}
       - name: Scan runner memory (expect neither sentinel)
         run: sudo python3 tests/secret_delivery_scan.py absent absent
 

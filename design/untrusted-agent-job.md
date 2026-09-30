@@ -1364,6 +1364,20 @@ model or a real secret):
     positive control and the evidence for this design. If a token comes
     back the probe revokes it at once (`DELETE /installation/token`) and
     prints nothing from it.
+  - The exchange answers only an event and a workflow file it accepts.
+    Measured on the step-1 branch on 2026-09-30:
+    - a `push` run: `401`, "Invalid OIDC token";
+    - a `workflow_dispatch` run of the branch, whose canary files differ
+      from `main`'s: `401`, "Workflow validation failed. The workflow file
+      must exist and have identical content to the version on the
+      repository's default branch";
+    - the codex job: no OIDC request token, so no request.
+
+    So the probe expects a token only on a `workflow_dispatch` from `main`
+    and records the outcome on every other run. The first positive run is
+    a dispatch from `main` after step 1 merges. The agent jobs are not
+    limited this way: they run on the events the action supports, from
+    workflow files that match the default branch.
   - After step 6 it must fail, and that failure is the proof of step 6.
   - Add the same probe to a codex job, where it must fail after step 1
     because the job has no `id-token: write`, and again after step 7
@@ -1416,7 +1430,7 @@ SECURITY.md text that its change makes true.
    - Tests: test_review_fix_gate, test_review_trig, test_skill_resolution,
      test_engine_job_isolation.
    - The canary's OIDC exchange probe lands here too, recording today's
-     positive result.
+     positive result (by a dispatch from `main` after merge: Testing).
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
    maintainer's machine. It can merge before or after step 1.

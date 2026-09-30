@@ -25,7 +25,9 @@ probe keeps their shape, so these checks hold the two together:
 - each probe agent job requests an OIDC token exactly when the real one
   does (the Claude job for WIF, the codex job never) and runs the OIDC
   exchange probe before its scan, expecting a minted App token in the
-  Claude job and none in the codex job; the probe script, run against a
+  Claude job on a dispatch from main (elsewhere the exchange refuses the
+  event or the changed workflow, and the outcome is only recorded) and none
+  in the codex job; the probe script, run against a
   stub curl, revokes a minted token at once, prints no token and fails on
   the unexpected outcome or a failed revocation
   (design/untrusted-agent-job.md → Testing).
@@ -185,7 +187,8 @@ def test_the_probe_agent_jobs_request_oidc_like_the_real_ones(name):
 
 def test_each_probe_agent_job_runs_the_exchange_probe_before_its_scan():
     probe = jobs(workflow(PROBE))
-    for job, expect in (("agent", "minted"), ("agent-codex", "refused")):
+    dispatch_from_main = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'minted' || 'any' }}"
+    for job, expect in (("agent", dispatch_from_main), ("agent-codex", "refused")):
         runs = [s for s in steps(probe[job]) if "app_token_exchange_probe.sh" in s]
         assert len(runs) == 1 and f"        run: bash tests/app_token_exchange_probe.sh {expect}\n" in runs[0], job
         assert steps(probe[job]).index(runs[0]) == len(steps(probe[job])) - 2, job
@@ -271,6 +274,15 @@ def test_exchange_probe_without_an_oidc_request_token_is_refused_without_a_call(
     assert r.returncode == 0, r.stdout + r.stderr
     assert "refused (no OIDC request token in this job); expected refused" in r.stdout
     assert calls == []
+
+
+def test_exchange_probe_records_any_outcome_without_asserting_it(tmp_path):
+    r, _, _ = run_probe(tmp_path, "any")
+    assert r.returncode == 0 and "minted (exchange HTTP 200; revoked, HTTP 204); expected any" in r.stdout
+    r, _, _ = run_probe(tmp_path / "b", "any", status="401", body='{"error":{"message":"Invalid OIDC token"}}')
+    assert r.returncode == 0 and "refused (exchange HTTP 401: Invalid OIDC token); expected any" in r.stdout
+    r, _, _ = run_probe(tmp_path / "c", "any", revoke="500")
+    assert r.returncode == 1 and "answered HTTP 500" in r.stdout
 
 
 def test_exchange_probe_refuses_an_unknown_expectation(tmp_path):

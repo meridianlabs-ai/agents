@@ -7,7 +7,14 @@
 # it is given no `github_token` (src/github/token.ts). That is what a runner
 # compromise in an agent job could do while the App is installed.
 #
-#   app_token_exchange_probe.sh minted|refused
+#   app_token_exchange_probe.sh minted|refused|any
+#
+# The exchange answers only for events and workflows it accepts: a `push`
+# run gets "Invalid OIDC token", and a run whose workflow file differs from
+# the default branch's gets "Workflow validation failed" (measured
+# 2026-09-30). So the caller expects `minted` only where the exchange would
+# answer an agent job, and `any` elsewhere, which records the outcome and
+# asserts nothing about it.
 #
 # `minted`: the exchange returned an App token. The probe revokes it at once
 # (DELETE /installation/token) and prints nothing from it. `refused`: no
@@ -19,7 +26,7 @@
 set -uo pipefail
 
 expect=${1:-}
-case "$expect" in minted|refused) ;; *) echo "usage: $0 minted|refused" >&2; exit 2 ;; esac
+case "$expect" in minted|refused|any) ;; *) echo "usage: $0 minted|refused|any" >&2; exit 2 ;; esac
 exchange=${APP_TOKEN_EXCHANGE_URL:-https://api.anthropic.com/api/github/github-app-token-exchange}
 api=${GITHUB_API_URL:-https://api.github.com}
 tmp=$(mktemp -d)
@@ -69,4 +76,4 @@ line="Claude App token exchange as runner: $outcome ($detail); expected $expect"
 echo "$line"
 [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "$line" >>"$GITHUB_STEP_SUMMARY"
 [ -z "$revoke_failed" ] || fail "revoking the minted App token answered HTTP $revoke_failed"
-[ "$outcome" = "$expect" ] || fail "the exchange outcome is $outcome, expected $expect"
+[ "$expect" = any ] || [ "$outcome" = "$expect" ] || fail "the exchange outcome is $outcome, expected $expect"
