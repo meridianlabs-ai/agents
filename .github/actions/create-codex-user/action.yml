@@ -290,6 +290,9 @@ runs:
             tree="$tc/$tool/$version"
             case "$trees" in *"|$tree|"*) continue ;; esac
             trees="$trees$tree|"
+            # ACLs first: a default ACL on a directory sets the mode of what
+            # is created in it later, whatever the creator's umask.
+            if command -v setfacl >/dev/null; then sudo setfacl -R -b "$tree"; fi
             sudo chown -R runner "$tree"
             sudo chmod -R go-w "$tree"
             echo "toolcache tree $tree: now runner-owned, no group or other write"

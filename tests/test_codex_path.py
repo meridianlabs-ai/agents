@@ -892,6 +892,10 @@ def test_create_codex_user_makes_each_toolcache_tree_on_the_path_runner_only(tmp
     assert [r.returncode for r in results] == [0, 0], [r.stderr for r in results]
     tree = str((tc / "node" / "24.21.0").resolve())
     repair = [f"chown -R runner {tree}", f"chmod -R go-w {tree}"]
+    # `setfacl -R -b` first where the host has setfacl (the hosted image).
+    acl = [c for c in calls if c.startswith("setfacl ")]
+    assert acl in ([], [f"setfacl -R -b {tree}"])
+    calls = [c for c in calls if not c.startswith("setfacl ")]
     assert calls[:4] == [f"find {ws} -mindepth 2 -name .git", *repair,
                          "adduser --system --home /home/codex --shell /bin/bash --group codex"], calls
     assert sum(c.startswith("chown -R runner ") for c in calls) == 1
@@ -1305,17 +1309,6 @@ def test_the_codex_job_puts_node_on_the_job_path_before_the_codex_user(name):
     assert cond(step) == cond(codex[user])
     # The Claude job never runs it: codex-action is the only reason for it.
     assert "actions/setup-node@" not in job_text(WORKFLOWS[name], CLAUDE_JOB[name])
-
-
-@pytest.mark.parametrize("name", [*sorted(WORKFLOWS), "engine-isolation-canary.yml"])
-def test_every_codex_action_step_installs_with_a_runner_only_umask(name):
-    # npm's own `umask` setting (0 by default) decides the modes of what
-    # codex-action's `npm install -g` extracts; 0 left the CLI and the proxy
-    # world-writable in the Node tree (canary run 36742725084).
-    text = (ROOT / ".github" / "workflows" / name).read_text()
-    at = text.index("        uses: openai/codex-action@v1\n")
-    step = text[text.rindex("\n      - ", 0, at):text.find("\n      - ", at)]
-    assert '        env:\n          NPM_CONFIG_UMASK: "022"\n' in step
 
 
 @pytest.mark.parametrize("name", ["claude.yml", "claude-auto.yml", "claude-auto-review.yml"])

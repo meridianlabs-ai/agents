@@ -2759,12 +2759,6 @@ jobs:
 
       - name: Run Codex
         id: codexrun
-        # npm extracts packages with its own `umask` setting, 0 by default,
-        # so codex-action's `npm install -g` would leave the CLI and the
-        # proxy world-writable in the Node tree, which the reclaim refuses
-        # (design/codex-engine.md → Runner-side search path).
-        env:
-          NPM_CONFIG_UMASK: "022"
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
