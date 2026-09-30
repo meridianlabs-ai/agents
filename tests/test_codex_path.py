@@ -768,7 +768,10 @@ def test_create_codex_user_checks_the_path_after_the_user_and_before_the_grant()
     assert f"SYSTEM_PATH: {SYSTEM_DIRS}" in reset and reset.index('export PATH="$SYSTEM_PATH"') < reset.index("sudo ")
     assert 'sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"' in first
     assert 'sudo usermod -a -G runner "$AGENT_USER"' in first
-    assert "chown" not in first and "chmod" not in first
+    # No grant in the first step: its only chown/chmod are the toolcache
+    # trees' repair, which never names the workspace.
+    assert all("GITHUB_WORKSPACE" not in l for l in first.splitlines() if "chown" in l or "chmod" in l)
+    assert first.index('sudo chown -R runner:root "$tree"') < first.index("sudo adduser")
     # The check probes as the user being created, whichever it is.
     assert ASSERT_USES in check_step and "user: ${{ inputs.user }}" in check_step and 'protect: "true"' in check_step
     assert 'sudo chown -R "runner:$AGENT_USER" "$GITHUB_WORKSPACE"' in grant
@@ -810,16 +813,18 @@ def create_world(tmp_path):
     for f in (bins / "sudo", bins / "stat"):
         f.chmod(0o755)
     log = tmp_path / "sudo.log"
+    # The test's own toolcache: a hosted runner's PATH holds entries under
+    # the real one (setup-python's), which the create step would repair.
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "GITHUB_WORKSPACE": str(ws), "RUNNER_TEMP": str(temp),
-           "SUDO_LOG": str(log), "HOME_SCRIPT": str(home_script)}
+           "SUDO_LOG": str(log), "HOME_SCRIPT": str(home_script), "RUNNER_TOOL_CACHE": str(tmp_path / "toolcache")}
     return ws, temp, log, env
 
 
-def run_create(tmp_path, user, grant="workspace"):
+def run_create(tmp_path, user, grant="workspace", path_prefix=""):
     """The create mode's two run blocks (the PATH check between them is its
     own composite, tested above), as the composite runs them."""
     ws, temp, log, env = create_world(tmp_path)
-    env = {**env, "AGENT_USER": user, "GRANT": grant}
+    env = {**env, "AGENT_USER": user, "GRANT": grant, "PATH": path_prefix + env["PATH"]}
     first, grant_step = composite_runs(CREATE)[:2]
     results = []
     for script in (first, grant_step):
@@ -870,6 +875,27 @@ def test_create_codex_user_for_claude_agent(tmp_path, grant):
     # None of the codex-only parts: no output dir, no codex home, nothing in
     # the user's global git config.
     assert not any(f"{temp}/codex" in c or "-u codex" in c or "--global" in c or c.startswith("home ") for c in calls)
+
+
+def test_create_codex_user_makes_each_toolcache_tree_on_the_path_runner_only(tmp_path):
+    # The image ships the toolcache Node tree writable by the agent user, and
+    # the PATH check reaches only an entry's hops and files; the whole tree
+    # of every toolcache entry on the job PATH is repaired, once per tree,
+    # before the user exists. Entries outside the toolcache, the toolcache
+    # root and a tool directory with no version are left alone.
+    tc = tmp_path / "toolcache"
+    node = tc / "node" / "24.21.0" / "x64"
+    for d in (node / "bin", node / "lib" / "node_modules" / "npm" / "bin", tc / "Python", tmp_path / "elsewhere"):
+        d.mkdir(parents=True)
+    prefix = f"{node / 'bin'}:{tmp_path / 'elsewhere'}:{tc}:{tc / 'Python'}:{node / 'lib' / 'node_modules' / 'npm' / 'bin'}:"
+    results, calls, ws, temp = run_create(tmp_path, "codex", path_prefix=prefix)
+    assert [r.returncode for r in results] == [0, 0], [r.stderr for r in results]
+    tree = str((tc / "node" / "24.21.0").resolve())
+    repair = [f"chown -R runner:root {tree}", f"chmod -R go-w {tree}", f"find {tree} -type d -exec chmod g+s {{}} +"]
+    assert calls[:5] == [f"find {ws} -mindepth 2 -name .git", *repair,
+                         "adduser --system --home /home/codex --shell /bin/bash --group codex"], calls
+    assert sum("-R runner:root" in c for c in calls) == 1
+    assert f"toolcache tree {tree}: now runner:root" in results[0].stdout
 
 
 @pytest.mark.parametrize("user,grant", [("root", "workspace"), ("", "workspace"), ("codex", "partial")])

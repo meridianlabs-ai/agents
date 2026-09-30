@@ -110,7 +110,9 @@
 #                          `npm install -g` steps and stops (every later
 #                          step of it needs a key or a prompt), then the
 #                          reclaim of THIS revision. Asserted: the reclaim,
-#                          with its PATH check, passes. The control runs
+#                          with its PATH check, passes, and nothing under
+#                          the Node prefix (npm's code, what npm installed)
+#                          is codex-writable. The control runs
 #                          without the Node step, the shape before the fix:
 #                          the reclaim must refuse the toolcache Node's bin
 #                          directory (a warning, not a failure, if the image
@@ -628,12 +630,19 @@ jobs:
           echo "job PATH entries under the toolcache:"
           printf '%s\n' "$PATH" | tr ':' '\n' | grep -n "^${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}/" || echo "(none)"
           prefix=$(dirname "$node_bin")
-          echo "files and directories under $prefix the codex user can write: $(sudo -u codex find "$prefix" -writable 2>/dev/null | wc -l)"
+          echo "runner umask: $(umask); what npm created:"
+          find "$prefix/lib/node_modules/@openai" -maxdepth 2 -printf '%M %u:%g %p\n' 2>/dev/null | head -8
+          writable=$(sudo -u codex find "$prefix" -writable 2>/dev/null | wc -l)
+          echo "files and directories under $prefix the codex user can write: $writable"
           sudo -u codex find "$prefix" -writable 2>/dev/null | head -20
           if [ "$NODE_FIRST" = true ]; then
             [ "$RECLAIM" = success ] || { echo "::error::the reclaim failed with the Node step in place (outcome: $RECLAIM); see its PATH check above"; exit 1; }
             if sudo -u codex test -w "$node_bin"; then echo "::error::$node_bin is writable by the codex user"; exit 1; fi
-            echo "the reclaim passed: codex-action added no codex-writable directory to the job PATH"
+            # The PATH check reaches only hops, files and link targets; the
+            # whole tree is what the runner runs (npm's lib, the CLI's
+            # vendored binary, the proxy).
+            [ "$writable" -eq 0 ] || { echo "::error::$writable entries under $prefix are writable by the codex user"; exit 1; }
+            echo "the reclaim passed and nothing under $prefix is codex-writable: codex-action added no codex-writable directory to the job PATH"
           else
             if [ "$RECLAIM" = success ]; then
               echo "::warning::the control did not reproduce: without the Node step the reclaim passed, so the image no longer ships $node_bin writable by the codex user"
