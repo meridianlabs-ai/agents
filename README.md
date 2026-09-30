@@ -138,6 +138,14 @@ Notes:
   account is retired separately. Commits do not appear mid-run;
   to iterate on CI failures use `@auto`, whose loop re-runs the agent on each
   red CI run.
+- The machine account posts a status comment when the run starts and
+  updates it when the run ends, with a link to the run and the outcome (the
+  PR, the pushed branch, no changes, or a failure).
+- The agent reads the issue or PR as it was when you triggered it: its
+  title, body and the comments and reviews posted before your request.
+  Anything written or edited after that is left out.
+- On a closed PR whose branch still exists, the agent continues that branch.
+  If the branch is gone, it answers with a comment and changes no code.
 - PR follow-ups first merge the base branch into the PR branch on the runner,
   and that merge lands with the run's push even if nothing else changes — so
   a behind branch may gain a merge commit from the machine account after any

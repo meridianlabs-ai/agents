@@ -25,14 +25,15 @@
 #                      original tree; and the grant mode's expectations.
 #
 # Arguments (namespace phase): --grant workspace|none, --runner-home DIR,
-# --bind DIR (each of the four binds), --workspace DIR, --landing DIR,
-# --wif DIR, --scratch DIR (none mode), --unreachable PATH (repeatable).
+# --bind DIR (each bind), --workspace DIR, --landing DIR, --wif DIR,
+# --scratch DIR (none mode), --context DIR (when the launcher was given
+# one), --unreachable PATH (repeatable).
 set -uo pipefail
 
 status=0
 fail() { echo "::error::agent isolation: $*"; status=1; }
 
-phase="" grant="" runner_home="" workspace="" landing="" wif="" scratch=""
+phase="" grant="" runner_home="" workspace="" landing="" wif="" scratch="" context=""
 binds=() unreachable=()
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || { echo "::error::agent isolation: $1 has no value"; exit 2; }
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
     --landing) landing=$2 ;;
     --wif) wif=$2 ;;
     --scratch) scratch=$2 ;;
+    --context) context=$2 ;;
     --unreachable) unreachable+=("$2") ;;
     *) echo "::error::agent isolation: unknown argument $1"; exit 2 ;;
   esac
@@ -204,6 +206,12 @@ done
 [ -d "$landing" ] && [ -w "$landing" ] || fail "the landing dir $landing is not writable"
 [ -d "$wif" ] || fail "the WIF dir $wif is missing"
 [ -r "$wif/identity-token" ] || fail "the identity token in $wif is not readable (the ACL grant did not hold)"
+if [ -n "$context" ]; then
+  [ -d "$context" ] && [ -r "$context" ] || fail "the context dir $context is not readable"
+  if [ -w "$context" ] || ( : >"$context/.agent-isolation-probe.$$" ) 2>/dev/null; then
+    rm -f "$context/.agent-isolation-probe.$$"; fail "the context dir $context is writable by the agent"
+  fi
+fi
 if [ "$grant" = workspace ]; then
   [ -w "$workspace" ] || fail "workspace mode, but the workspace root is not writable"
   [ -w "$workspace/.git" ] || fail "workspace mode, but .git is not writable"

@@ -462,6 +462,11 @@ outputs:
   landed_head:
     description: The SHA now at the tip of `branch` after the push (the manifest's head_sha).
     value: ${{ steps.push.outputs.landed_head }}
+  pushed_branch:
+    description: >-
+      The branch the commits were pushed to (the validated manifest's
+      `branch`) when they were pushed; empty otherwise.
+    value: ${{ steps.push.outputs.pushed == '1' && steps.plan.outputs.branch || '' }}
   posted_comments:
     description: >-
       How many `comments[]` bodies were posted (claude-review.yml's
@@ -1217,14 +1222,36 @@ runs:
               [ -f "$piece" ] && append_unanchored "$piece"
             done
           }
+          # Inline posting stops for the rest of the run on a 403 or 429 (a
+          # rate limit, or a refusal every later comment would get too), or
+          # after three comments in a row failed for any reason but a 422, so
+          # a forged or unlucky review cannot keep the job retrying into the
+          # limit (Claude Security 4773341). The remaining comments are
+          # folded into the follow-up comment, unposted inline.
           posted=0
+          fails=0
+          stopped=""
           for ((k = 0; k < n; k++)); do
             rc=$(jq -c ".review_comments[$k]" "$m")
             path=$(jq -r '.path' <<<"$rc")
             line=$(jq -r '.line' <<<"$rc")
             side=$(jq -r '.side // "RIGHT"' <<<"$rc")
             defang "$DIR/$(jq -r '.body_file' <<<"$rc")" "$RUNNER_TEMP/inline-$k.md"
-            if [ -n "$head_sha" ] && post_review_comment_file "$REPO" "$PR_NUMBER" "$head_sha" "$path" "$line" "$side" "$RUNNER_TEMP/inline-$k.md"; then
+            status=4
+            if [ -n "$head_sha" ] && [ -z "$stopped" ]; then
+              status=0
+              post_review_comment_file "$REPO" "$PR_NUMBER" "$head_sha" "$path" "$line" "$side" "$RUNNER_TEMP/inline-$k.md" || status=$?
+            fi
+            case "$status" in
+              0|1) fails=0 ;;
+              2) stopped="GitHub refused an inline comment with a rate limit or a 403" ;;
+              3) fails=$((fails + 1))
+                 [ "$fails" -lt 3 ] || stopped="three inline comments in a row failed" ;;
+            esac
+            if [ "$status" = 2 ] || { [ "$status" = 3 ] && [ -n "$stopped" ]; }; then
+              echo "::warning::land: $stopped; posting no more inline review comments this run — the rest go into the follow-up comment."
+            fi
+            if [ "$status" = 0 ]; then
               posted=$((posted + 1))
             else
               echo "::warning::land: inline review comment on $path:$line ($side) did not post; folding it into a follow-up comment."

@@ -114,7 +114,10 @@ Testing a change).
   "false", and `stage-override` replaces or removes the manifest's
   `stage`. The Post step replies only to the PR's own review comments
   (a foreign id skipped and recorded, a repeat dropped), and a codex
-  review flagged `review` gets the review marker after the de-fang. The
+  review flagged `review` gets the review marker after the de-fang.
+  Inline review comments stop after a 403 or 429 (one attempt, then none
+  more) or after three failures in a row, never over 422s, and the rest go
+  into the follow-up comment (4773341). The
   de-fang registry test extracts every marker pr-feedback-context,
   atlas_sync and the loop gates key on and requires each to be broken by
   `defang` or appended by `land` (4773878 and its siblings, 4773875). The
@@ -176,10 +179,35 @@ Testing a change).
   autonomous PR run, the stage rule, the agent's `comments` (pinned,
   shape-checked, capped), the no-change relay, the codex summary and
   thread ids, the branch-evidence rule (nothing bundled while HEAD is off
-  the run's branch) and the guard-failed codex path — with the issue-run
+  the run's branch; the branch is `Prepare branch`'s output, and a
+  comment-only run bundles nothing) and the guard-failed codex path — with the issue-run
   case run on through `emit-landing` and the validator under the land job's
   `branch-prefix`. Also checks every `workflow_call` input declares a
   `type`.
+- `test_dev_agent_mode.py` — `claude.yml` in agent mode (step 4 of
+  design/untrusted-agent-job.md): `Prepare branch` lifted and run against
+  local repositories (an issue run's new branch; an open PR left where the
+  sync put it, a merge in progress untouched; a closed PR continued at the
+  gate's start, fork-shaped name included; a moved tip refused; a deleted
+  head comment-only), the prompt step's random delimiter, the gate's
+  trigger-time step against stub payloads (comment, review, review
+  comment, opened, labeled with the history lookup, a stale entry and the
+  fallback, assigned), the gate's status comment and the land job's
+  finishing step against a stub `gh` (fixed bodies for each outcome, from
+  trusted values only), and the shape: agent mode on the job token with
+  the prompt and the PR's base, the context bound read-only, no job that
+  can mint a Claude App token.
+- `test_dev_agent_context.py` — the `dev-agent-context` composite's script
+  (`.github/scripts/dev_agent_context.py`) against a stub `gh`: an issue
+  run's comments before the trigger, oldest first, machine comments
+  dropped, the 30-comment and 40,000-character bounds with the "omitted"
+  line (a comment pointing at an earlier one, a `labeled` and an
+  `assigned` trigger); later comments, edits and reviews left out and the
+  payload's title and body used; a PR run's review summaries ahead of the
+  pr-feedback-context file; a failed read failing after three attempts;
+  images from the signed attachment host only, redirects refused, the
+  count and byte caps, a failed download leaving the link; the composite's
+  step; both engines reading the file.
 - `test_app_token_minting.py` — Phase 2 of the credential separation, as
   structural checks on the workflow text: every `gate` and `land` job (and
   the Atlas sync) mints the machine account's token first, for exactly the
@@ -424,7 +452,10 @@ Testing a change).
   two logins; `claude[bot]` or any other Bot does not anchor one, nor does
   the codex reviewer's old `engine: codex` footer without the marker, and
   the section falls back to the last 8 comments
-  (design/untrusted-agent-job.md).
+  (design/untrusted-agent-job.md). The dev agent's status comment is
+  dropped, and `trigger-time` leaves out comments and thread comments
+  created or edited at or after it (a thread with none left too); without
+  it nothing is filtered.
 - `test_codex_path.py` — the codex path's runner-side search path (Claude
   Security 4628448): the `assert-runner-only-path` check `create-codex-user`
   runs before its grant and `reclaim-codex-workspace` runs after codex
@@ -491,11 +522,12 @@ Testing a change).
   malformed and file-path `--mcp-config`, `plugin` and a second
   `--settings` refused; `--version` and non-action calls passed through;
   the env allow-list; the origin URL reset and the snapshot retaken; and
-  the new-branch precondition for an issue run, closed and merged PRs, a
-  PR closed after the gate and the fixed-clock collision (only "no such
-  ref" proceeds), with no lookup for an open-PR follow-up or a detached
-  review. `agent_ns.py`'s pure parts: the handoff format, the bind plan per
-  grant mode, the POSIX ACL encoding, the action-process check against a
+  no lookup on origin whatever branch is checked out (launch step 6 is
+  retired). The composite's `context-dir` check, lifted: a plain
+  runner-owned directory under `$RUNNER_TEMP` the agent user cannot write,
+  and not one the launch already binds. `agent_ns.py`'s pure parts: the
+  handoff format, the bind plan per grant mode and with a context
+  directory (read-only, last), the POSIX ACL encoding, the action-process check against a
   fake `/proc`, the run-file and handoff-file checks. The composite as
   text (order, root-owned installs, every value the wrapper and the
   namespace read is recorded, the pinned-version pattern against sample
@@ -563,14 +595,19 @@ Testing a change).
   the same `recipe`, then runs the pre-agent reclaim and the launcher before
   the claude-code-action step, which names the launcher's executable and
   sets `classify_inline_comments: "false"` (every claude-code-action step
-  does; in the reviewer and the loops each also passes `github_token: ${{
-  github.token }}` and no `additional_permissions`, and only the Claude job
-  requests `id-token: write`, never the codex job); the post-agent reclaim is the first step after it, and every later
-  git step (the origin reset, the import — which also needs a successful
+  does; each also passes `github_token: ${{ github.token }}` and no
+  `additional_permissions`, `trigger_phrase` or `label_trigger`, and only
+  the Claude job requests `id-token: write`, never the codex job); the
+  post-agent reclaim is the first step after it, no post-agent origin
+  reset runs, and every later
+  git step (the import — which also needs a successful
   launcher and an entered Claude step — the Surface tree check, the
   composers, the reviewer's re-plant check and landing prep, emit-landing's
   read-only) is gated on it; the Surface step names each boundary step's
-  failure; the reviewer's sandboxed paths create the user and launch with
+  failure, and, lifted and run with an `is_error` result beside a failed
+  reclaim (and in the reviewer a failed re-plant check or landing prep),
+  reports fixed text only (Claude Security 4773889); each land job has a
+  `timeout-minutes` under 30 (4773341); the reviewer's sandboxed paths create the user and launch with
   `grant: none`, hand it the scratch copy and drop the overlay's
   `.git/config` mask. `provision` and `codex_provision` are declared with a
   type and reach only the two provisioning steps. The tier-2 opt-in

@@ -1476,26 +1476,16 @@ jobs:
       # `claude-agent` process (normally none: the namespace ended with the
       # CLI), removes the Workload Identity ACL entries and the agent's
       # config dir, then refuses or reclaims `.git` exactly as the codex
-      # reclaim does. Every later step that runs git — the origin reset, the
-      # Surface step's tree check, the manifest composer and emit-landing —
-      # is gated on its success (AGENTS.md → the codex path, which this now
-      # shares). Runs no git itself.
+      # reclaim does. Every later step that runs git — the Surface step's
+      # tree check, the manifest composer and emit-landing — is gated on its
+      # success (AGENTS.md → the codex path, which this now shares). Runs no
+      # git itself.
       - name: Reclaim workspace from the agent
         id: agentreclaim
         if: always() && steps.agentuser.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
         with:
           user: claude-agent
-
-      # The action leaves its token (the job token) in remote.origin.url; the wrapper
-      # already reset it before the agent started, and this stays as belt and
-      # braces for the action's own later writes, after the reclaim (git over
-      # a `.git` the agent could write is never run) — git never consults a
-      # helper when the URL carries a credential. One mechanism across the
-      # three workflows. always(): a failed agent leaves the URL rewritten too.
-      - name: Reset origin URL after the agent
-        if: always() && steps.claude.outcome != 'skipped' && steps.agentreclaim.outcome == 'success'
-        uses: meridianlabs-ai/agents/.github/actions/reset-origin-url@main
 
       # Bring the agent's landing files across the user boundary ONCE, after
       # the reclaim's kill: every regular, single-link, `claude-agent`-owned
@@ -1648,20 +1638,22 @@ jobs:
           if [ -z "$err" ] && [ "${LAUNCHER_OUTCOME:-}" = "failure" ]; then
             err="preparing the fix agent's launch failed before it started — installing Claude Code at the version claude-code-action pins, the check that the agent user has no sudo, no Docker access and Yama ptrace_scope 1 or more, or a process still running as the agent user (see the job logs); no fix was attempted this round, though the runner's clean base merge, if there was one, was still landed on the branch. Re-trigger if it was the download, otherwise the runner image changed."
           fi
+          # A reclaim that did not succeed skips every later git call (the
+          # composer runs no git and emit-landing runs read-only), so it
+          # needs its own clause or the round is a silent no-change. `!=
+          # success` so a cancel mid-reclaim is named too; the agentuser test
+          # keeps a run that never created the user out.
+          # Before the agent's own error text below, so a round whose work was
+          # withheld reports only this fixed text (Claude Security 4773889).
+          if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then
+            err="the workspace could not be reclaimed from the fix agent (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — a job PATH entry writable by or owned by the agent user (a directory added to the job PATH after the Create agent user step checked it, most likely by a runner-image change; the reclaim refuses it and does not repair it), processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, an embedded git repository appeared in the tree, the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed this round, the runner's base merge included. Inspect the run before re-triggering."
+          fi
           # The agent's own error text is free-form (and unbounded — it is
           # the final message when is_error is set); cap it so the manifest's
           # error.message stays well under the validator's 64 KiB limit.
           [ -z "$err" ] && [ -f "$file" ] && err=$(jq -r '(if type=="array" then . else .messages end) | map(select(.type=="result" and .is_error==true)) | last | .result // empty' "$file" 2>/dev/null | head -c 6000 || true)
           if [ -z "$err" ] && [ "$CLAUDE_OUTCOME" = "failure" ]; then
             err="the review-fix step failed before producing a result (see the job logs)."
-          fi
-          # A reclaim that did not succeed skips every later git call (the
-          # composer runs no git and emit-landing runs read-only), so it
-          # needs its own clause or the round is a silent no-change. `!=
-          # success` so a cancel mid-reclaim is named too; the agentuser test
-          # keeps a run that never created the user out.
-          if [ -z "$err" ] && [ "${AGENTUSER_OUTCOME:-}" = "success" ] && [ "${AGENTRECLAIM_OUTCOME:-}" != "success" ]; then
-            err="the workspace could not be reclaimed from the fix agent (reclaim step outcome: ${AGENTRECLAIM_OUTCOME:-unknown}) — processes were still running as the agent user after repeated kills, .git is not a plain directory or a .git/commondir redirect exists, an embedded git repository appeared in the tree, the git config could not be restored, or the job was cancelled mid-reclaim (see the job logs); nothing was landed this round, the runner's base merge included. Inspect the run before re-triggering."
           fi
           # Completed-but-blocked: the action reports success,
           # but the agent left edits to tracked files uncommitted — they die
@@ -3081,6 +3073,11 @@ jobs:
     needs: [gate, fix, fix-codex]
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.act == 'fix'
     runs-on: ubuntu-latest
+    # Land runs take 10-50 s (56 land jobs across five caller repositories,
+    # 2026-09-30); the retries' backoff adds minutes at most. Well under
+    # the 6 h default, so a stuck post cannot hold the run (Claude
+    # Security 4773341).
+    timeout-minutes: 15
     env:
       # The result and outputs of the ONE fix job the gate's engine selected
       # (the other is `skipped`, with empty outputs): what the steps below

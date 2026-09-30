@@ -1632,6 +1632,40 @@ THREAT_MODEL.md text that its change makes true.
      for a caller that still passes no `github_token`.
    - After this step, check that no `claude[bot]` post appears on any
      Meridian repository for a week of normal use.
+   - As built (2026-09-30):
+     - The context file is capped at 100,000 bytes, which keeps the
+       Claude prompt under the 128 KiB limit on one environment value (the
+       action passes `prompt` as one). PR runs carry the newest 10 review
+       summaries submitted before the trigger (at most 20,000 characters)
+       ahead of pr-feedback-context's sections. With `trigger-time`,
+       pr-feedback-context also drops a review thread left with no
+       comment.
+     - The land composite gained a `pushed_branch` output for the status
+       comment. `dev-agent-status` joined `defang`'s list, since
+       pr-feedback-context now keys on it (the registry test).
+     - `Prepare branch` refuses an open PR whose HEAD is not on the head
+       branch sync-branch checked out. The launcher no longer records HEAD:
+       only launch step 6 read it.
+     - The private-repository image check has not been run: no Meridian
+       caller repository is private, and a private test repository has to
+       be made for it. The image code was run against a real public
+       attachment (meridianlabs-ai/ts-mono#270, two PNGs, with a user
+       token). Before this step merges, a `@claude` run on a private test
+       repository issue with an uploaded image must show the job token
+       fetching it; if it cannot, the fallback is links only and goes to
+       Ransom first.
+     - Folded in (decision: Ransom, 2026-09-30): the four land jobs have
+       `timeout-minutes: 15` (56 land runs across five repositories took
+       10-49 s), and the land composite stops posting inline review
+       comments after a 403 or 429, or after three failures in a row, and
+       folds the rest into the follow-up comment (4773341, criterion 2).
+       The Claude jobs' Surface steps decide a withheld run (the reclaim,
+       and in the reviewer the re-plant check and the landing prep) before
+       they read the agent's `is_error` text, so a withheld run reports
+       fixed text only (4773889, criterion 2), and their reclaim message
+       names the PATH check.
+     - After it merges: a week of normal use with no `claude[bot]` post on
+       any Meridian repository (step 5's search).
 5. **Check nothing else relies on the App.** A checklist in the step-6
    PR, each item with its evidence:
    - Claude Code on the web: who uses browser-onboarded sessions on

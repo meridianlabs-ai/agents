@@ -30,7 +30,7 @@ take effect on every repo's next run.
   `reclaim-codex-workspace`, `import-codex-final`, `claude-agent-launcher`,
   `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
-  `compose-settings`,
+  `compose-settings`, `dev-agent-context`,
   `drop-runner-root`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
@@ -120,16 +120,16 @@ take effect on every repo's next run.
   workflow or composite, give its step that env — never rely on
   `.git/config`, and never put a token in a URL or an `http.*.extraheader`.
   A URL credential WINS over a
-  helper (git never consults one when the URL carries auth), which is why
-  the `reset-origin-url` step runs after every claude-code-action step: the
-  action rewrites `remote.origin.url` to carry its token, and until the
-  reset every later fetch/push would use that instead of its helper — a
-  revoked token on marvin-less callers. (The launcher's wrapper already
-  resets it before the Claude agent starts; the step stays as belt and
-  braces.) The post-agent reclaim comes first, then this step: keep the
-  reclaim directly after the action step, `always()`-gated on the agent
-  user's creation, the reset right after it gated on the reclaim's
-  success, and put no git call between the action and the reset. On the
+  helper (git never consults one when the URL carries auth). The action
+  rewrites `remote.origin.url` to carry its token, which in every reusable
+  workflow is the job token (`github_token: ${{ github.token }}`); the
+  launcher's wrapper resets the URL before the Claude agent starts, and
+  nothing after the post-agent reclaim fetches or pushes, so the
+  post-agent `reset-origin-url` step is retired (design/untrusted-agent-job.md
+  → What stays in the untrusted job; the composite stays for direct
+  callers). Keep the post-agent reclaim directly after the action step,
+  `always()`-gated on the agent user's creation, and put no git call
+  between the action and the reclaim. On the
   codex path, the
   `reclaim-codex-workspace` step runs unconditionally right after codex
   (`if: always() && steps.codexuser.outcome == 'success'`): it kills any
