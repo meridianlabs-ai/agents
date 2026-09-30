@@ -104,7 +104,10 @@ AGENT_USER="$U" GRANT=workspace DENY_SCRIPT="$root/.github/actions/create-codex-
   /bin/bash -c "$(lift create-codex-user 1)"
 id "$U"
 { grep -qxF "$U" /etc/cron.deny && grep -qxF "$U" /etc/at.deny; } || fail "$U is not in /etc/cron.deny and /etc/at.deny"
-if command -v crontab >/dev/null; then sudo -u "$U" crontab -l 2>&1 | grep -q "not allowed" || fail "crontab -l as $U is not refused"; fi
+if command -v crontab >/dev/null; then
+  out=$(sudo -u "$U" crontab -l 2>&1) && fail "crontab -l as $U was not refused"
+  grep -q "not allowed" <<<"$out" || fail "crontab -l as $U failed, but not for the deny: $out"
+fi
 test -f "$RUNNER_TEMP/git-config.pre-codex" || fail "no config snapshot"
 
 say "2. pre-grant check with protect on, stock job PATH — must pass"
