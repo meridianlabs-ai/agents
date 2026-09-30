@@ -1544,7 +1544,13 @@ THREAT_MODEL.md text that its change makes true.
        the failing probe; the fix summary and `@review` request were
        posted by `meridian-marvin[bot]`. The tests run the push triggered
        ([36751315927](https://github.com/meridianlabs-ai/agents/actions/runs/36751315927))
-       passed.
+       passed. The Claude review of 98f80d6 had suggestions, and the
+       codex review-fix round anchored on it
+       ([run 36751661012](https://github.com/meridianlabs-ai/agents/actions/runs/36751661012))
+       also passed the reclaim and landed 942245a (this entry); the next
+       review
+       ([run 36752106545](https://github.com/meridianlabs-ai/agents/actions/runs/36752106545))
+       was clean and the loop converged.
 
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
