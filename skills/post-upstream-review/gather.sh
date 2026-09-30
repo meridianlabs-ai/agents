@@ -12,8 +12,10 @@
 # relay and for the double-relay check. When the NEWEST findings-shaped
 # comment is not a trusted one, nothing is chosen: the script stops and
 # names its author, for the maintainer to decide. The proxy itself must be
-# genuine (written by the machine account AND labelled External), and its
-# `Upstream PR:` line must name a PR of UKGovernmentBEIS/inspect_ai.
+# labelled External and written by a verified author — the machine account,
+# or a write-access maintainer, since new proxies are seeded by hand
+# (design/atlas-tracking.md) — and its `Upstream PR:` line must name a PR of
+# UKGovernmentBEIS/inspect_ai.
 #
 # A comment is findings-shaped when its body names a severity (blocking,
 # non-blocking) or one of the reviewer's verdict lines (looks ready to
@@ -26,8 +28,8 @@
 #                temporary directory.
 # Prints `OK proxy=#N upstream=<url> head=<sha> findings=<url> by <login>
 # at <time>` and the two paths. Exit codes: 0 ok; 1 usage; 2 a GitHub read
-# failed (nothing was chosen); 3 nothing to relay (not a genuine External
-# proxy, no Upstream PR line under upstream, the upstream PR is not open,
+# failed (nothing was chosen); 3 nothing to relay (not an External proxy
+# by a verified author, no Upstream PR line under upstream, the upstream PR is not open,
 # or no trusted findings comment); 4 the newest findings-shaped comment is
 # by an untrusted author (named on stderr) — stop and ask the maintainer;
 # 5 already relayed: your own upstream review is newer than the trusted
@@ -62,8 +64,12 @@ fail_read() { echo "ABORT: $1 — nothing was chosen; re-run" >&2; exit 2; }
 ISSUE=$(gh api "repos/$FORK/issues/$N" 2>/dev/null) || fail_read "could not read $FORK#$N"
 AUTHOR=$(jq -r '.user.login // ""' <<<"$ISSUE")
 LABELS=$(jq -r '[.labels[].name] | join(",")' <<<"$ISSUE")
-if ! genuine_proxy "$AUTHOR" "$LABELS"; then
-  echo "REFUSED: $FORK#$N is not a genuine External proxy (author=${AUTHOR:-?}, labels=${LABELS:-none}; a proxy is written by $TRUSTED_LOGINS and labelled External)" >&2
+case ",$LABELS," in
+  *",External,"*) ;;
+  *) echo "REFUSED: $FORK#$N is not labelled External (labels=${LABELS:-none}) — not a proxy" >&2; exit 3 ;;
+esac
+if ! trusted_login "$FORK" "$AUTHOR"; then
+  echo "REFUSED: $FORK#$N was written by ${AUTHOR:-unknown}, who is not in TRUSTED_LOGINS ($TRUSTED_LOGINS) and has no write access on $FORK — not a proxy this skill relays from" >&2
   exit 3
 fi
 proxy_upstream_pr "$(jq -r '.body // ""' <<<"$ISSUE")" "$UPSTREAM"
@@ -139,7 +145,7 @@ jq -j '.body // ""' <<<"$TRUSTED" >"$OUT/findings.md"
 jq -n --argjson proxy "$N" --arg fork "$FORK" --arg upstream "$UPSTREAM" --argjson pr "$UP_NUM" \
   --arg head "$HEAD_SHA" --argjson f "$TRUSTED" --arg me "$ME" \
   '{proxy: $proxy, fork: $fork, upstream: $upstream, pr: $pr, head_sha: $head, maintainer: $me,
-    findings: {url: $f.html_url, id: $f.id, author: $f.user.login, created_at: $f.created_at}}' >"$OUT/context.json"
+    findings: {url: $f.html_url, id: $f.id, author: $f.user.login, created_at: $f.created_at, updated_at: $f.updated_at}}' >"$OUT/context.json"
 echo "OK proxy=#$N upstream=https://github.com/$UPSTREAM/pull/$UP_NUM head=$HEAD_SHA findings=$(describe "$TRUSTED")"
 echo "findings: $OUT/findings.md"
 echo "context: $OUT/context.json"

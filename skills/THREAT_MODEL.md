@@ -87,7 +87,12 @@ split, and a reference GitHub would resolve in the destination's tracker
 is refused unless it is the one intended: a closing keyword there closes
 an issue, and a bare `#N` written on the fork names a different issue
 upstream. The text is printed as it will be posted, and `--dry-run` shows
-it without posting.
+it without posting. Printing during the post is a record, not a review:
+promote shows the upstream PR body in `--dry-run`, and pauses on a verdict
+that is not clean. post-upstream-review posts the agent's rewrite in the
+same run that prints it; its control is the maintainer reading the source
+findings before invoking the skill (an open decision: whether the final
+wording should be shown for approval first).
 
 (e) Security mechanics live in tested scripts. A check that guards the
 maintainer's login or machine is a script next to the skill or a helper in
@@ -113,7 +118,7 @@ tests them and fails when a skill script defines its own copy.
 | checkout | `checkout.sh` | b: the chip's head repository and author; c: an External PR lands detached, pinned, in a worktree outside the clone |
 | import | `import.sh` | d: the copied title and body are defanged before the fork issue is created under the maintainer's name |
 | merge-approved-prs | `approval_at_head.py`, `checks_at_head.py`, `companion_mergeable.py`, `external.sh`, `changelog_check.sh`, `conflicts.sh` | b: approvals and companions by write-access reviewers at the head; c: the External flow; a: CHANGELOG entries and conflicted file names |
-| post-upstream-review | `gather.sh`, `post.sh` | b: the findings comment by author; a and d: the review sent as a file, defanged, footer added, references checked |
+| post-upstream-review | `gather.sh`, `post.sh` | b: the proxy and the findings comment by author; a and d: the review sent as a file, defanged, footer added, references checked |
 | promote | `promote.sh` | b: the fork PR, the import header, the review verdict and the ts-mono companion by author; d: the upstream PR body and the branch's commit messages |
 | resolve-board | none | Reads only the workflow run and runs the chip sweep |
 

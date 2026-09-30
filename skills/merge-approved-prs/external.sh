@@ -35,8 +35,9 @@
 #       any other git command on the worktree, pinned (diff, log and show
 #       also get --no-ext-diff --no-textconv).
 #   external.sh commit [--trailer <line>]
-#       stage the resolution (every conflicted path, which must hold no
-#       conflict marker, and every tracked change), refuse a net change to
+#       stage the resolution (every conflicted path and every tracked
+#       change), refuse a conflict marker anywhere in it (git diff --check,
+#       any marker size), refuse a net change to
 #       the ts-mono gitlink, commit the merge with git's merge message plus
 #       the trailer, then run check.
 #   external.sh check
@@ -46,7 +47,8 @@
 #       check, then push HEAD to the contributor's branch, read from the PR
 #       (headRepositoryOwner/headRepository/headRefName; maintainerCanModify
 #       must be true), refusing unless the approved commit is an ancestor of
-#       HEAD and every commit on top of it is a merge. Never forced: a
+#       HEAD and every commit on top of it is a merge, and HEAD adds no
+#       conflict marker to the approved commit. Never forced: a
 #       rejection means the contributor pushed.
 # Exit codes: 0 ok; 1 usage, or not run from a linked worktree's root (or a
 # refused value); 2 dirty tree or a merge in progress when none is expected;
@@ -79,6 +81,9 @@ fi
 NOHOOKS=$(mktemp -d)
 trap 'rm -rf "$NOHOOKS"' EXIT
 pin_git_config "$NOHOOKS" "$PWD"
+# File names come from the contributor's tree, and git reads a pathspec's
+# magic (`:(glob)…`, `*`) even after `--`: every pathspec is literal here.
+export GIT_LITERAL_PATHSPECS=1
 
 sha_arg() {  # $1 = value: a full hex SHA, or usage
   grep -qE '^[0-9a-f]{40}$' <<<"$1" || { echo "external.sh: '$1' is not a full commit SHA" >&2; exit 1; }
@@ -125,6 +130,33 @@ gitlink_unchanged() {
   else
     git diff --quiet --no-ext-diff origin/main "$1" -- "$GITLINK"
   fi
+}
+# markers_vs <base> <result>: set MARKERS to the conflict markers git finds
+# in <result> (`--cached` for the index, or a commit) that <base> does not
+# have — `git diff --check`, which honours a path's conflict-marker-size
+# attribute — one `path:line` per line, "" when none. A diff that fails is
+# exit 1, never "none".
+markers_vs() {
+  local out rc=0
+  if [ "$2" = "--cached" ]; then
+    out=$(git diff --no-ext-diff --check --cached "$1" 2>&1) || rc=$?
+  else
+    out=$(git diff --no-ext-diff --check "$1" "$2" 2>&1) || rc=$?
+  fi
+  case "$rc" in
+    0|2) MARKERS=$({ grep -F ': leftover conflict marker' <<<"$out" || true; } | sed 's/: leftover conflict marker$//') ;;
+    *) echo "external.sh: git diff --check failed:" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+  esac
+}
+# conflict_residue <parent1> <parent2> <result>: set MARKERS to the conflict
+# markers in <result> that neither parent has — what an unfinished
+# resolution leaves, of any marker size, staged or not — and not a marker
+# line either side legitimately carries (a test fixture, a doc).
+conflict_residue() {
+  local a
+  markers_vs "$1" "$3"; a=$MARKERS
+  markers_vs "$2" "$3"
+  MARKERS=$(comm -12 <(sort <<<"$a") <(sort <<<"$MARKERS") | grep . || true)
 }
 check() {
   local rc=0
@@ -188,22 +220,20 @@ case "$CMD" in
       *) usage ;;
     esac
     in_merge || { echo "external.sh: no merge in progress — nothing to commit"; exit 0; }
-    # Every conflicted path must be resolved before anything is staged.
-    LEFT=""
-    while IFS= read -r -d '' f; do
-      if grep -qE '^(<<<<<<<|>>>>>>>)( |$)' -- "$f" 2>/dev/null; then
-        LEFT="$LEFT  $(printf '%q' "$f")"$'\n'
-      fi
-    done < <(git diff --name-only --diff-filter=U -z)
-    if [ -n "$LEFT" ]; then
-      echo "UNRESOLVED: conflict markers remain in:" >&2
-      printf '%s' "$LEFT" >&2
-      exit 3
-    fi
+    # Stage the resolution (every conflicted path, then every tracked
+    # change), then refuse any conflict marker in the whole staged result
+    # that neither side has: markers of any configured size, and content
+    # staged before this command, count the same.
     while IFS= read -r -d '' f; do
       git add -- "$f"
     done < <(git diff --name-only --diff-filter=U -z)
     git add -u
+    conflict_residue HEAD MERGE_HEAD --cached
+    if [ -n "$MARKERS" ]; then
+      echo "UNRESOLVED: conflict markers remain (path:line) — resolve them and run commit again:" >&2
+      sed 's/^/  /' <<<"$MARKERS" >&2
+      exit 3
+    fi
     if ! gitlink_unchanged --cached; then
       echo "INVARIANT: the merge carries a net change to the $GITLINK gitlink; restore it ('external.sh git checkout origin/main -- $GITLINK') and commit again" >&2
       exit 3
@@ -237,6 +267,12 @@ case "$CMD" in
       exit 1
     fi
     check || exit 3
+    conflict_residue "$APPROVED" origin/main HEAD
+    if [ -n "$MARKERS" ]; then
+      echo "UNRESOLVED: HEAD carries conflict markers neither the approved commit nor origin/main has (path:line) — not pushing:" >&2
+      sed 's/^/  /' <<<"$MARKERS" >&2
+      exit 3
+    fi
     PRJ=$(gh pr view "$N" --repo "$UPSTREAM" --json headRefName,headRepository,headRepositoryOwner,maintainerCanModify)
     OWNER=$(jq -r '.headRepositoryOwner.login // ""' <<<"$PRJ")
     NAME=$(jq -r '.headRepository.name // ""' <<<"$PRJ")

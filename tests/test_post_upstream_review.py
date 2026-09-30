@@ -85,9 +85,10 @@ MARVIN = {"login": "i-am-marvin", "type": "User"}
 APP = {"login": "meridian-marvin[bot]", "type": "Bot"}
 
 
-def comment(cid, user, body, at):
+def comment(cid, user, body, at, updated=None):
     return {
         "id": cid,
+        "updated_at": updated or at,
         "html_url": f"https://github.com/{FORK}/issues/{N}#issuecomment-{cid}",
         "user": user if isinstance(user, dict) else {"login": user, "type": "User"},
         "created_at": at,
@@ -197,12 +198,33 @@ def test_gather_never_trusts_another_app_and_never_looks_it_up(tmp_path, bot):
     assert not any("/permission" in c for c in s.calls())
 
 
-def test_gather_refuses_a_proxy_that_is_not_genuine(tmp_path):
-    s = Stub(tmp_path, comments=[comment(1, APP, FINDINGS, "2026-09-21T10:00:00Z")], author={"login": "outsider"})
+def test_gather_refuses_a_proxy_an_outsider_wrote_or_one_without_the_label(tmp_path):
+    s = Stub(tmp_path, comments=[comment(1, APP, FINDINGS, "2026-09-21T10:00:00Z")],
+             author={"login": "outsider", "type": "User"})
     r = s.gather()
-    assert r.returncode == 3 and "not a genuine External proxy" in r.stderr
-    s2 = Stub(tmp_path / "b", comments=[], labels=())
-    assert s2.gather().returncode == 3
+    assert r.returncode == 3 and "written by outsider" in r.stderr
+    assert any("collaborators/outsider/permission" in c for c in s.calls())
+    assert not any("pulls/" in c for c in s.calls())
+    s2 = Stub(tmp_path / "b", comments=[comment(1, APP, FINDINGS, "2026-09-21T10:00:00Z")], labels=())
+    r2 = s2.gather()
+    assert r2.returncode == 3 and "not labelled External" in r2.stderr
+
+
+@pytest.mark.parametrize("perm", ["write", "admin"])
+def test_gather_accepts_a_proxy_a_maintainer_seeded_by_hand(tmp_path, perm):
+    # Proxies are seeded by hand since the sync stopped creating them.
+    s = Stub(tmp_path, comments=[comment(1, APP, FINDINGS, "2026-09-21T10:00:00Z")],
+             author={"login": "ransomr", "type": "User"}, perms=[("ransomr", perm)])
+    r = s.gather()
+    assert r.returncode == 0, r.stderr
+    assert "findings=" in r.stdout and "by meridian-marvin[bot]" in r.stdout
+    assert any("collaborators/ransomr/permission" in c for c in s.calls())
+
+
+def test_gather_refuses_a_proxy_by_a_maintainer_whose_lookup_fails(tmp_path):
+    s = Stub(tmp_path, comments=[comment(1, APP, FINDINGS, "2026-09-21T10:00:00Z")],
+             author={"login": "ransomr", "type": "User"}, perms=[("ransomr", "FAIL")])
+    assert s.gather().returncode == 3
 
 
 def test_gather_believes_the_upstream_pr_line_only_under_upstream(tmp_path):
@@ -349,6 +371,11 @@ def test_post_refuses_when_the_findings_or_the_head_changed_since_gather(gathere
                     comment(2, MARVIN, "Needs discussion: blocking.", "2026-09-25T10:00:00Z")])
     r = s.run(POST, str(s.out / "context.json"), str(rv))
     assert r.returncode == 3 and "findings.url changed" in r.stderr
+    # The same comment, edited in place since gather.sh read it.
+    s.set_comments([comment(1, MARVIN, FINDINGS + "- **blocking**: also X\n", "2026-09-21T10:00:00Z",
+                            updated="2026-09-25T10:00:00Z")])
+    r = s.run(POST, str(s.out / "context.json"), str(rv))
+    assert r.returncode == 3 and "findings.updated_at changed" in r.stderr
     s.set_comments([comment(1, MARVIN, FINDINGS, "2026-09-21T10:00:00Z")])
     s.set_pr(head="c" * 40)
     r = s.run(POST, str(s.out / "context.json"), str(rv))

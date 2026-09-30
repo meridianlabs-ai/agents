@@ -45,7 +45,8 @@
 # bare refs would change text that is not a reference, or it could not be
 # rendered to check; a commit message in upstream main..<branch> references
 # an upstream issue or PR other than the import's, or the commits could not
-# be listed completely; a conflict merging upstream main into the branch);
+# be listed completely; the open ts-mono PRs on the branch could not be
+# listed completely; a conflict merging upstream main into the branch);
 # 6 ambiguous — more than one fork PR qualifies (re-run with --pr <number>),
 # or more than one open ts-mono PR on the branch passes the trust rule.
 set -euo pipefail
@@ -92,8 +93,9 @@ write() {  # guard every mutation; --dry-run prints instead
 # and the Markdown reference check (render_markdown, rendered_refs) are the
 # skills' shared copies (skills/THREAT_MODEL.md).
 . "$(dirname "$(realpath "$0")")/../lib/common.sh"
-# Open fork PRs the fallback lists at most; a listing this long is treated
-# as truncated (uniqueness cannot be established) and refused.
+# Open PRs a listing reads at most (the fork PRs of the fallback, the ts-mono
+# PRs on the branch); a listing this long is treated as truncated
+# (uniqueness cannot be established) and refused.
 LIST_LIMIT=500
 
 # fmt_pr <pr-json>: one listing line for the operator.
@@ -344,23 +346,30 @@ check_reviewer() {  # $1 = owner/repo; 204 ok, 404 exit 5, other → warn
 # only when it passes check_pr on ts-mono (its head is $TSMONO itself and
 # its author is trusted or has write access there), judged before anything
 # is written to it; two that pass are ambiguous (exit 6).
+# The listing must be complete and known-good before it decides anything (a
+# failed read, or one cut off at the limit, could hide the companion or a
+# second qualifying PR): either refuses with exit 5, before any write.
 COMPANION=""
 C_OK=""
-if C_ROWS=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open \
+if ! C_ROWS=$(gh pr list --repo "$TSMONO" --head "$BRANCH" --state open --limit "$LIST_LIMIT" \
       --json number,state,headRefName,author,headRepository,headRepositoryOwner 2>/dev/null \
     | jq -c --arg fork "$TSMONO" ".[] | $NORM"); then
-  while IFS= read -r c; do
-    [ -n "$c" ] || continue
-    check_pr "$TSMONO" "$c"
-    if [ -n "$REASON" ]; then
-      echo "note: ts-mono PR $TSMONO#$(jq -r .number <<<"$c") on branch $BRANCH is not the companion — REFUSED: $REASON" >&2
-    else
-      C_OK="$C_OK$c"$'\n'
-    fi
-  done <<<"$C_ROWS"
-else
-  echo "WARN: could not list $TSMONO PRs on branch $BRANCH — no companion reviewer request this run" >&2
+  echo "ABORT: could not list the open $TSMONO PRs on branch $BRANCH (gh pr list failed) — the companion cannot be decided; re-run. Nothing was written." >&2
+  exit 5
 fi
+if [ "$(jq -sc length <<<"$C_ROWS")" -ge "$LIST_LIMIT" ]; then
+  echo "ABORT: $TSMONO has $LIST_LIMIT or more open PRs on branch $BRANCH — the listing is truncated, so the companion cannot be decided. Nothing was written." >&2
+  exit 5
+fi
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  check_pr "$TSMONO" "$c"
+  if [ -n "$REASON" ]; then
+    echo "note: ts-mono PR $TSMONO#$(jq -r .number <<<"$c") on branch $BRANCH is not the companion — REFUSED: $REASON" >&2
+  else
+    C_OK="$C_OK$c"$'\n'
+  fi
+done <<<"$C_ROWS"
 case "$(jq -sc length <<<"$C_OK")" in
   0) ;;
   1) COMPANION=$(jq -sr '.[0].number' <<<"$C_OK") ;;

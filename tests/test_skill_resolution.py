@@ -48,7 +48,9 @@ case "$args" in
   "pr list --repo meridianlabs-ai/inspect_ai --state open "*)
     if [ -f "$STUB/prlist_fail" ]; then echo "gh: HTTP 500" >&2; exit 1; fi
     cat "$STUB/open_prs.json" 2>/dev/null || echo '[]' ;;
-  "pr list --repo meridianlabs-ai/ts-mono "*) cat "$STUB/tsmono_prs.json" 2>/dev/null || true ;;
+  "pr list --repo meridianlabs-ai/ts-mono "*)
+    if [ -f "$STUB/tsmono_fail" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+    cat "$STUB/tsmono_prs.json" 2>/dev/null || true ;;
   "pr checkout "*)
     # What gh does for a head repository that is not a configured remote
     # (the finding's layout): fetch refs/pull/M/head into the local branch
@@ -1597,6 +1599,23 @@ def test_promote_refuses_two_trusted_companions_as_ambiguous_before_any_write(tm
     assert r.returncode == 6, r.stdout + r.stderr
     assert "AMBIGUOUS" in r.stderr and "#77" in r.stderr and "#78" in r.stderr
     assert promote_calls_wrote_nothing(s.calls()) and not tsmono_writes(s.calls())
+
+
+def test_promote_refuses_when_the_ts_mono_listing_fails_or_is_truncated(tmp_path):
+    # A failed or cut-off read could hide the companion or a second one (review round 1, B4).
+    s = Stub(tmp_path, issue([chip(400, branch=BRANCH_A)]), tsmono_prs=[companion(77)])
+    (s.dir / "tsmono_fail").touch()
+    r = s.run(PROMOTE, str(N), "--dry-run")
+    assert r.returncode == 5 and "could not list the open meridianlabs-ai/ts-mono PRs" in r.stderr
+    assert "DRY-RUN" not in r.stdout  # stopped before planning any write
+    r = s.run(PROMOTE, str(N))
+    assert r.returncode == 5 and promote_calls_wrote_nothing(s.calls())
+    many = [companion(1000 + i, author="outsider", head_repo="outsider/ts-mono") for i in range(500)]
+    s2 = Stub(tmp_path / "b", issue([chip(400, branch=BRANCH_A)]), tsmono_prs=many)
+    r2 = s2.run(PROMOTE, str(N), "--dry-run")
+    assert r2.returncode == 5 and "listing is truncated" in r2.stderr
+    assert "DRY-RUN" not in r2.stdout
+    assert any(c.startswith("pr list --repo meridianlabs-ai/ts-mono ") and "--limit 500" in c for c in s2.calls())
 
 
 # --- promote: the branch's commit messages are checked like the body (Claude Security 4773879) ---

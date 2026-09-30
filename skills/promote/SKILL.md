@@ -154,7 +154,8 @@ other than the import's, qualifying its bare refs would change text that
 is not a reference, or it could not be rendered to check (edit the named
 refs or text in the fork PR body and re-run); a commit message on the
 branch references an upstream issue or PR, or the commits could not be
-listed (reword the named commits and re-run); or a conflict merging upstream
+listed (reword the named commits and re-run); the open ts-mono PRs on the
+branch could not be listed completely (re-run); or a conflict merging upstream
 main into the branch (resolve on the branch and re-run). No upstream PR was opened in any of
 these; **6** ambiguous — more
 than one fork PR qualifies at the same step (stderr lists them): ask the
@@ -185,7 +186,9 @@ from a personal fork under the same name, so a candidate counts only when
 its head repository is `meridianlabs-ai/ts-mono` and its author is in
 `TRUSTED_LOGINS` or has write access on ts-mono (the PR rule, judged
 before anything is written). Refused candidates are noted on stderr, and
-two that qualify stop the run with exit 6.
+two that qualify stop the run with exit 6. The listing must succeed and be
+complete (under `LIST_LIMIT`), or the run stops with exit 5 before any
+write.
 
 NEVER wait for GitHub to materialize a missing chip: on the fork, closing
 refs (`Fixes #N`) are inert — GitHub only processes them for PRs based on

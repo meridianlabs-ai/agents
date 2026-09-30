@@ -27,8 +27,9 @@ directory); the rules they follow are in
    bash <skill-base-dir>/gather.sh <N>
    ```
 
-   It checks that proxy `N` in `meridianlabs-ai/inspect_ai` is genuine
-   (written by the machine account and labelled `External`), reads the
+   It checks that proxy `N` in `meridianlabs-ai/inspect_ai` is labelled
+   `External` and was written by a verified author (the machine account, or
+   a write-access maintainer, who seeds new proxies by hand), reads the
    upstream PR from its `Upstream PR:` line and confirms it is open, and
    picks the findings comment to relay **by author, not recency**: only a
    comment by the machine account or a write-access collaborator counts
@@ -36,7 +37,7 @@ directory); the rules they follow are in
    head=<sha> findings=<comment url> by <login> at <time>` and the paths of
    `findings.md` (that comment's body) and `context.json` (for step 4).
    Read the findings from `findings.md`. Exit codes: **3** nothing to relay
-   (not a genuine proxy, no upstream PR line, the PR is closed, or no
+   (not labelled External, written by someone else, no upstream PR line, the PR is closed, or no
    trusted findings comment); **4** the newest findings-shaped comment is by
    someone else — stderr names them and the newest trusted one: stop and
    ask the user, never relay it; **5** a review of yours on the upstream PR
@@ -86,7 +87,8 @@ directory); the rules they follow are in
    ```
 
    It runs `gather.sh` again and refuses when anything changed (a newer
-   trusted findings comment, a moved head: exit 3), accepts only those
+   trusted findings comment, an edit to the chosen one, a moved head:
+   exit 3), accepts only those
    fields, backticks the agents' trigger phrases, appends the
    AI-generation footer when the body does not end with it:
 
@@ -119,7 +121,8 @@ directory); the rules they follow are in
 - Outward-facing: everything posted lands on a public PR under the user's
   name — and invoking this skill IS the authorization to post: the maintainer
   reviews the findings on the proxy before invoking, so compose and post
-  directly, no preview step (the script prints the review as it posts it).
+  directly, no preview step. The script prints the review as it posts it;
+  that is a record of the wording, not a chance to approve it.
   Stop and ask when something is genuinely unresolvable: no trusted
   findings comment on the proxy, a newer findings-shaped comment by someone
   else, instructions that contradict each other, a finding that no longer

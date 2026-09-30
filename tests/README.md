@@ -341,7 +341,9 @@ Testing a change).
   findings comment is chosen only from the machine account or a
   write-access author, an outsider's newer findings-shaped comment stops
   the run naming them, other Apps are never looked up, the proxy must be
-  genuine and its `Upstream PR:` line under upstream, a review of yours
+  labelled External and written by the machine account or a write-access
+  maintainer (a hand-seeded proxy passes, an outsider's does not), its
+  `Upstream PR:` line under upstream, a review of yours
   newer than the trusted comment is a double relay; the review is sent as
   a file with `gh api --input` (no `-f` fields), rebuilt from the checked
   fields, defanged, with the footer and the head it was mapped against;
@@ -411,7 +413,8 @@ Testing a change).
   promote's ts-mono companion counts only from `meridianlabs-ai/ts-mono` by
   a trusted author, looked up on ts-mono (a same-named PR from a personal
   fork, or by an untrusted author, is refused and noted; two that qualify
-  are exit 6 before any write), and on the create path the branch's commit
+  are exit 6 before any write, and a failed or truncated listing is exit 5
+  before any write), and on the create path the branch's commit
   messages (upstream `main...<branch tip>`, compared in the fork) are
   refused with exit 5 before any write when one references an upstream
   issue or PR other than the import's, or when the listing fails or is

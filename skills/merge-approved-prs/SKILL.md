@@ -317,6 +317,7 @@ Same flow as above with these substitutions — the branch lives on the
   goes through it (skills/THREAT_MODEL.md rule (c); Claude Security
   4773883, 4773882). Instead of the fetch/checkout block of section 2:
   ```bash
+  git checkout -q --detach origin/main                      # only when an earlier promotion left the worktree on its branch (our own tree)
   bash <skill-base-dir>/external.sh start <n> "$APPROVED"   # 5: the head is not the approved commit — SKIP, report both SHAs; 3: conflicts, listed
   ```
   It fetches `refs/pull/<n>/head` without checking it out, refuses it

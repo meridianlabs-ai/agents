@@ -18,8 +18,8 @@
 # were written on the fork, where a bare `#N` means a fork issue), and the
 # review is printed as it will be posted. The review is pinned to the head
 # gather.sh saw (`commit_id`), and gather.sh runs again first: a newer
-# trusted findings comment, a moved head, a closed PR or a review of yours
-# that already relayed it refuses the post.
+# trusted findings comment, an edit to the chosen one, a moved head, a
+# closed PR or a review of yours that already relayed it refuses the post.
 #
 # Usage: post.sh <context.json> <review.json> [--dry-run] [--allow-ref <N>]...
 #   context.json  written by gather.sh.
@@ -75,7 +75,7 @@ if ! bash "$HERE/gather.sh" "$PROXY" --out "$WORK/now" >"$WORK/gather.out" 2>"$W
   exit 3
 fi
 NOW="$WORK/now/context.json"
-for key in findings.url head_sha pr; do
+for key in findings.url findings.updated_at head_sha pr; do
   was=$(jq -r ".$key" "$CTX")
   now=$(jq -r ".$key" "$NOW")
   if [ "$was" != "$now" ]; then

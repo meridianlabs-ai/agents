@@ -4,11 +4,15 @@
 # main changed in it since the branch diverged, to resolve against. Run in
 # the queue worktree during the merge (external.sh runs it with its git
 # pins). A file name is the PR author's (an outsider's, for an External
-# PR) and may carry spaces, quotes or `$(`: the paths come from git
-# NUL-delimited and reach git only as a quoted variable (finding 4628737).
+# PR) and may carry spaces, quotes, `$(` or pathspec magic: the paths come
+# from git NUL-delimited and reach git only as a quoted variable (finding
+# 4628737), matched literally.
 #
 # Usage: conflicts.sh [<main-ref>]   (default origin/main)
 set -euo pipefail
+# git reads a pathspec's magic (`:(literal)…`, `*`) even after `--`; a file
+# name from the tree is matched literally.
+export GIT_LITERAL_PATHSPECS=1
 main=${1:-origin/main}
 base=$(git merge-base HEAD "$main")
 while IFS= read -r -d '' file; do

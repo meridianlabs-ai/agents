@@ -304,6 +304,16 @@ def test_the_primary_clone_and_a_branch_worktree_are_refused(queue):
     assert git("rev-parse", "HEAD", cwd=q.clone).stdout == q.before[1]
 
 
+def test_a_worktree_a_promotion_left_on_its_branch_detaches_and_starts(one_queue):
+    # The SKILL.md step for a queue that handled a promotion first.
+    q = one_queue
+    git("checkout", "-q", "-b", "claude/issue-1-promotion", "origin/main", cwd=q.queue)
+    assert q.run("start", "42", q.approved).returncode == 1
+    git("checkout", "-q", "--detach", "origin/main", cwd=q.queue)
+    r = q.run("start", "42", q.approved)
+    assert r.returncode == 0, r.stderr
+
+
 def test_the_git_passthrough_is_pinned(queue):
     q = queue
     assert q.run("start", "42", q.approved).returncode == 0
@@ -312,4 +322,93 @@ def test_the_git_passthrough_is_pinned(queue):
     (q.queue / "data.txt").write_text("edited\n")
     assert q.run("git", "diff", "--stat").returncode == 0
     assert q.run("git", "add", "data.txt").returncode == 0
+    assert q.ran() == ""
+
+
+# --- review round 1: every marker refused before commit and push (B1), file names are literal (B2) ---
+
+
+def make_conflict(q, name, *, attrs=None, main_extra=None):
+    """Main and the contributor add `name` with different text; returns the new approved SHA."""
+    git("checkout", "-q", "main", cwd=q.seed)
+    write(q.seed, name, "main's version\n")
+    for extra, text in (main_extra or {}).items():
+        write(q.seed, extra, text)
+    commit(q.seed, "main: adds the file")
+    git("push", "-q", "origin", "main", cwd=q.seed)
+    git("checkout", "-q", "contrib", cwd=q.seed)
+    write(q.seed, name, "the contributor's version\n")
+    if attrs:
+        write(q.seed, ".gitattributes", (q.seed / ".gitattributes").read_text() + attrs)
+    q.approved = commit(q.seed, "A2: the reviewed commit, same file")
+    git("push", "-q", "-f", "origin", "contrib:refs/pull/42/head", cwd=q.seed)
+    git("push", "-q", "-f", "fork", f"contrib:refs/heads/{q.branch}", cwd=q.seed)
+    return q.approved
+
+
+@pytest.fixture
+def one_queue(tmp_path):
+    return Queue(tmp_path, "main")
+
+
+def test_markers_of_a_configured_size_refuse_the_commit_and_the_push(one_queue):
+    q = one_queue
+    make_conflict(q, "conflict.py", attrs="conflict.py conflict-marker-size=12\n")
+    assert q.run("start", "42", q.approved).returncode == 3
+    assert "<" * 12 + " HEAD" in (q.queue / "conflict.py").read_text()  # the markers git wrote are 12 wide
+    before = q.fork_tip()
+    r = q.run("commit")
+    assert r.returncode == 3 and "UNRESOLVED" in r.stderr and "conflict.py:" in r.stderr
+    assert git("rev-parse", "HEAD", cwd=q.queue).stdout.strip() == q.approved
+    assert q.run("push", "42", q.approved).returncode != 0
+    assert q.fork_tip() == before
+
+
+def test_markers_staged_before_the_commit_are_refused(one_queue):
+    q = one_queue
+    make_conflict(q, "conflict.py")
+    assert q.run("start", "42", q.approved).returncode == 3
+    assert q.run("git", "add", "conflict.py").returncode == 0
+    r = q.run("commit")
+    assert r.returncode == 3 and "conflict.py:" in r.stderr
+    assert git("rev-parse", "HEAD", cwd=q.queue).stdout.strip() == q.approved
+
+
+def test_a_push_refuses_markers_committed_around_the_script(one_queue):
+    q = one_queue
+    make_conflict(q, "conflict.py")
+    assert q.run("start", "42", q.approved).returncode == 3
+    assert q.run("git", "add", "conflict.py").returncode == 0
+    assert q.run("git", "commit", "-q", "--no-edit").returncode == 0  # bypassing external.sh commit
+    before = q.fork_tip()
+    r = q.run("push", "42", q.approved)
+    assert r.returncode == 3 and "conflict.py:" in r.stderr
+    assert q.fork_tip() == before
+
+
+def test_a_marker_line_main_carries_is_not_residue(one_queue):
+    q = one_queue
+    fixture = "<<<<<<< ours\nfixture\n=======\ntheirs\n>>>>>>> theirs\n"
+    make_conflict(q, "conflict.py", main_extra={"tests/fixture.txt": fixture})
+    assert q.run("start", "42", q.approved).returncode == 3
+    (q.queue / "conflict.py").write_text("resolved\n")
+    r = q.run("commit")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert q.run("push", "42", q.approved).returncode == 0
+
+
+@pytest.mark.parametrize("name", [":(literal)conflict.py", ":(glob)**", "c*.py"])
+def test_file_names_from_the_tree_are_literal_pathspecs(one_queue, name):
+    q = one_queue
+    # cx.py: another file main changes, which a glob `c*.py` would also match.
+    make_conflict(q, name, main_extra={"cx.py": "main changes cx\n"})
+    r = q.run("start", "42", q.approved)
+    assert r.returncode == 3, r.stderr + r.stdout
+    section = r.stdout.split("=== ", 1)[1]
+    assert "main: adds the file" in section and "+main's version" in section
+    assert "cx.py" not in r.stdout  # only the named path was inspected
+    (q.queue / name).write_text("resolved\n")
+    r = q.run("commit")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert git("show", f"HEAD:{name}", cwd=q.queue).stdout == "resolved\n"
     assert q.ran() == ""
