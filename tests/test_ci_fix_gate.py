@@ -31,6 +31,8 @@ import stat
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
 LABELER = ROOT / ".github" / "actions" / "verify-auto-labeler" / "action.yml"
@@ -555,10 +557,10 @@ def test_reset_reports_a_patch_that_fails_after_retries(tmp_path):
 # --- verify-auto-labeler's trusted-logins input ------------------------------
 
 
-def verify(tmp_path, labeler, *, trusted, perms=None):
+def verify(tmp_path, labeler, *, trusted, perms=None, comments=()):
     env = {"PR": "7", "AUTO_LABEL": "auto", "TRUSTED_LOGINS": trusted}
     timeline = json.dumps([{"event": "labeled", "label": {"name": "auto"}, "actor": {"login": labeler}}])
-    fixtures = {"timeline": timeline, "comments": "[]"}
+    fixtures = {"timeline": timeline, "comments": json.dumps(list(comments))}
     for login, perm in (perms or {}).items():
         fixtures[f"perm.{login}"] = perm
     return run_step(VERIFY, tmp_path, env, fixtures, composite=True)
@@ -616,6 +618,36 @@ def test_labeler_passes_the_machine_accounts_bot_login_by_name_and_refuses_other
         res, out, calls, _ = verify(tmp_path, app, trusted=TRUSTED_LOGINS)
         assert res.returncode == 0, res.stderr
         assert out["verdict"] == "unverified" and lookups(calls) == [], app
+
+
+UNVERIFIED = "<!-- auto-gate-unverified -->"
+
+
+def notices(calls):
+    return [c for c in calls if c.startswith("pr comment 7 --repo o/r --body " + UNVERIFIED)]
+
+
+def test_labeler_sticky_notice_counts_only_a_trusted_logins_marker(tmp_path):
+    # An App's label is `unverified`: the notice posts once per PR, and the
+    # machine account's own earlier notice (either login) suppresses it.
+    for login in (MARVIN, MARVIN_BOT):
+        res, out, calls, _ = verify(tmp_path, "foo[bot]", trusted=TRUSTED_LOGINS,
+                                    comments=[comment(3, login, f"{UNVERIFIED}\nposted before")])
+        assert res.returncode == 0, res.stderr
+        assert out["verdict"] == "unverified" and notices(calls) == [], login
+        assert "already on PR #7" in res.stdout
+
+
+@pytest.mark.parametrize("login, type_", [("drive-by", "User"), ("github-actions[bot]", "Bot")])
+def test_labeler_sticky_notice_ignores_an_outsiders_marker_comment(tmp_path, login, type_):
+    # Anyone can paste the marker: an outsider's copy neither suppresses the
+    # notice nor is edited; a new one is posted.
+    res, out, calls, stub = verify(tmp_path, "foo[bot]", trusted=TRUSTED_LOGINS,
+                                   comments=[comment(3, login, f"{UNVERIFIED}\nnothing to see", type_)])
+    assert res.returncode == 0, res.stderr
+    assert out["verdict"] == "unverified"
+    assert len(notices(calls)) == 1
+    assert not [c for c in calls if c.startswith("api -X")] and not list(stub.glob("patched.*"))
 
 
 # --- the one trusted value ----------------------------------------------------

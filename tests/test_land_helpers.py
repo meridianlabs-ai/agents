@@ -1749,6 +1749,9 @@ def test_workflows_step_gates_the_push_and_reaches_the_report():
     # (Claude Security 4628444).
     assert "REMOTE_SHA: ${{ steps.fetch.outputs.remote_sha }}" in block
     assert "START_SHA" not in block and "start_sha" not in block
+    # A new branch is listed against the run's TRUSTED start, read from the
+    # caller's input itself (agents#192, run 36778367918).
+    assert "TRUSTED_START: ${{ inputs.start-sha }}" in block
     fetch = step_block(text, "fetch", indent=4)
     # The base a NEW branch is listed against: the PR's base, else the branch
     # the caller's trusted configuration cuts issue branches from (claude.yml
@@ -1920,7 +1923,7 @@ def commit_path(r, path, text="x\n"):
     r["head"] = git("rev-parse", "HEAD", cwd=r["work"]).stdout.strip()
 
 
-def run_workflows_step(r, repo, stub="", base=None, remote=None, allow_build_config=False):
+def run_workflows_step(r, repo, stub="", base=None, remote=None, allow_build_config=False, trusted=None):
     """The land composite's `workflows` step, lifted and run in the bare repo
     `land_fetch` filled, as GitHub runs it (`bash -eo pipefail`); STUB is
     shell prepended to it (a failing `git`, say). BASE is the fetch step's
@@ -1929,13 +1932,16 @@ def run_workflows_step(r, repo, stub="", base=None, remote=None, allow_build_con
     when the push creates the branch. START_SHA is set to the manifest's
     start, which the step must NOT consult (Claude Security 4628444: the
     agent job chooses it): the tests that shift it prove the listing does
-    not move with it. ALLOW_BUILD_CONFIG is the caller's `allow-build-config`
+    not move with it. TRUSTED is the caller's `start-sha` input, the run's
+    start its gate read (TRUSTED_START): the manifest's start unless a test
+    forges that. ALLOW_BUILD_CONFIG is the caller's `allow-build-config`
     input, as the step's env renders it."""
     out = r["tmp"] / "workflows-out.txt"
     out.write_text("")
     env = {"WORK": str(repo), "START_SHA": r["start"], "HEAD_SHA": r["head"], "GITHUB_OUTPUT": str(out),
            "RUNNER_TEMP": str(r["tmp"]), "BASE_SHA": base_sha(repo) if base is None else base,
            "REMOTE_SHA": remote_tip(r) if remote is None else remote, "LIB": str(LIB),
+           "TRUSTED_START": r["start"] if trusted is None else trusted,
            "ALLOW_BUILD_CONFIG": "1" if allow_build_config else ""}
     res = sh("bash", "-eo", "pipefail", "-c", stub + step_script("workflows"), check=False, env=env)
     outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
@@ -2856,9 +2862,13 @@ def test_start_sha_shifted_to_a_fork_pr_head_does_not_hide_its_workflow_file(rep
     # is identical at both, so a listing of start..head shows no workflow
     # file, while the fetch step's checks (E is on origin, head descends
     # from it, no remote tip to move) all pass. The step lists what the push
-    # would change on origin instead — for a new branch, head against
-    # origin's base tip — and refuses, naming the file.
+    # would change on origin instead — for a new branch, head against the
+    # run's trusted start (the gate's read, not the manifest's) — and
+    # refuses, naming the file. The validator refuses this manifest first
+    # (test_bundle_start_sha_must_be_the_trusted_start); the step does not
+    # rely on it.
     r = repos
+    trusted = r["start"]
     evil = fork_pr_head(r)
     git("reset", "-q", "--hard", evil, cwd=r["work"])
     r["start"] = evil
@@ -2866,10 +2876,15 @@ def test_start_sha_shifted_to_a_fork_pr_head_does_not_hide_its_workflow_file(rep
     emit(r)
     repo = land_fetch(r)
     assert old_listing(r, repo) == ""
-    res, outputs = run_workflows_step(r, repo, remote="")
+    res, outputs = run_workflows_step(r, repo, remote="", trusted=trusted)
     assert res.returncode != 0
     assert outputs["files"] == "`.github/workflows/evil.yml`"
     assert REFUSAL.format(files="`.github/workflows/evil.yml`") in res.stdout
+    # A trusted start off the base's history (the fork head itself, were a
+    # caller ever to pass one) is not a baseline: the base tip is, as before.
+    res, outputs = run_workflows_step(r, repo, remote="", trusted=evil)
+    assert res.returncode != 0
+    assert outputs["files"] == "`.github/workflows/evil.yml`"
     # The refusal is this step's, not the server's: this origin enforces no
     # Workflows permission (whether GitHub's own check refuses a push whose
     # workflow-adding commit already exists under refs/pull/ is not settled
@@ -2906,10 +2921,11 @@ def test_start_sha_shifted_to_an_old_base_commit_does_not_restore_a_deleted_work
     # The other origin-reachable history: an old base commit O that still
     # holds a workflow file the base has since deleted. start_sha=O, head a
     # child of O, new branch: start..head is clean, and head's copy equals
-    # O's — which is a merge base of head and the base tip. On a NEW branch
-    # only the base tip exempts: an issue run's branch is cut from the base
-    # tip at the run's start, so a fork point below it is the agent's choice
-    # and its content is on no branch of origin.
+    # O's — which is a merge base of head and the base tip. The run's
+    # trusted start is the base tip after the deletion (the gate read it),
+    # so old.yml is listed, and on a NEW branch only the base tip exempts:
+    # a fork point below the start is the agent's choice and its content is
+    # on no branch of origin.
     r = repos
     work = r["work"]
     commit_path(r, ".github/workflows/old.yml")
@@ -2918,13 +2934,14 @@ def test_start_sha_shifted_to_an_old_base_commit_does_not_restore_a_deleted_work
     git("rm", "-q", ".github/workflows/old.yml", cwd=work)
     git("commit", "-qm", "maintainer: retire old.yml", cwd=work)
     git("push", "-q", str(r["origin"]), "HEAD:main", cwd=work)
+    trusted = git("rev-parse", "HEAD", cwd=work).stdout.strip()
     git("reset", "-q", "--hard", old, cwd=work)
     r["start"] = old
     commit_path(r, "src/agent.py")
     emit(r)
     repo = land_fetch(r)
     assert old_listing(r, repo) == ""
-    res, outputs = run_workflows_step(r, repo, remote="")
+    res, outputs = run_workflows_step(r, repo, remote="", trusted=trusted)
     assert res.returncode != 0
     assert outputs["files"] == "`.github/workflows/old.yml`"
 
@@ -2940,7 +2957,8 @@ def cut_branch_from_base_tip(r):
 def test_new_branch_cut_from_the_base_tip_lands(repos):
     # The honest issue run: the branch was cut from origin's base tip (where
     # a workflow file lives), the agent changed source only, and the push
-    # creates the branch. Listed against the base tip: no workflow file.
+    # creates the branch. Listed against the trusted start (that tip): no
+    # workflow file.
     r = repos
     advance_base(r)
     cut_branch_from_base_tip(r)
@@ -2950,17 +2968,16 @@ def test_new_branch_cut_from_the_base_tip_lands(repos):
     res, outputs = run_workflows_step(r, repo, remote="")
     assert res.returncode == 0, res.stdout + res.stderr
     assert "files" not in outputs
-    assert f"land: no workflow or other executed files between origin's base tip ({base_sha(repo)}) and {r['head']} (the branch is new on origin)." in res.stdout
+    assert f"land: no workflow or other executed files between the run's trusted start ({base_sha(repo)}) and {r['head']} (the branch is new on origin)." in res.stdout
     git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/claude/issue-7-x", cwd=repo)
 
 
-def test_new_branch_forked_below_a_moved_base_tip_is_refused(repos):
-    # The cost of exempting only the base tip on a new branch: a maintainer
-    # changed ci.yml on main after the issue run cut its branch, so head
-    # carries the older version. Not the agent's edit — but no branch on
-    # origin holds that content any more, and the step cannot tell a run
-    # that raced the base from a start the agent chose (the test above).
-    # Refused and named; re-running the agent cuts from the new tip.
+def test_new_branch_raced_by_a_protected_base_change_lands(repos):
+    # agents#192, run 36778367918: a maintainer changed ci.yml on main after
+    # the issue run cut its branch, so head carries the older version. Not
+    # the agent's edit: listed against the run's trusted start, the file is
+    # unchanged, and the bundle lands. Until 2026-09-30 the listing was
+    # against the base tip, and every file of that merge read as the agent's.
     r = repos
     advance_base(r)
     cut_branch_from_base_tip(r)
@@ -2968,9 +2985,42 @@ def test_new_branch_forked_below_a_moved_base_tip_is_refused(repos):
     advance_base(r, text="on: push\n# v2\n")
     emit(r)
     repo = land_fetch(r)
+    assert base_sha(repo) != r["start"]
+    res, outputs = run_workflows_step(r, repo, remote="")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "files" not in outputs
+    assert f"between the run's trusted start ({r['start']})" in res.stdout
+    git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/claude/issue-7-x", cwd=repo)
+
+
+@pytest.mark.parametrize("path", [".github/workflows/ci.yml", ".github/workflows/agent.yml", "CLAUDE.md"])
+def test_new_branch_raced_by_a_base_change_still_refuses_the_agents_own_protected_change(repos, path):
+    # The same race, but the agent also changed a protected path (the one
+    # the base changed, or another): that change is listed against the
+    # trusted start and matches no base tip, so it is refused and named.
+    r = repos
+    advance_base(r)
+    cut_branch_from_base_tip(r)
+    commit_path(r, path, "agent's version\n")
+    advance_base(r, text="on: push\n# v2\n")
+    emit(r)
+    repo = land_fetch(r)
     res, outputs = run_workflows_step(r, repo, remote="")
     assert res.returncode != 0
-    assert outputs["files"] == "`.github/workflows/ci.yml`"
+    assert outputs["files"] == f"`{path}`"
+
+
+def test_new_branch_with_an_unreadable_trusted_start_is_refused_unchecked(repos):
+    # A trusted start this runner does not hold (the fetch step fetched the
+    # manifest's): the ancestry read fails, and nothing is listed.
+    r = repos
+    commit_path(r, "src/agent.py")
+    emit(r)
+    repo = land_fetch(r)
+    res, outputs = run_workflows_step(r, repo, remote="", trusted="d" * 40)
+    assert res.returncode != 0
+    assert "files" not in outputs
+    assert "refusing the bundle unchecked." in res.stdout
 
 
 def test_new_branch_without_a_base_tip_is_refused_unchecked(repos):
@@ -3033,10 +3083,15 @@ def test_new_branch_cut_from_a_configured_nondefault_base_lands(repos):
     assert res.returncode == 0, res.stdout + res.stderr
     assert "files" not in outputs
     git("push", "--quiet", str(r["origin"]), f"{r['head']}:refs/heads/claude/issue-7-source-only", cwd=repo)
-    # The default branch as the base is exactly the refusal the input exists
-    # to prevent — and the shifted-start attacks above stay refused.
+    # With the default branch as the base, the listing is still against the
+    # trusted start (meridian descends from it), so meridian's own workflow
+    # file no longer reads as deleted. Without a usable start (empty here, a
+    # stand-in for one off the base's history) the listing falls back to the
+    # base tip, and that is the refusal the input prevents.
     repo, fetched = run_fetch_step(r, "claude/issue-8-source-only", "meridian")
     res, outputs = run_workflows_step(r, repo, base=fetched["base_sha"], remote=fetched["remote_sha"])
+    assert res.returncode == 0, res.stdout + res.stderr
+    res, outputs = run_workflows_step(r, repo, base=fetched["base_sha"], remote=fetched["remote_sha"], trusted="")
     assert res.returncode != 0
     assert outputs["files"] == "`.github/workflows/meridian-only.yml`"
 

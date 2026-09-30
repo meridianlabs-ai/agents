@@ -415,11 +415,18 @@ credentials are changed from a maintainer's machine, under a maintainer's
 review, never by an agent running in CI. Since 2026-09-18 the land job
 enforces it before the push: its `workflows` step lists the paths under
 `.github/workflows/` the push would change on origin — the bundle's tip
-against the branch's live tip, or against origin's base tip when the push
-creates the branch; trusted references the land job reads itself, never
-the manifest's `start_sha`, which the agent job writes and which origin
-would serve for any reachable commit, a fork PR's head or an old base
-commit included (Claude Security finding 4628444, 2026-09-22) — and
+against the branch's live tip, or, when the push creates the branch,
+against the run's trusted start (the caller's `start-sha` input, the
+commit its gate read before the agent ran; on an issue run, the base tip)
+while origin's base tip descends from it, else against origin's base tip;
+trusted references the land job
+reads itself, never the manifest's `start_sha` alone, which the agent job
+writes and which origin would serve for any reachable commit, a fork PR's
+head or an old base commit included (Claude Security finding 4628444,
+2026-09-22; the validator refuses a bundle whose `start_sha` is not the
+trusted start). Until 2026-09-30 a new branch was listed against the base
+tip, so a run that raced a protected change merging to the base was
+refused for that merge's files (agents#192, run 36778367918) — and
 refuses the bundle with a
 one-line report naming the files the agent itself changed — a change the
 runner's base merge brought in (the file's content at the bundle's tip
@@ -427,9 +434,9 @@ equals the base branch's on origin, or, on a branch that is on origin, that
 of the base as last merged into
 the branch: the merge base of the tip and origin's base) is not the agent's
 and passes (decision: Ransom, 2026-09-18); on a branch the push creates,
-only content equal to the base tip passes, since an issue run cuts its
-branch from that tip and a lower fork point cannot be told from one the
-agent chose — and the agent prompts say up
+a path that differs from the trusted start passes only when it equals the
+base tip, since a lower fork point cannot be told from one the agent
+chose — and the agent prompts say up
 front not to edit them. Since 2026-09-23 the same step refuses the entry
 points and configuration files a later automated job on the branch
 executes or loads (Claude Security finding 4628446, criterion 2): anything

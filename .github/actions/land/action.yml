@@ -222,7 +222,10 @@ inputs:
       the fetch step reads it: the fetch takes `start_sha` from origin by
       SHA, which serves every reachable commit, so an agent job could
       otherwise name a fork PR's head or an old base commit as its start and
-      land history the run never began from. Empty refuses every bundle
+      land history the run never began from. The `workflows` step also
+      lists a branch the push creates against it (when origin's base tip
+      descends from it), so a protected change merged to the base during
+      the run does not read as the agent's. Empty refuses every bundle
       (fail closed): every caller whose agent commits must pass it — the
       reusable workflows pass their gate's read, and a direct caller of this
       composite records the start in its own trusted job and pins its agent
@@ -739,12 +742,25 @@ runs:
     # The paths checked are those the push
     # would CHANGE ON ORIGIN: head_sha against the branch's live tip (the
     # fetch step's ls-remote — an ancestor of head_sha, so held here), or,
-    # when the push creates the branch, against origin's base tip. Never
-    # against the manifest's start_sha: the agent job writes it, origin
+    # when the push creates the branch, against the run's TRUSTED start: the
+    # caller's `start-sha` input, which its gate read from the API before
+    # the agent ran (the base tip an issue run cuts its branch from), read
+    # here from the input itself. It is the baseline only while origin's
+    # base tip descends from it, so it stays on the base's history; any
+    # other start (a PR run whose branch was deleted during the run) is
+    # listed against the base tip. Listed against the base tip alone, a run
+    # that raced a protected change merging to the base was refused, since
+    # every file of that merge read as the agent's (agents#192, run
+    # 36778367918, 2026-09-30). Never against the manifest's start_sha
+    # alone: the agent job writes it, origin
     # serves any reachable SHA to the fetch step (a fork PR's head under
     # refs/pull/, an old base commit), and a file identical at a start the
     # agent chose and at head_sha would never be listed (Claude Security
-    # 4628444, 2026-09-22). Only the AGENT's changes count (decision:
+    # 4628444, 2026-09-22). The validator refuses a bundle whose start_sha
+    # is not the trusted start, and this step never reads the manifest's,
+    # so a start the agent chose cannot shrink the listing (a trusted start
+    # this runner does not hold is a failed read and refuses unchecked).
+    # Only the AGENT's changes count (decision:
     # Ransom, 2026-09-18): the runner merges the base branch into the branch
     # before the agent starts (sync-branch), and a workflow change that
     # merge brought in is already on origin. A listed path is exempt when
@@ -761,13 +777,12 @@ runs:
     # make it the merge base while a newer one is already an ancestor (round
     # 3 trusted every such parent, which let an agent pick the historical
     # version it wanted). Absent at both (the base deleted it) is equal too.
-    # On a NEW branch the base tip is the only trusted reference: an issue
-    # run cuts its branch from that tip, so the merge base of head_sha and
-    # the tip is the tip itself unless the base moved during the run or the
-    # agent chose a lower start — indistinguishable here, and content that
-    # is on no branch of origin is what GitHub's own check exists to refuse.
-    # A run that raced a base workflow change is refused and re-run. With no
-    # base tip nothing is exempt, and a new branch is refused unchecked.
+    # On a NEW branch the base tip is the only trusted reference: a path
+    # head_sha changed from the trusted start passes only when it equals the
+    # base tip, since a lower fork point the agent chose cannot be told from
+    # a base merge here, and content that is on no branch of origin is what
+    # GitHub's own check exists to refuse. With no base tip nothing is
+    # exempt, and a new branch is refused unchecked.
     # Skipped when origin already sits at
     # head_sha: nothing would be pushed, so nothing is refused. The paths
     # are agent-chosen: read NUL-separated for the blob lookups, shown
@@ -785,21 +800,31 @@ runs:
         HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
         REMOTE_SHA: ${{ steps.fetch.outputs.remote_sha }}
         BASE_SHA: ${{ steps.fetch.outputs.base_sha }}
+        TRUSTED_START: ${{ inputs.start-sha }}
         LIB: ${{ github.action_path }}/lib.sh
         ALLOW_BUILD_CONFIG: ${{ inputs.allow-build-config == 'true' && '1' || '' }}
         GIT_CONFIG_GLOBAL: /dev/null
       run: |
         set -euo pipefail
         cd "$WORK"
-        # The baseline (above): the branch's tip on origin, else the base tip.
+        # The baseline (above): the branch's tip on origin; on a new branch
+        # the run's trusted start when the base tip descends from it, else
+        # the base tip. is-ancestor exits 1 for "no"; anything higher (a
+        # start this repo does not hold) is a failed read.
         if [ -n "$REMOTE_SHA" ]; then
           from="$REMOTE_SHA"
           what="the branch's tip on origin ($from)"
           new_branch=""
         elif [ -n "$BASE_SHA" ]; then
-          from="$BASE_SHA"
-          what="origin's base tip ($from)"
           new_branch=" (the branch is new on origin)"
+          rc=1
+          [ -z "$TRUSTED_START" ] || { rc=0; git merge-base --is-ancestor "$TRUSTED_START" "$BASE_SHA" || rc=$?; }
+          case "$rc" in
+            0) from="$TRUSTED_START"; what="the run's trusted start ($from)" ;;
+            1) from="$BASE_SHA"; what="origin's base tip ($from)" ;;
+            *) echo "::error::land: could not tell whether the run's start $TRUSTED_START is in the history of the base tip $BASE_SHA (git merge-base failed, see above); refusing the bundle unchecked."
+               exit 1 ;;
+          esac
         else
           echo "::error::land: the push creates the branch and no base tip was fetched, so there is nothing trusted to list the bundle's workflow and other executed-file changes against; refusing the bundle unchecked."
           exit 1

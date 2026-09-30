@@ -440,6 +440,8 @@ def companion(number, **fields):
         "merged": False,
         "reviewDecision": None,
         "headRefOid": COMP_HEAD,
+        "isCrossRepository": False,
+        "author": {"login": "meridian-marvin", "__typename": "Bot"},  # GraphQL's bare App login
         "latestOpinionatedReviews": {"nodes": []},
     }
     d.update(fields)
@@ -546,6 +548,98 @@ def test_merge_gate_still_holds_on_the_real_companion_despite_an_outsiders_opt_o
 def test_merge_gate_honours_a_trusted_opt_out(gh):
     anchor(gh, "Companion PR: none")
     assert atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD}) is False
+
+
+# The branch-name convention's candidates (agents #185, "Not this PR"):
+# headRefName also matches PRs from forks of ts-mono, so a candidate counts
+# only as reflect_companion_loops counts one — its head in ts-mono itself,
+# its author trusted on ts-mono. Two that qualify and are open hold.
+
+OUTSIDER = {"login": "drive-by", "__typename": "User"}
+
+
+def discover(gh, nodes, has_next=False):
+    """Anchor #42 with no directive; the convention's query answers NODES."""
+    gh.route(is_issue_fetch, {"body": "Fix the viewer.", "login": MARVIN, "association": "MEMBER"})
+    gh.route(
+        is_discovery_query,
+        {"data": {"repository": {"pullRequests": {"pageInfo": {"hasNextPage": has_next}, "nodes": nodes}}}},
+    )
+
+
+def test_an_outsiders_fork_pr_with_the_companions_head_name_is_skipped(gh):
+    # Newest first, as the query orders them: the outsider's open fork PR,
+    # then the real companion. The fork PR is refused before any lookup.
+    discover(gh, [companion(80, isCrossRepository=True, author=OUTSIDER), companion(9)])
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9
+    assert gh.matching(is_permission_lookup) == []
+    assert any(f"{TS_MONO}#80: head is not in {TS_MONO}" in a for a in atlas.actions)
+
+
+def test_an_outsiders_fork_pr_alone_is_not_a_companion_and_holds_nothing(gh):
+    # Before: the fork PR was the companion, and its missing approval held
+    # the Merge move.
+    discover(gh, [companion(80, isCrossRepository=True, author=OUTSIDER)])
+    assert atlas.companion_pr(ISSUE, HEAD) is None
+    assert atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD}) is False
+
+
+def test_a_candidate_without_the_cross_repository_flag_fails_closed(gh):
+    pr = companion(80)
+    del pr["isCrossRepository"]
+    discover(gh, [pr, companion(9)])
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9
+
+
+@pytest.mark.parametrize("perm", ["read", "triage", "none"])
+def test_an_untrusted_authors_same_repo_pr_is_not_the_companion(gh, perm):
+    permission(gh, "drive-by", perm)
+    discover(gh, [companion(80, author=OUTSIDER), companion(9)])
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9
+    assert gh.repos_of(is_permission_lookup) == [TS_MONO]
+    assert any(f"{TS_MONO}#80: author drive-by is not a trusted author" in a for a in atlas.actions)
+
+
+def test_a_write_access_humans_same_repo_pr_is_the_companion(gh):
+    permission(gh, "colleague", "write")
+    discover(gh, [companion(9, author={"login": "colleague", "__typename": "User"})])
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9
+
+
+def test_two_qualifying_open_candidates_are_ambiguous_and_hold(gh):
+    permission(gh, "epatey", "write")
+    approved = {"nodes": [opinion("epatey", "APPROVED")]}
+    discover(gh, [companion(9, latestOpinionatedReviews=approved), companion(11, latestOpinionatedReviews=approved)])
+    comp = atlas.companion_pr(ISSUE, HEAD)
+    assert comp["_ambiguous"] == f"2 open {TS_MONO} PRs qualify (#9, #11)"
+    assert atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD}) is True
+    assert any("companion is ambiguous" in a and "holding stage" in a for a in atlas.actions)
+
+
+def test_an_open_companion_beside_older_closed_ones_is_not_ambiguous(gh):
+    discover(gh, [companion(12, state="CLOSED"), companion(9), companion(3, state="MERGED", merged=True)])
+    assert atlas.companion_pr(ISSUE, HEAD)["number"] == 9
+
+
+def test_a_truncated_candidate_listing_holds(gh):
+    # A candidate past the page could be the companion: undecided holds.
+    discover(gh, [companion(80, isCrossRepository=True, author=OUTSIDER)] * 50, has_next=True)
+    comp = atlas.companion_pr(ISSUE, HEAD)
+    assert comp["_ambiguous"].startswith(f"more than 50 {TS_MONO} PRs")
+    assert atlas.companion_blocks_merge(ISSUE, {"headRefName": HEAD}) is True
+
+
+def test_an_ambiguous_companion_after_the_upstream_merge_is_warned_about(gh):
+    discover(gh, [companion(9), companion(11)])
+    atlas.companion_leftover_warning(ISSUE, {"headRefName": HEAD})
+    assert any("WARNING companion ambiguous after upstream merge" in a for a in atlas.actions)
+
+
+def test_the_discovery_query_asks_for_each_candidates_head_repo_author_and_page(gh):
+    discover(gh, [companion(9)])
+    atlas.companion_pr(ISSUE, HEAD)
+    (query,) = gh.matching(is_discovery_query)
+    assert "isCrossRepository author{login __typename}" in query[3] and "pageInfo{hasNextPage}" in query[3]
 
 
 # ---------------------------------------------------------- companion_approved

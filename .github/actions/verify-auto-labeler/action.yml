@@ -58,7 +58,9 @@ description: >-
   The disarm posts a fresh note each time (the label has to be re-applied
   for it to recur, and the note names who did); the unverified notice is
   sticky — posted once per PR under `<!-- auto-gate-unverified -->`, since
-  later events would only repeat it. Both bodies are trigger-free like the
+  later events would only repeat it. Only a marker comment authored by one
+  of `trusted-logins` counts as that notice; a copy anyone else pasted is
+  ignored, so it cannot keep the notice off the PR. Both bodies are trigger-free like the
   failsafe's (no literal @auto/@review) and name the labeler without an @ so
   an outsider is not pinged. An App labeler is recognised from its login and
   never looked up: the lookup would 404 through the full retry (18 s of
@@ -167,10 +169,15 @@ runs:
         out labeler "$labeler"
         notice_unverified() {
           local marker="<!-- auto-gate-unverified -->" posted
-          # Sticky: one notice per PR. A failed scan falls through to posting
-          # — a duplicate notice is the harmless side of that error.
+          # Sticky: one notice per PR. Only a marker comment one of
+          # `trusted-logins` wrote counts: anyone can paste the marker, and
+          # an outsider's copy must not suppress the notice. A failed scan
+          # falls through to posting — a duplicate notice is the harmless
+          # side of that error.
           posted=$(ghr gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
-                     | jq -rs --arg m "$marker" 'any(.[][]; .body|contains($m))') || posted=""
+                     | jq -rs --arg m "$marker" --arg t "${TRUSTED_LOGINS// /}" \
+                         '($t | split(",") | map(select(. != ""))) as $tl
+                          | any(.[][]; (.body|contains($m)) and ((.user.login // "") as $l | any($tl[]; . == $l)))') || posted=""
           if [ "$posted" = "true" ]; then
             echo "Unverified-label notice already on PR #$PR; not repeating it."; return 0
           fi

@@ -550,7 +550,13 @@ stage, resolved by the hourly sync:
 - **Join key**: the companion is discovered by branch-name convention —
   the ts-mono PR whose head equals the upstream PR's `headRefName` (the
   dev agent names companion branches identically, e.g.
-  `claude/issue-251-20260818-2127` in both repos). An explicit
+  `claude/issue-251-20260818-2127` in both repos). The name matches PRs
+  from forks of ts-mono too, so a candidate counts only when its head is
+  in ts-mono itself and its author is trusted (the machine account, or
+  write access on ts-mono), the rule the companion-loop reflection uses
+  (finding 4773874). Two qualifying open PRs, or more candidates than the
+  query's one page, are ambiguous and hold the Merge move (2026-09-30).
+  An explicit
   `Companion PR: <url>` line in the anchor issue body overrides the
   convention for human-named branches — but only when the issue's author
   is a trusted identity or has write access (the machine account by login,
