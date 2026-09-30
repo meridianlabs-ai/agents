@@ -41,7 +41,7 @@ ways a steered agent can write into those scopes:
 A trusted workflow that later restores such an entry executes the agent's
 content with its own secrets and token. No commit, PR or attribution is
 involved. The entry lives until seven days pass without anyone restoring
-it. [SECURITY.md](../SECURITY.md) and the threat model in
+it. [THREAT_MODEL.md](../THREAT_MODEL.md) and the threat model in
 [credential-separation.md](credential-separation.md) never mention the
 cache.
 
@@ -339,7 +339,7 @@ need to adopt it; the reusable workflow's own key is the control.
 
 ### Documentation
 
-- `SECURITY.md` → Guarantees: a new bullet. "No job of the agent workflows
+- `THREAT_MODEL.md` → Guarantees: a new bullet. "No job of the agent workflows
   can save to the GitHub Actions cache: every reusable workflow declares
   `cache-mode: read`, which the platform enforces on the job's token, so
   nothing an agent does or a caller's setup nests can place content in a
@@ -611,7 +611,7 @@ design changes none of them.
    `examples/claude-stub.yml`, `examples/claude-auto-stub.yml`,
    `examples/claude-review-stub.yml` and this repo's
    `.github/workflows/*-stub.yml`. Documentation changes: `README.md` (the
-   claude-setup paragraph), `SECURITY.md` (the guarantee and the trust
+   claude-setup paragraph), `THREAT_MODEL.md` (the guarantee and the trust
    boundary line), `design/architecture.md` (the cache bullet),
    `design/credential-separation.md` (§3.5, §7) and `AGENTS.md` (the
    convention bullet). The PR edits workflow files, so it is made from a
@@ -661,7 +661,7 @@ and `env:`, and one bullet in each shared document.
 - **#124,** which removes the reviewer's `pull_request`/`pull_request_target`
   path, only shrinks the trigger set this design already covers.
 
-Documentation conflicts with #136 in `SECURITY.md`, `architecture.md` and
+Documentation conflicts with #136 in `THREAT_MODEL.md`, `architecture.md` and
 `credential-separation.md` are one-bullet merges.
 
 ## Decisions

@@ -237,8 +237,8 @@ on:
           MINUS `Bash(git push:*)`: the fix agent commits locally and the land
           job pushes (issue #82). The "Compose fix settings" step strips that
           rule from whatever a caller passes here (a JSON object, or the
-          action's other documented form, a path to a settings file) and
-          adds it (plus the gh comment/review/create verbs) to a `deny` list,
+          action's other documented form, a path to a settings file inside
+          the workspace with no symlink on the way) and adds it (plus the gh comment/review/create verbs) to a `deny` list,
           so a caller's settings cannot re-enable the direct push and posting
           commands.
         required: false
@@ -1098,38 +1098,15 @@ jobs:
       # credential. Composed BEFORE the agent user exists: a `settings` input
       # that names a file is read from the PR checkout here, before
       # provisioning runs as that user and could replace the file with a
-      # link to one of the runner's. Same step as claude.yml's and the other
-      # loop's; keep them in step.
+      # link to one of the runner's. The composite reads that file without
+      # following a symlink and only from inside the workspace (finding
+      # 4773338). Same deny list as the other loop's; keep them in step.
       - name: Compose fix settings (deny pushes and posts)
         id: fixsettings
-        env:
-          SETTINGS: ${{ inputs.settings }}
-        run: |
-          set -euo pipefail
-          # The action documents `settings` as a JSON string OR a path to a
-          # settings file (its setupClaudeCodeSettings tries JSON.parse
-          # first, then reads the path relative to the workspace — i.e. a
-          # file from this PR checkout, which the deny overlay below then
-          # covers like any other). Mirror that, since the value is
-          # transformed here before the action sees it; anything else fails
-          # loudly and the Surface step reports it (FIXSETTINGS_OUTCOME) —
-          # the action step is skipped, not failed, so nothing else would.
-          [ -n "$SETTINGS" ] || SETTINGS='{}'
-          is_object() { printf '%s' "$1" | jq -e 'type == "object"' >/dev/null 2>&1; }
-          if ! is_object "$SETTINGS" && [ -f "$SETTINGS" ]; then
-            echo "settings input is a path; reading $SETTINGS"
-            SETTINGS=$(cat "$SETTINGS")
-          fi
-          is_object "$SETTINGS" || { echo "::error::the settings input is neither a JSON object nor a path to a file holding one"; exit 1; }
-          deny='["Bash(git push:*)","Bash(gh pr comment:*)","Bash(gh issue comment:*)","Bash(gh pr review:*)","Bash(gh pr create:*)","Bash(gh pr merge:*)","Bash(gh issue create:*)"]'
-          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson d "$deny" '
-            .permissions.allow = ((.permissions.allow // []) - $d)
-            | .permissions.deny = (((.permissions.deny // []) + $d) | unique)')
-          {
-            echo "value<<SETTINGS_EOF"
-            printf '%s\n' "$merged"
-            echo "SETTINGS_EOF"
-          } >>"$GITHUB_OUTPUT"
+        uses: meridianlabs-ai/agents/.github/actions/compose-settings@main
+        with:
+          settings: ${{ inputs.settings }}
+          deny: '["Bash(git push:*)","Bash(gh pr comment:*)","Bash(gh issue comment:*)","Bash(gh pr review:*)","Bash(gh pr create:*)","Bash(gh pr merge:*)","Bash(gh issue create:*)"]'
 
       # ---- The agent user boundary (design/executed-paths-residual.md) -----
       # Nothing from the checked-out tree runs as the runner from here on

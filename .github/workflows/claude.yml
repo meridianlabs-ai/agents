@@ -755,7 +755,7 @@ jobs:
       # trig step's for the `labeled` path: the most recent `labeled` actor
       # for `auto` must be a human account holding admin/maintain/write —
       # not a bot, and not the machine account, whose label is a write for
-      # someone else's decision and never that decision itself (SECURITY.md
+      # someone else's decision and never that decision itself (THREAT_MODEL.md
       # → Guarantees; finding 4628345). Fails closed: a timeline or
       # permission lookup that never answers leaves the run one-shot. A PR's
       # `auto` label is verified by the loop gates instead (verify-auto-
@@ -1275,37 +1275,15 @@ jobs:
       # credential. Composed BEFORE the agent user exists: a `settings` input
       # that names a file is read from the checkout here, before provisioning
       # runs as that user and could replace the file with a link to one of
-      # the runner's. Same shape as the loops' step; keep them in step.
+      # the runner's. The composite reads that file without following a
+      # symlink and only from inside the workspace (finding 4773338).
+      # The deny list differs from the loops' by the tag-mode push script.
       - name: Compose agent settings (deny pushes and posts)
         id: agentsettings
-        env:
-          SETTINGS: ${{ inputs.settings }}
-        run: |
-          set -euo pipefail
-          # The action documents `settings` as a JSON string OR a path to a
-          # settings file (its setupClaudeCodeSettings tries JSON.parse
-          # first, then reads the path relative to the workspace — i.e. a
-          # file from this checkout, which the deny overlay below then
-          # covers like any other). Mirror that, since the value is
-          # transformed here before the action sees it; anything else fails
-          # loudly and the Surface step reports it (AGENTSETTINGS_OUTCOME) —
-          # the action step is skipped, not failed, so nothing else would.
-          [ -n "$SETTINGS" ] || SETTINGS='{}'
-          is_object() { printf '%s' "$1" | jq -e 'type == "object"' >/dev/null 2>&1; }
-          if ! is_object "$SETTINGS" && [ -f "$SETTINGS" ]; then
-            echo "settings input is a path; reading $SETTINGS"
-            SETTINGS=$(cat "$SETTINGS")
-          fi
-          is_object "$SETTINGS" || { echo "::error::the settings input is neither a JSON object nor a path to a file holding one"; exit 1; }
-          deny='["Bash(git push:*)","Bash(*/scripts/git-push.sh *)","Bash(gh pr comment:*)","Bash(gh issue comment:*)","Bash(gh pr review:*)","Bash(gh pr create:*)","Bash(gh pr merge:*)","Bash(gh issue create:*)"]'
-          merged=$(printf '%s' "$SETTINGS" | jq -c --argjson d "$deny" '
-            .permissions.allow = ((.permissions.allow // []) - $d)
-            | .permissions.deny = (((.permissions.deny // []) + $d) | unique)')
-          {
-            echo "value<<SETTINGS_EOF"
-            printf '%s\n' "$merged"
-            echo "SETTINGS_EOF"
-          } >>"$GITHUB_OUTPUT"
+        uses: meridianlabs-ai/agents/.github/actions/compose-settings@main
+        with:
+          settings: ${{ inputs.settings }}
+          deny: '["Bash(git push:*)","Bash(*/scripts/git-push.sh *)","Bash(gh pr comment:*)","Bash(gh issue comment:*)","Bash(gh pr review:*)","Bash(gh pr create:*)","Bash(gh pr merge:*)","Bash(gh issue create:*)"]'
 
       # ---- The agent user boundary (design/executed-paths-residual.md) -----
       # Nothing from the checked-out tree runs as the runner from here on

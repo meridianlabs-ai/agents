@@ -296,7 +296,8 @@ changed (the reusable workflow it calls updates automatically).
 You don't need any of this to *use* the agents — there are no secrets or config
 to set up per repo. For working on the infra:
 
-- [SECURITY.md](SECURITY.md) and [design/credential-separation.md](design/credential-separation.md) — how to report a vulnerability, the trust boundaries, and the gate/agent/land pattern and machine-account identity as they stand today.
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability.
+- [THREAT_MODEL.md](THREAT_MODEL.md) and [design/credential-separation.md](design/credential-separation.md) — the trust boundaries, and the gate/agent/land pattern and machine-account identity as they stand today.
 - [design/architecture.md](design/architecture.md) — auth (WIF), the permission
   model, model selection, branch protection, one-time org setup, and the
   rationale/history behind the design.

@@ -30,6 +30,7 @@ take effect on every repo's next run.
   `reclaim-codex-workspace`, `import-codex-final`, `claude-agent-launcher`,
   `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
+  `compose-settings`,
   `drop-runner-root`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
@@ -236,6 +237,38 @@ take effect on every repo's next run.
   operator detail in `design/`.
 - Match existing YAML style; GitHub-expression splices (`${{ … && … || '' }}`)
   are how optional flags are composed into `claude_args`.
+
+## Adding or changing a workflow
+
+These rules hold with the conventions above. The threat model they protect
+is in [THREAT_MODEL.md](THREAT_MODEL.md).
+
+- No secret of the machine account, and no other secret this repository
+  controls, in any job that runs an agent or code from a checkout the org
+  does not fully control. Not in `env:`, not as an action input, not through
+  a composite. The model credential (Workload Identity Federation, or
+  `OPENAI_API_KEY` in the codex job alone) and the Claude action's own token
+  are the known exceptions. Where the codex key may be referenced and how an
+  agent job provisions is under "One untrusted job per engine" above.
+- No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
+  it through `env:` and expand it as a quoted variable.
+  The skills under `skills/` that a maintainer's local agent runs with their
+  `gh` login follow the same rule for text from a PR or its tree — entry
+  text, file names, branch names, titles: a quoted variable, the environment
+  or stdin, never a value pasted into a command template (finding 4628737).
+- Every author check goes through `TRUSTED_LOGINS` or a permission lookup
+  that fails closed; never a substring of a comment or issue body.
+- Every write the agent asks the machine account for goes through the
+  landing manifest and the `land` composite, from a job that checks out
+  nothing. A trusted gate may
+  write before the agent runs (acknowledgement, stage, labels, counters),
+  never after.
+- Mint the machine account's token first in each trusted job, with the
+  narrowest `repositories` and `permission-*` inputs, and read it from
+  `steps.mint.outputs.token` only.
+- Stubs pass secrets as explicit one-key entries, never `secrets: inherit`.
+- Run `actionlint` as well as `python3 -m pytest` (Testing a change) before
+  opening the PR.
 
 ## Testing a change
 

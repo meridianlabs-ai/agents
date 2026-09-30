@@ -38,6 +38,16 @@ Testing a change).
   write-path workflows: the codex-owned output file is named only by
   codex-action's `output-file`, every reader takes the imported copy, and
   the import step sits right after the reclaim (finding 4628447).
+- `test_compose_settings.py` — the `compose-settings` composite and its
+  reader (`.github/scripts/read_settings.py`, finding 4773338): the
+  composite's step, lifted from its action.yml, merges the deny overlay
+  into inline JSON, an empty input and a valid in-tree path, and refuses
+  with no output a symlink (to a JSON object outside the tree, or inside
+  it), a symlinked parent directory, a `..` escape, an absolute path
+  outside the workspace, a FIFO, a directory, an oversized or non-UTF-8
+  file, a missing file and a file that is not a JSON object. A structural
+  check pins the three workflows' compose steps to the composite and their
+  deny lists.
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
   retry, open-or-adopt PR — a draft only on create when asked, an adopted
   PR's draft state untouched — and the branch-existence probe against a stub
