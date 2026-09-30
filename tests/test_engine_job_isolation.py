@@ -609,7 +609,7 @@ def dispatch(tmp_path: Path, user: str, caller_recipe: str = ""):
     # --` and the explicit `env -i VAR=…` prefix are swallowed so the
     # recipe stub keeps the test's LOG variable.
     write_exe(bins / "sudo", '#!/usr/bin/env bash\nprintf "sudo %s\\n" "$*" >>"$LOG"\n'
-              'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H|--|env|-i|*=*|/usr/bin/setpriv|--no-new-privs) shift ;; *) break ;; esac; done\nexec "$@"\n')
+              'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H|--|env|-i|*=*) shift ;; *) break ;; esac; done\nexec "$@"\n')
     recipe = write_exe(tmp_path / "recipe.sh", '#!/usr/bin/env bash\nprintf "recipe %s %s%s\\n" "$0" "$(pwd)" "${1:+ arg=$1}" >>"$LOG"\n')
     temp = tmp_path / "runner-temp"
     temp.mkdir()
@@ -634,7 +634,7 @@ def test_composite_runs_a_runner_temp_copy_under_sudo_for_the_user(tmp_path):
     copy = temp / "provision-fallback.sh"
     assert copy.exists() and stat.S_IMODE(copy.stat().st_mode) == 0o644
     assert copy.read_text() == (tmp_path / "recipe.sh").read_text()
-    assert log == f"sudo -u codex -H -- /usr/bin/setpriv --no-new-privs -- env -i HOME=/home/codex USER=codex LOGNAME=codex LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash {copy}\nrecipe {copy} {tmp_path / 'work'}\n"
+    assert log == f"sudo -u codex -H -- env -i HOME=/home/codex USER=codex LOGNAME=codex LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash {copy}\nrecipe {copy} {tmp_path / 'work'}\n"
     assert "provisioning as codex" in r.stdout
 
 
@@ -644,7 +644,7 @@ def test_composite_hands_the_caller_recipe_to_the_script_as_a_runner_temp_file(t
     caller = temp / "provision-recipe.sh"
     assert caller.read_text().rstrip("\n") == "uv venv --python 3.11\nuv sync --dev" and stat.S_IMODE(caller.stat().st_mode) == 0o644
     copy = temp / "provision-fallback.sh"
-    assert log == f"sudo -u codex -H -- /usr/bin/setpriv --no-new-privs -- env -i HOME=/home/codex USER=codex LOGNAME=codex LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash {copy} {caller}\nrecipe {copy} {tmp_path / 'work'} arg={caller}\n"
+    assert log == f"sudo -u codex -H -- env -i HOME=/home/codex USER=codex LOGNAME=codex LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash {copy} {caller}\nrecipe {copy} {tmp_path / 'work'} arg={caller}\n"
 
 
 def test_composite_refuses_a_caller_recipe_that_is_not_bash(tmp_path):
@@ -750,7 +750,6 @@ def workflow_text(name: str) -> str:
 # --- create-codex-user: the home recipe and the reset-home boundary ---------
 
 CODEX_USER = ROOT / ".github" / "actions" / "create-codex-user"
-PURGE = ROOT / ".github" / "scripts" / "purge_agent_schedules.sh"
 
 
 def fake_sudo(bins: Path, *, pkill_rc: str = "1") -> Path:
@@ -773,11 +772,8 @@ def home_env(tmp_path: Path, **extra):
     bins = tmp_path / "bin"
     bins.mkdir(exist_ok=True)
     fake_sudo(bins)
-    # The real purge script, over spools that do not exist (nothing to
-    # purge) unless a test makes them.
     return {"PATH": f"{bins}:{os.environ['PATH']}", "LOG": str(tmp_path / "log"), "PKILL_RC": "1",
-            "GITHUB_RUN_ID": "4242", "HOME_ROOT": str(tmp_path), "PURGE_SCRIPT": str(PURGE),
-            "CRON_SPOOL": str(tmp_path / "spool" / "crontabs"), "AT_SPOOL": str(tmp_path / "spool" / "atjobs"), **extra}
+            "GITHUB_RUN_ID": "4242", "HOME_ROOT": str(tmp_path), **extra}
 
 
 def run_home_script(tmp_path: Path, env: dict, *args: str):
@@ -1027,26 +1023,6 @@ def test_reset_mode_pins_nothing_without_bin_dirs(tmp_path):
     r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
     assert r.returncode == 0, r.stderr + r.stdout
     assert (tmp_path / "log").read_text() == "pkill pkill -KILL -u codex\nhome codex bin=\n"
-
-
-@pytest.mark.parametrize("spool", ["crontabs", "atjobs"])
-def test_reset_mode_fails_at_the_purge_before_the_home(tmp_path, spool):
-    # A cron or at entry of codex (finding 4773340): the kill is followed by
-    # the purge, which removes it, kills again and fails the step before the
-    # home is re-created.
-    env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PIN_SCRIPT=str(tmp_path / "pin.sh"),
-                   SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", BIN="", AGENT_USER="codex")
-    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
-    write_exe(tmp_path / "bin" / "id", f"#!/usr/bin/env bash\necho {os.getuid()}\n")
-    entry = tmp_path / "spool" / spool / ("codex" if spool == "crontabs" else "a0000101d5e2f1")
-    entry.parent.mkdir(parents=True)
-    entry.write_text("* * * * * sleep 600\n")
-    r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
-    assert r.returncode != 0
-    assert not entry.exists()
-    assert (tmp_path / "log").read_text() == "pkill pkill -KILL -u codex\npkill pkill -KILL -u codex\n"
-    assert f"removed {entry}, a scheduler entry of codex" in r.stdout
-    assert "        PURGE_SCRIPT: ${{ github.action_path }}/../../scripts/purge_agent_schedules.sh\n" in (CODEX_USER / "action.yml").read_text()
 
 
 def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):

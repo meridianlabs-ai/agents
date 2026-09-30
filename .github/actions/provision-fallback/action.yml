@@ -165,9 +165,8 @@ inputs:
     default: ""
   user:
     description: >-
-      Run the recipe as this unprivileged user (`sudo -u <user> -H`, with
-      no_new_privs, so a setuid or setgid file gains nothing) instead of
-      the runner. The codex jobs pass `codex`, after the
+      Run the recipe as this unprivileged user (`sudo -u <user> -H`) instead
+      of the runner. The codex jobs pass `codex`, after the
       `create-codex-user` composite has created the user and group-granted
       the workspace; empty (the default) runs it as the runner, as the
       Claude jobs do.
@@ -221,13 +220,10 @@ runs:
           # image's system path (the recipe prepends ~/.local/bin itself);
           # no GITHUB_*, no runner PATH, no XDG_* reaches the recipe. sudo
           # keeps the working directory, so the venv lands in the checkout
-          # as in the runner case. no_new_privs (`setpriv --no-new-privs`)
-          # for all of it: a setuid or setgid file the recipe runs, such as
-          # `crontab` or `at`, gains nothing (Claude Security finding
-          # 4773340).
+          # as in the runner case.
           install -m 644 "$RECIPE" "$RUNNER_TEMP/provision-fallback.sh"
           echo "provisioning as $AS_USER"
-          sudo -u "$AS_USER" -H -- /usr/bin/setpriv --no-new-privs -- env -i \
+          sudo -u "$AS_USER" -H -- env -i \
             HOME="/home/$AS_USER" USER="$AS_USER" LOGNAME="$AS_USER" LANG=C.UTF-8 \
             PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             bash "$RUNNER_TEMP/provision-fallback.sh" ${args[@]+"${args[@]}"}

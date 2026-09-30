@@ -37,13 +37,9 @@ description: >-
      process or its WIF files is checked later, inside the namespace, right
      before the CLI starts.
   6. Every process running as `claude-agent` is killed, until a pass finds
-     none (the reclaim's loop), and every cron and at entry it owns is
-     removed (`.github/scripts/purge_agent_schedules.sh`), failing the step
-     if there was one (Claude Security finding 4773340: the root daemon
-     would otherwise start an agent-uid process on the host after the
-     kill). With `grant: none` no pre-agent reclaim runs, so this is that
-     kill; from here nothing runs as the agent user outside the namespace
-     the wrapper starts.
+     none (the reclaim's loop). With `grant: none` no pre-agent reclaim
+     runs, so this is that kill; from here nothing runs as the agent user
+     outside the namespace the wrapper starts.
   7. The agent's landing directory (`$RUNNER_TEMP/claude-agent`) is
      re-created empty, `runner:claude-agent` 2775 as `create-codex-user`
      made it: provisioning ran as the agent user with write access to it,
@@ -102,7 +98,6 @@ runs:
         PATH_PREFIX: ${{ inputs.path-prefix }}
         SYSTEM_PATH: ${{ inputs.system-path }}
         SOURCE_DIR: ${{ github.action_path }}
-        PURGE_SCRIPT: ${{ github.action_path }}/../../scripts/purge_agent_schedules.sh
       run: |
         set -euo pipefail
         export PATH="$SYSTEM_PATH"
@@ -193,8 +188,6 @@ runs:
           sleep 0.2
         done
         [ "$clear" = 1 ] || err "processes were still running as $user after repeated kills"
-        # ... and nothing cron or at would start as it later.
-        AGENT_USER="$user" bash "$PURGE_SCRIPT" || err "the purge of $user's cron and at entries failed (see above)"
 
         # 7. The landing directory, empty: nothing provisioning wrote there
         #    may pass for the agent's output.

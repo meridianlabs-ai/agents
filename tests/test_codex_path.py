@@ -266,10 +266,6 @@ def world(tmp_path):
         "ASSERT_RUNNER_ONLY_PATH_ELEVATED": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
-        # The reclaim's purge of cron and at entries: spools that do not
-        # exist, never the host's.
-        "CRON_SPOOL": str(tmp_path / "spool" / "crontabs"),
-        "AT_SPOOL": str(tmp_path / "spool" / "atjobs"),
     }
     return {"tmp": tmp_path, "ws": ws, "planted": planted, "system": system, "system_path": system_path,
             "image": image, "image_path": image_path, "tail": f"{system}:{image}/bin", "temp": temp, "hijack": hijack, "sudo_log": sudo_log,

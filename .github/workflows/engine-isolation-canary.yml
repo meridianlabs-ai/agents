@@ -1,7 +1,7 @@
 # Hosted-runner canary for the engine split (Claude Security findings 4628446
 # and 4629153; design/codex-engine.md → One job per engine). Not a caller
 # stub and not an agent run: no real secret, no model, and codex-action only
-# without a key or a prompt (codex-action-path, below). Seven parts on the
+# without a key or a prompt (codex-action-path, below). Six parts on the
 # stock `ubuntu-latest` image:
 #
 #   probe                  the secret-delivery probe
@@ -100,26 +100,6 @@
 #                          hostile probe: the boundary inside the namespace
 #                          is assessed by Claude Security scans instead
 #                          (decision: Ransom, 2026-09-24).
-#   scheduler-boundary     the agent users cannot schedule host-side work
-#                          (Claude Security finding 4773340, criterion 1),
-#                          once per agent user, with cron and at installed
-#                          and running (tests/scheduler_boundary_smoke.sh).
-#                          After `create-codex-user`, each layer refuses on
-#                          its own (the deny files; no_new_privs with the
-#                          deny lifted), with a positive control. Then the
-#                          user tries crontab, at and direct spool writes
-#                          during `provision-fallback` and, for
-#                          claude-agent, from inside a namespace launched
-#                          through the real agent-ns-launch (a copy of
-#                          bash named `bun` stands in for the action's
-#                          process, a root-owned script for the CLI).
-#                          Last, with the deny lifted as a bypass would
-#                          leave it, a crontab and an at job are planted
-#                          for the user before each purge site (the
-#                          launcher or `reset-home`, then the reclaim):
-#                          each must fail, and no agent-uid process may
-#                          appear on the host past the next minute
-#                          boundary.
 #   codex-action-path      the job PATH around the real openai/codex-action
 #                          (design/codex-engine.md → Runner-side search
 #                          path), in the codex jobs' step order: the Node
@@ -170,8 +150,6 @@ on:
       - "tests/app_token_exchange_probe.sh"
       - "tests/fixtures/hostile-checkout/**"
       - "tests/fixtures/callers/**"
-      - ".github/scripts/purge_agent_schedules.sh"
-      - "tests/scheduler_boundary_smoke.sh"
 
 permissions:
   contents: read
@@ -590,148 +568,6 @@ jobs:
           [ ! -e /home/claude-agent/.anthropic-config ] || { echo "::error::the agent's config dir survived"; exit 1; }
           git status --short >/dev/null
           echo "reclaimed: .git and the root runner-owned and closed to the group"
-
-  scheduler-boundary:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        user: [claude-agent, codex]
-    env:
-      U: ${{ matrix.user }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      # Never runs: the launcher reads the pinned CLI version from it.
-      - name: claude-code-action (downloaded, not run)
-        if: false
-        uses: anthropics/claude-code-action@v1
-
-      - name: cron and at, installed and running
-        run: bash tests/scheduler_boundary_smoke.sh image
-
-      - name: Create the agent user (this revision)
-        id: agentuser
-        uses: ./.github/actions/create-codex-user
-        with:
-          user: ${{ matrix.user }}
-
-      - name: The deny and no_new_privs each refuse on their own
-        run: bash tests/scheduler_boundary_smoke.sh layers "$U"
-
-      - name: Provision as the agent user, trying both schedulers (this revision)
-        timeout-minutes: 10
-        uses: ./.github/actions/provision-fallback
-        with:
-          user: ${{ matrix.user }}
-          recipe: |
-            bash tests/scheduler_boundary_smoke.sh attempt provisioning >scheduler-provisioning.txt 2>&1
-
-      - name: Provisioning reached no scheduler
-        run: bash tests/scheduler_boundary_smoke.sh check "$U" scheduler-provisioning.txt
-
-      - name: Reset codex home (this revision)
-        if: matrix.user == 'codex'
-        uses: ./.github/actions/create-codex-user
-        with:
-          mode: reset-home
-
-      - name: Launcher (this revision)
-        if: matrix.user == 'claude-agent'
-        uses: ./.github/actions/claude-agent-launcher
-
-      # The real launch path from agent-ns-launch on: a copy of bash named
-      # `bun` stands in for the action's process (the launch checks the
-      # name, the uid and Runner.Worker above it), a synthetic Workload
-      # Identity dir for the action's, and a root-owned script for the CLI,
-      # which agent-ns-init starts with the CLI's own privilege drop inside
-      # the finished namespace after the isolation check passes.
-      - name: "From inside the launched namespace: both schedulers refused"
-        if: matrix.user == 'claude-agent'
-        run: |
-          set -euo pipefail
-          opt=/opt/meridian-agent
-          cli="$RUNNER_TEMP/canary-cli"
-          printf '#!/bin/bash\nexec /bin/bash %q attempt namespace >%q 2>&1\n' \
-            "$GITHUB_WORKSPACE/tests/scheduler_boundary_smoke.sh" "$RUNNER_TEMP/claude-agent/scheduler-namespace.txt" >"$cli"
-          sudo install -o root -g root -m 755 "$cli" "$opt/bin/canary-cli"
-          printf '%s\n' "$opt/bin/canary-cli" | sudo tee "$opt/run/cli" >/dev/null
-          wif="$RUNNER_TEMP/claude-workload-identity"
-          install -d -m 700 "$wif"
-          (umask 077 && echo synthetic >"$wif/identity-token")
-          handoff_dir="$RUNNER_TEMP/canary-handoff"
-          install -d -m 700 "$handoff_dir"
-          python3 - "$handoff_dir/handoff" <<'PY'
-          import os, sys
-          fields = [b"meridian-agent-handoff-1",
-                    b"argv", b"0",
-                    b"env", b"2", b"PATH=/usr/sbin:/usr/bin:/sbin:/bin", b"HOME=/home/claude-agent",
-                    b"unreachable", b"0",
-                    b"settings", b"1", b"{}",
-                    b"wif-config", b"0"]
-          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-          os.write(fd, b"\0".join(fields) + b"\0")
-          os.close(fd)
-          PY
-          install -d -m 755 "$RUNNER_TEMP/fakebun"
-          cp /bin/bash "$RUNNER_TEMP/fakebun/bun"
-          rc=0
-          # shellcheck disable=SC2016 # expanded by the stand-in's own bash
-          "$RUNNER_TEMP/fakebun/bun" -c 'sudo -n /opt/meridian-agent/bin/agent-ns-launch "$1" "$$"; exit $?' _ "$handoff_dir/handoff" || rc=$?
-          [ "$rc" = 0 ] || { echo "::error::the launch failed (exit $rc)"; exit 1; }
-          echo "the launch ran the stand-in CLI in the namespace and exited 0"
-
-      - name: The namespace reached no scheduler
-        if: matrix.user == 'claude-agent'
-        run: bash tests/scheduler_boundary_smoke.sh check "$U" "$RUNNER_TEMP/claude-agent/scheduler-namespace.txt"
-
-      # The purges. Each site gets what a bypassed deny would leave and must
-      # fail the step, remove it, and leave no agent-uid process on the host.
-      - name: Plant for the pre-launch kill
-        run: bash tests/scheduler_boundary_smoke.sh plant "$U"
-
-      - name: Launcher again, expected to fail at the purge (this revision)
-        id: launchpurge
-        if: matrix.user == 'claude-agent'
-        continue-on-error: true
-        uses: ./.github/actions/claude-agent-launcher
-
-      - name: Reset codex home again, expected to fail at the purge (this revision)
-        id: resetpurge
-        if: matrix.user == 'codex'
-        continue-on-error: true
-        uses: ./.github/actions/create-codex-user
-        with:
-          mode: reset-home
-
-      - name: The pre-launch purge failed the step and left nothing
-        env:
-          OUTCOME: ${{ matrix.user == 'codex' && steps.resetpurge.outcome || steps.launchpurge.outcome }}
-        run: |
-          set -euo pipefail
-          [ "$OUTCOME" = failure ] || { echo "::error::the step with the planted entries ended '$OUTCOME', not failure"; exit 1; }
-          bash tests/scheduler_boundary_smoke.sh quiet "$U"
-
-      - name: Plant for the reclaim
-        run: bash tests/scheduler_boundary_smoke.sh plant "$U"
-
-      - name: Reclaim, expected to fail at the purge (this revision)
-        id: reclaimpurge
-        continue-on-error: true
-        uses: ./.github/actions/reclaim-codex-workspace
-        with:
-          user: ${{ matrix.user }}
-
-      - name: The reclaim's purge failed the step and left nothing
-        env:
-          OUTCOME: ${{ steps.reclaimpurge.outcome }}
-        run: |
-          set -euo pipefail
-          [ "$OUTCOME" = failure ] || { echo "::error::the reclaim with the planted entries ended '$OUTCOME', not failure"; exit 1; }
-          bash tests/scheduler_boundary_smoke.sh quiet "$U"
 
   codex-action-path:
     runs-on: ubuntu-latest
