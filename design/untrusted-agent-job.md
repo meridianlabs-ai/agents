@@ -1453,6 +1453,30 @@ SECURITY.md text that its change makes true.
 
      The run URLs and outcomes are recorded here, under this step, in a
      follow-up PR. If a check fails, step 1 is reverted.
+
+     Results (2026-09-30, #179 merged as 23913b0):
+     - Canary, dispatched on `main`:
+       [run 36729558388](https://github.com/meridianlabs-ai/agents/actions/runs/36729558388),
+       success. The Claude probe printed `minted (exchange HTTP 200;
+       revoked, HTTP 204)` and the codex probe `refused (no OIDC request
+       token in this job)`. The push-triggered run the merge started
+       ([36729058076](https://github.com/meridianlabs-ai/agents/actions/runs/36729058076))
+       was green too, but on a push the Claude probe only records: the
+       exchange answered `401 Invalid OIDC token`.
+     - `@review`, Claude engine: meridianlabs-ai/ts-mono#697,
+       [run 36729713075](https://github.com/meridianlabs-ai/ts-mono/actions/runs/36729713075),
+       success. The action logged `Using provided GITHUB_TOKEN for
+       authentication` and skipped `Revoke app token` (no App token was
+       minted). The review and its verdict were posted by
+       `meridian-marvin[bot]`; nothing was posted as `claude[bot]`.
+     - `@review`, codex engine: the same PR with a temporary
+       `engine:codex` label (created in ts-mono for this),
+       [run 36730675006](https://github.com/meridianlabs-ai/ts-mono/actions/runs/36730675006),
+       success. `review-codex` ran and `review` was skipped; the review
+       and verdict were posted by `meridian-marvin[bot]`; nothing was
+       posted as `claude[bot]`.
+     - CI-fix round (Claude): pending, exercised on this PR.
+     - Review-fix round (codex): pending, exercised on this PR.
 2. **The fork's reviewer stub** drops `allowed_bots: "claude[bot]"`: a
    companion PR on meridianlabs-ai/inspect_ai `meridian`, from a
    maintainer's machine. It can merge before or after step 1.
