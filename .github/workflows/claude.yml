@@ -3635,6 +3635,18 @@ jobs:
           # the gate's read failed: then nothing may be labelled, and the
           # composer's empty list passes.
           allowed-pr-labels: ${{ needs.gate.outputs.pr_labels }}
+          # The composer's rules, enforced on this fresh runner too
+          # (design/untrusted-agent-job.md → Land enforces what the
+          # composers enforced): comments only on this run's issue or PR
+          # (and the "opened a pull request" note only on its issue), at
+          # most five of them.
+          comment-numbers: event
+          max-comments: "5"
+          # A hand-back needs a bundle (the composer owes one only when HEAD
+          # moved), and only a run the gate put in the loop's hands, or one
+          # whose caller asked for a review after the PR opens, may post it.
+          allow-no-change-handback: "false"
+          allow-handback: ${{ (needs.gate.outputs.auto == 'true' || inputs.request_review_after_open == 'true') && 'true' || 'false' }}
           # The caller's tier-2 opt-in (the `allow_build_config` input):
           # build and dependency configuration lands when it is true.
           allow-build-config: ${{ inputs.allow_build_config && 'true' || 'false' }}

@@ -111,6 +111,9 @@ def run(
     allowed_assignees=None,
     max_issues=None,
     allowed_pr_labels=None,
+    comment_numbers="*",
+    max_comments=None,
+    max_review_comments=None,
 ):
     return vm.validate(
         manifest,
@@ -132,6 +135,9 @@ def run(
         allowed_issue_assignees=allowed_assignees,
         max_issues=max_issues,
         allowed_pr_labels=allowed_pr_labels,
+        comment_numbers=comment_numbers,
+        max_comments=max_comments,
+        max_review_comments=max_review_comments,
     )
 
 
@@ -1228,6 +1234,136 @@ def test_allow_review_and_refuse_bundle_are_independent(tmp_path):
     assert any(e.startswith("comments[0]: review marks") for e in errs)
 
 
+# --- where and how much a manifest may post (step 3 of
+# design/untrusted-agent-job.md: land enforces what the composers enforced).
+# One adversarial manifest per posting path; the defaults keep today's rule.
+
+
+def test_comment_numbers_event_refuses_another_number_and_accepts_the_events(tmp_path):
+    m = base_manifest(tmp_path)
+    assert run(tmp_path, m, comment_numbers="event") == []
+    m["comments"] = [{"number": 456, "body_file": "c1.md"}, {"number": 79, "body_file": "c1.md"}]
+    assert run(tmp_path, m, comment_numbers="event") == []
+    m["comments"].append({"number": 80, "body_file": "c1.md"})
+    assert run(tmp_path, m, comment_numbers="event") == [
+        "comments[2]: number 80 is not this run's issue or PR (#456, #79; --comment-numbers event)"]
+    # On a run that names only a PR, the PR is the one target.
+    m = base_manifest(tmp_path, issue_number=None, comments=[{"number": 79, "body_file": "c1.md"}])
+    del m["pr"]
+    assert run(tmp_path, m, event_issue="", comment_numbers="event") == [
+        "comments[0]: number 79 is not this run's issue or PR (#456; --comment-numbers event)"]
+
+
+def test_comment_numbers_event_refuses_every_comment_on_a_run_that_names_nothing(tmp_path):
+    m = triage_manifest(tmp_path, comments=[{"number": 5, "body_file": write(tmp_path, "c.md")}])
+    errs = triage_run(tmp_path, m, comment_numbers="event")
+    assert errs == ["comments[0]: number 5 is not this run's issue or PR (none; --comment-numbers event)"]
+
+
+def test_comment_numbers_event_pins_the_pr_issue_note(tmp_path):
+    # `pr.issue` is where land posts the "opened a pull request" note.
+    m = base_manifest(tmp_path)
+    m["pr"]["issue"] = 80
+    assert run(tmp_path, m, comment_numbers="event") == [
+        "pr: issue 80 is not the issue this run's event names (#79; --comment-numbers event)"]
+    # A PR run has no event issue: any pr.issue is refused.
+    m = base_manifest(tmp_path, issue_number=None, comments=[])
+    assert run(tmp_path, m, event_issue="", comment_numbers="event") == [
+        "pr: issue 79 is not the issue this run's event names (none; --comment-numbers event)"]
+
+
+def test_the_defaults_keep_todays_acceptance(tmp_path):
+    m = base_manifest(tmp_path, comments=[{"number": 80, "body_file": "c1.md"}] * 60,
+                      review_comments=None)
+    m["pr"]["issue"] = 80
+    assert run(tmp_path, m) == []
+    d = tmp_path / "review"
+    d.mkdir()
+    assert run(d, review_manifest(d, review_comments=[
+        {"path": "a.py", "line": i + 1, "body_file": "claude-inline-0.md"} for i in range(80)]),
+        event_issue="", refuse_bundle=True, allow_review=True) == []
+
+
+def reviewer_run(d: Path, m: dict):
+    # claude-review.yml's land inputs.
+    return run(d, m, event_issue="", allowed=[], refuse_bundle=True, refuse_pr=True, allow_review=True,
+               comment_numbers="event", max_comments=5, max_review_comments=50)
+
+
+def test_the_reviewers_land_inputs_accept_its_manifest(tmp_path):
+    assert reviewer_run(tmp_path, review_manifest(tmp_path)) == []
+
+
+def test_the_reviewers_land_inputs_refuse_the_probe_manifest(tmp_path):
+    # The design review's probe: one legitimate review comment plus 51
+    # issues[].comment_on entries on another issue, which post through the
+    # same issue-comment endpoint. It passed before step 3.
+    entry = {"repo": REPO, "title": "t", "body_file": write(tmp_path, "i.md"), "comment_on": 999}
+    m = review_manifest(tmp_path, issues=[entry] * 51)
+    assert run(tmp_path, m, event_issue="", refuse_bundle=True, refuse_pr=True, allow_review=True) == []
+    errs = reviewer_run(tmp_path, m)
+    assert len(errs) == 51 and all(e.endswith(f"repo {REPO!r} is not in the allowed issue repos") for e in errs)
+    # One entry is refused just the same, and so is a reopen.
+    assert reviewer_run(tmp_path, review_manifest(tmp_path, issues=[entry])) != []
+    assert reviewer_run(tmp_path, review_manifest(tmp_path, issues=[{**entry, "reopen": True}])) != []
+    # And a comment on another thread.
+    m = review_manifest(tmp_path)
+    m["comments"].append({"number": 999, "body_file": "claude-review.md"})
+    assert reviewer_run(tmp_path, m) == [
+        "comments[1]: number 999 is not this run's issue or PR (#456; --comment-numbers event)"]
+
+
+def test_max_comments_refuses_an_over_cap_manifest(tmp_path):
+    m = review_manifest(tmp_path)
+    m["comments"] = m["comments"] * 5
+    assert reviewer_run(tmp_path, m) == []
+    m["comments"] = m["comments"] + m["comments"][:1]
+    assert reviewer_run(tmp_path, m) == [
+        "manifest: comments lists 6 entries; this land job allows at most 5 (--max-comments)"]
+
+
+def test_max_review_comments_refuses_the_uncapped_inline_manifest(tmp_path):
+    # Claude Security 4773341: inline review comments were uncapped.
+    rc = {"path": "src/app.py", "line": 1, "side": "RIGHT", "body_file": "claude-inline-0.md"}
+    assert reviewer_run(tmp_path, review_manifest(tmp_path, review_comments=[rc] * 50)) == []
+    assert reviewer_run(tmp_path, review_manifest(tmp_path, review_comments=[rc] * 500)) == [
+        "manifest: review_comments lists 500 entries; this land job allows at most 50 (--max-review-comments)"]
+
+
+# workflow → the strict values its land step passes.
+STRICT_LAND_INPUTS = {
+    "claude.yml": ['comment-numbers: event', 'max-comments: "5"', 'allowed-issue-repos: ""',
+                   'allow-no-change-handback: "false"',
+                   "allow-handback: ${{ (needs.gate.outputs.auto == 'true' || inputs.request_review_after_open == 'true') && 'true' || 'false' }}"],
+    "claude-review.yml": ['comment-numbers: event', 'max-comments: "5"', 'max-review-comments: "50"', 'allowed-issue-repos: ""'],
+    "claude-auto.yml": ['comment-numbers: event', 'max-comments: "5"', 'allowed-issue-repos: ""'],
+    "claude-auto-review.yml": ['comment-numbers: event', 'max-comments: "5"', 'allowed-issue-repos: ""'],
+}
+
+
+@pytest.mark.parametrize("name", sorted(STRICT_LAND_INPUTS))
+def test_the_reusable_land_jobs_pass_the_strict_values(name):
+    text = (ROOT / ".github" / "workflows" / name).read_text()
+    land = step_block(text, "land")
+    assert "uses: meridianlabs-ai/agents/.github/actions/land@main" in land
+    for line in STRICT_LAND_INPUTS[name]:
+        assert f"          {line}\n" in land, (name, line)
+
+
+def test_the_composite_defaults_stay_backward_compatible():
+    text = (ROOT / ".github" / "actions" / "land" / "action.yml").read_text()
+    inputs = text[text.index("\ninputs:\n"):text.index("\noutputs:\n")]
+    for name, default in (("comment-numbers", '"*"'), ("max-comments", '""'), ("max-review-comments", '""'),
+                          ("allow-handback", '"true"'), ("stage-override", '""'), ("allowed-issue-repos", "${{ github.repository }}")):
+        after = inputs[inputs.index(f"\n  {name}:\n"):]
+        (first_default,) = [ln for ln in after.splitlines() if ln.startswith("    default: ")][:1]
+        assert first_default == f"    default: {default}", name
+    validate = step_block(text, "validate", indent=4)
+    for flag in ('--comment-numbers "$COMMENT_NUMBERS"', '--max-comments "$MAX_COMMENTS"',
+                 '--max-review-comments "$MAX_REVIEW_COMMENTS"', '--stage-override "$STAGE_OVERRIDE"'):
+        assert flag in validate, flag
+
+
 # --- refuse_bundle (a land job whose agent never commits) --------------------
 
 
@@ -1732,6 +1868,35 @@ def test_cli_max_issues_must_be_a_number(tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli(tmp_path, "--max-issues", "one")
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("flag,value", [("--comment-numbers", "Event"), ("--comment-numbers", ""), ("--max-comments", "five"),
+                                        ("--max-review-comments", "-1"), ("--stage-override", "review"),
+                                        ("--stage-override", "Done")])
+def test_cli_malformed_posting_policy_is_a_usage_error(tmp_path, flag, value):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    with pytest.raises(SystemExit) as exc:
+        cli(tmp_path, flag, value)
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("override", ["", "none", "Review", "Agent"])
+def test_cli_accepts_every_stage_override_shape(tmp_path, capsys, override):
+    (tmp_path / "manifest.json").write_text(json.dumps(base_manifest(tmp_path)))
+    assert cli(tmp_path, "--stage-override", override) == 0
+
+
+def test_cli_posting_policy_flags(tmp_path, capsys):
+    m = base_manifest(tmp_path, comments=[{"number": 80, "body_file": "c1.md"}] * 2)
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path) == 0
+    assert cli(tmp_path, "--comment-numbers", "event") == 1
+    assert "comments[0]: number 80 is not this run's issue or PR" in capsys.readouterr().out
+    m["comments"] = [{"number": 79, "body_file": "c1.md"}] * 2
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    assert cli(tmp_path, "--comment-numbers", "event", "--max-comments", "2") == 0
+    assert cli(tmp_path, "--max-comments", "1") == 1
+    assert "comments lists 2 entries; this land job allows at most 1" in capsys.readouterr().out
 
 
 def test_cli_missing_manifest(tmp_path, capsys):

@@ -75,15 +75,16 @@ ref; a diverted HEAD that isn't genuinely new work fails the push
 non-fast-forward — loud, not lossy. Failure parity mirrors the Claude
 path throughout: a failed codex step *or* any of its prep steps
 (workspace/context prep, and the dev verb's separate prompt-compose)
-surfaces a visible error comment and, in the loops, a failed prep step
-refunds the review round / CI-fix attempt (the codex step was never
-entered), while a codex step that ran and failed keeps its round, like a
-failed Claude step (Claude Security 4628734 / 4628735, 2026-09-22: a
-refund keyed on the agent step's own outcome is the agent's to trigger).
-A missing `OPENAI_API_KEY` fails the entered codex action step — the key
-is passed straight to it — and therefore consumes a round or attempt,
-where it used to be refunded; a persistently missing key now reaches the
-cap and a human instead of a refund on every trigger;
+surfaces a visible error comment, and in the loops every round or attempt
+counts, a failed prep step's included. (A failed prep step, where the codex
+step was never entered, was refunded until step 3 of
+[untrusted-agent-job.md](untrusted-agent-job.md): the fix job's own
+`agent_skipped` output decided it, and the untrusted job writes its own
+outputs. A codex step that ran and failed already kept its round since
+Claude Security 4628734 / 4628735, 2026-09-22.) A missing `OPENAI_API_KEY`
+fails the entered codex action step — the key is passed straight to it —
+and therefore consumes a round or attempt, so a persistently missing key
+reaches the cap and a human;
 in both loops (`claude-auto.yml` since #82, `claude-auto-review.yml`
 since #83) the codex step only *commits*:
 the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)
@@ -698,14 +699,16 @@ counterpart.
   each compose step; the compose cats its file), so the dev verb and the
   review-fix loop run one jq program rather than two copies; its fetches
   are retry-then-fail, and a failure is surfaced as a pre-agent error
-  (and refunded, in the loop) like a failed prep. Both anchor
+  (and counted, in the loop) like a failed prep. Both anchor
   patterns — the Claude marker and the codex reviewer's `engine: codex`
   footer — join the de-fanged substrings on both the prompt and the
   output side (every codex summary that posts as marvin, the CI-fix
   loop's included), so a codex summary echoing either cannot become a
-  false anchor (the reviewer's own footer is appended after its sed AND
-  after its comment-size cap, so a truncated review still carries the
-  anchor), and the Claude-path prompts that post on a PR — the fix
+  false anchor (until 2026-09-30 the reviewer's own footer was appended
+  after its sed and its comment-size cap; since step 3 of
+  design/untrusted-agent-job.md the codex review lands flagged `review`
+  and gets the Claude marker from `land`, and `land` splits the footer in
+  every body), and the Claude-path prompts that post on a PR — the fix
   prompt's forbidden-substring list and the dev verb's review-etiquette
   rule — name them too; the author restriction covers a caller's human
   commenters, who are under neither rule. The

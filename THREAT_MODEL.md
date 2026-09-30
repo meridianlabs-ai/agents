@@ -111,6 +111,24 @@ text are checked by the tests under `tests/`.
   run's start as the gate read it before the agent ran, never on a start the
   agent job names: the land job refuses a bundle whose `start_sha` is any
   other commit before fetching it.
+- On the four reusable workflows' land jobs every post lands on the run's
+  own issue or PR: `comments[]` and the "opened a pull request" note
+  (`comment-numbers: event`), replies only to the PR's own review comments,
+  and thread resolutions only on the PR's own threads. Follow-up issues are
+  refused (`allowed-issue-repos: ""`). Comments are capped at five and the
+  reviewer's inline comments at fifty (Claude Security 4773341). Every agent
+  body passes the de-fang, which breaks every marker a consumer keys on in
+  a machine-account comment, the codex reviewer's old `engine: codex`
+  footer and atlas_sync's reopen record included; a test pins the list
+  (4773878, 4773339, 4773881, 4773886, 4773889, 4773875). The dev agent's
+  hand-back needs a bundle and a run its gate put in the loop's hands, and
+  the reviewer's stage move rests on its land job's own read of the `auto`
+  label. The validator and the land composite enforce all of this on the
+  fresh runner, so none of it rests on the composers in the agent job.
+  Direct callers of the composite get the same rules through its inputs,
+  and keep the old defaults until those flip
+  (design/untrusted-agent-job.md → Land enforces what the composers
+  enforced).
 - The machine account's tokens are minted per job, for one repository and the
   permissions that job uses, from the GitHub App's secrets, and are revoked at
   job end.
@@ -232,17 +250,14 @@ text are checked by the tests under `tests/`.
   move, merge or model work; the runner merges exactly the base tip the
   gate read. A Claude step that fails lands nothing and keeps its attempt —
   the action's execution-file output is not launch evidence, so the step's
-  outcome decides what lands, and a round is refunded only when the agent
-  step was never entered (the engine's agent step `skipped` — each engine
-  runs in its own fix job — a step outcome the runner settled before any
-  agent code ran, delivered by that job's own outputs — a cancelled job is refunded on that evidence alone, and a
-  pending job cancelled before it started, which delivers none, keeps its
-  round), never on how the agent's own step ended (Claude Security 4628734 and
-  4628735, 2026-09-22); in both loops a manifest with no bundle posts the
-  `@review` hand-back only when the agent step succeeded, so a round that
-  landed nothing and did not complete cannot re-arm the loop, and the
-  review-fix stall check keys on the recorded tip, not on a count a refund
-  may have taken to 0. What this establishes is the run's head commit, the base
+  outcome decides what lands. Every round counts against the cap, one whose
+  agent step never ran included: the agent job writes its own outputs, so
+  nothing it reports can show that the agent never ran (decision: Ransom,
+  2026-09-29; Claude Security 4628734 and 4628735 were the refund's earlier
+  gaps). In both loops a manifest with no bundle posts the `@review`
+  hand-back only when the agent step succeeded, so a round that landed
+  nothing and did not complete cannot re-arm the loop, and the review-fix
+  stall check keys on the recorded tip. What this establishes is the run's head commit, the base
   branch it was merged into and the base tip that is merged now, and that
   no other PR can be the run's origin — not which PR GitHub considered the
   trigger, not the merge commit the run built, and not the base tip it
@@ -374,11 +389,13 @@ text are checked by the tests under `tests/`.
   files in its landing
   directory, posted as the review after trigger tokens and loop markers are
   removed, with a verdict that is one of two fixed bodies. Its landing
-  manifest is still data the land job acts on: a comment on another thread,
-  a caller-repository issue write or a stage move that a compromised
-  review job requested would post as the machine account; opening,
-  adopting or labelling a PR is refused (`refuse-bundle`, `refuse-pr`).
-  A human reads every review.
+  manifest is still data the land job acts on, but a comment on another
+  thread and a follow-up issue are refused (`comment-numbers: event`,
+  `allowed-issue-repos: ""`), and so are opening, adopting or labelling a
+  PR (`refuse-bundle`, `refuse-pr`). On a PR the land job decides the stage
+  from its own label read, which leaves an External proxy issue's stage
+  move as the one board write a forged review manifest can choose. A human
+  reads every review.
 
 ## Adding or changing a workflow
 

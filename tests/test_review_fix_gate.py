@@ -6,9 +6,10 @@ substring: the reviewer's verdict, the round counter with the previous head
 SHA, the re-review requests the stale-verdict guard compares against, and
 the converged hand-off's double-post marker. On a public caller any account
 can post those substrings, so every read now also checks the author against
-the workflow-level TRUSTED_LOGINS / REVIEWER_LOGINS lists. The three steps
-that read them — the gate's `Gate and count`, the `Converged handoff`, and
-the land job's `Refund infra-crashed round` — are lifted out of the workflow
+the workflow-level TRUSTED_LOGINS / REVIEWER_LOGINS lists. The steps
+that read them — the gate's `Gate and count` and the `Converged handoff`
+(the land job's round refund was the third until refunds went,
+design/untrusted-agent-job.md step 3) — are lifted out of the workflow
 and run here against a stub `gh` (one case per forgery, plus the positive
 path each filter must keep working), the way test_review_fix_composer.py
 runs the manifest composer.
@@ -400,95 +401,24 @@ def test_handoff_dedupes_only_on_the_loops_own_marker(tmp_path):
     assert "already posted" in r.stdout
 
 
-# --- the land job's refund ---------------------------------------------------
-
-REFUND_STUB = r"""
-gh() {
-  case "$*" in
-    "api repos/o/r/issues/42/comments --paginate") cat "$STATE/comments.json" ;;
-    "api repos/o/r/issues/comments/"*" --jq .body")
-      [ -f "$STATE/body-fail" ] && { echo '{"message":"Server Error"}'; return 1; }
-      local id=${2##*/}
-      jq -r --argjson i "$id" '.[] | select(.id==$i) | .body' "$STATE/comments.json" ;;
-    "api -X PATCH repos/o/r/issues/comments/"*)
-      echo "${4##*/}" >>"$STATE/patched"; printf '%s\n' "$6" >"$STATE/patched-body" ;;
-    *) echo "unexpected gh call: $*" >&2; return 1 ;;
-  esac
-}
-"""
-
-
-def run_refund(tmp_path, comments, *, body_fail=False):
-    state = fresh_state(tmp_path)
-    (state / "comments.json").write_text(json.dumps(comments))
-    if body_fail:
-        (state / "body-fail").write_text("")
-    env = {"STATE": str(state), "REPO": "o/r", "PR": "42", "ROUND": "3", "CAP": "10",
-           "MARKER": MARKER, "TRUSTED_LOGINS": TRUSTED_LOGINS}
-    r = sh(*STEP_BASH, REFUND_STUB + lift_step(WORKFLOW, "      - name: Refund infra-crashed round"),
-           check=False, env=env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    patched = (state / "patched").read_text().split() if (state / "patched").exists() else []
-    body = (state / "patched-body").read_text() if (state / "patched-body").exists() else ""
-    return r, patched, body
-
-
-def test_refund_patches_only_the_loops_own_counter(tmp_path):
-    _, patched, body = run_refund(tmp_path, [counter("i-am-marvin", 3, T0, cid=100, head=OLD),
-                                             counter("nobody", 999, T2, cid=200, head=HEAD)])
-    assert patched == ["100"]
-    assert "rounds: 2" in body and OLD in body
-
-
-def test_refund_skips_when_the_counter_body_cannot_be_read(tmp_path):
-    # A failed GET is not an absent count: zeroing the counter on it would
-    # erase the budget and the no-progress baseline. No PATCH, a warning,
-    # one round of slack.
-    r, patched, _ = run_refund(tmp_path, [counter("i-am-marvin", 3, T0, cid=100, head=OLD)], body_fail=True)
-    assert patched == []
-    assert "::warning::could not read counter comment 100" in r.stdout
-
-
-def test_refund_ignores_a_counter_that_is_only_an_outsiders(tmp_path):
-    r, patched, _ = run_refund(tmp_path, [counter("nobody", 999, T2, cid=200, head=HEAD)])
-    assert patched == []
-    assert "No counter comment found" in r.stdout
-
-
-def test_refund_reads_an_absent_or_unparsable_count_as_zero_with_no_head(tmp_path):
-    # A reset body (escalation or re-engagement) carries no count and no
-    # head on purpose; a late refund that wrote this run's round (3) and tip
-    # back over it would undo the fresh budget and re-arm the no-progress
-    # check. From 0 the refund stays at 0 and records no head, so the next
-    # gate runs round 1 with a fresh baseline. A malformed body reads the same.
-    reset_body = f"{MARKER}\n🤖 auto review rounds reset (on escalation) — the next round starts at 1 with the full cap."
-    _, patched, patched_body = run_refund(tmp_path, [comment(100, "i-am-marvin", reset_body, T0)])
-    assert patched == ["100"]
-    assert "rounds: 0" in patched_body and "auto-review-head:" not in patched_body
-    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
-                                  comment(100, "i-am-marvin", patched_body, T0)])
-    assert o["act"] == "fix" and o["round"] == "1" and o.get("stalled") is None
-    malformed = f"{MARKER}\n🤖 auto review rounds: 3.5 (cap 10).\n<!-- auto-review-head:{OLD}-x -->"
-    _, patched, patched_body = run_refund(tmp_path, [comment(100, "i-am-marvin", malformed, T0)])
-    assert patched == ["100"] and "rounds: 0" in patched_body and "auto-review-head:" not in patched_body
-
-
-# --- the refund's trust and the stall check it must not disarm (4628734) -----
+# --- every round counts (design/untrusted-agent-job.md → Refunds go) --------
 #
-# The finding's loop: a steered fix agent sets `handback: true`, commits
-# nothing and kills its own action step. The refund read the step's failure
-# and an empty execution file as an infra crash and took round 1 back to 0
-# (marker kept); the bare `@review` posted anyway; the next verdict found
-# prev=0 and skipped the stall check, so round 1 ran again — without bound.
-# Three rules close it, each checked here or in the composer / land tests:
-# the refund fires only on a step the runner never entered, a bundle-less
-# hand-back needs a successful agent step, and the stall check keys on the
-# recorded tip whatever the count reads.
+# The land job used to hand a round back when the fix job reported its agent
+# step `skipped`. That output was written by the untrusted job itself, so a
+# compromised runner could report every round as skipped and run the loop
+# without bound. The refund is gone (decision: Ransom, 2026-09-29): a round
+# whose agent step never ran keeps its count, and the cap and the stall check
+# bound the loop on the gate's own record. Claude Security 4628734's loop (a
+# steered agent that committed nothing, killed its own step and asked for a
+# re-review) is still closed by the other two rules: a bundle-less hand-back
+# needs a successful agent step, and the stall check keys on the recorded tip
+# whatever the count reads.
 
 
 def test_no_progress_escalation_fires_at_zero_when_the_recorded_tip_is_unchanged(tmp_path):
-    # rounds: 0 with a head marker is exactly the refunded-round-1 body; the
-    # unchanged tip escalates, a moved tip runs round 1.
+    # rounds: 0 with a head marker (a hand-edited counter, or a round-1 refund
+    # written before refunds went): the unchanged tip escalates, a moved tip
+    # runs round 1.
     _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
                                   counter("i-am-marvin", 0, T0, cid=100, head=HEAD)])
     assert o["act"] == "escalate" and o["stalled"] == "1"
@@ -497,159 +427,47 @@ def test_no_progress_escalation_fires_at_zero_when_the_recorded_tip_is_unchanged
     assert o["act"] == "fix" and o["round"] == "1" and o.get("stalled") is None
 
 
-def test_a_refunded_first_round_still_escalates_on_the_unchanged_tip(tmp_path):
-    # gate (round 1 recorded on HEAD) → refund → gate on the same tip. The
-    # refund writes rounds: 0 and keeps the tip; the next verdict on that tip
-    # escalates for no progress instead of re-running round 1 — and a refund
-    # never takes the count below 0.
-    _, patched, refunded = run_refund(tmp_path, [counter("i-am-marvin", 1, T0, cid=100, head=HEAD)])
-    assert patched == ["100"] and "rounds: 0" in refunded and HEAD in refunded
-    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
-                                  comment(100, "i-am-marvin", refunded, T0)])
+def test_a_skipped_agent_step_keeps_its_round(tmp_path):
+    # gate (round N recorded on the tip) → a fix job whose agent step never
+    # ran (nothing pushed, nothing refunded) → the next verdict. The count
+    # the gate recorded stands: on the unchanged tip the gate escalates for
+    # no progress; on a moved tip (a human pushed) it runs round N + 1; and
+    # at the cap it escalates instead of running another round.
+    recorded = counter("i-am-marvin", 1, T0, cid=100, head=HEAD)
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1), recorded])
     assert o["act"] == "escalate" and o["stalled"] == "1"
-    _, patched, again = run_refund(tmp_path, [comment(100, "i-am-marvin", refunded, T0)])
-    assert patched == ["100"] and "rounds: 0" in again and HEAD in again
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  counter("i-am-marvin", 1, T0, cid=100, head=OLD)])
+    assert o["act"] == "fix" and o["round"] == "2"
+    _, o, _ = run_gate(tmp_path, [verdict("i-am-marvin", "suggestions", T1, cid=1),
+                                  counter("i-am-marvin", 10, T0, cid=100, head=OLD)])
+    assert o["act"] == "escalate" and o.get("stalled") is None
 
 
-def step_if(workflow: Path, anchor: str) -> str:
-    """The `if: >-` expression of the step at `anchor`, whitespace-folded."""
-    text = workflow.read_text()
-    block = text[text.index(anchor):]
-    block = block[:block.index("        run: |")]
-    return " ".join(block[block.index("if: >-") + len("if: >-"):block.index("env:")].split())
-
-
-def ghx(expr: str, ctx: dict) -> bool:
-    """Evaluate a GitHub Actions `if:` expression of the shape the refund
-    steps use — `always()`, `<context path> == 'literal'` / `!= 'literal'`,
-    `&&`, `||`, parentheses — against `ctx`, a map of context paths to their
-    string values. A path missing from `ctx` is an unset output or an
-    undelivered job output and compares as the empty string, as it does on
-    the runner. Written for these tests only; it refuses anything else."""
-    tokens = re.findall(r"\(|\)|&&|\|\||==|!=|'[^']*'|always\(\)|[A-Za-z_][\w.-]*", expr)
-    assert "".join(tokens).replace(" ", "") == expr.replace(" ", ""), f"unsupported syntax in {expr!r}"
-    pos = [0]
-
-    def peek():
-        return tokens[pos[0]] if pos[0] < len(tokens) else None
-
-    def take():
-        pos[0] += 1
-        return tokens[pos[0] - 1]
-
-    def atom():
-        t = take()
-        if t == "(":
-            v = expr_or()
-            assert take() == ")"
-            return v
-        if t == "always()":
-            return True
-        assert re.match(r"[A-Za-z_]", t) and peek() in ("==", "!="), t
-        op, lit = take(), take()
-        assert lit.startswith("'"), lit
-        left = ctx.get(t, "")
-        return (left == lit[1:-1]) if op == "==" else (left != lit[1:-1])
-
-    def expr_and():
-        v = atom()
-        while peek() == "&&":
-            take()
-            v = atom() and v
-        return v
-
-    def expr_or():
-        v = expr_and()
-        while peek() == "||":
-            take()
-            v = expr_and() or v
-        return v
-
-    v = expr_or()
-    assert peek() is None, tokens[pos[0]:]
-    return v
-
-
-# One row per shape the land job can meet; `fix_result` is `needs.fix.result`,
-# `skipped` the fix job's `agent_skipped` output (None: the job delivered no
-# outputs — a PENDING job cancelled before it started, or a runner that
-# died), `pushed` the Land step's output. Shared with test_ci_fix_gate.py:
-# the two refunds must read identically.
-REFUND_CASES = [
-    # (fix_result, skipped, pushed, refunded, why)
-    ("failure", "true", "", True, "sync or provisioning failed; the agent step was skipped"),
-    ("cancelled", "true", "", True, "cancelled during checkout/sync/provisioning; the agent step was skipped"),
-    ("failure", "false", "", False, "the agent step was entered and failed (or was killed by the agent)"),
-    ("cancelled", "false", "", False, "cancelled after the agent step started: the agent ran"),
-    ("cancelled", None, "", False, "a pending job cancelled before it started delivers no outputs: unknown keeps its round"),
-    ("failure", None, "", False, "no outputs delivered (runner died mid-agent): unknown keeps its round"),
-    ("success", "false", "1", False, "a normal round that landed"),
-    ("success", "false", "", False, "a round that ran and landed nothing (no-change, or a lost bundle)"),
-    ("failure", "true", "1", False, "provisioning failed over a stale branch but the base merge landed"),
-]
-
-
-def refund_ctx(fix_result, skipped, pushed, act="fix"):
-    ctx = {"needs.gate.outputs.act": act, "needs.fix.result": fix_result, "steps.land.outputs.pushed": pushed}
-    if skipped is not None:
-        ctx["needs.fix.outputs.agent_skipped"] = skipped
-    return ctx
-
-
-def engine_selected_skipped(engine, skipped):
-    """The land job's `AGENT_SKIPPED` env — `engine == 'codex' &&
-    needs.fix-codex.outputs.agent_skipped || needs.fix.outputs.agent_skipped`
-    — as GitHub evaluates `a && b || c` (b when a holds and b is non-empty,
-    else c): only the engine's job ran and delivered `skipped`; the other
-    job was skipped at the job level and delivers no outputs (one job per
-    engine, findings 4628446 and 4629153)."""
-    codex_out = (skipped or "") if engine == "codex" else ""
-    claude_out = (skipped or "") if engine != "codex" else ""
-    return codex_out if engine == "codex" and codex_out else claude_out
-
-
-def refund_ctx_split(fix_result, skipped, pushed, engine, act="fix"):
-    ctx = {"needs.gate.outputs.act": act, "steps.land.outputs.pushed": pushed,
-           "env.AGENT_RESULT": fix_result, "env.AGENT_SKIPPED": engine_selected_skipped(engine, skipped)}
-    return ctx
-
-
-def test_the_refund_and_the_hand_back_key_on_evidence_settled_before_the_agent_ran():
-    """The refund's gating inputs (the `if:`, not only the comment selection
-    the tests above cover): the fix job's `agent_skipped` output — both
-    engines' agent steps `skipped`, a step outcome settled before any agent
-    code ran — plus nothing pushed. Never the agent step's own outcome, and
-    never the job's RESULT (review round 1: a job cancelled after the agent
-    step started ran the agent, and a pending job cancelled before it
-    started delivers no outputs, so neither is evidence — unknown keeps its
-    round). No execution-file signal exists in the workflow at all. The Land
-    step admits a bundle-less hand-back only on the agent step's success,
-    the direction the agent cannot push."""
+def test_the_refund_is_gone_and_the_land_job_reads_only_the_agent_outcome():
+    """No refund step, no skipped-step output on either engine's fix job,
+    and the land job reads nothing from the fix jobs' outputs but
+    `agent_outcome`, which only chooses whether a bundle-less hand-back may
+    post: every value it can take is safe (design/untrusted-agent-job.md →
+    The boundary). The Land step also carries the composers' comment rules
+    (`comment-numbers: event`, `max-comments: "5"`), enforced on the
+    trusted runner."""
     text = WORKFLOW.read_text()
+    assert "- name: Refund" not in text and "agent_skipped" not in text and "AGENT_SKIPPED" not in text
+    assert "rounds: $prev" not in text  # the refund's PATCH of the counter
     assert "id: launched" not in text and "agent_started" not in text and 'echo "value=true"' not in text
-    # One job per engine: each job's `agent_skipped` reads its own agent
-    # step, and the land job selects the engine's.
     claude_job = text[text.index("\n  fix:\n"):text.index("\n  fix-codex:\n")]
     codex_job = text[text.index("\n  fix-codex:\n"):text.index("\n  land:\n")]
     land_job = text[text.index("\n  land:\n"):]
-    assert "      agent_skipped: ${{ steps.claude.outcome == 'skipped' && 'true' || 'false' }}\n" in claude_job
-    assert "      agent_skipped: ${{ steps.codexfix.outcome == 'skipped' && 'true' || 'false' }}\n" in codex_job
+    for job in (claude_job, codex_job):
+        outputs = job[job.index("    outputs:\n"):job.index("    steps:\n")]
+        assert re.findall(r"^      ([a-z_]+):", outputs, re.M) == ["agent_outcome"]
     assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
-    assert ("      AGENT_SKIPPED: ${{ needs.gate.outputs.engine == 'codex' && needs.fix-codex.outputs.agent_skipped "
-            "|| needs.fix.outputs.agent_skipped }}\n") in land_job
-    outputs = claude_job[claude_job.index("    outputs:\n"):claude_job.index("    steps:\n")]
-    assert "outputs.value" not in outputs and "-s " not in outputs
-    condition = step_if(WORKFLOW, "      - name: Refund infra-crashed round")
-    assert condition == ("always() && needs.gate.outputs.act == 'fix' && "
-                         "env.AGENT_SKIPPED == 'true' && "
-                         "steps.land.outputs.pushed != '1'")
-    assert "needs.fix.result" not in condition and "agent_outcome" not in condition and "AGENT_RESULT" not in condition
-    for engine in ("claude", "codex"):
-        for fix_result, skipped, pushed, refunded, why in REFUND_CASES:
-            assert ghx(condition, refund_ctx_split(fix_result, skipped, pushed, engine)) is refunded, (engine, why)
-        assert ghx(condition, refund_ctx_split("failure", "true", "", engine, act="escalate")) is False
-    land = text[text.index("      - name: Land\n"):text.index("      # Infra crashes must not burn review rounds")]
+    assert set(re.findall(r"needs\.fix(?:-codex)?\.outputs\.([a-z_]+)", land_job)) == {"agent_outcome"}
+    land = land_job[land_job.index("      - name: Land\n"):]
     assert "allow-no-change-handback: ${{ env.AGENT_OUTCOME == 'success' && 'true' || 'false' }}" in land
+    assert "\n          comment-numbers: event\n" in land
+    assert '\n          max-comments: "5"\n' in land
 
 
 # --- escalation's reset (the shared composite) -------------------------------
@@ -795,8 +613,7 @@ def test_workflow_declares_trusted_logins_once_and_passes_it_to_every_composite(
     assert TRUSTED_LOGINS == f"{MARVIN},{MARVIN_BOT}"
     assert REVIEWER_LOGINS == f"{MARVIN},{MARVIN_BOT}"
     assert text.count("trusted-logins: ${{ env.TRUSTED_LOGINS }}") == 2
-    for anchor in ("        id: resolve", "        id: gate", "      - name: Converged handoff",
-                   "      - name: Refund infra-crashed round"):
+    for anchor in ("        id: resolve", "        id: gate", "      - name: Converged handoff"):
         assert "i-am-marvin" not in lift_step(WORKFLOW, anchor), anchor
     assert "trusted_author" in lift_step(WORKFLOW, "        id: gate")
     # The fix agent's bot allow-lists carry the same value (the codex verdict

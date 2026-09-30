@@ -6,15 +6,19 @@ inline.json under the review output directory, the prep step turns them into
 landing files plus the inline-comment list, and the compose step turns those
 into the manifest's `comments` (flagged `review`), `review_comments` and
 `review_verdict` — the fields the land job posts, as it already did for the
-codex engine (whose own prep step is untouched; its compose branch is
-exercised here too). Both steps' bash is lifted from the workflow and run
-against scratch directories, and the pr-mode result runs on through
-emit-landing (read-only) and the validator under refuse-bundle, as the land
-job would.
+codex engine (whose prep step and composer are exercised here too). Both
+steps' bash is lifted from the workflow and run against scratch
+directories, and the pr-mode result runs on through emit-landing
+(read-only) and the validator with the reviewer's land inputs, as the land
+job would. Also the reads that moved out of the review jobs in step 3 of
+design/untrusted-agent-job.md: the responsible-human lookup (now in the
+gate) and the loop-ownership read (now in the land job, which passes it as
+`stage-override`).
 """
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -32,10 +36,14 @@ spec = importlib.util.spec_from_file_location("validate_manifest_rc", VALIDATOR)
 vm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vm)
 
+TEXT = WORKFLOW.read_text()
 PREP = lift_step(WORKFLOW, "        id: claudepost")
 COMPOSE = lift_step(WORKFLOW, "        id: landing")
 # The codex engine has its own job (and composer) since 2026-09-22.
-COMPOSE_CODEX = lift_run(job_block(WORKFLOW.read_text(), "review-codex"), "        id: landing")
+COMPOSE_CODEX = lift_run(job_block(TEXT, "review-codex"), "        id: landing")
+PREP_CODEX = lift_run(job_block(TEXT, "review-codex"), "        id: codexpost")
+WHO = lift_run(job_block(TEXT, "gate"), "        id: who")
+AUTOLOOP = lift_run(job_block(TEXT, "land"), "        id: autoloop")
 SETTINGS_STEP = lift_step(WORKFLOW, "        id: reviewsettings")
 SHA = "a" * 40
 RUNNER_TEMP = "/home/runner/work/_temp"
@@ -68,17 +76,19 @@ def prep(tmp_path, *, mode="pr", summary=None, verdict=None, inline=None):
 
 
 def compose(tmp_path, *, mode="pr", claudepost="success", landed="true", verdict="clean",
-            codexpost="skipped", codex_verdict="", claude_outcome="success", ack="true", engaged="false",
-            engine="claude"):
+            codexpost="skipped", codex_verdict="", claude_outcome="success", engine="claude"):
     landing = tmp_path / "landing"
     landing.mkdir(exist_ok=True)
     extra = tmp_path / "landing-extra.json"
     env = {
-        "DIR": str(landing), "EXTRA": str(extra), "NUM": "42", "MODE": mode, "ACK": ack,
+        "DIR": str(landing), "EXTRA": str(extra), "NUM": "42", "MODE": mode,
         "CLAUDE_OUTCOME": claude_outcome, "CLAUDEPOST_OUTCOME": claudepost, "CLAUDE_LANDED": landed,
         "CLAUDE_VERDICT": verdict, "CLAUDE_INLINE": str(tmp_path / "claude-inline.json"),
-        "CODEXPOST_OUTCOME": codexpost, "CODEX_VERDICT": codex_verdict, "ENGAGED": engaged,
+        "CODEXPOST_OUTCOME": codexpost, "CODEX_VERDICT": codex_verdict,
         "PROV_NOTE": "", "ERROR_FILE": str(tmp_path / "agent-error.md"),
+        # What the composers no longer read (step 3): a stale value must not
+        # bring the stage decision back.
+        "ACK": "true", "ENGAGED": "false",
     }
     r = sh("bash", "-c", COMPOSE_CODEX if engine == "codex" else COMPOSE, check=False, env=env)
     assert r.returncode == 0, r.stderr + r.stdout
@@ -86,11 +96,13 @@ def compose(tmp_path, *, mode="pr", claudepost="success", landed="true", verdict
 
 
 def validate(landing: Path, *, branch="claude/issue-81-review", pr="456", issue="", prefix=""):
+    # The reviewer's land inputs (claude-review.yml's Land step).
     manifest = json.loads((landing / "manifest.json").read_text())
     return vm.validate(
         manifest, artifact_dir=landing, repo="meridianlabs-ai/agents", run_id="123", default_branch="main",
-        allowed_issue_repos=["meridianlabs-ai/agents"], pr_head_ref=branch if pr else "", refused_branches=["main"],
+        allowed_issue_repos=[], pr_head_ref=branch if pr else "", refused_branches=["main"],
         event_pr_number=pr, event_issue_number=issue, branch_prefix=prefix, refuse_bundle=True, allow_review=True,
+        comment_numbers="event", max_comments=5, max_review_comments=50,
     )
 
 
@@ -265,13 +277,13 @@ def test_compose_claude_review_in_pr_mode_validates_end_to_end(tmp_path):
             {"path": "src/a.py", "line": 3, "side": "LEFT", "body_file": "claude-inline-0.md"},
             {"path": "docs/x.md", "line": 10, "side": "RIGHT", "body_file": "claude-inline-1.md"},
         ],
-        "stage": "Review",
     }
     # Through emit-landing (read-only, as the workflow runs it) and the land
     # job's validator under refuse-bundle: the manifest the land job posts.
-    r, landing, _ = run_emit_landing(tmp_path, cwd=tmp_path, read_only=True, start_sha=SHA, extra=extra)
+    r, landing, _ = run_emit_landing(tmp_path, cwd=tmp_path, read_only=True, start_sha=SHA, extra=extra,
+                                     pr_number="42")
     assert r.returncode == 0, r.stderr
-    assert validate(landing) == []
+    assert validate(landing, pr="42") == []
     manifest = json.loads((landing / "manifest.json").read_text())
     assert manifest["review_comments"] == m["review_comments"] and manifest["comments"][0]["review"] is True
 
@@ -281,8 +293,9 @@ def test_compose_claude_review_without_inline_comments(tmp_path):
     m, extra = compose(tmp_path)
     assert "review_comments" not in m
     assert m["comments"] == [{"number": 42, "body_file": "claude-review.md", "review": True}] and m["review_verdict"] == "clean"
-    r, landing, _ = run_emit_landing(tmp_path, cwd=tmp_path, read_only=True, start_sha=SHA, extra=extra)
-    assert validate(landing) == []
+    r, landing, _ = run_emit_landing(tmp_path, cwd=tmp_path, read_only=True, start_sha=SHA, extra=extra,
+                                     pr_number="42")
+    assert validate(landing, pr="42") == []
 
 
 def test_compose_external_mode_is_one_plain_comment_on_the_proxy_issue(tmp_path):
@@ -298,22 +311,142 @@ def test_compose_lands_no_review_when_the_prep_step_found_no_summary(tmp_path):
     prep(tmp_path, verdict="clean")
     m, _ = compose(tmp_path, landed="false", verdict="")
     assert "comments" not in m and "review_verdict" not in m and "review_comments" not in m
-    assert m == {"stage": "Review"}
+    # The stage is the land job's (stage-override) on a PR.
+    assert m == {}
 
 
-def test_compose_codex_path_is_unchanged(tmp_path):
-    # The codex job's own composer (one job per engine since 2026-09-22):
-    # the same manifest the shared composer produced for the codex branch.
+def test_compose_codex_review_is_flagged_and_moves_no_stage(tmp_path):
+    # The codex job's own composer: its review is flagged `review` like the
+    # Claude review, so land appends the review-comment marker after the
+    # de-fang, and the stage is the land job's (step 3).
     landing = tmp_path / "landing"
     landing.mkdir()
-    (landing / "codex-review.md").write_text("codex says\n\n🤖 engine: codex\n")
-    m, _ = compose(tmp_path, engine="codex", claudepost="skipped", landed="", verdict="", codexpost="success",
-                   codex_verdict="suggestions", claude_outcome="skipped")
-    assert m == {"comments": [{"number": 42, "body_file": "codex-review.md"}], "review_verdict": "suggestions", "stage": "Review"}
-    # A codex review the loop owns hands nothing back to Review.
-    m, _ = compose(tmp_path, engine="codex", codexpost="success", codex_verdict="clean", engaged="true")
-    assert m == {"comments": [{"number": 42, "body_file": "codex-review.md"}], "review_verdict": "clean"}
-    # A failed codex step: no review, the error only, and the stage move.
+    (landing / "codex-review.md").write_text("codex says\n\n🤖 Reviewed by Codex\n")
+    m, extra = compose(tmp_path, engine="codex", claudepost="skipped", landed="", verdict="", codexpost="success",
+                       codex_verdict="suggestions", claude_outcome="skipped")
+    assert m == {"comments": [{"number": 42, "body_file": "codex-review.md", "review": True}], "review_verdict": "suggestions"}
+    r, out, _ = run_emit_landing(tmp_path, cwd=tmp_path, read_only=True, start_sha=SHA, extra=extra, pr_number="42")
+    assert r.returncode == 0, r.stderr
+    assert validate(out, pr="42") == []
+    # A failed codex step: no review, the error only.
     (tmp_path / "agent-error.md").write_text("⚠️ codex failed")
     m, _ = compose(tmp_path, engine="codex", codexpost="skipped")
-    assert m == {"stage": "Review", "error": {"message": "⚠️ codex failed", "fail_run": True}}
+    assert m == {"error": {"message": "⚠️ codex failed", "fail_run": True}}
+
+
+def test_codex_prep_writes_no_footer(tmp_path):
+    # The old `engine: codex` footer is what pr-feedback-context still
+    # anchors on for reviews posted before step 3; no new review carries
+    # it, and a review quoting it has it split (here too, by land).
+    out = tmp_path / "codex-review.json"
+    out.write_text(json.dumps({"verdict": "clean", "review": "Looks fine; cc @review.\n"}))
+    landing = tmp_path / "landing"
+    gh_out = tmp_path / "out.txt"
+    gh_out.write_text("")
+    r = sh("bash", "-eo", "pipefail", "-c", PREP_CODEX, check=False,
+           env={"OUT": str(out), "DIR": str(landing), "GITHUB_OUTPUT": str(gh_out)})
+    assert r.returncode == 0, r.stderr
+    body = (landing / "codex-review.md").read_text()
+    assert body.endswith("\n\n🤖 Reviewed by Codex\n")
+    assert "engine: codex" not in body and "@review" not in body
+    assert outputs(gh_out) == {"verdict": "clean"}
+
+
+def test_prep_caps_inline_comments_at_the_land_jobs_limit(tmp_path):
+    # The land job refuses more than 50 (max-review-comments); the prep keeps
+    # the first 50 and says so, so a long review still lands.
+    many = [{"path": f"src/f{i}.py", "line": i + 1, "body": f"finding {i}"} for i in range(55)]
+    o, landing, inline_list, r = prep(tmp_path, summary="ok\n", verdict="suggestions", inline=many)
+    kept = json.loads(inline_list.read_text())
+    assert len(kept) == 50 and kept[-1]["path"] == "src/f49.py"
+    assert not (landing / "claude-inline-50.md").exists()
+    assert "_[5 inline comment(s) over the 50-comment cap were dropped]_" in (landing / "claude-review.md").read_text()
+    m, extra = compose(tmp_path, verdict="suggestions")
+    r, out, _ = run_emit_landing(tmp_path, cwd=tmp_path, read_only=True, start_sha=SHA, extra=extra, pr_number="42")
+    assert validate(out, pr="42") == []
+
+
+def test_reviewer_land_inputs_refuse_the_forged_probe_manifest(tmp_path):
+    # One review comment plus 51 comment_on entries on another issue: the
+    # manifest the design's review probe showed passing before step 3.
+    landing = tmp_path / "landing"
+    landing.mkdir()
+    (landing / "r.md").write_text("review\n")
+    m = {"schema": 1, "repo": "meridianlabs-ai/agents", "run_id": 123, "branch": "claude/issue-81-review",
+         "start_sha": SHA, "head_sha": SHA, "has_bundle": False, "pr_number": 42,
+         "comments": [{"number": 42, "body_file": "r.md", "review": True}], "review_verdict": "clean",
+         "issues": [{"repo": "meridianlabs-ai/agents", "title": "t", "body_file": "r.md", "comment_on": 999}] * 51}
+    (landing / "manifest.json").write_text(json.dumps(m))
+    errors = validate(landing, pr="42")
+    assert any("not in the allowed issue repos" in e for e in errors)
+
+
+# --- the reads that moved out of the review jobs (step 3) --------------------
+
+# `gh` for the lifted reads: the PR body names a Fixes ref, the issue has
+# an assignee (or only the machine account), the labels come from $LABELS.
+READ_STUB = r"""
+gh() {
+  echo "$*" >>"$STATE/calls"
+  case "$*" in
+    "pr view "*"--json body"*) printf '%s' "$PR_BODY" ;;
+    "pr view "*"--json headRefName"*) printf '%s' "$HEAD" ;;
+    "api repos/"*"/issues/7") printf '%s' "$ISSUE_JSON" ;;
+    "api repos/"*"/labels "*) printf '%s' "$LABELS" | jq '[.[] | select(.name == "auto")] | length' ;;
+    *) echo "unexpected gh $*" >&2; return 2 ;;
+  esac
+}
+"""
+
+
+def run_read(tmp_path, script, **env):
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    out = tmp_path / "read-out.txt"
+    out.write_text("")
+    full = {"STATE": str(state), "GITHUB_OUTPUT": str(out), "REPO": "o/r", "NUM": "42", "PATH": os.environ["PATH"],
+            "TRUSTED_LOGINS": "i-am-marvin,meridian-marvin[bot]", "IS_PR": "true", "ANCHOR_REPO": "",
+            "PR_BODY": "", "HEAD": "", "ISSUE_JSON": "{}", "LABELS": "[]", **env}
+    r = sh("bash", "-eo", "pipefail", "-c", READ_STUB + script, check=False, env=full)
+    assert r.returncode == 0, r.stderr
+    return outputs(out)
+
+
+def test_the_gate_derives_the_responsible_human_before_any_agent_runs(tmp_path):
+    issue = json.dumps({"assignees": [{"login": "i-am-marvin", "type": "User"}, {"login": "alice", "type": "User"}],
+                        "user": {"login": "bob", "type": "User"}})
+    o = run_read(tmp_path, WHO, PR_BODY="Fixes #7\n", ISSUE_JSON=issue)
+    assert o == {"mention": "alice"}
+    # No human on the issue: nobody.
+    issue = json.dumps({"assignees": [], "user": {"login": "meridian-marvin[bot]", "type": "Bot"}})
+    assert run_read(tmp_path, WHO, PR_BODY="Fixes #7", ISSUE_JSON=issue) == {"mention": ""}
+
+
+def test_mention_comes_from_the_gate_and_no_review_job_outputs_it():
+    gate = job_block(TEXT, "gate")
+    assert "      mention: ${{ steps.who.outputs.mention }}\n" in gate
+    assert "        if: steps.trig.outputs.ok == 'true'\n" in gate[gate.index("        id: who"):]
+    for job in ("review", "review-codex"):
+        block = job_block(TEXT, job)
+        assert "id: who" not in block and "id: autoloop" not in block and "mention:" not in block.split("    steps:")[0]
+        assert "MENTION: ${{ needs.gate.outputs.mention }}" in block
+        assert "steps.who." not in block and "ENGAGED" not in block
+    assert "MENTION: ${{ needs.gate.outputs.mention }}" in job_block(TEXT, "land")
+    assert "needs.review.outputs.mention" not in TEXT
+
+
+@pytest.mark.parametrize("labels,engaged", [("[]", "false"), ('[{"name": "auto"}]', "true"), ('[{"name": "autox"}]', "false")])
+def test_the_land_job_reads_loop_ownership_itself(tmp_path, labels, engaged):
+    assert run_read(tmp_path, AUTOLOOP, LABELS=labels) == {"engaged": engaged}
+
+
+def test_the_land_job_passes_the_strict_values_and_its_own_stage():
+    land = job_block(TEXT, "land")
+    step = land[land.index("      - name: Land\n"):]
+    for line in ('comment-numbers: event', 'max-comments: "5"', 'max-review-comments: "50"', 'allowed-issue-repos: ""',
+                 "stage-override: ${{ needs.gate.outputs.mode != 'external' && ((needs.gate.outputs.ack == 'true' && "
+                 "steps.autoloop.outputs.engaged != 'true') && 'Review' || 'none') || '' }}"):
+        assert "          " + line + "\n" in step, line
+    # The read runs before the Land step, on the job token.
+    assert land.index("id: autoloop") < land.index("      - name: Land\n")
+    assert "GH_TOKEN: ${{ github.token }}" in land[land.index("id: autoloop"):land.index("      - name: Land\n")]

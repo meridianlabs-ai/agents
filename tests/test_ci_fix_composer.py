@@ -122,8 +122,8 @@ def test_a_failed_claude_step_lands_nothing_whatever_the_execution_file_says(rep
     # path file), so the rule is the step OUTCOME, fail-closed: a failed
     # Claude step lands nothing — not the base merge, not a commit made
     # before the failure — owes no hand-back and relays nothing; its attempt
-    # stays counted (Claude Security 4628735: the refund fires only for a
-    # step the runner never entered — test_ci_fix_gate.py). Same shape as
+    # stays counted, like every attempt (Claude Security 4628735; the
+    # refund is gone — test_ci_fix_gate.py). Same shape as
     # the codex failure path. The execution file here is present and
     # well-formed, as a preseeded one would be.
     commit(repo)                                    # the runner's base merge, above the start SHA

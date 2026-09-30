@@ -1570,6 +1570,36 @@ THREAT_MODEL.md text that its change makes true.
      and actions' triage pass `comment-numbers: event` cleanly against
      their recent manifests (their composers pin numbers already). This
      is the evidence for flipping the default in a later PR.
+   - Also here (decision: Ransom, 2026-09-30): the three gaps in the land
+     composite's protected-path check. `entry()` compares mode, type and
+     object id (4773337) and reads the path as a literal pathspec
+     (4773336). The `@path` import tokenizer follows the CLI's own rule
+     (Unicode whitespace, `\ ` unescaped, the `#` cut) and adds
+     over-protective candidates (4774319). It skips nothing as code:
+     telling a code span from escaped backticks, or from backticks in
+     separate blocks, takes the CLI's own lexer, and a wrong guess drops a
+     real import. So a backticked `@name` is protected too.
+   - As built (2026-09-30):
+     - The reviewer's `who` read moved to its **gate**, not its land job.
+       The review jobs' Surface steps cc the same login in their error
+       text, which the land job cannot add. The gate is trusted too and
+       runs before any agent, which is what item 5 needs. The
+       loop-ownership read did move to the land job.
+     - The Claude reviewer's prep step keeps the first 50 inline comments
+       and notes the rest in the review body, so an honest long review is
+       not refused whole by `max-review-comments`.
+     - A reply to a review comment that is not on the PR is skipped and
+       recorded as a post failure, as a failed reply was before.
+     - `allow-handback` is `auto` or `request_review_after_open == 'true'`
+       from claude.yml's gate and inputs.
+     - Direct callers, checked 2026-09-30 from their land job logs and the
+       two landing artifacts still kept (retention is one day):
+       inspect_flow's `inspect-update.yml` (5 land runs) and
+       `inspect-ai-main-failure.yml` (3), and ts-mono's `dependabot-fix.yml`
+       (14), comment only on their event number, and both kept manifests
+       pass the validator with `--comment-numbers event`. actions' triage
+       carries no `comments[]` and keeps `*`. ts-mono had no continuation
+       run in the window, so its comment path was checked from its source.
 4. **claude.yml to agent mode.**
    - The `dev-agent-context` composite, used by both jobs, with the gate's
      `trigger_time` output.
