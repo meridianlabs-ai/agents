@@ -556,6 +556,12 @@ def companion_pr(issue: int, head_ref: str):
     verbatim) only the header is read — the snapshot is an outsider's text
     under a trusted author's name. Any other line is treated as absent and
     the convention decides.
+
+    The convention counts only a PR whose head is in ts-mono itself and
+    whose author is trusted, the rule reflect_companion_loops applies. When
+    it cannot name one companion (two qualifying open PRs, or more
+    candidates than one page holds), the result carries `_ambiguous`, the
+    reason, and no PR fields: the merge gate holds on it.
     """
     iss = gh_json(
         "api",
@@ -611,18 +617,42 @@ def companion_pr(issue: int, head_ref: str):
     if not head_ref:
         return None
     owner, repo = TS_MONO.split("/")
-    nodes = gql(
+    conn = gql(
         """query($o:String!,$r:String!,$h:String!){ repository(owner:$o,name:$r){
-             pullRequests(headRefName:$h, first:5, orderBy:{field:UPDATED_AT,direction:DESC}){
-               nodes{number state merged reviewDecision headRefOid
+             pullRequests(headRefName:$h, first:50, orderBy:{field:UPDATED_AT,direction:DESC}){
+               pageInfo{hasNextPage}
+               nodes{number state merged reviewDecision headRefOid isCrossRepository author{login __typename}
                  latestOpinionatedReviews(first:10){nodes{state commit{oid} author{login __typename}}}}}}}""",
         repo=TS_MONO,
         o=owner,
         r=repo,
         h=head_ref,
-    )["repository"]["pullRequests"]["nodes"]
+    )["repository"]["pullRequests"]
+    if (conn.get("pageInfo") or {}).get("hasNextPage"):
+        # a candidate past the page could be the companion
+        return {"_repo": TS_MONO, "_ambiguous": f"more than 50 {TS_MONO} PRs on branch {head_ref}"}
+    # headRefName also matches PRs from forks of ts-mono, which anyone can
+    # open under any name: count a candidate only as reflect_companion_loops
+    # does (finding 4773874) — its head in ts-mono itself and a trusted author
+    nodes = []
+    for n in conn.get("nodes") or []:
+        if n.get("isCrossRepository") is not False:
+            actions.append(f"{TS_MONO}#{n['number']}: head is not in {TS_MONO} — not a companion")
+            continue
+        author = graphql_login(n.get("author"))
+        if not trusted_author(author, TS_MONO):
+            actions.append(
+                f"{TS_MONO}#{n['number']}: author {author or '(none)'} is not a "
+                "trusted author — not a companion"
+            )
+            continue
+        nodes.append(n)
+    open_prs = [n for n in nodes if n["state"] == "OPEN"]
+    if len(open_prs) > 1:
+        numbers = ", ".join(f"#{n['number']}" for n in open_prs)
+        return {"_repo": TS_MONO, "_ambiguous": f"{len(open_prs)} open {TS_MONO} PRs qualify ({numbers})"}
     # prefer an open PR; else the most recently updated (merged counts)
-    pick = next((n for n in nodes if n["state"] == "OPEN"), nodes[0] if nodes else None)
+    pick = open_prs[0] if open_prs else (nodes[0] if nodes else None)
     if pick:
         pick["_repo"] = TS_MONO
     return pick
@@ -676,9 +706,15 @@ def companion_blocks_merge(issue: int, pr) -> bool:
     first), but a substantive viewer change should pass ts-mono's own
     review before queueing — merged companions and those approved at their
     current head (companion_approved) pass. No companion at all passes
-    trivially.
+    trivially; an ambiguous one (companion_pr's `_ambiguous`) holds.
     """
     comp = companion_pr(issue, pr.get("headRefName") or "")
+    if comp is not None and comp.get("_ambiguous"):
+        actions.append(
+            f"#{issue}: upstream approved but the companion is ambiguous "
+            f"({comp['_ambiguous']}) — holding stage"
+        )
+        return True
     if comp is None or comp["merged"] or companion_approved(comp):
         return False
     if comp["state"] == "CLOSED":  # closed unmerged: not a blocker, but note it
@@ -929,7 +965,12 @@ def companion_leftover_warning(issue: int, pr) -> None:
     so an OPEN companion here is a leftover to close by hand — warn only.
     """
     comp = companion_pr(issue, pr.get("headRefName") or "")
-    if comp is not None and comp["state"] == "OPEN":
+    if comp is not None and comp.get("_ambiguous"):
+        actions.append(
+            f"#{issue}: WARNING companion ambiguous after upstream merge "
+            f"({comp['_ambiguous']}) — check {TS_MONO} by hand"
+        )
+    elif comp is not None and comp["state"] == "OPEN":
         actions.append(
             f"#{issue}: WARNING companion {comp['_repo']}#{comp['number']} "
             f"still open after upstream merge — close it manually"

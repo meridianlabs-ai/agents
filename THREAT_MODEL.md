@@ -138,7 +138,8 @@ text are checked by the tests under `tests/`.
 - Whether a comment, label or issue-body line is believed is decided by its
   author's login or verified write access, never by the text itself. The
   hourly Atlas sync counts a ts-mono companion's loop markers only from
-  such an author, on a same-repository PR such an author opened. The
+  such an author, on a same-repository PR such an author opened, and its
+  merge gate finds a companion by branch name only among such PRs. The
   machine account's login alone does not make a comment the sync's own:
   land posts agent text under it. The sync recognises its own recovery
   reopen by the reopen event's actor and by a comment it posted and then
@@ -316,12 +317,18 @@ text are checked by the tests under `tests/`.
   made from a maintainer's machine, under a maintainer's review. The land
   job refuses a bundle in which the agent changed them before pushing, with
   a report naming the files; changes the runner's base merge brought in
-  pass. The files it checks are the ones the push would change on origin
-  (the bundle's tip against the branch's live tip, or against the base
-  branch's tip when the push creates the branch), never a range the
-  manifest names: the manifest's `start_sha` is the agent job's to write,
-  and origin serves any reachable commit — a fork PR's head, an old base
-  commit — as a start (Claude Security finding 4628444, 2026-09-22).
+  pass. The files it checks are the ones the push would change on origin:
+  the bundle's tip against the branch's live tip. When the push creates
+  the branch, the tip is compared with the run's trusted start, the
+  commit the caller's gate read before the agent ran, as long as the base
+  branch's current tip descends from it; otherwise with the base branch's
+  tip. A protected change merged to the base during the run is then not
+  counted as the agent's. The check never uses a range the manifest alone
+  names: the manifest's `start_sha` is the agent job's to write, and origin
+  serves any reachable commit — a fork PR's head, an old base commit — as
+  a start (Claude Security finding 4628444, 2026-09-22). The land job
+  reads the trusted start from its caller's input, and refuses a bundle
+  whose `start_sha` differs from it.
 - The same refusal covers the entry points and configuration files a later
   automated job on the branch executes or loads — not everything those
   run (see the accepted gap below) — since the machine account's push would

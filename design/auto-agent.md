@@ -189,7 +189,9 @@ finding 4121989) that is enforced in three layers rather than assumed:
   triage"; the unverified path posts a one-time sticky
   notice (`<!-- auto-gate-unverified -->`) saying what could not be verified
   and that a write-access account can remove and re-add the label to arm the
-  loop. The sticky notice matters because an unverifiable label can be
+  loop. Only a marker comment by one of the gate's trusted logins counts as
+  that notice, so a copy someone else pasted cannot keep it off the PR
+  (2026-09-30). The sticky notice matters because an unverifiable label can be
   permanent, not a blip — a deleted account 404s forever and an App stays an
   App — which would otherwise be the silent labeled-and-stalled state the
   gate-failure failsafe (below) exists to prevent.

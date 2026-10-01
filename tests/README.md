@@ -66,9 +66,12 @@ Testing a change).
   `--force`), run against local repos — including `emit-landing`'s `write`
   step, lifted from the action and run against those repos, and the
   `workflows` guard, lifted the same way: what the push would change on
-  origin, listed from the branch's live tip or the base tip, never from
-  the manifest's `start_sha` (a start shifted onto a fork PR's head or an
-  old base commit still names the file; Claude Security 4628444) — with a
+  origin, listed from the branch's live tip or, for a new branch, from the
+  run's trusted start (the caller's `start-sha`) while the base tip descends
+  from it, never from the manifest's `start_sha` (a start shifted onto a
+  fork PR's head or an old base commit still names the file; Claude
+  Security 4628444); a protected change merged to the base during the run
+  lands, while the agent's own protected change is still refused — with a
   new branch cut from a configured non-default base (the fork's `main`
   under a `meridian` default) run through the lifted `fetch` step too.
   The same guard under the caller's tier-2 opt-in
@@ -230,7 +233,9 @@ Testing a change).
   or triage is refused), the stale hand-back revival honouring only trusted authors
   (an outsider's `@review` or forged verdict is never re-issued as the
   machine account and ends the search), the `Companion PR:` issue-body
-  line counting only from a trusted author and only for a ts-mono URL, and
+  line counting only from a trusted author and only for a ts-mono URL, the
+  branch-name convention counting only a same-repository PR by a trusted
+  author (two qualifying open PRs, or a truncated listing, hold), and
   the companion merge gate clearing only on a write-access reviewer's
   APPROVED review naming the companion's current head (never on
   `reviewDecision` alone) — the machine account's App login included, with
