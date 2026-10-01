@@ -109,6 +109,9 @@ Testing a change).
   kept, like every attempt: `test_ci_fix_gate.py` checks that the refund is
   gone and that the gate's count reaches the cap (4628735;
   design/untrusted-agent-job.md → Refunds go).
+  It also runs the `fix-codex` job's `Compose codex prompt` step: the
+  caller's `append_system_prompt` reaches Codex as a `REPO GUIDANCE`
+  line ahead of the CI log, unexpanded, and no line when empty.
 - `test_land_helpers.py` also runs the `land` composite's `plan` step: a
   `handback` on a manifest with no bundle is dropped unless the caller's
   `allow-no-change-handback` is "true" (the loops pass the agent step's
@@ -134,6 +137,9 @@ Testing a change).
   rule that a hand-back without a commit needs a successful agent step
   (4628734) — with the codex no-thread-ids case run on through
   `emit-landing` and the validator.
+  It also runs the `fix-codex` job's `Compose codex prompt` step: the
+  caller's `append_system_prompt` reaches Codex as a `REPO GUIDANCE`
+  line ahead of the review feedback, unexpanded, and no line when empty.
 - `test_review_composer.py` — `claude-review.yml`'s `Prepare Claude review
   for landing` and `Compose landing manifest` steps, lifted the same way
   (issue #114): the reviewer's summary / verdict / inline.json files become

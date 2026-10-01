@@ -2024,6 +2024,7 @@ jobs:
           SYNC_BASE: ${{ steps.sync.outputs.base }}
           SYNC_APPEND: ${{ inputs.branch_sync_append }}
           CAP: ${{ inputs.fix_attempt_cap }}
+          EXTRA: ${{ inputs.append_system_prompt }}
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           BIN: ${{ steps.setup.outputs.bin }}
         run: |
@@ -2094,6 +2095,7 @@ jobs:
               echo "$SYNC_APPEND"
             fi
             echo "ENDING CONTRACT: your final message MUST start with a single conventional-commit summary line for the fix (it becomes the commit subject), then a blank line, then a body explaining the root cause and the fix (posted as a comment). If you cannot fix it, leave the tree untouched and explain what is blocking."
+            [ -n "$EXTRA" ] && printf 'REPO GUIDANCE: %s\n' "$EXTRA"
             echo ""
             echo "FAILING CI LOG (run $CI_RUN_ID, failed jobs, tail):"
             fetch "$RUNNER_TEMP/codex-ci-log.txt" run view "$CI_RUN_ID" --repo "$REPO" --log-failed

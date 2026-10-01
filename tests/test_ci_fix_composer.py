@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "claude-auto.yml"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import WORKFLOW_FILES_RULE, WORKFLOW_FILES_RULE_ALLOWED, assert_prompt_rule, claude_prompt, sh, git, step_block, job_block  # noqa: E402
+from test_land_helpers import WORKFLOW_FILES_RULE, WORKFLOW_FILES_RULE_ALLOWED, assert_prompt_rule, claude_prompt, codex_fix_prompt, sh, git, step_block, job_block  # noqa: E402
 
 
 def composer_script(engine: str = "claude") -> str:
@@ -168,3 +168,20 @@ def test_prompts_forbid_workflow_file_edits(tmp_path):
     allowed = claude_prompt(text, "prompt", tmp_path, allow=True)
     assert WORKFLOW_FILES_RULE_ALLOWED + " in a comment so a maintainer makes it from their machine." in allowed
     assert "pyproject.toml" not in allowed and "build and dependency" not in allowed
+
+
+GUIDANCE = "Qualify issue refs as owner/repo#N; keep $(touch pwned) and `x` literal."
+
+
+def test_codex_prompt_carries_the_callers_append_system_prompt(tmp_path):
+    # The caller's `append_system_prompt` reaches the Codex CI fixer as the
+    # dev agent-codex job delivers it (claude.yml): a REPO GUIDANCE line
+    # ahead of the failing CI log, the text as data (no expansion), and no line
+    # when the input is empty.
+    text = WORKFLOW.read_text()
+    assert "          EXTRA: ${{ inputs.append_system_prompt }}\n" in step_block(job_block(text, "fix-codex"), "codexcompose")
+    prompt = codex_fix_prompt(text, "fix-codex", tmp_path, EXTRA=GUIDANCE)
+    assert f"REPO GUIDANCE: {GUIDANCE}\n" in prompt
+    assert prompt.index("REPO GUIDANCE: ") < prompt.index("FAILING CI LOG")
+    assert not (tmp_path / "pwned").exists()
+    assert "REPO GUIDANCE" not in codex_fix_prompt(text, "fix-codex", tmp_path / "empty")
