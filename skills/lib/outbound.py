@@ -41,9 +41,11 @@ anything fetched stay as they are, so a number in an upstream subject keeps
 its meaning. Each own commit is replayed with its parents mapped, side
 branches included, so no original stays reachable. Trees, authors,
 committers and dates are kept, so the rewrite is deterministic, and HEAD
-moves only when a message changed. It prints `old -> new` per rewritten
-commit (SHAs only: no message text reaches the log). Exit 0 when every own
-commit is qualified, 2 when git fails or one still carries a bare reference.
+moves only when a message changed. A rewritten commit loses its signature,
+and a merge loses the embedded signed tag (`mergetag`) of a parent that was
+rewritten. It prints `old -> new` per rewritten commit (SHAs only: no
+message text reaches the log). Exit 0 when every own commit is qualified,
+2 when git fails or one still carries a bare reference.
 """
 
 from __future__ import annotations
@@ -114,7 +116,10 @@ def _qualify_commit(raw: bytes, repo: str, parents: dict[str, str]) -> bytes:
     """Commit object `raw` with its message qualified and its parents mapped.
 
     `raw` itself when neither changes. A signature header is dropped once
-    the object changes: it would no longer verify.
+    the object changes: it would no longer verify. So is a `mergetag` (a
+    merged signed tag, embedded whole) whose tagged commit was rewritten:
+    it would name a commit that is no longer a parent, and the tag cannot
+    be repointed without breaking its signature.
     """
     head, sep, message = raw.partition(b"\n\n")
     text = message.decode("utf-8", "surrogateescape")
@@ -129,11 +134,12 @@ def _qualify_commit(raw: bytes, repo: str, parents: dict[str, str]) -> bytes:
     if qualified == text and new == old:
         return raw
     lines: list[bytes] = []
-    signature = False
+    drop = False
     for line in new:
         if not line.startswith(b" "):
-            signature = line.startswith((b"gpgsig ", b"gpgsig-sha256 "))
-        if not signature:
+            drop = line.startswith((b"gpgsig ", b"gpgsig-sha256 ")) or (
+                line.startswith(b"mergetag object ") and line[16:].decode() in parents)
+        if not drop:
             lines.append(line)
     return b"\n".join(lines) + sep + qualified.encode("utf-8", "surrogateescape")
 

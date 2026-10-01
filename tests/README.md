@@ -400,7 +400,9 @@ Testing a change).
   FETCH_HEAD); a merged side branch is rewritten too, with no original
   left reachable; only SHAs are printed; nothing moves without a bare
   reference; a bad start, a ref that cannot move and a bare reference that
-  survives all fail and leave HEAD; a stale signature is dropped. Also fails when a skill script defines its own copy of a shared
+  survives all fail and leave HEAD; a stale signature is dropped, and so is
+  a merged signed tag's `mergetag` once its commit is rewritten (itself or
+  through an ancestor), while one naming an unchanged parent is kept. Also fails when a skill script defines its own copy of a shared
   helper.
 - `test_post_upstream_review.py` — `skills/post-upstream-review/gather.sh`
   and `post.sh` against a stub `gh` (Claude Security 4773885, 4773877): the

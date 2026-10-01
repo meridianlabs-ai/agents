@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -479,6 +480,70 @@ def test_qualify_commits_leaves_no_original_reachable_through_a_side_branch(tmp_
     assert log.count(f"Fixes {FORK}#12") == 1 and "Fixes #12" not in log
 
 
+def signed_tag(tmp_path, g, name, rev):
+    """A signed tag (an ephemeral SSH key): merging one records a `mergetag`
+    header, which an unsigned annotated tag does not."""
+    key = tmp_path / f"{name}-key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    g("-c", "gpg.format=ssh", "-c", f"user.signingkey={key}", "tag", "-s", "-m", f"tag {name}", name, rev)
+
+
+def merge_tag(g, name):
+    g("merge", "-q", "--no-ff", "--no-edit", name)
+    assert "\nmergetag object " in g("cat-file", "commit", "HEAD")
+
+
+needs_ssh_keygen = pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="no ssh-keygen to sign a tag")
+
+
+@needs_ssh_keygen
+def test_qualify_commits_drops_a_mergetag_whose_tagged_commit_was_rewritten(tmp_path):
+    work, g, start = qrepo(tmp_path)
+    g("checkout", "-q", "-b", "side")
+    commit(work, g, "s", "Fixes #12")
+    signed_tag(tmp_path, g, "side-tag", "HEAD")
+    g("checkout", "-q", "work")
+    commit(work, g, "a", "Main line")
+    merge_tag(g, "side-tag")
+    assert qualify(work, start).returncode == 0
+    assert g("log", "-1", "--format=%s", "HEAD^2") == f"Fixes {FORK}#12"
+    assert "mergetag" not in g("cat-file", "commit", "HEAD")
+
+
+@needs_ssh_keygen
+def test_qualify_commits_drops_a_mergetag_whose_tagged_commit_moved_with_its_ancestor(tmp_path):
+    # The tagged commit's own message is clean, but its parent was rewritten,
+    # so its SHA changed all the same.
+    work, g, start = qrepo(tmp_path)
+    commit(work, g, "a", "Fixes #12")
+    g("checkout", "-q", "-b", "side")
+    tagged = commit(work, g, "s", "Side work")
+    signed_tag(tmp_path, g, "side-tag", "HEAD")
+    g("checkout", "-q", "work")
+    commit(work, g, "b", "More")
+    merge_tag(g, "side-tag")
+    assert qualify(work, start).returncode == 0
+    assert g("log", "-1", "--format=%s", "HEAD^2") == "Side work" and g("rev-parse", "HEAD^2") != tagged
+    assert "mergetag" not in g("cat-file", "commit", "HEAD")
+
+
+@needs_ssh_keygen
+def test_qualify_commits_keeps_a_mergetag_whose_tagged_commit_is_unchanged(tmp_path):
+    # An upstream tag merged after a bare-reference commit: the merge is
+    # rewritten for its first parent, and its tag still names its second.
+    work, g, start = qrepo(tmp_path)
+    upstream = g("rev-parse", "origin/main")
+    signed_tag(tmp_path, g, "v1", upstream)
+    commit(work, g, "a", "Fixes #12")
+    merge_tag(g, "v1")
+    tag_header = g("cat-file", "commit", "HEAD").split("\nmergetag ", 1)[1].split("\n\n", 1)[0]
+    assert qualify(work, start).returncode == 0
+    merge = g("cat-file", "commit", "HEAD")
+    assert g("log", "-1", "--format=%s", "HEAD~1") == f"Fixes {FORK}#12"
+    assert g("rev-parse", "HEAD^2") == upstream
+    assert f"\nmergetag object {upstream}\n" in merge and tag_header in merge
+
+
 def test_qualify_commits_leaves_commits_fetch_head_reaches(tmp_path):
     # A base fetched without a remote-tracking ref (`git fetch <url> main`)
     # is still the base: FETCH_HEAD bounds the run's commits like a remote.
@@ -536,6 +601,10 @@ def test_qualify_commit_drops_a_stale_signature_and_keeps_other_headers():
                    b"\nauthor a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\nencoding ISO-8859-1"
                    b"\nmergetag object " + b"4" * 40 + b"\n type commit\n tag v1"
                    b"\n\nFix o/r#12 for caf\xe9\n")
+    # A rewritten tagged parent takes its mergetag with it, continuation lines and all.
+    out = outbound._qualify_commit(raw, "o/r", {"4" * 40: "6" * 40})
+    assert b"mergetag" not in out and b"type commit" not in out and b"gpgsig" not in out
+    assert b"\nencoding ISO-8859-1\n\nFix o/r#12" in out
     # Unchanged message and parents: the object is returned as it was, signature and all.
     assert outbound._qualify_commit(raw.replace(b"#12", b"o/r#12"), "o/r", {}) == raw.replace(b"#12", b"o/r#12")
 
