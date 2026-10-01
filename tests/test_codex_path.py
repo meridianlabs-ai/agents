@@ -1153,8 +1153,13 @@ def qualify(w, start, **more):
     env = {"START_SHA": start, "REPO": "o/r", "OUTBOUND": OUTBOUND, "GIT_DIR": gitdir, "GIT_COMMON_DIR": gitdir,
            "GIT_WORK_TREE": w["ws"], "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.hooksPath",
            "GIT_CONFIG_VALUE_0": w["temp"] / "no-hooks", "GIT_CONFIG_KEY_1": "core.fsmonitor",
-           "GIT_CONFIG_VALUE_1": "false", **more}
+           "GIT_CONFIG_VALUE_1": "false", "GITHUB_OUTPUT": w["tmp"] / "qualify-out.txt", **more}
+    (w["tmp"] / "qualify-out.txt").write_text("")
     return run(composite_runs(QUALIFY)[0], w, **env)
+
+
+def qualified_ok(w) -> bool:
+    return "ok=true" in (w["tmp"] / "qualify-out.txt").read_text().splitlines()
 
 
 def test_qualify_rewrites_with_git_and_python_from_the_system_path(world):
@@ -1164,28 +1169,64 @@ def test_qualify_rewrites_with_git_and_python_from_the_system_path(world):
     git("commit", "-q", "-am", "Fix it\n\nFixes #12", cwd=w["ws"])
     r = qualify(w, start)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "qualify-commit-refs: qualified the issue references in:\n  " in r.stdout
+    assert "qualify-commit-refs: qualified the issue references in:\n" in r.stdout and qualified_ok(w)
     assert git("log", "-1", "--format=%B", cwd=w["ws"]).stdout.strip() == "Fix it\n\nFixes o/r#12"
     assert hijacked(w) == "", hijacked(w)
     r = qualify(w, start)
-    assert r.returncode == 0 and "no bare issue references" in r.stdout
+    assert r.returncode == 0 and "no bare issue references" in r.stdout and qualified_ok(w)
     script = composite_runs(QUALIFY)[0]
     assert script.index('export PATH="$SYSTEM_PATH"') < script.index("python3 ")
 
 
-def test_qualify_never_fails_the_job(world):
+def test_qualify_logs_no_agent_text(world):
+    # The runner reads `::cmd::` at the start of a line and the legacy
+    # `##[cmd]` anywhere in one: an agent-written subject in the log could
+    # load a problem matcher or set a variable. Only SHAs are logged.
     w = world
-    repo(w)
+    start = repo(w)
+    git("commit", "-q", "--allow-empty", "-m", "##[add-matcher]/missing #12", cwd=w["ws"])
+    git("commit", "-q", "--allow-empty", "-m", "::error::planted #13", cwd=w["ws"])
+    r = qualify(w, start)
+    assert r.returncode == 0 and qualified_ok(w), r.stdout + r.stderr
+    assert "##[" not in r.stdout and "::error::planted" not in r.stdout and "missing" not in r.stdout
+    assert git("log", "-1", "--format=%s", cwd=w["ws"]).stdout.strip() == "::error::planted o/r#13"
+
+
+def test_qualify_failure_withholds_the_commits_and_stops_commands_around_git_output(world):
+    # A valid start, but HEAD cannot move (a stale ref lock): the step still
+    # exits 0, reports no `ok`, prints git's message with commands stopped
+    # under a fresh token, and emit-landing — given `withhold`, as every
+    # writing job passes it without `ok` — packages no bundle at all.
+    import json
+
+    w = world
+    start = repo(w)
     git("commit", "-q", "--allow-empty", "-m", "Fixes #12", cwd=w["ws"])
     head = git("rev-parse", "HEAD", cwd=w["ws"]).stdout.strip()
-    # A start this repo does not hold: git fails, the step warns and HEAD stays.
-    r = qualify(w, "f" * 40)
-    assert r.returncode == 0 and "::warning::qualify-commit-refs: could not rewrite" in r.stdout
+    (w["ws"] / ".git" / "refs" / "heads" / "main.lock").write_text("")
+    r = qualify(w, start)
+    assert r.returncode == 0 and not qualified_ok(w), r.stdout + r.stderr
+    assert "::error::qualify-commit-refs: could not qualify" in r.stdout
+    lines = r.stdout.splitlines()
+    stop = next(i for i, line in enumerate(lines) if line.startswith("::stop-commands::"))
+    token = lines[stop][len("::stop-commands::"):]
+    assert re.fullmatch(r"[0-9a-f]{32}", token)
+    resume = lines.index(f"::{token}::")
+    assert any("update-ref failed" in line for line in lines[stop + 1:resume])
     assert git("rev-parse", "HEAD", cwd=w["ws"]).stdout.strip() == head
-    # Not a SHA (a failed base step): nothing is run at all.
+    landing = w["tmp"] / "landing"
+    output = w["tmp"] / "out.txt"
+    output.write_text("")
+    r = run(emit_landing_script(), w, START_SHA=start, BRANCH="claude/issue-1-codex", PR_NUMBER="", ISSUE_NUMBER="1",
+            EXTRA="", DIR=landing, READ_ONLY="false", REPO="o/r", RUN_ID="7", GITHUB_OUTPUT=output,
+            WITHHOLD="its commit messages could not be qualified.")
+    assert r.returncode == 0, r.stdout + r.stderr
+    m = json.loads((landing / "manifest.json").read_text())
+    assert m["has_bundle"] is False and m["head_sha"] == start and not (landing / "commits.bundle").exists()
+    assert "could not be qualified" in m["error"]["message"] and m["error"]["fail_run"] is True
+    # Not a SHA (a failed base step): nothing runs and there is no `ok`.
     r = qualify(w, "")
-    assert r.returncode == 0 and "is not a full SHA; nothing rewritten" in r.stdout
-    assert git("rev-parse", "HEAD", cwd=w["ws"]).stdout.strip() == head
+    assert r.returncode == 0 and "is not a full SHA; nothing rewritten" in r.stdout and not qualified_ok(w)
     assert hijacked(w) == ""
 
 

@@ -35,11 +35,15 @@ malformed or incomplete (fail closed).
 before they are landed): in the git repository it runs in, it rewrites each
 bare `#N` and `GH-N` in the messages of the run's own commits to `REPO#N`,
 the form that resolves to the same item wherever the message is copied.
-Only commits on HEAD's first-parent chain above SHA that no remote-tracking
-ref reaches are the run's own: a base merge's commits and anything fetched
-stay as they are, so a number in an upstream subject keeps its meaning.
-Trees, authors, committers and dates are kept, so the rewrite is
-deterministic, and HEAD moves only when a message changed.
+The run's own commits are those HEAD reaches and neither SHA, a
+remote-tracking ref nor FETCH_HEAD does: a base merge's commits and
+anything fetched stay as they are, so a number in an upstream subject keeps
+its meaning. Each own commit is replayed with its parents mapped, side
+branches included, so no original stays reachable. Trees, authors,
+committers and dates are kept, so the rewrite is deterministic, and HEAD
+moves only when a message changed. It prints `old -> new` per rewritten
+commit (SHAs only: no message text reaches the log). Exit 0 when every own
+commit is qualified, 2 when git fails or one still carries a bare reference.
 """
 
 from __future__ import annotations
@@ -134,35 +138,44 @@ def _qualify_commit(raw: bytes, repo: str, parents: dict[str, str]) -> bytes:
     return b"\n".join(lines) + sep + qualified.encode("utf-8", "surrogateescape")
 
 
-def qualify_commits(repo: str, start: str) -> list[str]:
-    """Qualify the bare references in the run's own commits; one line per rewrite.
+def _own_commits(start: str) -> list[str]:
+    """The run's own commits, parents before children: those HEAD reaches
+    and neither `start`, a remote-tracking ref nor FETCH_HEAD does."""
+    exclude = [start, "--remotes"]
+    fetched = subprocess.run(["git", "rev-parse", "-q", "--verify", "FETCH_HEAD^{commit}"],
+                             capture_output=True, check=False).stdout.decode().strip()
+    if fetched:
+        exclude.append(fetched)
+    return _git("rev-list", "--topo-order", "--reverse", "HEAD", "--not", *exclude).decode().split()
 
-    The run's own commits are HEAD's first-parent chain down to the first
-    commit that `start` or a remote-tracking ref reaches.
+
+def _message(raw: bytes) -> str:
+    return raw.partition(b"\n\n")[2].decode("utf-8", "surrogateescape")
+
+
+def qualify_commits(repo: str, start: str) -> list[str]:
+    """Qualify the bare references in the run's own commits; `old -> new` per rewrite.
+
+    Every own commit is replayed with its parents mapped, so none of the
+    originals stays reachable from HEAD. Raises ValueError when an own
+    commit still carries a bare reference afterwards.
     """
     head = _git("rev-parse", "--verify", "HEAD^{commit}").decode().strip()
-    own = set(_git("rev-list", head, "--not", start, "--remotes").decode().split())
-    raws: dict[str, bytes] = {}
-    chain: list[str] = []
-    sha = head
-    while sha in own:
-        chain.append(sha)
-        raws[sha] = _git("cat-file", "commit", sha)
-        first = re.search(rb"^parent ([0-9a-f]+)$", raws[sha].partition(b"\n\n")[0], flags=re.MULTILINE)
-        if not first:
-            break
-        sha = first.group(1).decode()
     mapped: dict[str, str] = {}
     report: list[str] = []
-    for sha in reversed(chain):
-        raw = _qualify_commit(raws[sha], repo, mapped)
-        if raw == raws[sha]:
+    for sha in _own_commits(start):
+        raw = _git("cat-file", "commit", sha)
+        new = _qualify_commit(raw, repo, mapped)
+        if new == raw:
             continue
-        mapped[sha] = _git("hash-object", "-t", "commit", "-w", "--stdin", data=raw).decode().strip()
-        subject = raws[sha].partition(b"\n\n")[2].split(b"\n", 1)[0].decode("utf-8", "replace")
-        report.append(f"{sha} -> {mapped[sha]} ({subject[:72]})")
+        mapped[sha] = _git("hash-object", "-t", "commit", "-w", "--stdin", data=new).decode().strip()
+        report.append(f"{sha} -> {mapped[sha]}")
     if head in mapped:
         _git("update-ref", "-m", "qualify commit refs", "HEAD", mapped[head], head)
+    messages = {sha: _message(_git("cat-file", "commit", sha)) for sha in _own_commits(start)}
+    left = [sha for sha, text in messages.items() if qualify_refs(text, repo) != text]
+    if left:
+        raise ValueError("commits still carry a bare reference: " + " ".join(left))
     return report
 
 
@@ -236,6 +249,9 @@ def main(argv: list[str]) -> int:
         except subprocess.CalledProcessError as exc:
             err = exc.stderr.decode("utf-8", "replace").strip() if exc.stderr else ""
             print(f"outbound.py qualify-commits: git {exc.cmd[1]} failed: {err}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"outbound.py qualify-commits: {exc}", file=sys.stderr)
             return 2
         for line in report:
             print(line)

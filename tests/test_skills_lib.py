@@ -436,12 +436,93 @@ def test_qualify_commits_moves_nothing_without_a_bare_reference(tmp_path):
     assert r.returncode == 0 and r.stdout == "" and g("rev-parse", "HEAD") == start
 
 
+def own_bare(g, start, repo=FORK):
+    """The run's commits (above start, off the remotes) that still carry a bare reference."""
+    own = g("rev-list", "HEAD", "--not", start, "--remotes").split()
+    return [c for c in own if outbound.qualify_refs(g("log", "-1", "--format=%B", c), repo) != g("log", "-1", "--format=%B", c)]
+
+
+def test_qualify_commits_rewrites_a_merged_side_branch(tmp_path):
+    # A side branch from the start, committed on and merged back --no-ff:
+    # its commit is the run's too and is qualified, the merge mapped onto it.
+    work, g, start = qrepo(tmp_path)
+    g("checkout", "-q", "-b", "side")
+    side = commit(work, g, "s", "Fixes #12 on the side")
+    g("checkout", "-q", "work")
+    commit(work, g, "a", "Main line")
+    g("merge", "-q", "--no-ff", "--no-edit", "side")
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert g("log", "-1", "--format=%s", "HEAD^2") == f"Fixes {FORK}#12 on the side"
+    assert own_bare(g, start) == []
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", side, "HEAD"], cwd=work, check=False).returncode == 1
+    # SHAs only: no message text reaches the workflow log.
+    assert r.stdout and all(re.fullmatch(r"[0-9a-f]{40} -> [0-9a-f]{40}", line) for line in r.stdout.splitlines())
+
+
+def test_qualify_commits_leaves_no_original_reachable_through_a_side_branch(tmp_path):
+    # A side branch forked AFTER a bare-reference commit on the main line:
+    # rewriting only the main line would leave the original reachable through
+    # the merge's second parent, next to its rewrite.
+    work, g, start = qrepo(tmp_path)
+    first = commit(work, g, "a", "Fixes #12")
+    g("checkout", "-q", "-b", "side")
+    commit(work, g, "s", "Side work")
+    g("checkout", "-q", "work")
+    commit(work, g, "b", "More")
+    g("merge", "-q", "--no-ff", "--no-edit", "side")
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert own_bare(g, start) == []
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", first, "HEAD"], cwd=work, check=False).returncode == 1
+    log = g("log", "--format=%s", f"{start}..HEAD").splitlines()
+    assert log.count(f"Fixes {FORK}#12") == 1 and "Fixes #12" not in log
+
+
+def test_qualify_commits_leaves_commits_fetch_head_reaches(tmp_path):
+    # A base fetched without a remote-tracking ref (`git fetch <url> main`)
+    # is still the base: FETCH_HEAD bounds the run's commits like a remote.
+    work, g, start = qrepo(tmp_path)
+    upstream = g("rev-parse", "origin/main")
+    g("update-ref", "-d", "refs/remotes/origin/main")
+    (work / ".git" / "FETCH_HEAD").write_text(f"{upstream}\t\tbranch 'main' of https://example.com/u\n")
+    g("merge", "-q", "--ff-only", upstream)
+    commit(work, g, "a", "After the merge, see #5627")
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert g("rev-parse", "HEAD~1") == upstream
+    assert g("log", "-1", "--format=%s", upstream) == "Upstream fix (#5627)"
+    assert g("log", "-1", "--format=%s", "HEAD") == f"After the merge, see {FORK}#5627"
+
+
 def test_qualify_commits_fails_closed_on_a_bad_start(tmp_path):
     work, g, _ = qrepo(tmp_path)
     tip = commit(work, g, "a", "Fixes #12")
     r = qualify(work, "f" * 40)
     assert r.returncode == 2 and "qualify-commits: git rev-list failed" in r.stderr
     assert g("rev-parse", "HEAD") == tip
+
+
+def test_qualify_commits_fails_when_head_cannot_move(tmp_path):
+    # A stale ref lock: the rewritten commits exist but HEAD cannot point at
+    # them, so the run's commits are still bare and the command fails.
+    work, g, start = qrepo(tmp_path)
+    tip = commit(work, g, "a", "Fixes #12")
+    (work / ".git" / "refs" / "heads" / "work.lock").write_text("")
+    r = qualify(work, start)
+    assert r.returncode == 2 and "git update-ref failed" in r.stderr
+    assert g("rev-parse", "HEAD") == tip
+
+
+def test_qualify_commits_fails_when_a_bare_reference_survives(tmp_path, monkeypatch):
+    # The final check, whatever let a bare reference through: here a
+    # rewrite that changes nothing.
+    work, g, start = qrepo(tmp_path)
+    tip = commit(work, g, "a", "Fixes #12")
+    monkeypatch.chdir(work)
+    monkeypatch.setattr(outbound, "_qualify_commit", lambda raw, repo, parents: raw)
+    with pytest.raises(ValueError, match=f"still carry a bare reference: {tip}"):
+        outbound.qualify_commits(FORK, start)
 
 
 def test_qualify_commit_drops_a_stale_signature_and_keeps_other_headers():

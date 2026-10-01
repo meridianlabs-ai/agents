@@ -551,6 +551,8 @@ def test_the_post_agent_reclaim_is_first_after_the_action_and_gates_every_later_
 
 
 QUALIFY_USES = "uses: meridianlabs-ai/agents/.github/actions/qualify-commit-refs@main"
+WITHHOLD = ("          withhold: ${{ steps.qualify.outputs.ok != 'true' && 'its commit messages could not be qualified "
+            "(see the Qualify issue references step in the job log).' || '' }}\n")
 
 
 @pytest.mark.parametrize("name,job", [(n, j) for n in REUSABLE for j in AGENT_JOBS[n]])
@@ -558,14 +560,19 @@ def test_the_runs_commits_are_qualified_after_the_reclaim_and_before_landing_rea
     # qualify-commit-refs (decision: Ransom, 2026-10-01): once per writing
     # job, as post-agent git gated on the reclaim, after the codex commit
     # step, before the Surface step and the composer read HEAD, and from the
-    # same start emit-landing bundles above. The reviewer never commits.
+    # same start emit-landing bundles above; emit-landing withholds the
+    # commits unless it reported `ok`. The reviewer never commits.
     all_steps = steps(jobs(workflow_text(name))[job])
     at = [i for i, s in enumerate(all_steps) if QUALIFY_USES in s]
+    emit = next(s for s in all_steps if "emit-landing@main" in s)
     if name == "claude-review.yml":
-        assert at == []
+        assert at == [] and "withhold:" not in emit
         return
     assert len(at) == 1, at
     q = all_steps[at[0]]
+    assert step_id(q) == "qualify"
+    # Fails closed: the commits land only when the step reported `ok`.
+    assert WITHHOLD in emit, emit
     ids = [step_id(s) for s in all_steps]
     reclaim = "codexreclaim" if job.endswith("-codex") else "agentreclaim"
     assert step_if(q) == f"always() && steps.{reclaim}.outcome == 'success'"
@@ -575,7 +582,6 @@ def test_the_runs_commits_are_qualified_after_the_reclaim_and_before_landing_rea
     def start(block):
         return next(l.strip() for l in code_lines(block) if l.strip().startswith("start-sha:"))
 
-    emit = next(s for s in all_steps if "emit-landing@main" in s)
     assert start(q) == start(emit).replace(" || github.sha", ""), start(q)
 
 

@@ -110,6 +110,14 @@ added on create and on adopt (`gh pr edit --add-assignee`, idempotent). A
 malformed value refuses the landing before anything is pushed. The defaults
 leave the PR as `land` has always opened it: ready for review, unassigned.
 
+`emit-landing`'s `withhold` input refuses the run's commits for a reason the
+caller states: a HEAD that moved is packaged as if its bundle could not be
+written (no bundle, `head_sha` = `start_sha`, the hand-back, hand-off,
+thread resolutions and stage dropped) and the reason is appended to
+`error` with `fail_run`. The six writing agent jobs pass it when
+`qualify-commit-refs` did not report `ok`, so a commit message with a bare
+issue reference never lands.
+
 `emit-landing`'s `read-only` input and `land`'s `refuse-bundle` input are the
 pair for a caller whose agent never commits (claude-review.yml, whose Claude
 reviewer writes its summary, inline comments and verdict to files the review

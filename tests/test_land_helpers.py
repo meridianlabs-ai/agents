@@ -3226,7 +3226,7 @@ def emit_landing_script() -> str:
 
 
 def run_emit_landing(tmp_path, *, cwd, read_only, start_sha, extra=None,
-                     branch="claude/issue-81-review", pr_number="456", issue_number=""):
+                     branch="claude/issue-81-review", pr_number="456", issue_number="", withhold=""):
     landing = tmp_path / "landing"
     out = tmp_path / "out.txt"
     out.write_text("")
@@ -3238,6 +3238,7 @@ def run_emit_landing(tmp_path, *, cwd, read_only, start_sha, extra=None,
         "EXTRA": str(extra) if extra else "",
         "DIR": str(landing),
         "READ_ONLY": "true" if read_only else "false",
+        "WITHHOLD": withhold,
         "REPO": "meridianlabs-ai/agents",
         "RUN_ID": "123",
         "GITHUB_OUTPUT": str(out),
@@ -3336,6 +3337,37 @@ def test_emit_landing_lost_bundle_drops_every_landed_work_claim(repos):
     assert m["error"]["message"].startswith("the agent said so")
     assert "dropped with the bundle" in m["error"]["message"]
     assert "wrote=true" in output
+
+
+def test_emit_landing_withhold_packages_the_moved_head_as_a_lost_bundle(repos):
+    # The agent jobs pass `withhold` when qualify-commit-refs did not succeed:
+    # HEAD moved (to commits that are a valid bundle), but none of it may
+    # land, and every landed-work claim goes the way of a lost bundle. The
+    # reason reaches the PR through `error`.
+    import json
+
+    r = repos
+    extra = r["tmp"] / "extra.json"
+    (r["landing"] / "c.md").write_text("summary\n")
+    extra.write_text(json.dumps({"handback": True, "stage": "Review", "resolve_threads": ["PRRT_a"],
+                                 "comments": [{"number": 456, "body_file": "c.md"}]}))
+    reason = "its commit messages could not be qualified."
+    res, landing, output = run_emit_landing(r["tmp"], cwd=r["work"], read_only=False, start_sha=r["start"],
+                                            extra=extra, withhold=reason)
+    assert res.returncode == 0, res.stderr
+    m = json.loads((landing / "manifest.json").read_text())
+    assert m["has_bundle"] is False and m["head_sha"] == r["start"]
+    assert not (landing / "commits.bundle").exists()
+    for gone in ("handback", "stage", "resolve_threads"):
+        assert gone not in m, m
+    assert m["comments"] == [{"number": 456, "body_file": "c.md"}]
+    assert m["error"]["fail_run"] is True and reason in m["error"]["message"]
+    assert "head_sha=" + r["start"] in output and "has_bundle=false" in output
+    # A HEAD that never moved owes nothing, so there is nothing to withhold.
+    git("reset", "-q", "--hard", r["start"], cwd=r["work"])
+    res, landing, _ = run_emit_landing(r["tmp"], cwd=r["work"], read_only=False, start_sha=r["start"], withhold=reason)
+    assert res.returncode == 0, res.stderr
+    assert "error" not in json.loads((landing / "manifest.json").read_text())
 
 
 def test_emit_landing_keeps_a_no_change_handoff(repos):

@@ -1823,8 +1823,10 @@ jobs:
       # Qualify the bare issue references in the agent's commit messages
       # (`OWNER/REPO#N`, decision: Ransom, 2026-10-01) before anything reads
       # HEAD for landing: see the composite. Post-agent git, so gated on the
-      # reclaim like the steps below.
+      # reclaim like the steps below; unless it reports `ok`, emit-landing
+      # withholds the commits (`withhold`).
       - name: Qualify issue references in the agent's commits
+        id: qualify
         if: always() && steps.agentreclaim.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/qualify-commit-refs@main
         with:
@@ -2468,6 +2470,7 @@ jobs:
           pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
           issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
+          withhold: ${{ steps.qualify.outputs.ok != 'true' && 'its commit messages could not be qualified (see the Qualify issue references step in the job log).' || '' }}
           read-only: ${{ steps.landing.outputs.read_only != 'false' && 'true' || 'false' }}
 
 
@@ -3144,8 +3147,10 @@ jobs:
       # Qualify the bare issue references in the codex commit messages
       # (`OWNER/REPO#N`, decision: Ransom, 2026-10-01) before anything reads
       # HEAD for landing: see the composite. Post-agent git, so gated on the
-      # reclaim like the steps below.
+      # reclaim like the steps below; unless it reports `ok`, emit-landing
+      # withholds the commits (`withhold`).
       - name: Qualify issue references in the codex commits
+        id: qualify
         if: always() && steps.codexreclaim.outcome == 'success'
         uses: meridianlabs-ai/agents/.github/actions/qualify-commit-refs@main
         with:
@@ -3733,6 +3738,7 @@ jobs:
           pr-number: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || '' }}
           issue-number: ${{ !github.event.issue.pull_request && github.event.issue.number || '' }}
           manifest-extra: ${{ runner.temp }}/landing-extra.json
+          withhold: ${{ steps.qualify.outputs.ok != 'true' && 'its commit messages could not be qualified (see the Qualify issue references step in the job log).' || '' }}
           read-only: ${{ steps.landing.outputs.read_only != 'false' && 'true' || 'false' }}
 
 
