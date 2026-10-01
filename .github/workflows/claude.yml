@@ -497,6 +497,10 @@ jobs:
           REVIEW: ${{ github.event.review.body }}
           IBODY: ${{ github.event.issue.body }}
           ITITLE: ${{ github.event.issue.title }}
+          # Who wrote the body and title, and whether this `opened` is a
+          # transfer into this repository (its payload carries the source).
+          IAUTHOR: ${{ github.event.issue.user.login }}
+          TRANSFERRED: ${{ (github.event.changes.old_issue || github.event.changes.old_repository) && 'true' || 'false' }}
           LNAME: ${{ github.event.label.name }}
           # Fork-head resolution. The JOB token (read access is enough, and it
           # cannot expire like a PAT); the review-event payload carries the
@@ -508,6 +512,9 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           ok=false
+          # Whose write access the lookup below checks: the actor, except
+          # for an opened issue's body and title, whose author is judged.
+          who="$ACTOR"
           # trusted_login LOGIN: membership in the workflow-level TRUSTED_LOGINS
           # (the machine account's logins; spaces ignored).
           trusted_login() { case ",${TRUSTED_LOGINS// /}," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -569,9 +576,21 @@ jobs:
                 # upstream issue further down is theirs. A `claude`/`auto`
                 # label or a later comment starts work on an import, judged
                 # by its own actor.
+                #
+                # A transferred issue (Claude Security 4774320): moving an
+                # issue into this repository emits `opened` here with the
+                # transferring account as github.actor, while the body, title
+                # and issue.user are the original author's, so the premise
+                # that the actor wrote the text fails. The text counts only
+                # when its author is the actor and the payload is no transfer
+                # (`changes.old_issue` / `old_repository`), and the lookup
+                # below judges that author. An empty author is a mismatch.
                 if printf '%s' "$IBODY" | head -n1 | grep -qE '^Upstream issue:[[:space:]]*https?://'; then
                   echo "::notice::imported upstream issue: its body and title are the upstream author's text, not a trigger; label it or comment to start the agent."
+                elif [ "$TRANSFERRED" = "true" ] || [ "$IAUTHOR" != "$ACTOR" ]; then
+                  echo "::notice::transferred issue, or one whose author (${IAUTHOR:-unknown}) is not the actor ($ACTOR): its body and title are not a trigger; a maintainer can start the agent with a \`$PHRASE\` comment or the \`$LABEL\` label."
                 else
+                  who="$IAUTHOR"
                   text="$IBODY
           $ITITLE"
                 fi
@@ -585,13 +604,14 @@ jobs:
           # move, no @auto opt-in, no counter reset, no checkout, no agent.
           # Same lookup the reviewer's trig step makes for @review, with the
           # job token (read is enough, and it cannot expire like a PAT). Who
-          # is judged: github.actor — the commenter/author, and on the
+          # is judged (`who`): github.actor — the commenter, and on the
           # `labeled` path the account that applied the label (the actor of
-          # a label event IS the labeler). Every actor that reaches this
-          # point is a human account (the paths above admit no bot and
-          # neither machine login), and every one is looked up: the machine
-          # account is not authorized by name here any more, since nothing
-          # it writes is its own decision (see the label path above; the
+          # a label event IS the labeler) — or, for an opened issue's text,
+          # its author, admitted above only when that is the actor. Every
+          # actor that reaches this point is a human account (the paths
+          # above admit no bot and neither machine login), and every one is
+          # looked up: the machine account is not authorized by name here
+          # any more, since nothing it writes is its own decision (see the label path above; the
           # reviewer's trig step still trusts its `@review` hand-back by
           # login, which IS the loop's own callback). Fails closed: a lookup
           # error is `none`. Retried once like the fork-head
@@ -604,7 +624,7 @@ jobs:
           if [ "$ok" = "true" ]; then
             perm=""
             for i in 1 2; do
-              perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission' 2>/dev/null) && break
+              perm=$(gh api "repos/$REPO/collaborators/$who/permission" --jq '.permission' 2>/dev/null) && break
               perm=""
               [ "$i" -lt 2 ] && sleep 5
             done
@@ -612,7 +632,7 @@ jobs:
               admin|maintain|write) authorized=true ;;
               *)
                 ok=false
-                echo "::notice::$ACTOR does not have write access (permission: ${perm:-lookup failed}); not running, acking or staging."
+                echo "::notice::$who does not have write access (permission: ${perm:-lookup failed}); not running, acking or staging."
                 ;;
             esac
           fi

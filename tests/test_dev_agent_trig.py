@@ -42,7 +42,7 @@ gh() {
 
 
 def run_trig(tmp_path, *, actor, event, action, perms=None, comment="", label="", is_pr=False,
-             phrase="@auto", label_trigger="auto", ibody="", ititle=""):
+             phrase="@auto", label_trigger="auto", ibody="", ititle="", iauthor=None, transferred=False):
     state = fresh_state(tmp_path)
     (state / "perms").write_text("".join(f"{k} {v}\n" for k, v in (perms or {}).items()))
     out = tmp_path / "out"
@@ -51,6 +51,7 @@ def run_trig(tmp_path, *, actor, event, action, perms=None, comment="", label=""
         "GITHUB_OUTPUT": str(out), "STATE": str(state), "PHRASE": phrase, "LABEL": label_trigger,
         "EVENT": event, "EVENT_ACTION": action, "ACTOR": actor, "COMMENT": comment, "REVIEW": "",
         "IBODY": ibody, "ITITLE": ititle, "LNAME": label, "REPO": "o/r",
+        "IAUTHOR": actor if iauthor is None else iauthor, "TRANSFERRED": "true" if transferred else "false",
         "IS_PR_COMMENT": "true" if is_pr else "false", "PR_NUM": "7", "HEAD_REPO": "",
         "TRUSTED_LOGINS": TRUSTED_LOGINS,
     }
@@ -162,6 +163,83 @@ def test_a_humans_label_starts_work_on_an_imported_issue(tmp_path):
     _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="labeled", label="auto",
                            ibody=IMPORT_BODY, ititle="@auto also in the title", perms={"alice": "write"})
     assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
+
+
+# A transferred issue (Claude Security 4774320): GitHub emits `issues: opened`
+# in the destination with the transferring maintainer as the actor, while the
+# body, title and issue.user are the original author's, and the payload
+# carries `changes.old_issue` / `changes.old_repository`.
+TRANSFER_PHRASES = [("@claude", "claude"), ("@auto", "auto")]
+
+
+@pytest.mark.parametrize(("phrase", "label"), TRANSFER_PHRASES)
+def test_an_opened_issue_by_another_author_is_not_a_text_trigger(tmp_path, phrase, label):
+    # The transferring maintainer (write) is not the text's author: nothing
+    # is looked up, and with `ok` false the engine step, which sets `auto`
+    # and the PR labels, never runs.
+    r, o, state = run_trig(tmp_path, actor="alice", event="issues", action="opened", iauthor="outsider",
+                           ibody=f"<!-- {phrase} do it -->", ititle=f"{phrase} in the title",
+                           phrase=phrase, label_trigger=label, perms={"alice": "write", "outsider": "read"})
+    assert o["ok"] == "false" and o["authorized"] == "false" and lookups(state) == []
+    assert f"`{phrase}` comment or the `{label}` label" in r.stdout
+    # An empty author (payload drift) fails closed the same way.
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="opened", iauthor="",
+                           ibody=f"{phrase} do it", phrase=phrase, label_trigger=label, perms={"alice": "write"})
+    assert o["ok"] == "false" and lookups(state) == []
+
+
+@pytest.mark.parametrize(("phrase", "label"), TRANSFER_PHRASES)
+def test_a_transfer_payload_is_not_a_text_trigger_even_when_the_logins_match(tmp_path, phrase, label):
+    # A maintainer who transfers their own issue: the text is theirs, but it
+    # was written for the source repository and the transfer is not a new
+    # request here.
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="opened", transferred=True,
+                           ibody=f"{phrase} do it", ititle=f"{phrase} in the title",
+                           phrase=phrase, label_trigger=label, perms={"alice": "write"})
+    assert o["ok"] == "false" and o["authorized"] == "false" and lookups(state) == []
+
+
+def test_a_transfer_is_refused_before_the_engine_step_can_label_the_pr_auto():
+    # The engine step (auto, pr_labels) runs only on an ok trigger, so a
+    # refused transfer can never put `auto` on the PR.
+    step = lift_step(WORKFLOW, "        id: engine")
+    text = WORKFLOW.read_text()
+    assert "        id: engine\n        if: steps.trig.outputs.ok == 'true'\n" in text
+    assert "pr_labels=" in step
+
+
+def test_the_opened_issues_author_is_the_one_looked_up(tmp_path):
+    # A normal opened issue: author and actor are the same write-access
+    # account, and the lookup is of that author.
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="opened", iauthor="alice",
+                           ibody="@claude fix this", phrase="@claude", label_trigger="claude",
+                           perms={"alice": "write"})
+    assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
+    # A read-only author of their own issue is still refused by the lookup.
+    _, o, state = run_trig(tmp_path, actor="bob", event="issues", action="opened",
+                           ibody="@claude fix this", phrase="@claude", label_trigger="claude",
+                           perms={"bob": "read"})
+    assert o["ok"] == "false" and lookups(state) == ["bob"]
+
+
+@pytest.mark.parametrize(("phrase", "label"), TRANSFER_PHRASES)
+def test_a_label_or_comment_still_starts_work_on_a_transferred_issue(tmp_path, phrase, label):
+    # The sanctioned kickoffs stay, each judged by its own actor: the
+    # maintainer's label, and a later comment (the payload of a comment
+    # event carries the issue's original author too).
+    _, o, state = run_trig(tmp_path, actor="alice", event="issues", action="labeled", label=label,
+                           iauthor="outsider", ibody=f"{phrase} do it", phrase=phrase, label_trigger=label,
+                           perms={"alice": "write"})
+    assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
+    _, o, state = run_trig(tmp_path, actor="alice", event="issue_comment", action="created",
+                           comment=f"{phrase} go", iauthor="outsider", ibody=f"{phrase} do it",
+                           phrase=phrase, label_trigger=label, perms={"alice": "write"})
+    assert o["ok"] == "true" and o["authorized"] == "true" and lookups(state) == ["alice"]
+    # An outsider's own later comment is judged by its own actor, and refused.
+    _, o, state = run_trig(tmp_path, actor="outsider", event="issue_comment", action="created",
+                           comment=f"{phrase} go", iauthor="outsider", phrase=phrase, label_trigger=label,
+                           perms={"outsider": "read"})
+    assert o["ok"] == "false" and lookups(state) == ["outsider"]
 
 
 def test_workflow_names_both_logins_once_and_the_agent_steps_admit_no_bot():
