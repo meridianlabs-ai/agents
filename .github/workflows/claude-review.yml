@@ -254,6 +254,27 @@ on:
         required: false
         type: string
         default: ""
+      openai_wif_probe:
+        description: >-
+          For openai-wif-canary.yml only. Empty (the default): the reviewer
+          runs as always. `meridian-audience` or `wrong-audience`: no
+          review runs (the gate is skipped, and every other job with it);
+          the `openai-wif-probe` job requests a GitHub OIDC token for that
+          audience and asks OpenAI's token exchange for a token, expecting
+          `openai_wif_probe_expect`, and drops any token it gets. OpenAI's
+          mapping trusts the four agent workflows, so only a job in one of
+          them can show that the audience and event conditions refuse on
+          their own (design/untrusted-agent-job.md → Testing).
+        required: false
+        type: string
+        default: ""
+      openai_wif_probe_expect:
+        description: >-
+          With `openai_wif_probe`: the outcome the probe must see,
+          `refused`, `exchanged` or `any`.
+        required: false
+        type: string
+        default: refused
     secrets:
       MARVIN_APP_CLIENT_ID:
         description: >-
@@ -321,8 +342,11 @@ jobs:
   # before the agent.
   # Checks out nothing. Its outputs are the trusted context the other two
   # jobs run on (`ok` gates both; the land job's PR/issue pins come from the
-  # event payload directly, `head_ref` from trig's API lookup).
+  # event payload directly, `head_ref` from trig's API lookup). Skipped
+  # when the OpenAI canary calls this workflow for its probe job (input
+  # `openai_wif_probe`), which skips every job that needs it.
   gate:
+    if: inputs.openai_wif_probe == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -3126,3 +3150,37 @@ jobs:
           [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
           gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The review run completed without writing a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with `@review`.%s' "$cc")" || true
           exit 1
+
+  # CANARY ONLY: runs when openai-wif-canary.yml passes `openai_wif_probe`,
+  # never on a review (the input is empty then, and the gate runs instead).
+  # Its `job_workflow_ref` is this workflow at `refs/heads/main`, which the
+  # OpenAI mapping trusts, so a refusal here comes from the audience or the
+  # event alone, and an exchange on a listed event is the positive control
+  # (design/untrusted-agent-job.md → Testing). It checks out nothing,
+  # references no secret, and drops any token it gets.
+  openai-wif-probe:
+    if: inputs.openai_wif_probe != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write         # the probe's OIDC token
+    steps:
+      - name: Refuse an unknown probe
+        if: inputs.openai_wif_probe != 'meridian-audience' && inputs.openai_wif_probe != 'wrong-audience'
+        run: |
+          echo "::error::openai_wif_probe must be meridian-audience or wrong-audience"
+          exit 1
+      - name: OpenAI exchange with the Meridian audience
+        if: inputs.openai_wif_probe == 'meridian-audience'
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: probe
+          expect: ${{ inputs.openai_wif_probe_expect }}
+      - name: OpenAI exchange with a wrong audience
+        if: inputs.openai_wif_probe == 'wrong-audience'
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: probe
+          audience: openai-wif:meridianlabs-ai-wrong-audience
+          expect: ${{ inputs.openai_wif_probe_expect }}

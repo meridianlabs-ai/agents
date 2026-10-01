@@ -161,9 +161,17 @@ def claims(jwt: str) -> dict:
         return {}
 
 
+def is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def exchange(args, jwt: str) -> tuple:
-    """Exchange `jwt` for a service-account token. Returns (token, lifetime
-    in seconds). The error names OpenAI's error code and description only."""
+    """Exchange `jwt` for a service-account token. Returns (token, seconds
+    it has left now, the answer's `expires_in` or None). `expires_in` counts from issuance, which is after the
+    request started, and `expires_at` is absolute, so the time left is the
+    smaller of the two, counted from the request's start and from this
+    host's clock; an answer whose token has already expired is an error.
+    The error names OpenAI's error code and description only."""
     form = urllib.parse.urlencode({
         "grant_type": GRANT_TYPE,
         "identity_provider_id": args.identity_provider_id,
@@ -171,6 +179,7 @@ def exchange(args, jwt: str) -> tuple:
         "subject_token_type": SUBJECT_TOKEN_TYPE,
         "subject_token": jwt,
     }).encode()
+    started = time.monotonic()
     status, data = call("POST", args.token_url, {"Content-Type": "application/x-www-form-urlencoded",
                                                  "Accept": "application/json"}, form, "the OpenAI token exchange")
     try:
@@ -191,13 +200,17 @@ def exchange(args, jwt: str) -> tuple:
     token = doc.get("access_token")
     if not isinstance(token, str) or not token or any(not " " < c <= "~" for c in token):
         raise ExchangeError(f"the OpenAI token exchange answered HTTP {status} without a usable access_token")
-    lifetime = doc.get("expires_in")
-    if not isinstance(lifetime, (int, float)) or isinstance(lifetime, bool):
-        at = doc.get("expires_at")
-        lifetime = at - time.time() if isinstance(at, (int, float)) and not isinstance(at, bool) else None
-    if lifetime is None or lifetime <= 0:
+    left = []
+    if is_number(doc.get("expires_in")):
+        left.append(doc["expires_in"] - (time.monotonic() - started))
+    if is_number(doc.get("expires_at")):
+        left.append(doc["expires_at"] - time.time())
+    if not left:
         raise ExchangeError(f"the OpenAI token exchange answered HTTP {status} without a usable expiry")
-    return token, float(lifetime)
+    if min(left) <= 0:
+        raise ExchangeError(f"the OpenAI token exchange answered HTTP {status} with an expired token")
+    issued = doc["expires_in"] if is_number(doc.get("expires_in")) else None
+    return token, float(min(left)), issued
 
 
 def mask(value: str) -> None:
@@ -214,12 +227,12 @@ class Credentials:
 
     def _renew(self, why: str) -> None:
         try:
-            token, lifetime = exchange(self.args, oidc_token(self.args.audience))
+            token, lifetime, _ = exchange(self.args, oidc_token(self.args.audience))
         except ExchangeError as e:
             self.log(f"renewal failed ({why}): {e}")
             raise
         self.token, self.expires = token, time.monotonic() + lifetime
-        self.log(f"renewed ({why}): expires_in={int(lifetime)}")
+        self.log(f"renewed ({why}): valid for {round(lifetime)} s")
 
     def current(self) -> str:
         with self.lock:
@@ -391,7 +404,7 @@ def serve(args) -> int:
         connection(args.upstream_url, 1)[0].close()
         jwt = oidc_token(args.audience)
         mask(jwt)
-        token, lifetime = exchange(args, jwt)
+        token, lifetime, issued = exchange(args, jwt)
         mask(token)
     except ExchangeError as e:
         print(f"::error::openai-wif-proxy: {e}")
@@ -413,7 +426,8 @@ def serve(args) -> int:
         with open(os.path.join(args.state_dir, "pid"), "w") as f:
             f.write(f"{pid}\n")
         write_output("endpoint", f"http://127.0.0.1:{port}{ROUTE}")
-        summary(f"openai-wif-proxy: exchanged; token expires_in {int(lifetime)} s, GitHub OIDC token "
+        summary(f"openai-wif-proxy: exchanged; token expires_in {issued if issued is not None else 'absent'}, "
+                f"valid for {round(lifetime)} s on receipt, GitHub OIDC token "
                 f"lifetime (exp - iat) {oidc_life if oidc_life is not None else 'unknown'} s; "
                 f"forwarding POST {ROUTE} on 127.0.0.1:{port} (pid {pid})")
         return 0
@@ -431,7 +445,7 @@ def serve(args) -> int:
         with lock:
             os.write(1, f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}\n".encode())
 
-    log(f"start: exchanged, expires_in={int(lifetime)}")
+    log(f"start: exchanged, valid for {round(lifetime)} s")
     creds = Credentials(args, token, lifetime, log)
     del token
     server = Server(sock, creds, args.upstream_url, log)
@@ -472,7 +486,7 @@ def probe(args) -> int:
         c = claims(jwt)
         detail = ", ".join(f"{k}={clean(c.get(k), 120)}" for k in ("aud", "event_name", "job_workflow_ref")
                            if isinstance(c.get(k), str))
-        token, _ = exchange(args, jwt)
+        token, _, _ = exchange(args, jwt)
         mask(token)
         outcome, why = "exchanged", "HTTP 2xx, a token (dropped)"
     except ExchangeError as e:

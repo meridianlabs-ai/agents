@@ -68,6 +68,8 @@ class Stub:
         self.lock = threading.Lock()
         self.oidc, self.exchanges, self.upstream = [], [], []
         self.expires_in = 3600
+        self.expires_at_in = None        # seconds from now for expires_at; None: same as expires_in; False: omit
+        self.exchange_delays = []        # per call: seconds the answer waits
         self.exchange_plan = []          # per call: None (grant), or (status, body)
         self.upstream_plan = []          # per call: callable(handler) or None (200 JSON echo)
         self.release = threading.Event()
@@ -105,11 +107,15 @@ class Stub:
                         stub.exchanges.append({"form": urllib.parse.parse_qs(body.decode(), keep_blank_values=True),
                                                "raw": body.decode(), "ctype": self.headers.get("Content-Type")})
                         plan = stub.exchange_plan.pop(0) if stub.exchange_plan else None
+                        delay = stub.exchange_delays.pop(0) if stub.exchange_delays else 0
+                    time.sleep(delay)
                     if plan:
                         return self.reply(plan[0], plan[1].encode())
-                    return self.reply(200, json.dumps({"access_token": f"OAT-SECRET-{n}", "token_type": "Bearer",
-                                                       "expires_in": stub.expires_in,
-                                                       "expires_at": int(time.time()) + stub.expires_in}).encode())
+                    doc = {"access_token": f"OAT-SECRET-{n}", "token_type": "Bearer", "expires_in": stub.expires_in}
+                    if stub.expires_at_in is not False:
+                        doc["expires_at"] = time.time() + (stub.expires_in if stub.expires_at_in is None
+                                                           else stub.expires_at_in)
+                    return self.reply(200, json.dumps(doc).encode())
                 with stub.lock:
                     stub.upstream.append({"path": self.path, "headers": dict(self.headers.items()), "body": body})
                     plan = stub.upstream_plan.pop(0) if stub.upstream_plan else None
@@ -252,7 +258,8 @@ def test_the_first_exchange_sends_exactly_the_token_exchange_fields(run, stub):
     # It listens on loopback, and says what it measured.
     assert urllib.parse.urlsplit(run.endpoint).hostname == "127.0.0.1"
     assert urllib.parse.urlsplit(run.endpoint).path == "/v1/responses"
-    assert "token expires_in 3600 s, GitHub OIDC token lifetime (exp - iat) 300 s" in run.summary.read_text()
+    assert ("token expires_in 3600, valid for 3600 s on receipt, GitHub OIDC token lifetime (exp - iat) 300 s"
+            in run.summary.read_text())
     assert oct(run.state.stat().st_mode & 0o777) == "0o700"
     assert oct((run.state / "log").stat().st_mode & 0o777) == "0o600"
     # The parent returned; the forwarder serves on.
@@ -314,7 +321,41 @@ def test_renewal_comes_before_expiry_with_a_fresh_subject_token(run, stub):
     assert all(o["query"]["audience"] == [AUDIENCE] for o in stub.oidc)
     used = [u["headers"]["Authorization"] for u in stub.upstream]
     assert used == ["Bearer OAT-SECRET-1", "Bearer OAT-SECRET-2", "Bearer OAT-SECRET-2", "Bearer OAT-SECRET-3"]
-    assert run.log().count("renewed (expiry): expires_in=62") == 2
+    assert run.log().count("renewed (expiry): valid for 62 s") == 2
+    run.assert_no_secret_leaked()
+
+
+def test_the_absolute_expiry_wins_over_a_longer_expires_in(run, stub):
+    # OpenAI's expires_at says the token has 61 s left although expires_in
+    # says 300: the forwarder renews once it is inside the 60 s margin.
+    stub.expires_in, stub.expires_at_in = 300, 61
+    assert run.start().returncode == 0
+    assert "token expires_in 300, valid for 61 s on receipt" in run.summary.read_text()
+    time.sleep(1.2)
+    resp, _ = run.post()
+    assert resp.status == 200 and len(stub.exchanges) == 2
+    assert stub.upstream[0]["headers"]["Authorization"] == "Bearer OAT-SECRET-2"
+
+
+def test_the_time_an_answer_takes_counts_against_expires_in(run, stub):
+    # expires_in counts from issuance, so 1.5 s spent waiting for the
+    # answer leaves 60.5 s of a 62 s token: inside the margin 0.5 s later.
+    stub.expires_in, stub.expires_at_in = 62, False
+    stub.exchange_delays = [1.5]
+    assert run.start().returncode == 0
+    assert "token expires_in 62, valid for 60 s on receipt" in run.summary.read_text()
+    time.sleep(0.7)
+    resp, _ = run.post()
+    assert resp.status == 200 and len(stub.exchanges) == 2
+    assert "renewed (expiry): valid for 62 s" in run.log()
+
+
+def test_an_already_expired_token_fails_start_up(run, stub):
+    stub.expires_in, stub.expires_at_in = 300, -5
+    r = run.start()
+    assert r.returncode == 1
+    assert "::error::openai-wif-proxy: the OpenAI token exchange answered HTTP 200 with an expired token" in r.stdout
+    assert run.pid() is None
     run.assert_no_secret_leaked()
 
 
@@ -577,21 +618,76 @@ PROBE_STEP = ("        uses: meridianlabs-ai/agents/.github/actions/openai-wif-p
 OIDC_ONLY = "    permissions:\n      contents: read\n      id-token: write\n"
 
 
-def test_the_canaries_each_expect_a_refusal_outside_the_four_workflows():
+CALLER_PERMS = ("    permissions:\n      contents: read\n      pull-requests: read\n      issues: read\n"
+                "      id-token: write\n      actions: read\n    cache-mode: read\n")
+REVIEWER_CALL = "    uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main\n"
+
+
+def canary_jobs(text: str) -> dict:
+    body = text[text.index("\njobs:\n"):]
+    starts = [(m.start(), m.group(1)) for m in re.finditer(r"^  ([a-z-]+):$", body, re.M)]
+    return {name: body[s:(starts[i + 1][0] if i + 1 < len(starts) else len(body))]
+            for i, (s, name) in enumerate(starts)}
+
+
+def test_each_canary_fails_one_condition_and_the_positive_control_exchanges():
     canary = (WORKFLOWS / "openai-wif-canary.yml").read_text()
     other = (WORKFLOWS / "openai-wif-canary-reusable.yml").read_text()
-    # On workflow_run from main (an event the mapping lists, the workflow at
-    # refs/heads/main), so only the workflow condition fails; by hand too.
+    # workflow_run from main is an event the mapping lists; a dispatch and
+    # the schedule are not (the wrong-event case).
     on = canary[canary.index("\non:\n"):canary.index("\npermissions:\n")]
-    assert on == ('\non:\n  workflow_run:\n    workflows: ["engine isolation canary"]\n    types: [completed]\n'
-                  "    branches: [main]\n  workflow_dispatch:\n")
-    body = canary[canary.index("\njobs:\n"):]
-    assert re.findall(r"^  ([a-z-]+):$", body, re.M) == ["no-reusable-workflow", "other-reusable-workflow"]
-    job = body[body.index("  no-reusable-workflow:"):body.index("  other-reusable-workflow:")]
-    assert OIDC_ONLY in job and PROBE_STEP in job and "uses: ./" not in job
-    call = body[body.index("  other-reusable-workflow:"):]
-    assert "    uses: ./.github/workflows/openai-wif-canary-reusable.yml\n" in call and OIDC_ONLY in call
-    assert "\non:\n  workflow_call:\n\n" in other
-    assert OIDC_ONLY in other and PROBE_STEP in other
+    assert on.startswith('\non:\n  workflow_run:\n    workflows: ["engine isolation canary"]\n    types: [completed]\n'
+                         "    branches: [main]\n  workflow_dispatch:\n  schedule:\n")
+    cron = re.findall(r'^    - cron: "([^"]+)"', on, re.M)
+    assert len(cron) == 1 and cron[0].split()[0] != "0"
+    jobs = canary_jobs(canary)
+    assert list(jobs) == ["no-reusable-workflow", "other-reusable-workflow", "reviewer-meridian-audience",
+                          "reviewer-wrong-audience"]
+    # A job in no reusable workflow, and another reusable workflow.
+    assert OIDC_ONLY in jobs["no-reusable-workflow"] and PROBE_STEP in jobs["no-reusable-workflow"]
+    assert "uses: ./" not in jobs["no-reusable-workflow"]
+    assert "    uses: ./.github/workflows/openai-wif-canary-reusable.yml\n" in jobs["other-reusable-workflow"]
+    assert OIDC_ONLY in jobs["other-reusable-workflow"]
+    assert "\non:\n  workflow_call:\n\n" in other and OIDC_ONLY in other and PROBE_STEP in other
+    # One of the four at main, with a wrong audience, and with the right one:
+    # refused off the listed events, exchanged on workflow_run.
+    for name, probe, expect in (
+            ("reviewer-wrong-audience", "wrong-audience", "refused"),
+            ("reviewer-meridian-audience", "meridian-audience",
+             "${{ github.event_name == 'workflow_run' && 'exchanged' || 'refused' }}")):
+        job = jobs[name]
+        assert REVIEWER_CALL in job and CALLER_PERMS in job, name
+        assert f"      openai_wif_probe: {probe}\n      openai_wif_probe_expect: {expect}\n" in job, name
+        assert "secrets" not in job
     for text in (canary, other):
         assert "secrets." not in text and "actions/checkout" not in text
+
+
+def test_the_reviewer_probe_job_runs_only_for_the_canary():
+    text = (WORKFLOWS / "claude-review.yml").read_text()
+    head = text[:text.index("\njobs:\n")]
+    for key, default in (("openai_wif_probe", '""'), ("openai_wif_probe_expect", "refused")):
+        block = head[head.index(f"\n      {key}:\n"):]
+        block = block[:re.compile(r"\n      [a-z_]+:\n|\n    secrets:\n").search(block, 1).start()]
+        assert f"        required: false\n        type: string\n        default: {default}" in block, key
+    jobs = canary_jobs(text)
+    # Empty by default: the gate runs and the probe is skipped; set, the gate
+    # is skipped, and every job that needs it with it.
+    assert "\n    if: inputs.openai_wif_probe == ''\n" in jobs["gate"]
+    probe = jobs["openai-wif-probe"]
+    assert "\n    if: inputs.openai_wif_probe != ''\n" in probe and "needs:" not in probe
+    assert "    permissions:\n      contents: read\n      id-token: write" in probe
+    assert "secrets." not in probe and "checkout" not in probe
+    for job, block in jobs.items():
+        if job not in ("gate", "openai-wif-probe"):
+            assert re.search(r"^    needs: .*gate", block, re.M), job
+    steps = probe[probe.index("    steps:\n"):]
+    assert ("        if: inputs.openai_wif_probe == 'meridian-audience'\n"
+            "        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main\n"
+            "        with:\n          mode: probe\n          expect: ${{ inputs.openai_wif_probe_expect }}\n") in steps
+    assert ("        if: inputs.openai_wif_probe == 'wrong-audience'\n"
+            "        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main\n"
+            "        with:\n          mode: probe\n          audience: openai-wif:meridianlabs-ai-wrong-audience\n"
+            "          expect: ${{ inputs.openai_wif_probe_expect }}\n") in steps
+    assert ("        if: inputs.openai_wif_probe != 'meridian-audience' && inputs.openai_wif_probe != 'wrong-audience'\n"
+            in steps)

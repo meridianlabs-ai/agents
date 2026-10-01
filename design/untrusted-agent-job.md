@@ -1758,21 +1758,37 @@ THREAT_MODEL.md text that its change makes true.
      - The forwarder follows no redirect on any of its calls and answers
        an upstream redirect with 502. Its OIDC and exchange calls are
        retried up to three times on a network error, 429 or 5xx.
-     - The negative canaries are `openai-wif-canary.yml` (a job in no
-       reusable workflow) and `openai-wif-canary-reusable.yml` (another
-       reusable workflow of this repository), run on `workflow_run` after
-       each `main` run of the engine isolation canary, an event the
-       mapping lists, so only the workflow condition fails. A wrong
-       audience or a wrong event is only a meaningful test from a job in
-       one of the four workflows, which have no such job; that waits on a
-       decision.
+     - A token's expiry is the earlier of `expires_in`, counted from when
+       the exchange request started (it counts from issuance), and
+       `expires_at` by the runner's clock. An answer whose token has
+       already expired is an error.
+     - The canaries are in `openai-wif-canary.yml`, each failing one
+       condition on the event that isolates it. On `workflow_run` after
+       each `main` run of the engine isolation canary (an event the
+       mapping lists): a job in no reusable workflow and
+       `openai-wif-canary-reusable.yml` (another reusable workflow) are
+       refused on the workflow, and claude-review.yml's probe job with a
+       wrong audience on the audience; the same probe job with the
+       Meridian audience must be exchanged, the positive control. On a
+       dispatch or its weekly schedule (events outside the list) that
+       Meridian-audience probe must be refused, the wrong-event case.
+     - The probe job needs a home in one of the four workflows, since only
+       their jobs carry a trusted `job_workflow_ref`. claude-review.yml
+       gained two inputs for it, `openai_wif_probe` (default empty) and
+       `openai_wif_probe_expect`. Empty, the reviewer runs as before and
+       the probe job is skipped. Set, the gate is skipped, and every other
+       job with it. The reviewer was chosen because its jobs request only
+       read permissions besides `id-token: write`, so the canary's calling
+       job grants no write.
      - The pipeline probe's codex job requests `id-token: write` like the
        real one, references no secret, and expects the App exchange to be
        refused on a dispatch from main.
      - A branch run cannot pass the exchange (the mapping needs
        `job_workflow_ref` at `refs/heads/main`), so the positive check is
-       after the merge: a codex `@review`, one codex fix round, and the
-       canaries on a dispatch from `main`. The results go under this step
+       after the merge: a codex `@review`, one codex fix round, a dispatch
+       of the engine isolation canary from `main` (which starts
+       `openai-wif-canary.yml` on `workflow_run`), and a dispatch of
+       `openai-wif-canary.yml` itself for the wrong-event case. The results go under this step
        in a follow-up PR.
 
 ## Open questions

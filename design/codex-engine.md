@@ -192,8 +192,12 @@ booleans the identity provider derives with CEL: `openai.agents_workflow`
 `refs/heads/main`) and `openai.agents_event` (`event_name` is one the stubs
 use). Callers need no OpenAI configuration. Adding an agents workflow or a
 trigger event means editing the provider's transforms, not the mapping.
-`openai-wif-canary.yml` checks that a job in no reusable workflow and
-another reusable workflow of this repository are refused.
+`openai-wif-canary.yml` checks that a job in no reusable workflow, another
+reusable workflow of this repository, a wrong audience and a wrong event
+are each refused, and that the right audience on a listed event is
+exchanged. The audience and event cases run in a probe job of
+claude-review.yml, which runs only when the canary passes its
+`openai_wif_probe` input.
 
 Before step 7 the codex engine used an `OPENAI_API_KEY` org secret
 (created by Ransom, 2026-08-31), referenced only by the codex job's

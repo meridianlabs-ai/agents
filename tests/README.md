@@ -44,8 +44,11 @@ Testing a change).
   in any file, log line or response, only in mask commands; `stop` counts
   and stops; `probe` tells a refusal from an exchange and an outage; the
   composite's defaults are the configured IDs, its step runs on the system
-  PATH; and the negative canaries (`openai-wif-canary.yml` and its
-  reusable workflow) each expect a refusal.
+  PATH; the canaries (`openai-wif-canary.yml` and its reusable workflow)
+  each expect a refusal on the event that isolates one condition, with
+  claude-review.yml's probe as the positive control on `workflow_run`; and
+  that probe job runs only with the canary's `openai_wif_probe` input,
+  which skips the gate and so every review job.
 - `test_import_codex_final.py` — the `import-codex-final` composite's
   script (`.github/scripts/import_codex_final.py`): a regular file owned by
   the expected user is copied byte for byte; a symlink (to a runner file, or
