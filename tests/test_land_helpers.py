@@ -140,6 +140,25 @@ def claude_prompt(text: str, step_id: str, tmp_path, *, allow: bool) -> str:
     return value
 
 
+def codex_fix_prompt(text: str, job: str, tmp_path, **env_values: str) -> str:
+    """The prompt a loop's `Compose codex prompt` step (in JOB of workflow
+    TEXT) writes, run with every env var the step declares set empty unless
+    ENV_VALUES names it, a `gh` stub for the CI log fetch, and a minimal
+    review-feedback file for the review-fix step's emptiness check."""
+    block = step_block(job_block(text, job), "codexcompose")
+    names = re.findall(r"^ {10}([A-Z_]+):", block.split("        run: |")[0], re.M)
+    temp = tmp_path / job
+    (temp / "bin").mkdir(parents=True)
+    gh = temp / "bin" / "gh"
+    gh.write_text("#!/bin/sh\necho 'FAILED: test_x'\n")
+    gh.chmod(0o755)
+    (temp / "codex-feedback.md").write_text("RECENT PR COMMENTS\n--- reviewer\nfix it\nREVIEW THREADS\n")
+    env = {**{n: "" for n in names}, **env_values, "RUNNER_TEMP": str(temp), "PATH": f"{temp / 'bin'}:{os.environ['PATH']}"}
+    res = sh("bash", "-c", lift_run(job_block(text, job), "        id: codexcompose"), cwd=tmp_path, check=False, env=env)
+    assert res.returncode == 0, res.stderr
+    return (temp / "codex-prompt.md").read_text()
+
+
 # --- lib.sh -----------------------------------------------------------------
 
 
