@@ -324,8 +324,10 @@ text are checked by the tests under `tests/`.
   Ransom, 2026-09-23). Anthropic's federation rule admits only the
   workflows that use it, each at `refs/heads/main`: this repository's four
   reusable workflows and three direct callers in inspect_flow and ts-mono
-  (decision: Ransom, 2026-09-30; applied 2026-10-01). A token from any
-  other Meridian workflow, or from another ref, is refused.
+  (decision: Ransom, 2026-09-30; applied 2026-10-01). Tokens are refused
+  unless `job_workflow_ref` matches a listed reusable workflow or
+  `workflow_ref` matches a listed direct caller. For reusable jobs, this
+  pins the called workflow, not the caller's workflow or ref.
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.
