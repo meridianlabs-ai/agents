@@ -1289,6 +1289,16 @@ jobs:
         with:
           user: claude-agent
 
+      # Qualify the bare issue references in the agent's commit messages
+      # (`OWNER/REPO#N`, decision: Ransom, 2026-10-01) before anything reads
+      # HEAD for landing: see the composite. Post-agent git, so gated on the
+      # reclaim like the steps below.
+      - name: Qualify issue references in the agent's commits
+        if: always() && steps.agentreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/qualify-commit-refs@main
+        with:
+          start-sha: ${{ steps.base.outputs.sha }}
+
       # Which model actually served this run (design/architecture.md → Model
       # selection): the init line echoes the requested model even when
       # --fallback-model fires, so this parses modelUsage, writes the served-
@@ -2265,7 +2275,7 @@ jobs:
             # fallback is reached — the fallback would only ever cover an
             # empty first line.
             subject=$(head -n1 "$OUT" 2>/dev/null | cut -c1-120 || true)
-            [ -n "$subject" ] || subject="codex: fix failing CI on PR #$PR"
+            [ -n "$subject" ] || subject="codex: fix failing CI on PR $GITHUB_REPOSITORY#$PR"
             git add -A
             git commit --quiet -m "$subject" -m "Co-Authored-By: Codex <noreply@openai.com>"
           fi
@@ -2336,6 +2346,16 @@ jobs:
           fi
           echo "codex summary: $(wc -c <"$DIR/codex-comment.md") bytes — posted by the land job."
       # ---- end Codex engine ---------------------------------------------------
+
+      # Qualify the bare issue references in the codex commit messages
+      # (`OWNER/REPO#N`, decision: Ransom, 2026-10-01) before anything reads
+      # HEAD for landing: see the composite. Post-agent git, so gated on the
+      # reclaim like the steps below.
+      - name: Qualify issue references in the codex commits
+        if: always() && steps.codexreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/qualify-commit-refs@main
+        with:
+          start-sha: ${{ steps.base.outputs.sha }}
 
       # Surface agent errors: a failed step anywhere on the path (the commit
       # step is deterministic, so a completed codex run cannot strand its

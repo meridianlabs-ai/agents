@@ -550,6 +550,35 @@ def test_the_post_agent_reclaim_is_first_after_the_action_and_gates_every_later_
     }[name], read_only
 
 
+QUALIFY_USES = "uses: meridianlabs-ai/agents/.github/actions/qualify-commit-refs@main"
+
+
+@pytest.mark.parametrize("name,job", [(n, j) for n in REUSABLE for j in AGENT_JOBS[n]])
+def test_the_runs_commits_are_qualified_after_the_reclaim_and_before_landing_reads_head(name, job):
+    # qualify-commit-refs (decision: Ransom, 2026-10-01): once per writing
+    # job, as post-agent git gated on the reclaim, after the codex commit
+    # step, before the Surface step and the composer read HEAD, and from the
+    # same start emit-landing bundles above. The reviewer never commits.
+    all_steps = steps(jobs(workflow_text(name))[job])
+    at = [i for i, s in enumerate(all_steps) if QUALIFY_USES in s]
+    if name == "claude-review.yml":
+        assert at == []
+        return
+    assert len(at) == 1, at
+    q = all_steps[at[0]]
+    ids = [step_id(s) for s in all_steps]
+    reclaim = "codexreclaim" if job.endswith("-codex") else "agentreclaim"
+    assert step_if(q) == f"always() && steps.{reclaim}.outcome == 'success'"
+    after = ids.index("codexcommit") if job.endswith("-codex") else ids.index(reclaim)
+    assert after < at[0] < ids.index("surface") < ids.index("landing")
+
+    def start(block):
+        return next(l.strip() for l in code_lines(block) if l.strip().startswith("start-sha:"))
+
+    emit = next(s for s in all_steps if "emit-landing@main" in s)
+    assert start(q) == start(emit).replace(" || github.sha", ""), start(q)
+
+
 @pytest.mark.parametrize("name", REUSABLE)
 def test_the_surface_step_reports_each_boundary_step(name):
     surface = next(s for s in claude_steps(name) if step_id(s) == "surface")

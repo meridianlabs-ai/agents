@@ -10,6 +10,7 @@ common.sh.
     outbound.py defang < text > text
     outbound.py defang-review < review.json > review.json
     outbound.py commit-refs --repo OWNER/REPO [--allow N]... < commits
+    outbound.py qualify-commits --repo OWNER/REPO --start SHA
 
 `defang` backticks the agents' trigger phrases and splits the loops'
 `<!-- … -->` markers, case-insensitively: the rewrite the land composite
@@ -28,6 +29,17 @@ base branch, where a closing keyword before one closes that issue. So the
 scan is textual and errs towards reporting. Exit 0 when no commit carries
 one, 1 when some do (one line per commit on stdout), 2 when the listing is
 malformed or incomplete (fail closed).
+
+`qualify-commits` is the agent workflows' side of the same rule (the
+`qualify-commit-refs` composite runs it after an agent's commits are made,
+before they are landed): in the git repository it runs in, it rewrites each
+bare `#N` and `GH-N` in the messages of the run's own commits to `REPO#N`,
+the form that resolves to the same item wherever the message is copied.
+Only commits on HEAD's first-parent chain above SHA that no remote-tracking
+ref reaches are the run's own: a base merge's commits and anything fetched
+stay as they are, so a number in an upstream subject keeps its meaning.
+Trees, authors, committers and dates are kept, so the rewrite is
+deterministic, and HEAD moves only when a message changed.
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from collections.abc import Iterable
 
@@ -60,6 +73,10 @@ def defang_review(review: dict) -> dict:
     return out
 
 
+# The two forms GitHub resolves against the repository the text lands in.
+BARE_REFS = (r"(?<![\w/&])#(\d+)\b", r"(?<![\w/])GH-(\d+)\b")
+
+
 def text_refs(text: str, repo: str, allow: Iterable[int] = ()) -> list[int]:
     """Issue and PR numbers of `repo` that plain `text` references, other than `allow`.
 
@@ -70,14 +87,83 @@ def text_refs(text: str, repo: str, allow: Iterable[int] = ()) -> list[int]:
     """
     name = re.escape(repo)
     patterns = (
-        r"(?<![\w/&])#(\d+)\b",
-        r"(?<![\w/])GH-(\d+)\b",
+        *BARE_REFS,
         rf"(?<![\w.-]){name}#(\d+)\b",
         rf"https?://github\.com/{name}/(?:issues|pull)/(\d+)",
     )
     allowed = set(allow)
     found = {int(m.group(1)) for p in patterns for m in re.finditer(p, text, flags=re.I)}
     return sorted(found - allowed)
+
+
+def qualify_refs(text: str, repo: str) -> str:
+    """`text` with each bare `#N` and `GH-N` written as `repo#N`."""
+    bare = re.compile("|".join(BARE_REFS), flags=re.IGNORECASE)
+    return bare.sub(lambda m: f"{repo}#{m.group(1) or m.group(2)}", text)
+
+
+def _git(*args: str, data: bytes | None = None) -> bytes:
+    return subprocess.run(["git", *args], input=data, capture_output=True, check=True).stdout
+
+
+def _qualify_commit(raw: bytes, repo: str, parents: dict[str, str]) -> bytes:
+    """Commit object `raw` with its message qualified and its parents mapped.
+
+    `raw` itself when neither changes. A signature header is dropped once
+    the object changes: it would no longer verify.
+    """
+    head, sep, message = raw.partition(b"\n\n")
+    text = message.decode("utf-8", "surrogateescape")
+    qualified = qualify_refs(text, repo)
+    old = head.split(b"\n")
+    new: list[bytes] = []
+    for line in old:
+        if line.startswith(b"parent "):
+            sha = line[7:].decode()
+            line = b"parent " + parents.get(sha, sha).encode()
+        new.append(line)
+    if qualified == text and new == old:
+        return raw
+    lines: list[bytes] = []
+    signature = False
+    for line in new:
+        if not line.startswith(b" "):
+            signature = line.startswith((b"gpgsig ", b"gpgsig-sha256 "))
+        if not signature:
+            lines.append(line)
+    return b"\n".join(lines) + sep + qualified.encode("utf-8", "surrogateescape")
+
+
+def qualify_commits(repo: str, start: str) -> list[str]:
+    """Qualify the bare references in the run's own commits; one line per rewrite.
+
+    The run's own commits are HEAD's first-parent chain down to the first
+    commit that `start` or a remote-tracking ref reaches.
+    """
+    head = _git("rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    own = set(_git("rev-list", head, "--not", start, "--remotes").decode().split())
+    raws: dict[str, bytes] = {}
+    chain: list[str] = []
+    sha = head
+    while sha in own:
+        chain.append(sha)
+        raws[sha] = _git("cat-file", "commit", sha)
+        first = re.search(rb"^parent ([0-9a-f]+)$", raws[sha].partition(b"\n\n")[0], flags=re.MULTILINE)
+        if not first:
+            break
+        sha = first.group(1).decode()
+    mapped: dict[str, str] = {}
+    report: list[str] = []
+    for sha in reversed(chain):
+        raw = _qualify_commit(raws[sha], repo, mapped)
+        if raw == raws[sha]:
+            continue
+        mapped[sha] = _git("hash-object", "-t", "commit", "-w", "--stdin", data=raw).decode().strip()
+        subject = raws[sha].partition(b"\n\n")[2].split(b"\n", 1)[0].decode("utf-8", "replace")
+        report.append(f"{sha} -> {mapped[sha]} ({subject[:72]})")
+    if head in mapped:
+        _git("update-ref", "-m", "qualify commit refs", "HEAD", mapped[head], head)
+    return report
 
 
 def commit_refs(lines: Iterable[str], repo: str, allow: Iterable[int] = ()) -> tuple[list[str], str | None]:
@@ -126,6 +212,9 @@ def main(argv: list[str]) -> int:
     refs = sub.add_parser("commit-refs")
     refs.add_argument("--repo", required=True)
     refs.add_argument("--allow", type=int, action="append", default=[])
+    qualify = sub.add_parser("qualify-commits")
+    qualify.add_argument("--repo", required=True)
+    qualify.add_argument("--start", required=True)
     args = parser.parse_args(argv)
     if args.cmd == "defang":
         sys.stdout.write(defang(sys.stdin.read()))
@@ -140,6 +229,16 @@ def main(argv: list[str]) -> int:
             print("outbound.py defang-review: not a JSON object", file=sys.stderr)
             return 2
         json.dump(defang_review(review), sys.stdout)
+        return 0
+    if args.cmd == "qualify-commits":
+        try:
+            report = qualify_commits(args.repo, args.start)
+        except subprocess.CalledProcessError as exc:
+            err = exc.stderr.decode("utf-8", "replace").strip() if exc.stderr else ""
+            print(f"outbound.py qualify-commits: git {exc.cmd[1]} failed: {err}", file=sys.stderr)
+            return 2
+        for line in report:
+            print(line)
         return 0
     offenders, error = commit_refs(sys.stdin, args.repo, args.allow)
     for line in offenders:
