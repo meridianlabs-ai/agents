@@ -251,6 +251,17 @@ is in [THREAT_MODEL.md](THREAT_MODEL.md).
   `OPENAI_API_KEY` in the codex job alone) and the Claude action's own token
   are the known exceptions. Where the codex key may be referenced and how an
   agent job provisions is under "One untrusted job per engine" above.
+- The Anthropic federation rule (`fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y`) admits
+  only the workflows it names, each at `refs/heads/main`: this repo's four
+  reusable workflows by `job_workflow_ref`, and the three direct callers
+  (inspect_flow `inspect-ai-main-failure.yml` and `inspect-update.yml`,
+  ts-mono `dependabot-fix.yml`) by `workflow_ref` (decision: Ransom,
+  2026-09-30; applied 2026-10-01; design/architecture.md → Why the IDs
+  aren't secrets). A new workflow that calls claude-code-action directly
+  needs its own entry in the rule, made by an org admin in the Anthropic
+  Console. Renaming a reusable workflow, or calling one at a ref other than
+  `main`, gets its token exchange refused until the rule is changed to
+  match.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
   The skills under `skills/` that a maintainer's local agent runs with their

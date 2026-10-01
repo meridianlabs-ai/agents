@@ -515,7 +515,10 @@ human step.
 - **The model credential.** Claude authenticates through Workload Identity
   Federation: the job's OIDC token is exchanged for a short-lived Anthropic
   credential under a rule that matches `repository_owner ==
-  "meridianlabs-ai"`; there is no API key. The codex engine has no such
+  "meridianlabs-ai"` and, since 2026-10-01, only the four reusable
+  workflows and three direct callers it names, at `refs/heads/main`
+  (architecture.md → Why the IDs aren't secrets); there is no API key.
+  The codex engine has no such
   exchange, so `OPENAI_API_KEY` is the one secret an agent job names — the
   codex job, at its codex-action step, and no other job (section 3.1): the
   Claude job's YAML references it nowhere, so a Claude-engine run's job

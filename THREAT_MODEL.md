@@ -319,6 +319,13 @@ text are checked by the tests under `tests/`.
   other than the machine account — is refused by the CI-fix gate's actor
   check before any write, on both engines (decision: Ransom, 2026-09-22;
   design/auto-agent.md → Binding the failed run to its PR → Decisions).
+- The Claude agent can read its model credential: the Claude CLI makes the
+  Workload Identity exchange itself (the declared exception, decision:
+  Ransom, 2026-09-23). Anthropic's federation rule admits only the
+  workflows that use it, each at `refs/heads/main`: this repository's four
+  reusable workflows and three direct callers in inspect_flow and ts-mono
+  (decision: Ransom, 2026-09-30; applied 2026-10-01). A token from any
+  other Meridian workflow, or from another ref, is refused.
 - A caller without the two app secrets still runs the dev agent, degraded:
   pushes and PRs come from `github-actions[bot]` and trigger nothing. The
   reviewer and the loops fail at their mint step instead.
