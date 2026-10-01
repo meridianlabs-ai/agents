@@ -78,7 +78,11 @@ text are checked by the tests under `tests/`.
   After the agent, a reclaim kills whatever is left, removes its Workload
   Identity access and credential cache, and takes `.git` back before any
   runner-side git; the agent's landing files reach the runner only through
-  an owner-checked, `O_NOFOLLOW`, size-capped copy. A hosted canary
+  an owner-checked, `O_NOFOLLOW`, size-capped copy. Both agent users are
+  in `/etc/cron.deny` and `/etc/at.deny`, so neither can use cron or at to
+  start work on the host after the kills: cheap depth, not a boundary
+  (Claude Security finding 4773340, criterion 1; criterion 2 is
+  design/untrusted-agent-job.md steps 1, 4 and 6). A hosted canary
   exercises the codex boundary and the secret delivery against a hostile
   checkout and synthetic secrets (design/credential-separation.md → section
   6), and the Claude launcher up to its launch; adversarial probing of the

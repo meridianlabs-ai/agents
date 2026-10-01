@@ -603,6 +603,12 @@ Testing a change).
   and adversarial probing is left to Claude Security scans
   (design/executed-paths-residual.md → Testing; decision: Ransom,
   2026-09-24).
+- `test_agent_schedulers.py` — the agent users are denied cron and at
+  (Claude Security finding 4773340, criterion 1):
+  `create-codex-user/deny-schedulers.sh` against a scratch `/etc` appends
+  the user once to `cron.deny` and `at.deny`, on its own line, creating
+  the files when missing, and fails when an allow file lists the user;
+  the create mode runs it right after the user exists.
 - `test_dev_agent_engine.py` — `claude.yml`'s `Detect engine` step, lifted
   the same way against a stub `gh`: an issue's `auto` label is the run's
   opt-in only when the account that applied it most recently is a human

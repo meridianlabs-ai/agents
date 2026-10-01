@@ -100,8 +100,14 @@ run_assert() { # <PATH> <protect> [user]
 }
 
 say "1. create-codex-user, step 1: snapshots, user, groups"
-AGENT_USER="$U" GRANT=workspace /bin/bash -c "$(lift create-codex-user 1)"
+AGENT_USER="$U" GRANT=workspace DENY_SCRIPT="$root/.github/actions/create-codex-user/deny-schedulers.sh" \
+  /bin/bash -c "$(lift create-codex-user 1)"
 id "$U"
+{ grep -qxF "$U" /etc/cron.deny && grep -qxF "$U" /etc/at.deny; } || fail "$U is not in /etc/cron.deny and /etc/at.deny"
+if command -v crontab >/dev/null; then
+  out=$(sudo -u "$U" crontab -l 2>&1) && fail "crontab -l as $U was not refused"
+  grep -q "not allowed" <<<"$out" || fail "crontab -l as $U failed, but not for the deny: $out"
+fi
 test -f "$RUNNER_TEMP/git-config.pre-codex" || fail "no config snapshot"
 
 say "2. pre-grant check with protect on, stock job PATH — must pass"

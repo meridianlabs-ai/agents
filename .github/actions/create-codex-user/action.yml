@@ -75,6 +75,15 @@ description: >-
      Group kept as a faithful copy of the example; if codex ever drops a
      600 file, the reclaim step needs a `chmod -R a+rX` sweep, not this
      group.
+  2b. Deny cron and at to the new user (Claude Security finding 4773340,
+     criterion 1; `deny-schedulers.sh` next to this file): it is appended
+     to `/etc/cron.deny` and `/etc/at.deny`, each created when missing, and
+     the step fails if `/etc/cron.allow` or `/etc/at.allow` lists it (with
+     an allow file present, Debian's crontab and at read only that file).
+     Cheap depth (design/untrusted-agent-job.md → What stays in the
+     untrusted job): the root cron or at daemon would otherwise start an
+     agent-uid process on the host, outside the agent's namespace and after
+     every kill of the user's processes.
   3. A codex-owned `$RUNNER_TEMP/codex` dir (755) for the explicit
      `output-file` — codex itself (via `sudo -u`) writes it and the action
      re-reads it as codex, but `$RUNNER_TEMP` is 755 runner:runner on the
@@ -263,6 +272,7 @@ runs:
       env:
         AGENT_USER: ${{ inputs.user }}
         GRANT: ${{ inputs.grant }}
+        DENY_SCRIPT: ${{ github.action_path }}/deny-schedulers.sh
       run: |
         set -euo pipefail
         case "$AGENT_USER" in
@@ -308,6 +318,8 @@ runs:
         sudo adduser --system --home "/home/$AGENT_USER" --shell /bin/bash --group "$AGENT_USER"
         sudo usermod -a -G "$AGENT_USER" runner
         sudo usermod -a -G runner "$AGENT_USER"
+        # 2b. No cron or at for the user (see description, 2b).
+        sudo bash "$DENY_SCRIPT" "$AGENT_USER"
 
     # Refuse before the grant if the job PATH has a directory codex could
     # write (see description, 2). Its own probes run by system path.

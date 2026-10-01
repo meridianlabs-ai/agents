@@ -785,6 +785,8 @@ def test_create_codex_user_checks_the_path_after_the_user_and_before_the_grant()
     assert first.index('cp "$GITHUB_WORKSPACE/.git/config"') < first.index("sudo adduser")
 
 
+DENY_SH = CREATE.parent / "deny-schedulers.sh"
+
 CREATE_SUDO_STUB = r"""#!/bin/bash
 # Stand-in for /usr/bin/sudo in the create-mode tests: logs every call and
 # runs only the snapshot's `find`; everything else (adduser, install, chown,
@@ -816,7 +818,8 @@ def create_world(tmp_path):
     # The test's own toolcache: a hosted runner's PATH holds entries under
     # the real one (setup-python's), which the create step would repair.
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "GITHUB_WORKSPACE": str(ws), "RUNNER_TEMP": str(temp),
-           "SUDO_LOG": str(log), "HOME_SCRIPT": str(home_script), "RUNNER_TOOL_CACHE": str(tmp_path / "toolcache")}
+           "SUDO_LOG": str(log), "HOME_SCRIPT": str(home_script), "RUNNER_TOOL_CACHE": str(tmp_path / "toolcache"),
+           "DENY_SCRIPT": str(DENY_SH)}
     return ws, temp, log, env
 
 
@@ -846,6 +849,7 @@ def test_create_codex_user_defaults_keep_the_codex_sequence(tmp_path):
         "adduser --system --home /home/codex --shell /bin/bash --group codex",
         "usermod -a -G codex runner",
         "usermod -a -G runner codex",
+        f"bash {DENY_SH} codex",
         f"chown -R runner:codex {ws}",
         f"chmod -R g+rwX {ws}",
         f"find {ws} -type d -exec chmod g+s {{}} +",
@@ -865,6 +869,7 @@ def test_create_codex_user_for_claude_agent(tmp_path, grant):
         "adduser --system --home /home/claude-agent --shell /bin/bash --group claude-agent",
         "usermod -a -G claude-agent runner",
         "usermod -a -G runner claude-agent",
+        f"bash {DENY_SH} claude-agent",
         *(granted if grant == "workspace" else []),
         # The landing dir, the system safe.directory, the root-owned /opt dir.
         f"install -d -o runner -g claude-agent -m 2775 {temp}/claude-agent",

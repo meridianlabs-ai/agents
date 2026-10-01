@@ -751,8 +751,15 @@ quo, and the reason step 7 follows step 6 closely.
 escape from the namespace reaches the host as `claude-agent`. From there
 it can read world- or group-readable runner files and see the argv of
 runner processes, and holds nothing more than the job token. Denying
-cron and at to the agent users (`/etc/cron.deny`, `/etc/at.deny`, written
-by `create-codex-user`) is cheap depth for both engines.
+cron and at to the agent users is cheap depth for both engines, and it is
+in place (criterion 1): `create-codex-user` appends `claude-agent` or
+`codex` to `/etc/cron.deny` and `/etc/at.deny`, creating them when
+missing. Debian's crontab and at read the deny file only when no allow
+file exists, so the step fails if `/etc/cron.allow` or `/etc/at.allow`
+lists the user. Nothing more is added to the uid layer for this finding
+(decision: Ransom, 2026-09-30): after steps 4, 6 and 7 an agent-uid
+process started by cron or at reaches nothing the agent does not already
+hold. Criterion 2 (the App token on argv) is met by steps 1, 4 and 6.
 
 **4773338 (settings path).** This is independent of the rest and ships
 first. The three `Compose … settings` steps keep accepting a path, because
