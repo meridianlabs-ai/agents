@@ -1,0 +1,115 @@
+name: qualify-commit-refs
+description: >-
+  Rewrite each bare `#N` and `GH-N` in the messages of the agent run's own
+  commits to `OWNER/REPO#N` for the repository the run is in
+  (`skills/lib/outbound.py qualify-commits`). A commit message is copied
+  wherever its commit goes: when a fork branch is promoted, upstream
+  squash-merges with the messages as the squash body, and a bare number
+  written on the fork then resolves against upstream's tracker, where a
+  closing keyword before it closes the wrong issue (decision: Ransom,
+  2026-10-01; the promote skill's commit-reference check stays the
+  backstop). The qualified form names the item the bare one named where it
+  was written, so the rewrite changes no reference's meaning in this
+  repository.
+
+  The run's own commits are those HEAD reaches above `start-sha` that no
+  remote-tracking ref (and not FETCH_HEAD) reaches: the commits a base merge
+  or a fast-forward brings in, and anything else fetched, keep their SHAs
+  and messages (an upstream subject's `(#5627)` still means upstream's
+  #5627 once promoted). Every own commit is replayed with its parents
+  mapped, a merged side branch's included, so no original stays reachable
+  from HEAD. Trees, authors, committers and dates are kept, so the rewrite
+  is deterministic and HEAD moves only when a message changed; it runs
+  before the landing composer and emit-landing read HEAD, so the PR title,
+  the manifest and the bundle all see the rewritten commits.
+
+  Runs git as `runner` on a workspace the agent user could write: the caller
+  gates it on the post-agent reclaim's success, like every other post-agent
+  git step, and the git dir, hooks and fsmonitor are pinned by env here as
+  in emit-landing. Fails closed without failing the job: `ok` is "true"
+  only when every own commit is qualified afterwards, and the caller passes
+  emit-landing's `withhold` unless it is, so a failed rewrite lands nothing
+  and is reported through the manifest's error. The log carries SHAs and
+  fixed text; git's error output is printed with workflow commands stopped
+  under a fresh token, since it may quote what the agent wrote. Referenced
+  fully-qualified
+  (meridianlabs-ai/agents/.github/actions/qualify-commit-refs@main); NO post
+  step (local composite actions with post steps break teardown on the fork).
+
+inputs:
+  start-sha:
+    description: >-
+      The SHA recorded before the agent ran: the same start the job passes
+      to emit-landing. Anything but a full SHA skips the rewrite (and `ok`
+      stays empty).
+    required: true
+  system-path:
+    description: >-
+      The PATH the step's commands run with, pinned before the first of them:
+      `git` and `python3` must never resolve through a directory codex could
+      write (Claude Security finding 4628448; design/codex-engine.md →
+      Runner-side search path). The hosted runner image's root-owned system
+      directories — NOT `/usr/local/bin`, which the image ships
+      world-writable.
+    required: false
+    default: /usr/sbin:/usr/bin:/sbin:/bin
+
+outputs:
+  ok:
+    description: >-
+      "true" when every commit of the run is qualified (including when none
+      needed it); empty otherwise.
+    value: ${{ steps.qualify.outputs.ok }}
+
+runs:
+  using: composite
+  steps:
+    - id: qualify
+      shell: bash
+      env:
+        START_SHA: ${{ inputs.start-sha }}
+        REPO: ${{ github.repository }}
+        OUTBOUND: ${{ github.action_path }}/../../../skills/lib/outbound.py
+        SYSTEM_PATH: ${{ inputs.system-path }}
+        GIT_DIR: ${{ github.workspace }}/.git
+        GIT_COMMON_DIR: ${{ github.workspace }}/.git
+        GIT_WORK_TREE: ${{ github.workspace }}
+        GIT_CONFIG_GLOBAL: /dev/null
+        GIT_CONFIG_COUNT: "2"
+        GIT_CONFIG_KEY_0: core.hooksPath
+        GIT_CONFIG_VALUE_0: ${{ runner.temp }}/no-hooks
+        GIT_CONFIG_KEY_1: core.fsmonitor
+        GIT_CONFIG_VALUE_1: "false"
+      run: |
+        # Not set -e: a failure is reported through `ok`, never by failing
+        # the job (emit-landing then withholds the commits).
+        set -uo pipefail
+        # System tools only, whatever GITHUB_PATH prepended (see the input).
+        export PATH="$SYSTEM_PATH"
+        if ! [[ "$START_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "qualify-commit-refs: start-sha '$START_SHA' is not a full SHA; nothing rewritten."
+          exit 0
+        fi
+        # -I: no PYTHONPATH, user site or script directory on sys.path.
+        # stdout is `old -> new` SHA pairs only.
+        err=$(mktemp "$RUNNER_TEMP/qualify-commit-refs.XXXXXX") || err=/dev/null
+        if out=$(python3 -I "$OUTBOUND" qualify-commits --repo "$REPO" --start "$START_SHA" 2>"$err"); then
+          if [ -n "$out" ]; then
+            echo "qualify-commit-refs: qualified the issue references in:"
+            printf '%s\n' "$out"
+          else
+            echo "qualify-commit-refs: no bare issue references in the run's commits."
+          fi
+          echo "ok=true" >>"$GITHUB_OUTPUT"
+        else
+          echo "::error::qualify-commit-refs: could not qualify the issue references in the run's commit messages; the commits will not land (see below)."
+          # git's message may quote agent-written text, and the runner reads
+          # a workflow command anywhere in a line (`##[...]`), so commands
+          # stay off while it prints, under a token nobody could predict.
+          token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+          echo "::stop-commands::$token"
+          cat "$err"
+          echo "::$token::"
+        fi
+        [ "$err" = /dev/null ] || rm -f "$err"
+        exit 0

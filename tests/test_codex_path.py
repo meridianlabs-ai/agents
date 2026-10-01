@@ -16,9 +16,9 @@ executables that log `HIJACKED` when run, first on the job PATH:
   create, are refused with the entry named; the sticky-directory exception
   holds; a clean PATH passes; and the check's own probes never resolve
   through the PATH under test.
-- `reclaim-codex-workspace`, `codex-usage`, `unresolved-merge-guard` and
-  `emit-landing`'s `write` step complete their real work with the planted
-  directory first on PATH and touch none of it.
+- `reclaim-codex-workspace`, `codex-usage`, `unresolved-merge-guard`,
+  `qualify-commit-refs` and `emit-landing`'s `write` step complete their
+  real work with the planted directory first on PATH and touch none of it.
 - `provision-fallback` with `add-to-path: false` writes nothing to
   GITHUB_PATH (and both lines with the default).
 - The wiring: the four workflows pass `add-to-path` from the gate's engine,
@@ -65,7 +65,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_land_helpers import emit_landing_script, git  # noqa: E402
+from test_land_helpers import emit_landing_script, git, lift_run  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTIONS = ROOT / ".github" / "actions"
@@ -74,6 +74,8 @@ CREATE = ACTIONS / "create-codex-user" / "action.yml"
 RECLAIM = ACTIONS / "reclaim-codex-workspace" / "action.yml"
 USAGE = ACTIONS / "codex-usage" / "action.yml"
 GUARD = ACTIONS / "unresolved-merge-guard" / "action.yml"
+QUALIFY = ACTIONS / "qualify-commit-refs" / "action.yml"
+OUTBOUND = ROOT / "skills" / "lib" / "outbound.py"
 PROVISION = ACTIONS / "provision-fallback" / "action.yml"
 WORKFLOWS = {name: ROOT / ".github" / "workflows" / name
              for name in ("claude.yml", "claude-review.yml", "claude-auto.yml", "claude-auto-review.yml")}
@@ -85,7 +87,7 @@ ME = subprocess.run(["id", "-un"], check=True, text=True, capture_output=True).s
 # call by bare name, plus the interpreter names.
 PLANTED = ("sudo", "bash", "sh", "git", "jq", "find", "sort", "cmp", "diff", "cp", "mv", "rm",
            "mkdir", "cat", "grep", "tr", "head", "cut", "mktemp", "sleep", "dirname", "basename",
-           "id", "test", "pkill", "chown", "chmod")
+           "id", "test", "pkill", "chown", "chmod", "python3")
 
 
 def composite_runs(action: Path) -> list:
@@ -208,7 +210,7 @@ def world(tmp_path):
     tool_dirs = []
     tools = {}
     for tool in ("git", "jq", "find", "sort", "cmp", "diff", "cp", "mv", "rm", "mkdir", "cat", "grep", "tr",
-                 "head", "cut", "mktemp", "sleep", "dirname", "basename", "id", "pkill", "chmod", "wc", "sed"):
+                 "head", "cut", "mktemp", "sleep", "dirname", "basename", "id", "pkill", "chmod", "wc", "sed", "python3"):
         found = shutil.which(tool)
         assert found, tool
         tools[tool] = found
@@ -1147,6 +1149,136 @@ def test_emit_landing_bundles_with_git_from_the_system_path(world):
     assert hijacked(w) == "", hijacked(w)
 
 
+# --- qualify-commit-refs ------------------------------------------------------------
+
+
+def qualify(w, start, **more):
+    """The composite's step, with the env its action.yml gives it."""
+    gitdir = w["ws"] / ".git"
+    env = {"START_SHA": start, "REPO": "o/r", "OUTBOUND": OUTBOUND, "GIT_DIR": gitdir, "GIT_COMMON_DIR": gitdir,
+           "GIT_WORK_TREE": w["ws"], "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.hooksPath",
+           "GIT_CONFIG_VALUE_0": w["temp"] / "no-hooks", "GIT_CONFIG_KEY_1": "core.fsmonitor",
+           "GIT_CONFIG_VALUE_1": "false", "GITHUB_OUTPUT": w["tmp"] / "qualify-out.txt", **more}
+    (w["tmp"] / "qualify-out.txt").write_text("")
+    return run(composite_runs(QUALIFY)[0], w, **env)
+
+
+def qualified_ok(w) -> bool:
+    return "ok=true" in (w["tmp"] / "qualify-out.txt").read_text().splitlines()
+
+
+def test_qualify_rewrites_with_git_and_python_from_the_system_path(world):
+    w = world
+    start = repo(w)
+    (w["ws"] / "README").write_text("changed\n")
+    git("commit", "-q", "-am", "Fix it\n\nFixes #12", cwd=w["ws"])
+    r = qualify(w, start)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "qualify-commit-refs: qualified the issue references in:\n" in r.stdout and qualified_ok(w)
+    assert git("log", "-1", "--format=%B", cwd=w["ws"]).stdout.strip() == "Fix it\n\nFixes o/r#12"
+    assert hijacked(w) == "", hijacked(w)
+    r = qualify(w, start)
+    assert r.returncode == 0 and "no bare issue references" in r.stdout and qualified_ok(w)
+    script = composite_runs(QUALIFY)[0]
+    assert script.index('export PATH="$SYSTEM_PATH"') < script.index("python3 ")
+
+
+def test_qualify_logs_no_agent_text(world):
+    # The runner reads `::cmd::` at the start of a line and the legacy
+    # `##[cmd]` anywhere in one: an agent-written subject in the log could
+    # load a problem matcher or set a variable. Only SHAs are logged.
+    w = world
+    start = repo(w)
+    git("commit", "-q", "--allow-empty", "-m", "##[add-matcher]/missing #12", cwd=w["ws"])
+    git("commit", "-q", "--allow-empty", "-m", "::error::planted #13", cwd=w["ws"])
+    r = qualify(w, start)
+    assert r.returncode == 0 and qualified_ok(w), r.stdout + r.stderr
+    assert "##[" not in r.stdout and "::error::planted" not in r.stdout and "missing" not in r.stdout
+    assert git("log", "-1", "--format=%s", cwd=w["ws"]).stdout.strip() == "::error::planted o/r#13"
+
+
+def test_qualify_failure_withholds_the_commits_and_stops_commands_around_git_output(world):
+    # A valid start, but HEAD cannot move (a stale ref lock): the step still
+    # exits 0, reports no `ok`, prints git's message with commands stopped
+    # under a fresh token, and emit-landing — given `withhold`, as every
+    # writing job passes it without `ok` — packages no bundle at all.
+    import json
+
+    w = world
+    start = repo(w)
+    git("commit", "-q", "--allow-empty", "-m", "Fixes #12", cwd=w["ws"])
+    head = git("rev-parse", "HEAD", cwd=w["ws"]).stdout.strip()
+    (w["ws"] / ".git" / "refs" / "heads" / "main.lock").write_text("")
+    r = qualify(w, start)
+    assert r.returncode == 0 and not qualified_ok(w), r.stdout + r.stderr
+    assert "::error::qualify-commit-refs: could not qualify" in r.stdout
+    lines = r.stdout.splitlines()
+    stop = next(i for i, line in enumerate(lines) if line.startswith("::stop-commands::"))
+    token = lines[stop][len("::stop-commands::"):]
+    assert re.fullmatch(r"[0-9a-f]{32}", token)
+    resume = lines.index(f"::{token}::")
+    assert any("update-ref failed" in line for line in lines[stop + 1:resume])
+    assert git("rev-parse", "HEAD", cwd=w["ws"]).stdout.strip() == head
+    landing = w["tmp"] / "landing"
+    output = w["tmp"] / "out.txt"
+    output.write_text("")
+    r = run(emit_landing_script(), w, START_SHA=start, BRANCH="claude/issue-1-codex", PR_NUMBER="", ISSUE_NUMBER="1",
+            EXTRA="", DIR=landing, READ_ONLY="false", REPO="o/r", RUN_ID="7", GITHUB_OUTPUT=output,
+            WITHHOLD="its commit messages could not be qualified.")
+    assert r.returncode == 0, r.stdout + r.stderr
+    m = json.loads((landing / "manifest.json").read_text())
+    assert m["has_bundle"] is False and m["head_sha"] == start and not (landing / "commits.bundle").exists()
+    assert "could not be qualified" in m["error"]["message"] and m["error"]["fail_run"] is True
+    # Not a SHA (a failed base step): nothing runs and there is no `ok`.
+    r = qualify(w, "")
+    assert r.returncode == 0 and "is not a full SHA; nothing rewritten" in r.stdout and not qualified_ok(w)
+    assert hijacked(w) == ""
+
+
+# The three codex commit steps: each one's fallback subject (no final message)
+# names its issue or PR qualified, and an agent's own bare reference is
+# qualified by the composite run after it.
+COMMIT_STEPS = [("claude.yml", "agent-codex", "Commit codex work", "NUM", "codex: automated change for o/r#7"),
+                ("claude-auto.yml", "fix-codex", "Commit codex fix", "PR", "codex: fix failing CI on PR o/r#7"),
+                ("claude-auto-review.yml", "fix-codex", "Commit codex fix", "PR",
+                 "codex: address review feedback on PR o/r#7")]
+
+
+@pytest.mark.parametrize("name,job,step,var,subject", COMMIT_STEPS)
+def test_codex_commit_steps_write_qualified_subjects(world, name, job, step, var, subject):
+    w = world
+    start = repo(w)
+    script = lift_run(job_text(WORKFLOWS[name], job), f"      - name: {step}")
+    gitdir = w["ws"] / ".git"
+    output = w["tmp"] / "out.txt"
+    output.write_text("")
+    # Every env key the three steps read; OUT and FINAL both name the final
+    # message (claude-auto-review.yml takes its subject from FINAL).
+    missing = w["tmp"] / "missing-final.md"
+    env = {var: "7", "START_SHA": start, "OUT": missing, "FINAL": missing, "MERGE_SHA": "", "DIR": w["tmp"] / "landing",
+           "ATTEMPT": "1", "ROUND": "1", "MENTION": "", "IDS": "",
+           "GIT_DIR": gitdir, "GIT_COMMON_DIR": gitdir, "GIT_WORK_TREE": w["ws"], "GIT_CONFIG_COUNT": "2",
+           "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": w["temp"] / "no-hooks",
+           "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "false",
+           "GITHUB_REPOSITORY": "o/r", "GITHUB_OUTPUT": output}
+    (w["ws"] / "README").write_text("changed\n")
+    r = run(script, w, **env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert git("log", "-1", "--format=%s", cwd=w["ws"]).stdout.strip() == subject
+    # The subject from codex's final message, with a bare reference in it.
+    final = w["tmp"] / "final.md"
+    final.write_text("fix: handle #12\n\nbody\n")
+    (w["ws"] / "README").write_text("again\n")
+    r = run(script, w, **{**env, "OUT": final, "FINAL": final})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert git("log", "-1", "--format=%s", cwd=w["ws"]).stdout.strip() == "fix: handle #12"
+    r = qualify(w, start)
+    assert r.returncode == 0, r.stdout + r.stderr
+    log = git("log", "--format=%s", f"{start}..HEAD", cwd=w["ws"]).stdout.splitlines()
+    assert log == ["fix: handle o/r#12", subject]
+    assert hijacked(w) == "", hijacked(w)
+
+
 # --- provision-fallback -----------------------------------------------------------
 
 
@@ -1265,7 +1397,7 @@ def test_commit_steps_pin_path_before_their_first_command(name, step):
 
 
 def test_post_codex_composites_take_a_system_path_and_pin_it():
-    for action in (RECLAIM, USAGE, GUARD, ACTIONS / "emit-landing" / "action.yml"):
+    for action in (RECLAIM, USAGE, GUARD, QUALIFY, ACTIONS / "emit-landing" / "action.yml"):
         text = action.read_text()
         assert f"default: {SYSTEM_DIRS}" in text, action
         assert "SYSTEM_PATH: ${{ inputs.system-path }}" in text, action

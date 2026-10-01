@@ -64,7 +64,9 @@ Testing a change).
   the git sequence its fetch/push steps rely on (bundle above the start SHA;
   unbundle into an empty bare repo; refuse a moved branch; push without
   `--force`), run against local repos — including `emit-landing`'s `write`
-  step, lifted from the action and run against those repos, and the
+  step, lifted from the action and run against those repos (its `withhold`
+  input packaging a moved HEAD as a lost bundle, with the reason in
+  `error`), and the
   `workflows` guard, lifted the same way: what the push would change on
   origin, listed from the branch's live tip or, for a new branch, from the
   run's trusted start (the caller's `start-sha`) while the base tip descends
@@ -394,8 +396,20 @@ Testing a change).
   `pin_git_config` against a clone whose hooks, fsmonitor and filter
   drivers (one defined only in the worktree's own config) resolve into the
   tree, `rendered_refs`, and `outbound.py`'s `defang`, `defang-review` and
-  plain-text commit-message scan (complete listings only). Also fails when
-  a skill script defines its own copy of a shared helper.
+  plain-text commit-message scan (complete listings only). Also its bare
+  reference rewrite (`qualify-commits`, which the agent workflows run):
+  each bare `#N` and `GH-N` becomes `OWNER/REPO#N`, the same items in the
+  repository and none in another; in a local repository the run's own
+  commits are rewritten with their trees, authors and dates kept, and the
+  same input gives the same SHAs, while a merged or fast-forwarded base
+  commit's `(#5627)` keeps its SHA (bounded by a remote-tracking ref or
+  FETCH_HEAD); a merged side branch is rewritten too, with no original
+  left reachable; only SHAs are printed; nothing moves without a bare
+  reference; a bad start, a ref that cannot move and a bare reference that
+  survives all fail and leave HEAD; a stale signature is dropped, and so is
+  a merged signed tag's `mergetag` once its commit is rewritten (itself or
+  through an ancestor), while one naming an unchanged parent is kept. Also fails when a skill script defines its own copy of a shared
+  helper.
 - `test_post_upstream_review.py` — `skills/post-upstream-review/gather.sh`
   and `post.sh` against a stub `gh` (Claude Security 4773885, 4773877): the
   findings comment is chosen only from the machine account or a
@@ -548,7 +562,8 @@ Testing a change).
   symlinked tools into the real binaries' directories, an
   /etc/alternatives chain — never the host's real /bin or /usr/bin, and a
   check that lists a directory outside the test's own fails the test); the
-  reclaim, `codex-usage`, the unresolved-merge guard and `emit-landing`'s `write` step run against a
+  reclaim, `codex-usage`, the unresolved-merge guard, `qualify-commit-refs`
+  and `emit-landing`'s `write` step run against a
   PLANTED `.venv/bin` of `sudo`, `git`, `find`, `jq` and friends first on
   the job PATH and touch none of it; `provision-fallback` writes nothing to
   GITHUB_PATH under `add-to-path: false`; and the wiring — no agent job
@@ -557,7 +572,13 @@ Testing a change).
   the codex jobs provision with `user: codex`, neither passes
   `add-to-path`), the codex jobs' compose
   steps discover the tools from the composite's `bin` directories and never
-  through `command -v`, the commit steps pin PATH, the user is created,
+  through `command -v`, the commit steps pin PATH (and, lifted and run,
+  write their fallback subjects with the issue or PR qualified, then
+  `qualify-commit-refs` qualifies a bare reference in codex's own subject;
+  the composite logs no subject text, so a `##[...]` or `::...::` subject
+  runs no workflow command; on a failure it exits 0 without `ok`, prints
+  git's message with commands stopped under a fresh token, and
+  emit-landing given `withhold` packages no bundle), the user is created,
   checked, then granted, and `create-codex-user`'s `reset-home` mode
   re-checks and pins PATH (and is codex-only); each codex job runs
   codex-action's own setup-node (same pin, node-version "24") before
@@ -685,7 +706,11 @@ Testing a change).
   read-only) is gated on it; the Surface step names each boundary step's
   failure, and, lifted and run with an `is_error` result beside a failed
   reclaim (and in the reviewer a failed re-plant check or landing prep),
-  reports fixed text only (Claude Security 4773889); each land job has a
+  reports fixed text only (Claude Security 4773889); every writing agent
+  job runs `qualify-commit-refs` once (`id: qualify`), gated on its
+  reclaim, after the codex commit step and before the Surface step and the
+  composer, from emit-landing's start, and passes emit-landing `withhold`
+  unless it reported `ok`; the reviewer's jobs never do; each land job has a
   `timeout-minutes` under 30 (4773341); the reviewer's sandboxed paths create the user and launch with
   `grant: none`, hand it the scratch copy and drop the overlay's
   `.git/config` mask. `provision` and `codex_provision` are declared with a

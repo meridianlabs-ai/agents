@@ -7,7 +7,8 @@ not shaped like a login reaches the request path), the External-proxy test,
 the git pins for an outsider's tree (hooks, fsmonitor, every filter driver
 the clone or the worktree defines, submodule recursion), and the
 outbound-text guards (trigger-phrase rewrite, the rendered-reference parse,
-the plain-text commit-message scan). The bash helpers run under a stub `gh`
+the plain-text commit-message scan and the bare-reference rewrite the
+agent workflows run). The bash helpers run under a stub `gh`
 that logs every call. A last check keeps the skills on the shared copies.
 Run with `python3 -m pytest` from the repo root.
 """
@@ -16,6 +17,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -310,6 +312,301 @@ def test_commit_refs_command_line_exit_codes(stdin, rc):
     r = subprocess.run([sys.executable, str(LIB / "outbound.py"), "commit-refs", "--repo", "UKGovernmentBEIS/inspect_ai"],
                        input=stdin, text=True, capture_output=True)
     assert r.returncode == rc, r.stderr
+
+
+FORK = "meridianlabs-ai/inspect_ai"
+UPSTREAM = "UKGovernmentBEIS/inspect_ai"
+
+
+@pytest.mark.parametrize("text,qualified", [
+    ("Fixes #12", f"Fixes {FORK}#12"),
+    ("(#7) and GH-8 and gh-9", f"({FORK}#7) and {FORK}#8 and {FORK}#9"),
+    ("`#15` in code too", f"`{FORK}#15` in code too"),
+    ("Closes #1, #2\n\nsee #3.", f"Closes {FORK}#1, {FORK}#2\n\nsee {FORK}#3."),
+    # Qualified, linked or not a reference: left as written.
+    ("meridianlabs-ai/inspect_ai#16, UKGovernmentBEIS/inspect_ai#5627, abc#18, &#19; x/#20, #12abc",
+     "meridianlabs-ai/inspect_ai#16, UKGovernmentBEIS/inspect_ai#5627, abc#18, &#19; x/#20, #12abc"),
+    ("https://github.com/o/r/pull/13 and page#14", "https://github.com/o/r/pull/13 and page#14"),
+])
+def test_qualify_refs_writes_each_bare_reference_against_the_repository(text, qualified):
+    assert outbound.qualify_refs(text, FORK) == qualified
+    # Idempotent, and the same items in the repository it was written in,
+    # none of them in another repository's tracker.
+    assert outbound.qualify_refs(qualified, FORK) == qualified
+    assert outbound.text_refs(qualified, FORK) == outbound.text_refs(text, FORK)
+    assert outbound.text_refs(qualified, UPSTREAM) == outbound.text_refs(text, UPSTREAM, allow=outbound.text_refs(text, FORK))
+
+
+def qrepo(tmp_path):
+    """A repository whose `origin/main` has an upstream-style squash subject,
+    and a branch `work` cut below it (the run's start)."""
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def g(*args, env=None):
+        e = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", **(env or {})}
+        return subprocess.run(["git", *args], cwd=work, env=e, check=True, text=True, capture_output=True).stdout.strip()
+
+    g("init", "-q", "-b", "work")
+    g("config", "user.email", "agent@example.com")
+    g("config", "user.name", "agent")
+    (work / "f").write_text("0\n")
+    g("add", "f")
+    g("commit", "-q", "-m", "start")
+    start = g("rev-parse", "HEAD")
+    g("checkout", "-q", "-b", "upstream")
+    (work / "u").write_text("u\n")
+    g("add", "u")
+    g("commit", "-q", "-m", "Upstream fix (#5627)")
+    g("update-ref", "refs/remotes/origin/main", "HEAD")
+    g("checkout", "-q", "work")
+    g("branch", "-D", "-q", "upstream")
+    return work, g, start
+
+
+def commit(work, g, name, message, date="1700000000 +0000"):
+    (work / name).write_text(message)
+    g("add", name)
+    env = {"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+    g("commit", "-q", "-m", message, env=env)
+    return g("rev-parse", "HEAD")
+
+
+def qualify(work, start, repo=FORK):
+    return subprocess.run([sys.executable, str(LIB / "outbound.py"), "qualify-commits", "--repo", repo, "--start", start],
+                          cwd=work, text=True, capture_output=True, check=False,
+                          env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
+
+
+def test_qualify_commits_rewrites_the_runs_own_commits_and_leaves_merged_ones(tmp_path):
+    work, g, start = qrepo(tmp_path)
+    upstream = g("rev-parse", "origin/main")
+    first = commit(work, g, "a", "Fix the parser\n\nFixes #12, see GH-3.")
+    # A base merge (the runner's sync, or the agent's own): the merged
+    # commit's `(#5627)` is upstream's and stays; the merge commit is the
+    # run's and names nothing.
+    g("merge", "-q", "--no-edit", "origin/main")
+    merge = g("rev-parse", "HEAD")
+    tip = commit(work, g, "b", "Follow up on #12")
+    before = {c: g("log", "-1", "--format=%T%n%an <%ae> %ad%n%cn <%ce> %cd", c) for c in (first, merge, tip)}
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert len(r.stdout.splitlines()) == 3  # the merge is rewritten for its new parent
+    assert g("log", "--format=%B", "-1", "HEAD~2") == f"Fix the parser\n\nFixes {FORK}#12, see {FORK}#3."
+    assert g("log", "--format=%s", "-1", "HEAD") == f"Follow up on {FORK}#12"
+    assert "#" not in g("log", "--format=%B", "-1", "HEAD~1")
+    # The merged commit and the start are the same objects; trees, authors,
+    # committers and dates are kept, and the work tree is untouched.
+    assert g("rev-parse", "HEAD~1^2") == upstream
+    assert g("log", "--format=%s", "-1", upstream) == "Upstream fix (#5627)"
+    assert g("rev-parse", "HEAD~3") == start
+    after = [g("log", "-1", "--format=%T%n%an <%ae> %ad%n%cn <%ce> %cd", c) for c in ("HEAD~2", "HEAD~1", "HEAD")]
+    assert after == [before[first], before[merge], before[tip]]
+    assert g("status", "--porcelain") == ""
+    # Deterministic: the same commits give the same SHAs; a second run is a no-op.
+    rewritten = g("rev-parse", "HEAD")
+    g("update-ref", "HEAD", tip)
+    assert qualify(work, start).returncode == 0 and g("rev-parse", "HEAD") == rewritten
+    r = qualify(work, start)
+    assert r.returncode == 0 and r.stdout == "" and g("rev-parse", "HEAD") == rewritten
+
+
+def test_qualify_commits_stops_at_a_commit_a_remote_ref_reaches(tmp_path):
+    # A fast-forward onto the base puts the base's commits on HEAD's
+    # first-parent chain: they keep their SHAs, and only the run's commit
+    # above them is rewritten.
+    work, g, start = qrepo(tmp_path)
+    g("merge", "-q", "--ff-only", "origin/main")
+    upstream = g("rev-parse", "HEAD")
+    commit(work, g, "a", "Revert part of #5627")
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert g("rev-parse", "HEAD~1") == upstream
+    assert g("log", "--format=%s", "-1", "HEAD") == f"Revert part of {FORK}#5627"
+    assert g("log", "--format=%s", "-1", "HEAD~1") == "Upstream fix (#5627)"
+
+
+def test_qualify_commits_moves_nothing_without_a_bare_reference(tmp_path):
+    work, g, start = qrepo(tmp_path)
+    tip = commit(work, g, "a", f"Fix it\n\nFixes {FORK}#12")
+    r = qualify(work, start)
+    assert r.returncode == 0 and r.stdout == "" and g("rev-parse", "HEAD") == tip
+    # Nothing above the start: nothing to do either.
+    g("reset", "-q", "--hard", start)
+    r = qualify(work, start)
+    assert r.returncode == 0 and r.stdout == "" and g("rev-parse", "HEAD") == start
+
+
+def own_bare(g, start, repo=FORK):
+    """The run's commits (above start, off the remotes) that still carry a bare reference."""
+    own = g("rev-list", "HEAD", "--not", start, "--remotes").split()
+    return [c for c in own if outbound.qualify_refs(g("log", "-1", "--format=%B", c), repo) != g("log", "-1", "--format=%B", c)]
+
+
+def test_qualify_commits_rewrites_a_merged_side_branch(tmp_path):
+    # A side branch from the start, committed on and merged back --no-ff:
+    # its commit is the run's too and is qualified, the merge mapped onto it.
+    work, g, start = qrepo(tmp_path)
+    g("checkout", "-q", "-b", "side")
+    side = commit(work, g, "s", "Fixes #12 on the side")
+    g("checkout", "-q", "work")
+    commit(work, g, "a", "Main line")
+    g("merge", "-q", "--no-ff", "--no-edit", "side")
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert g("log", "-1", "--format=%s", "HEAD^2") == f"Fixes {FORK}#12 on the side"
+    assert own_bare(g, start) == []
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", side, "HEAD"], cwd=work, check=False).returncode == 1
+    # SHAs only: no message text reaches the workflow log.
+    assert r.stdout and all(re.fullmatch(r"[0-9a-f]{40} -> [0-9a-f]{40}", line) for line in r.stdout.splitlines())
+
+
+def test_qualify_commits_leaves_no_original_reachable_through_a_side_branch(tmp_path):
+    # A side branch forked AFTER a bare-reference commit on the main line:
+    # rewriting only the main line would leave the original reachable through
+    # the merge's second parent, next to its rewrite.
+    work, g, start = qrepo(tmp_path)
+    first = commit(work, g, "a", "Fixes #12")
+    g("checkout", "-q", "-b", "side")
+    commit(work, g, "s", "Side work")
+    g("checkout", "-q", "work")
+    commit(work, g, "b", "More")
+    g("merge", "-q", "--no-ff", "--no-edit", "side")
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert own_bare(g, start) == []
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", first, "HEAD"], cwd=work, check=False).returncode == 1
+    log = g("log", "--format=%s", f"{start}..HEAD").splitlines()
+    assert log.count(f"Fixes {FORK}#12") == 1 and "Fixes #12" not in log
+
+
+def signed_tag(tmp_path, g, name, rev):
+    """A signed tag (an ephemeral SSH key): merging one records a `mergetag`
+    header, which an unsigned annotated tag does not."""
+    key = tmp_path / f"{name}-key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    g("-c", "gpg.format=ssh", "-c", f"user.signingkey={key}", "tag", "-s", "-m", f"tag {name}", name, rev)
+
+
+def merge_tag(g, name):
+    g("merge", "-q", "--no-ff", "--no-edit", name)
+    assert "\nmergetag object " in g("cat-file", "commit", "HEAD")
+
+
+needs_ssh_keygen = pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="no ssh-keygen to sign a tag")
+
+
+@needs_ssh_keygen
+def test_qualify_commits_drops_a_mergetag_whose_tagged_commit_was_rewritten(tmp_path):
+    work, g, start = qrepo(tmp_path)
+    g("checkout", "-q", "-b", "side")
+    commit(work, g, "s", "Fixes #12")
+    signed_tag(tmp_path, g, "side-tag", "HEAD")
+    g("checkout", "-q", "work")
+    commit(work, g, "a", "Main line")
+    merge_tag(g, "side-tag")
+    assert qualify(work, start).returncode == 0
+    assert g("log", "-1", "--format=%s", "HEAD^2") == f"Fixes {FORK}#12"
+    assert "mergetag" not in g("cat-file", "commit", "HEAD")
+
+
+@needs_ssh_keygen
+def test_qualify_commits_drops_a_mergetag_whose_tagged_commit_moved_with_its_ancestor(tmp_path):
+    # The tagged commit's own message is clean, but its parent was rewritten,
+    # so its SHA changed all the same.
+    work, g, start = qrepo(tmp_path)
+    commit(work, g, "a", "Fixes #12")
+    g("checkout", "-q", "-b", "side")
+    tagged = commit(work, g, "s", "Side work")
+    signed_tag(tmp_path, g, "side-tag", "HEAD")
+    g("checkout", "-q", "work")
+    commit(work, g, "b", "More")
+    merge_tag(g, "side-tag")
+    assert qualify(work, start).returncode == 0
+    assert g("log", "-1", "--format=%s", "HEAD^2") == "Side work" and g("rev-parse", "HEAD^2") != tagged
+    assert "mergetag" not in g("cat-file", "commit", "HEAD")
+
+
+@needs_ssh_keygen
+def test_qualify_commits_keeps_a_mergetag_whose_tagged_commit_is_unchanged(tmp_path):
+    # An upstream tag merged after a bare-reference commit: the merge is
+    # rewritten for its first parent, and its tag still names its second.
+    work, g, start = qrepo(tmp_path)
+    upstream = g("rev-parse", "origin/main")
+    signed_tag(tmp_path, g, "v1", upstream)
+    commit(work, g, "a", "Fixes #12")
+    merge_tag(g, "v1")
+    tag_header = g("cat-file", "commit", "HEAD").split("\nmergetag ", 1)[1].split("\n\n", 1)[0]
+    assert qualify(work, start).returncode == 0
+    merge = g("cat-file", "commit", "HEAD")
+    assert g("log", "-1", "--format=%s", "HEAD~1") == f"Fixes {FORK}#12"
+    assert g("rev-parse", "HEAD^2") == upstream
+    assert f"\nmergetag object {upstream}\n" in merge and tag_header in merge
+
+
+def test_qualify_commits_leaves_commits_fetch_head_reaches(tmp_path):
+    # A base fetched without a remote-tracking ref (`git fetch <url> main`)
+    # is still the base: FETCH_HEAD bounds the run's commits like a remote.
+    work, g, start = qrepo(tmp_path)
+    upstream = g("rev-parse", "origin/main")
+    g("update-ref", "-d", "refs/remotes/origin/main")
+    (work / ".git" / "FETCH_HEAD").write_text(f"{upstream}\t\tbranch 'main' of https://example.com/u\n")
+    g("merge", "-q", "--ff-only", upstream)
+    commit(work, g, "a", "After the merge, see #5627")
+    r = qualify(work, start)
+    assert r.returncode == 0, r.stderr
+    assert g("rev-parse", "HEAD~1") == upstream
+    assert g("log", "-1", "--format=%s", upstream) == "Upstream fix (#5627)"
+    assert g("log", "-1", "--format=%s", "HEAD") == f"After the merge, see {FORK}#5627"
+
+
+def test_qualify_commits_fails_closed_on_a_bad_start(tmp_path):
+    work, g, _ = qrepo(tmp_path)
+    tip = commit(work, g, "a", "Fixes #12")
+    r = qualify(work, "f" * 40)
+    assert r.returncode == 2 and "qualify-commits: git rev-list failed" in r.stderr
+    assert g("rev-parse", "HEAD") == tip
+
+
+def test_qualify_commits_fails_when_head_cannot_move(tmp_path):
+    # A stale ref lock: the rewritten commits exist but HEAD cannot point at
+    # them, so the run's commits are still bare and the command fails.
+    work, g, start = qrepo(tmp_path)
+    tip = commit(work, g, "a", "Fixes #12")
+    (work / ".git" / "refs" / "heads" / "work.lock").write_text("")
+    r = qualify(work, start)
+    assert r.returncode == 2 and "git update-ref failed" in r.stderr
+    assert g("rev-parse", "HEAD") == tip
+
+
+def test_qualify_commits_fails_when_a_bare_reference_survives(tmp_path, monkeypatch):
+    # The final check, whatever let a bare reference through: here a
+    # rewrite that changes nothing.
+    work, g, start = qrepo(tmp_path)
+    tip = commit(work, g, "a", "Fixes #12")
+    monkeypatch.chdir(work)
+    monkeypatch.setattr(outbound, "_qualify_commit", lambda raw, repo, parents: raw)
+    with pytest.raises(ValueError, match=f"still carry a bare reference: {tip}"):
+        outbound.qualify_commits(FORK, start)
+
+
+def test_qualify_commit_drops_a_stale_signature_and_keeps_other_headers():
+    raw = (b"tree " + b"1" * 40 + b"\nparent " + b"2" * 40 + b"\nparent " + b"3" * 40 +
+           b"\nauthor a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\nencoding ISO-8859-1"
+           b"\nmergetag object " + b"4" * 40 + b"\n type commit\n tag v1"
+           b"\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----"
+           b"\n\nFix #12 for caf\xe9\n")
+    out = outbound._qualify_commit(raw, "o/r", {"2" * 40: "5" * 40})
+    assert out == (b"tree " + b"1" * 40 + b"\nparent " + b"5" * 40 + b"\nparent " + b"3" * 40 +
+                   b"\nauthor a <a@x> 1 +0000\ncommitter c <c@x> 1 +0000\nencoding ISO-8859-1"
+                   b"\nmergetag object " + b"4" * 40 + b"\n type commit\n tag v1"
+                   b"\n\nFix o/r#12 for caf\xe9\n")
+    # A rewritten tagged parent takes its mergetag with it, continuation lines and all.
+    out = outbound._qualify_commit(raw, "o/r", {"4" * 40: "6" * 40})
+    assert b"mergetag" not in out and b"type commit" not in out and b"gpgsig" not in out
+    assert b"\nencoding ISO-8859-1\n\nFix o/r#12" in out
+    # Unchanged message and parents: the object is returned as it was, signature and all.
+    assert outbound._qualify_commit(raw.replace(b"#12", b"o/r#12"), "o/r", {}) == raw.replace(b"#12", b"o/r#12")
 
 
 def test_outbound_runs_on_the_macos_system_python():

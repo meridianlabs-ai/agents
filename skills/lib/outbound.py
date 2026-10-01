@@ -10,6 +10,7 @@ common.sh.
     outbound.py defang < text > text
     outbound.py defang-review < review.json > review.json
     outbound.py commit-refs --repo OWNER/REPO [--allow N]... < commits
+    outbound.py qualify-commits --repo OWNER/REPO --start SHA
 
 `defang` backticks the agents' trigger phrases and splits the loops'
 `<!-- … -->` markers, case-insensitively: the rewrite the land composite
@@ -28,6 +29,23 @@ base branch, where a closing keyword before one closes that issue. So the
 scan is textual and errs towards reporting. Exit 0 when no commit carries
 one, 1 when some do (one line per commit on stdout), 2 when the listing is
 malformed or incomplete (fail closed).
+
+`qualify-commits` is the agent workflows' side of the same rule (the
+`qualify-commit-refs` composite runs it after an agent's commits are made,
+before they are landed): in the git repository it runs in, it rewrites each
+bare `#N` and `GH-N` in the messages of the run's own commits to `REPO#N`,
+the form that resolves to the same item wherever the message is copied.
+The run's own commits are those HEAD reaches and neither SHA, a
+remote-tracking ref nor FETCH_HEAD does: a base merge's commits and
+anything fetched stay as they are, so a number in an upstream subject keeps
+its meaning. Each own commit is replayed with its parents mapped, side
+branches included, so no original stays reachable. Trees, authors,
+committers and dates are kept, so the rewrite is deterministic, and HEAD
+moves only when a message changed. A rewritten commit loses its signature,
+and a merge loses the embedded signed tag (`mergetag`) of a parent that was
+rewritten. It prints `old -> new` per rewritten commit (SHAs only: no
+message text reaches the log). Exit 0 when every own commit is qualified,
+2 when git fails or one still carries a bare reference.
 """
 
 from __future__ import annotations
@@ -35,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from collections.abc import Iterable
 
@@ -60,6 +79,10 @@ def defang_review(review: dict) -> dict:
     return out
 
 
+# The two forms GitHub resolves against the repository the text lands in.
+BARE_REFS = (r"(?<![\w/&])#(\d+)\b", r"(?<![\w/])GH-(\d+)\b")
+
+
 def text_refs(text: str, repo: str, allow: Iterable[int] = ()) -> list[int]:
     """Issue and PR numbers of `repo` that plain `text` references, other than `allow`.
 
@@ -70,14 +93,96 @@ def text_refs(text: str, repo: str, allow: Iterable[int] = ()) -> list[int]:
     """
     name = re.escape(repo)
     patterns = (
-        r"(?<![\w/&])#(\d+)\b",
-        r"(?<![\w/])GH-(\d+)\b",
+        *BARE_REFS,
         rf"(?<![\w.-]){name}#(\d+)\b",
         rf"https?://github\.com/{name}/(?:issues|pull)/(\d+)",
     )
     allowed = set(allow)
     found = {int(m.group(1)) for p in patterns for m in re.finditer(p, text, flags=re.I)}
     return sorted(found - allowed)
+
+
+def qualify_refs(text: str, repo: str) -> str:
+    """`text` with each bare `#N` and `GH-N` written as `repo#N`."""
+    bare = re.compile("|".join(BARE_REFS), flags=re.IGNORECASE)
+    return bare.sub(lambda m: f"{repo}#{m.group(1) or m.group(2)}", text)
+
+
+def _git(*args: str, data: bytes | None = None) -> bytes:
+    return subprocess.run(["git", *args], input=data, capture_output=True, check=True).stdout
+
+
+def _qualify_commit(raw: bytes, repo: str, parents: dict[str, str]) -> bytes:
+    """Commit object `raw` with its message qualified and its parents mapped.
+
+    `raw` itself when neither changes. A signature header is dropped once
+    the object changes: it would no longer verify. So is a `mergetag` (a
+    merged signed tag, embedded whole) whose tagged commit was rewritten:
+    it would name a commit that is no longer a parent, and the tag cannot
+    be repointed without breaking its signature.
+    """
+    head, sep, message = raw.partition(b"\n\n")
+    text = message.decode("utf-8", "surrogateescape")
+    qualified = qualify_refs(text, repo)
+    old = head.split(b"\n")
+    new: list[bytes] = []
+    for line in old:
+        if line.startswith(b"parent "):
+            sha = line[7:].decode()
+            line = b"parent " + parents.get(sha, sha).encode()
+        new.append(line)
+    if qualified == text and new == old:
+        return raw
+    lines: list[bytes] = []
+    drop = False
+    for line in new:
+        if not line.startswith(b" "):
+            drop = line.startswith((b"gpgsig ", b"gpgsig-sha256 ")) or (
+                line.startswith(b"mergetag object ") and line[16:].decode() in parents)
+        if not drop:
+            lines.append(line)
+    return b"\n".join(lines) + sep + qualified.encode("utf-8", "surrogateescape")
+
+
+def _own_commits(start: str) -> list[str]:
+    """The run's own commits, parents before children: those HEAD reaches
+    and neither `start`, a remote-tracking ref nor FETCH_HEAD does."""
+    exclude = [start, "--remotes"]
+    fetched = subprocess.run(["git", "rev-parse", "-q", "--verify", "FETCH_HEAD^{commit}"],
+                             capture_output=True, check=False).stdout.decode().strip()
+    if fetched:
+        exclude.append(fetched)
+    return _git("rev-list", "--topo-order", "--reverse", "HEAD", "--not", *exclude).decode().split()
+
+
+def _message(raw: bytes) -> str:
+    return raw.partition(b"\n\n")[2].decode("utf-8", "surrogateescape")
+
+
+def qualify_commits(repo: str, start: str) -> list[str]:
+    """Qualify the bare references in the run's own commits; `old -> new` per rewrite.
+
+    Every own commit is replayed with its parents mapped, so none of the
+    originals stays reachable from HEAD. Raises ValueError when an own
+    commit still carries a bare reference afterwards.
+    """
+    head = _git("rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    mapped: dict[str, str] = {}
+    report: list[str] = []
+    for sha in _own_commits(start):
+        raw = _git("cat-file", "commit", sha)
+        new = _qualify_commit(raw, repo, mapped)
+        if new == raw:
+            continue
+        mapped[sha] = _git("hash-object", "-t", "commit", "-w", "--stdin", data=new).decode().strip()
+        report.append(f"{sha} -> {mapped[sha]}")
+    if head in mapped:
+        _git("update-ref", "-m", "qualify commit refs", "HEAD", mapped[head], head)
+    messages = {sha: _message(_git("cat-file", "commit", sha)) for sha in _own_commits(start)}
+    left = [sha for sha, text in messages.items() if qualify_refs(text, repo) != text]
+    if left:
+        raise ValueError("commits still carry a bare reference: " + " ".join(left))
+    return report
 
 
 def commit_refs(lines: Iterable[str], repo: str, allow: Iterable[int] = ()) -> tuple[list[str], str | None]:
@@ -126,6 +231,9 @@ def main(argv: list[str]) -> int:
     refs = sub.add_parser("commit-refs")
     refs.add_argument("--repo", required=True)
     refs.add_argument("--allow", type=int, action="append", default=[])
+    qualify = sub.add_parser("qualify-commits")
+    qualify.add_argument("--repo", required=True)
+    qualify.add_argument("--start", required=True)
     args = parser.parse_args(argv)
     if args.cmd == "defang":
         sys.stdout.write(defang(sys.stdin.read()))
@@ -140,6 +248,19 @@ def main(argv: list[str]) -> int:
             print("outbound.py defang-review: not a JSON object", file=sys.stderr)
             return 2
         json.dump(defang_review(review), sys.stdout)
+        return 0
+    if args.cmd == "qualify-commits":
+        try:
+            report = qualify_commits(args.repo, args.start)
+        except subprocess.CalledProcessError as exc:
+            err = exc.stderr.decode("utf-8", "replace").strip() if exc.stderr else ""
+            print(f"outbound.py qualify-commits: git {exc.cmd[1]} failed: {err}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"outbound.py qualify-commits: {exc}", file=sys.stderr)
+            return 2
+        for line in report:
+            print(line)
         return 0
     offenders, error = commit_refs(sys.stdin, args.repo, args.allow)
     for line in offenders:

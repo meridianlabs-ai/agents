@@ -30,6 +30,7 @@ take effect on every repo's next run.
   `reclaim-codex-workspace`, `import-codex-final`, `claude-agent-launcher`,
   `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
+  `qualify-commit-refs`,
   `compose-settings`, `dev-agent-context`,
   `drop-runner-root`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,

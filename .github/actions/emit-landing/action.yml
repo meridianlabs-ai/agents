@@ -93,6 +93,18 @@ inputs:
       which refuses any manifest carrying commits whatever this job uploaded.
     required: false
     default: "false"
+  withhold:
+    description: >-
+      Non-empty: why the run's commits must not land (the caller's own,
+      fixed text). A HEAD that moved is then packaged as if no bundle could
+      be written: no bundle, head_sha = start-sha, the hand-back, hand-off,
+      thread resolutions and stage dropped, and this text appended to the
+      manifest's error so the land job reports it and fails the run. The
+      agent jobs pass it when `qualify-commit-refs` did not succeed, so a
+      commit message with a bare issue reference is never pushed. Empty
+      (the default) changes nothing; ignored on a read-only run.
+    required: false
+    default: ""
   system-path:
     description: >-
       The PATH the `write` step's commands run with, pinned before the first
@@ -133,6 +145,7 @@ runs:
         EXTRA: ${{ inputs.manifest-extra }}
         DIR: ${{ inputs.landing-dir }}
         READ_ONLY: ${{ inputs.read-only }}
+        WITHHOLD: ${{ inputs.withhold }}
         REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
         SYSTEM_PATH: ${{ inputs.system-path }}
@@ -189,7 +202,14 @@ runs:
             echo "::warning::emit-landing: start-sha '$START_SHA' is not a full SHA."
             START_SHA="$head_sha"
           fi
-          if [ "$head_sha" != "$START_SHA" ]; then
+          if [ "$head_sha" != "$START_SHA" ] && [ -n "${WITHHOLD:-}" ]; then
+            # The caller refused this run's commits (see the input): the
+            # same packaging as a bundle that could not be written.
+            note="${note:+$note }emit-landing: the agent's commits were NOT packaged and will not land: $WITHHOLD"
+            echo "::error::emit-landing: the caller withheld the commits ($START_SHA..$head_sha) from landing."
+            head_sha="$START_SHA"
+            lost_bundle=true
+          elif [ "$head_sha" != "$START_SHA" ]; then
             # Only the commits above the start SHA: the land job fetches the
             # start SHA from origin itself and refuses a bundle whose tip does
             # not descend from it. A HEAD that is NOT a descendant (the agent
