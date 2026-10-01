@@ -96,7 +96,11 @@ Non-goals:
 - **Keeping the model credential from the agent.** That is the declared
   exception (AGENTS.md → Adding or changing a workflow; decision: Ransom,
   2026-09-23). It stays as it is, and it now covers codex's federated
-  OpenAI token too (Design → Codex jobs).
+  OpenAI token too (Design → Codex jobs). Anthropic's rule no longer
+  matches every Meridian workflow: since 2026-10-01 it admits only the
+  four reusable workflows and the three direct callers that use it, at
+  `refs/heads/main` (decision: Ransom, 2026-09-30; applied 2026-10-01;
+  architecture.md → Why the IDs aren't secrets).
 - **Removing the agent user boundary.** It stays as the second line
   (Design → What stays in the untrusted job).
 - **meridianlabs-ai/actions** (`isolated-agent` and its `model-broker`):
@@ -309,7 +313,7 @@ design (Claude jobs after step 6; codex jobs after step 7):
 | Held in the job | Reachable by `runner`/root | The agent may have it because |
 |---|---|---|
 | Job token: contents, pull requests, issues and actions read | yes | it is the agent's own `GH_TOKEN` (the launcher gives it) |
-| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential. Anthropic WIF and, for the four reusable workflows' jobs, the OpenAI federation mapping are the declared exception. The Claude App exchange has no installation to issue from after step 6. PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` in step 1 and regain it in step 7, after step 6 |
+| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential. Anthropic WIF (since 2026-10-01 only for the workflows its rule names) and, for the four reusable workflows' jobs, the OpenAI federation mapping are the declared exception. The Claude App exchange has no installation to issue from after step 6. PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` in step 1 and regain it in step 7, after step 6 |
 | WIF JWT and the Anthropic access token | yes | the declared model-credential exception |
 | The exchanged OpenAI token (codex jobs, in the `openai-wif-proxy` process) | yes | the declared model-credential exception, job-bound like Anthropic's: at most an hour, never beyond the OIDC token |
 | `ACTIONS_RUNTIME_TOKEN` | yes | cache access is read-only (`cache-mode: read`). Artifact upload in this run reaches only the `landing` artifact, which land already treats as untrusted, and no trusted job consumes an artifact (the rule below) |
@@ -1246,7 +1250,10 @@ Untrusted input reaching the new or moved code:
   Step 5's audit is what makes "no relying party grants more" true, and
   it has to stay true. A new OIDC trust (a cloud role, a publisher) that
   does not pin its workflow must not be added for Meridian repositories.
-  AGENTS.md → Adding or changing a workflow gains that line. Sigstore
+  AGENTS.md → Adding or changing a workflow gains that line. Anthropic's
+  rule pins its workflows since 2026-10-01: before, it matched
+  `repository_owner` alone (decision: Ransom, 2026-09-30; applied
+  2026-10-01). Sigstore
   accepts any token, but binds the certificate to the agent workflow's
   identity, so a verifier pinned to a release workflow rejects it.
 - **What this does not close.**
