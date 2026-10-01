@@ -1,0 +1,61 @@
+# Negative canaries for the codex jobs' OpenAI workload identity federation
+# (design/untrusted-agent-job.md → Codex jobs: OpenAI API Platform workload
+# identity federation, and → Testing). No secret and no model: each job
+# requests a GitHub OIDC token for the Meridian audience and asks OpenAI's
+# token exchange for a service-account token with the openai-wif-proxy
+# composite's `probe` mode, which records the outcome and the token's
+# non-secret claims (`aud`, `event_name`, `job_workflow_ref`) in the job
+# summary and drops any token it gets. Each must be refused (HTTP 4xx); an
+# outage counts as neither and fails the job.
+#
+# The mapping matches the issuer, the audience, the owner and its id, and
+# two booleans the identity provider derives: `job_workflow_ref` is one of
+# the four agent workflows at `refs/heads/main`, and `event_name` is one the
+# stubs use. On `workflow_run` (one of those events) from `main`, each job
+# below fails exactly one condition, the workflow:
+#
+#   no-reusable-workflow     a job in this file, which is no reusable
+#                            workflow;
+#   other-reusable-workflow  openai-wif-canary-reusable.yml, a reusable
+#                            workflow of this repository at `main` that is
+#                            not one of the four.
+#
+# A manual dispatch runs the same jobs on an event outside the list, so
+# there they fail two conditions. The positive control is a real codex run
+# of the four workflows after the merge.
+#
+# Runs after each `main` run of the engine isolation canary (weekly, on its
+# push paths and by hand) and by hand. A `workflow_run` workflow runs from
+# the default branch only, so a branch cannot run this as itself.
+
+name: openai wif canary
+
+on:
+  workflow_run:
+    workflows: ["engine isolation canary"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  no-reusable-workflow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: OpenAI exchange from a job in no reusable workflow (expect refused)
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: probe
+          expect: refused
+
+  other-reusable-workflow:
+    uses: ./.github/workflows/openai-wif-canary-reusable.yml
+    permissions:
+      contents: read
+      id-token: write

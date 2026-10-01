@@ -444,7 +444,7 @@ def test_the_claude_job_prepares_branch_and_context_before_the_agent_user():
 
 def test_no_job_can_mint_a_claude_app_token():
     # Every claude-code-action step passes the job token, so the action never
-    # runs the OIDC exchange; the codex jobs hold no id-token permission.
+    # runs the OIDC exchange for a Claude App token.
     for name in REUSABLE:
         for job, block in jobs((WORKFLOWS / name).read_text()).items():
             for s in steps(block):

@@ -13,10 +13,15 @@ way to keep `OPENAI_API_KEY` out of a Claude-engine run is a job that does
 not reference it: a job-level `if:` is decided by the service before the
 job is dispatched, and a skipped job gets no job message at all.
 
-- 4629153: the job that runs the Claude agent names no `OPENAI_API_KEY`;
-  the codex job names it at its codex-action step and nowhere else; the
-  two are selected by the gate's `engine` output at the job level and
-  never both run; the land job waits for both.
+- 4629153: no job names `OPENAI_API_KEY` since the codex jobs federate
+  (design/untrusted-agent-job.md, step 7): the codex-action step passes a
+  fixed placeholder key and the `openai-wif-proxy` step's endpoint, that
+  step runs after the Node setup and before `Create codex user`, the
+  forwarder is stopped after `Codex usage`, and both agent jobs request
+  `id-token: write`; the workflows still declare the secret, so a stub that
+  passes it keeps loading, and this repository's stubs and examples pass it
+  no more. The two jobs are selected by the gate's `engine` output at the
+  job level and never both run; the land job waits for both.
 - 4628446: the codex job executes nothing from the checked-out tree as the
   runner — no `./.github/actions/claude-setup`, and provisioning runs the
   shared fallback recipe as the `codex` user (`user: codex`), after the
@@ -116,24 +121,54 @@ def test_the_claude_job_names_no_openai_key_and_runs_no_codex(name):
             assert "          user: claude-agent\n" in s, s[:80]
 
 
+WIF_PROXY = "meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main"
+
+
 @pytest.mark.parametrize("name", REUSABLE)
-def test_the_codex_job_names_the_key_only_at_the_codex_action_step(name):
+def test_no_job_references_the_openai_key(name):
+    # Step 7 of design/untrusted-agent-job.md: the codex jobs federate. The
+    # declaration under workflow_call stays: a stub naming an undeclared
+    # secret fails to load, and the caller stubs drop it in their own PRs.
     text = workflow_text(name)
-    codex_job = jobs(text)[AGENT_JOBS[name][1]]
-    named = [line for line in code_lines(codex_job) if f"secrets.{KEY}" in line]
-    assert named == ["          openai-api-key: ${{ secrets.OPENAI_API_KEY }}"]
-    assert named[0] in step_with(codex_job, CODEX_ACTION)
-    # The only other mention is the Surface step's error text naming a
-    # missing key as a cause — prose in a string, no reference.
-    assert all('err="' in line for line in code_lines(codex_job) if KEY in line and line not in named)
-    assert CLAUDE_ACTION not in codex_job
-    # And no other job of the workflow references it at all: the declaration
-    # under workflow_call stays (callers pass the secret; a stub naming an
-    # undeclared secret fails to load), the gate and land jobs never did.
     for job, block in jobs(text).items():
-        if job != AGENT_JOBS[name][1]:
-            assert not [line for line in code_lines(block) if f"secrets.{KEY}" in line], job
+        assert not [line for line in code_lines(block) if KEY in line], job
     assert f"      {KEY}:\n" in text[: text.index("\njobs:\n")]
+    assert CLAUDE_ACTION not in jobs(text)[AGENT_JOBS[name][1]]
+
+
+def test_no_stub_or_example_passes_the_openai_key():
+    for p in sorted(ROOT.glob("examples/*.yml")) + sorted(WORKFLOWS.glob("*-stub.yml")):
+        assert KEY not in p.read_text(), p.name
+
+
+@pytest.mark.parametrize("name", REUSABLE)
+def test_the_codex_action_step_uses_the_openai_forwarder(name):
+    codex_job = jobs(workflow_text(name))[AGENT_JOBS[name][1]]
+    action = "\n".join(code_lines(step_with(codex_job, CODEX_ACTION)))
+    assert '\n          openai-api-key: "meridian-wif-placeholder"\n' in action
+    assert "\n          responses-api-endpoint: ${{ steps.openaiwif.outputs.endpoint }}\n" in action
+    names = [s.splitlines()[0] for s in steps(codex_job)]
+    start = step_with(codex_job, "\n        id: openaiwif\n")
+    assert start.startswith("      - name: Start the OpenAI forwarder\n")
+    assert f"\n        uses: {WIF_PROXY}\n" in start and "        with:\n" not in start
+    # After the Node setup, before the codex user exists: as `runner`, with
+    # nothing from the checkout run yet; the same condition as both.
+    i = names.index("      - name: Start the OpenAI forwarder")
+    assert names[i - 1] == "      - name: Set up Node for codex-action"
+    assert names[i + 1].startswith("      - name: Create codex user")
+    cond = lambda s: [l for l in s.splitlines() if l.startswith("        if: ")]
+    assert cond(start) == cond(steps(codex_job)[i + 1]) == cond(steps(codex_job)[i - 1])
+    # Stopped (and its counts reported) right after the usage step, on every
+    # path once it started; it runs no git.
+    stop = steps(codex_job)[names.index("      - name: Stop the OpenAI forwarder")]
+    assert names[names.index("      - name: Stop the OpenAI forwarder") - 1] == "      - name: Codex usage"
+    assert "        if: always() && steps.openaiwif.outcome == 'success'\n" in stop
+    assert "        continue-on-error: true\n" in stop
+    assert f"        uses: {WIF_PROXY}\n        with:\n          mode: stop\n" in stop
+    # The Surface step names a failed exchange.
+    surface = step_with(codex_job, "\n        id: surface\n")
+    assert "          OPENAIWIF_OUTCOME: ${{ steps.openaiwif.outcome }}\n" in surface
+    assert '"${OPENAIWIF_OUTCOME:-}" = "failure"' in surface
 
 
 @pytest.mark.parametrize("name", REUSABLE)
@@ -143,8 +178,9 @@ def test_the_two_agent_jobs_are_selected_by_the_gate_engine_and_never_both(name)
     assert "needs.gate.outputs.engine != 'codex'" in job_if(claude_job)
     assert "needs.gate.outputs.engine == 'codex'" in job_if(codex_job)
     assert "    needs: gate\n" in claude_job and "    needs: gate\n" in codex_job
-    # Same untrusted read permissions on both; only the Claude job requests
-    # an OIDC token (test_only_the_claude_job_requests_an_oidc_token).
+    # Same untrusted read permissions on both; each requests an OIDC token
+    # for its own model credential
+    # (test_both_agent_jobs_request_an_oidc_token_for_their_model_credential).
     reads = ("contents", "pull-requests", "issues", "actions")
     assert [l.split("#")[0].strip() for l in permissions(claude_job).splitlines() if l.strip().startswith(reads)] == \
            [l.split("#")[0].strip() for l in permissions(codex_job).splitlines() if l.strip().startswith(reads)]
@@ -156,14 +192,12 @@ def test_the_two_agent_jobs_are_selected_by_the_gate_engine_and_never_both(name)
 
 
 @pytest.mark.parametrize("name", REUSABLE)
-def test_only_the_claude_job_requests_an_oidc_token(name):
-    # design/untrusted-agent-job.md → Stop trusting claude[bot]: nothing in a
-    # codex job requests an OIDC token, and with `id-token: write` a runner
-    # compromise there could exchange one for a Claude App token. The Claude
-    # job keeps it for Workload Identity Federation. (Step 7 of that design
-    # restores it on the codex jobs for the OpenAI federation.)
+def test_both_agent_jobs_request_an_oidc_token_for_their_model_credential(name):
+    # The Claude job for Anthropic's Workload Identity Federation; the codex
+    # job, since step 7 of design/untrusted-agent-job.md (after step 6
+    # uninstalled the Claude App, which step 1 removed it for), for OpenAI's.
     claude_job, codex_job = (jobs(workflow_text(name))[j] for j in AGENT_JOBS[name])
-    assert "id-token" not in "\n".join(code_lines(permissions(codex_job)))
+    assert "      id-token: write         # OpenAI workload identity federation" in permissions(codex_job)
     assert "      id-token: write         # WIF auth" in permissions(claude_job)
 
 

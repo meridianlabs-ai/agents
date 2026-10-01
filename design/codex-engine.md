@@ -81,10 +81,10 @@ step was never entered, was refunded until step 3 of
 [untrusted-agent-job.md](untrusted-agent-job.md): the fix job's own
 `agent_skipped` output decided it, and the untrusted job writes its own
 outputs. A codex step that ran and failed already kept its round since
-Claude Security 4628734 / 4628735, 2026-09-22.) A missing `OPENAI_API_KEY`
-fails the entered codex action step — the key is passed straight to it —
-and therefore consumes a round or attempt, so a persistently missing key
-reaches the cap and a human;
+Claude Security 4628734 / 4628735, 2026-09-22.) A refused OpenAI exchange
+fails the forwarder step before codex, and a failed renewal fails the
+entered codex step; either consumes a round or attempt, so a persistent
+credential failure reaches the cap and a human;
 in both loops (`claude-auto.yml` since #82, `claude-auto-review.yml`
 since #83) the codex step only *commits*:
 the `Commit codex fix` step (reclaim-gated, hooks-pinned, no credential)
@@ -151,28 +151,55 @@ substrings verbatim in a comment (the `auto-handoff` first line of the
 handoff comment is the one sanctioned use) — the codex paths enforce
 this with sed, the Claude path by instruction.
 
-## Auth — the accepted policy exception
+## Auth — OpenAI workload identity federation
 
-OpenAI has no Workload Identity Federation equivalent, so the codex
-engine uses an **`OPENAI_API_KEY` org secret** (created by Ransom,
-2026-08-31) — the one exception to this repo's no-API-key-secrets
-invariant. Containment: the reusable workflows declare it as an
-optional secret, stubs pass it explicitly (never `secrets: inherit`),
-and it is referenced ONLY by the `openai/codex-action` step of the codex
-job — the `agent-codex`, `review-codex` and `fix-codex` jobs, one per
-workflow, which the gate's `engine` output selects at the job level (One
-job per engine, below). The action uses it server-side to mint a scoped
-proxy credential; it never appears in prompts, sandboxed command
-environments, or other steps, and since 2026-09-22 never in another job's
-message either: until then the codex step sat in the same job as the
-Claude agent with a step-level `if:`, and a referenced secret reaches the
-job's runner whatever the step's `if:` says (the runner builds its
-`secrets` context from the job message before any step runs), so every
-Claude-engine run's job carried the key where the unsandboxed,
-sudo-capable Claude agent could read it out of Runner.Worker's memory
-(Claude Security finding 4629153). Repos without the secret: codex-labeled
-runs fail at the codex step with a clear error rather than silently
-falling back (a silent Claude fallback would misattribute output).
+Since step 7 of [untrusted-agent-job.md](untrusted-agent-job.md) the codex
+jobs hold no OpenAI key. Each runs the `openai-wif-proxy` composite as
+`runner`, after `Set up Node for codex-action` and before `Create codex
+user`, in a job with `id-token: write`:
+
+- It requests a GitHub OIDC token for the audience
+  `openai-wif:meridianlabs-ai` and exchanges it at
+  `https://auth.openai.com/oauth/token` (`grant_type`
+  `urn:ietf:params:oauth:grant-type:token-exchange`, the identity provider
+  and service account IDs, `subject_token_type`
+  `urn:ietf:params:oauth:token-type:jwt`) for a short-lived token of the
+  `agents-ci` project's service account. The project has a hard monthly
+  spend cap. A failed first exchange fails the step, so codex never starts
+  without a credential, and the Surface step names it.
+- It then forwards `POST /v1/responses` on `127.0.0.1` to
+  `https://api.openai.com/v1/responses`, replacing the incoming
+  `Authorization` with the current token and relaying the response as it
+  arrives. No refresh token is issued, so it re-exchanges with a fresh OIDC
+  token within 60 seconds of expiry, and once on an upstream 401. It never
+  follows a redirect, and the token is in its memory only: never in a
+  file, a log or a response.
+- codex-action's own proxy accepts only a static key in a narrow charset,
+  read once at start, so the codex-action step gets the fixed placeholder
+  `meridian-wif-placeholder` as `openai-api-key` and the forwarder as
+  `responses-api-endpoint`. The forwarder drops the placeholder.
+- After `Codex usage`, `mode: stop` writes the forwarder's counts
+  (requests, renewals, refusals) to the job summary and stops it. The
+  start step's summary line records the token's `expires_in` and the
+  GitHub OIDC token's `exp - iat`.
+
+The identity provider, service account and audience are identifiers, not
+secrets, like the Anthropic WIF IDs. Their one copy is the composite's
+input defaults. OpenAI's single mapping, `agents-ci-workflows`, matches the
+issuer, the audience, `repository_owner` and `repository_owner_id`, and two
+booleans the identity provider derives with CEL: `openai.agents_workflow`
+(`job_workflow_ref` is one of the four reusable workflows at
+`refs/heads/main`) and `openai.agents_event` (`event_name` is one the stubs
+use). Callers need no OpenAI configuration. Adding an agents workflow or a
+trigger event means editing the provider's transforms, not the mapping.
+`openai-wif-canary.yml` checks that a job in no reusable workflow and
+another reusable workflow of this repository are refused.
+
+Before step 7 the codex engine used an `OPENAI_API_KEY` org secret
+(created by Ransom, 2026-08-31), referenced only by the codex job's
+codex-action step. The org secret stays: actions' scheduled model test
+suites still use it. The reusable workflows still declare it, so a stub
+that passes it keeps loading, but no job references it.
 
 ## Safety strategy: unprivileged-user, not drop-sudo
 
@@ -183,7 +210,7 @@ job (openai/codex-action#160; hit twice at ~62 min on the first codex
 runs, inspect_ai#389). Every codex step therefore creates a dedicated
 `codex` system user and runs with `safety-strategy: unprivileged-user`:
 containment is the user boundary plus the permission-profile sandbox, the
-API key stays unreadable (codex has no sudo), and the host is never
+runner's OIDC request token stays unreadable (codex has no sudo), and the host is never
 mutated. The setup mirrors the action's `examples/unprivileged-user.yml`
 plus two grants its demo never needs: a codex-owned `$RUNNER_TEMP/codex`
 dir for the explicit `output-file` (`$RUNNER_TEMP` itself is 755
@@ -426,6 +453,11 @@ own script cannot pin its way out, since its `bash` was already chosen.
 The `mechanism` job of `.github/workflows/codex-path-smoke.yml` reproduces
 this on the hosted image: with the workspace venv on `GITHUB_PATH` and a
 `bash` planted there, the next `shell: bash` step runs under it.
+
+Since step 7 of [untrusted-agent-job.md](untrusted-agent-job.md) this is
+hygiene rather than the boundary: a runner compromise in a codex job
+reaches the read-only job token and the model credential, which the agent
+may have, and no key. The checks below stay, as on the Claude jobs.
 
 Until 2026-09-22 `provision-fallback` put `$PWD/.venv/bin` on
 `GITHUB_PATH` on every engine, and `create-codex-user`'s `chown -R
@@ -954,8 +986,9 @@ which are empty when the codex job ran). Two Claude Security findings
   sudo (every same-repo Claude run) could read it. A job-level `if:` is
   decided by the service before dispatch and a skipped job gets no job
   message, so the Claude job now references no key at all; the codex job
-  references it at its codex-action step and nowhere else
-  (`tests/test_engine_job_isolation.py`). Whether the service scopes
+  referenced it at its codex-action step and nowhere else
+  (`tests/test_engine_job_isolation.py`), until step 7 of
+  untrusted-agent-job.md removed the key from every job. Whether the service scopes
   referenced secrets per job or per called workflow is not documented; the
   hosted canary below measures it — per job, in the agent workflows' own
   gate/agent/land shape too — and design/credential-separation.md →
@@ -1068,8 +1101,9 @@ prompt composition after provisioning — so their Surface steps name a
 `codexcompose` failure separately, and `agent_outcome` counts it.
 
 The stubs are unchanged: every reusable workflow still declares
-`OPENAI_API_KEY` (a stub passing an undeclared secret fails to load) and
-the stubs keep passing it; only the codex job reads it. The example stubs
+`OPENAI_API_KEY` (a stub passing an undeclared secret fails to load). Since
+step 7 of untrusted-agent-job.md no job reads it, and the stubs drop it in
+their own PRs. The example stubs
 carry the `codex_provision` guidance as comments.
 
 **The hosted canary** (`.github/workflows/engine-isolation-canary.yml`,
@@ -1101,8 +1135,9 @@ shape (`engine-isolation-canary-pipeline.yml`, once per engine): the three
 secrets under their real names carrying the sentinels, a gate and a land
 job referencing the App secrets in job env and as action inputs, and the
 two agent jobs selected by the gate's `engine` output; the Claude agent job
-is expected to hold neither sentinel, the codex job the OpenAI stand-in
-alone, and `tests/test_secret_delivery_canary.py` keeps the probe's
+is expected to hold neither sentinel, and since step 7 of
+untrusted-agent-job.md the codex job neither (the caller still passes the
+OpenAI stand-in, which no job references), and `tests/test_secret_delivery_canary.py` keeps the probe's
 per-job references equal to the reusable workflows'. Results per run are in
 the run's logs; the recorded runs are in design/credential-separation.md →
 section 6.

@@ -9,14 +9,15 @@
 #     MARVIN_APP_CLIENT_ID, MARVIN_APP_PRIVATE_KEY, OPENAI_API_KEY — which
 #     the caller fills with SYNTHETIC sentinels only: sentinel A
 #     (`CANARYA-<16 hex>`) for both App secrets, sentinel B
-#     (`CANARYB-<16 hex>`) for the OpenAI key;
+#     (`CANARYB-<16 hex>`) for the OpenAI key, which no job references
+#     since the codex jobs federate (design/untrusted-agent-job.md, step 7)
+#     but which a stub may still pass;
 #   - `gate` references the App secrets the way the real gates do: in a
 #     job-level `env:` (claude.yml's HAS_APP_SECRETS) and as action inputs
 #     of a step that runs (the mint step), and publishes `ok` and `engine`;
 #   - `agent` and `agent-codex` both `needs: gate` and are selected by the
-#     gate's `engine` output at the job level, exactly one running; the
-#     Claude job references no secret, the codex job references the OpenAI
-#     key as an action input of a step that runs (the codex-action step);
+#     gate's `engine` output at the job level, exactly one running; neither
+#     references a secret;
 #   - `land` needs all three, runs `always()` after a successful gate,
 #     references the App secrets like the gate, and fails unless the
 #     selected agent job succeeded (so a skipped agent job cannot pass the
@@ -27,23 +28,25 @@
 #
 # Each job's last step runs tests/secret_delivery_scan.py as root over the
 # memory of the runner processes (Runner.Worker and Runner.Listener) and
-# prints only match counts. Expected: gate and land hold A and not B; the
-# Claude agent job holds neither — no App secret although the gate and land
-# jobs of the same called workflow referenced them, before and after it, and
-# no OpenAI key although the caller passed it; the codex job holds B and not
-# A. Per-workflow delivery would put A into both agent jobs.
+# prints only match counts. Expected: gate and land hold A and not B; both
+# agent jobs hold neither — no App secret although the gate and land jobs of
+# the same called workflow referenced them, before and after it, and no
+# OpenAI key although the caller passed it. Per-workflow delivery would put
+# A into both agent jobs.
 #
 # Each agent job also runs the OIDC exchange probe
 # (tests/app_token_exchange_probe.sh; design/untrusted-agent-job.md →
-# Testing) before its scan, with the real jobs' OIDC permission: the Claude
-# job has `id-token: write` (Workload Identity Federation), the codex job
-# none. As `runner`, the probe asks the Claude App token exchange for a
-# token and revokes any it gets. Expected: on a dispatch from main the
-# Claude job mints one (while the App is installed on this repository;
-# that is the evidence the design rests on, and step 6 of the design flips
-# it to `refused`); on other runs its outcome is recorded only (the
-# exchange refuses push events and workflow files that differ from main's).
-# The codex job cannot mint on any run, having no OIDC request token.
+# Testing) before its scan, with the real jobs' OIDC permission: both have
+# `id-token: write` (Workload Identity Federation: Anthropic's for the
+# Claude job, OpenAI's for the codex job since step 7 of the design). As
+# `runner`, the probe asks the Claude App token exchange for a token and
+# revokes any it gets. Expected: on a dispatch from main the Claude job
+# mints one (while the App is installed on this repository; that is the
+# evidence the design rests on, and step 6 of the design flips it to
+# `refused`); on other runs its outcome is recorded only (the exchange
+# refuses push events and workflow files that differ from main's). The
+# codex job, which has `id-token: write` again only after step 6 removed
+# the App, must be refused on a dispatch from main.
 
 name: engine isolation canary (pipeline probe)
 
@@ -122,18 +125,17 @@ jobs:
     if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.engine == 'codex'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write         # as the real codex job's (OpenAI WIF)
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Codex-action step stand-in (uses the OpenAI key)
-        uses: ./tests/fixtures/secret-input
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-      - name: OIDC exchange probe (expect no token; the job has no id-token)
-        run: bash tests/app_token_exchange_probe.sh refused
-      - name: Scan runner memory (expect A absent, B present)
-        run: sudo python3 tests/secret_delivery_scan.py absent present
+      - name: OIDC exchange probe (expect no App token on a dispatch from main; the App is uninstalled)
+        run: bash tests/app_token_exchange_probe.sh ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'refused' || 'any' }}
+      - name: Scan runner memory (expect neither sentinel)
+        run: sudo python3 tests/secret_delivery_scan.py absent absent
 
   land:
     needs: [gate, agent, agent-codex]

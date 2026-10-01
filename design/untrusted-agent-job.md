@@ -1743,6 +1743,37 @@ THREAT_MODEL.md text that its change makes true.
      their agent stubs. The org secret is **not** deleted: actions'
      `inspect-ai-scheduled-tests.yml` and `inspect-swe-nightly-tests.yml`
      still use it (Design → Codex jobs).
+   - As built (2026-10-01; merges only after step 6 is confirmed):
+     - The identity provider, service account and audience are the
+       `openai-wif-proxy` composite's input defaults, their one copy, so
+       the four workflows pass none. The service account is the form the
+       OpenAI dashboard showed (`user-...`). If the exchange refuses it,
+       the API form is probably `svc_acct_...`, a one-line change there;
+       the first run after the merge settles it.
+     - The start step's job summary line records the token's `expires_in`
+       and the GitHub OIDC token's `exp - iat`. After `Codex usage` a
+       `Stop the OpenAI forwarder` step writes the forwarder's counts
+       (requests, renewals, refusals) to the summary and stops it, so a
+       long run shows its renewals.
+     - The forwarder follows no redirect on any of its calls and answers
+       an upstream redirect with 502. Its OIDC and exchange calls are
+       retried up to three times on a network error, 429 or 5xx.
+     - The negative canaries are `openai-wif-canary.yml` (a job in no
+       reusable workflow) and `openai-wif-canary-reusable.yml` (another
+       reusable workflow of this repository), run on `workflow_run` after
+       each `main` run of the engine isolation canary, an event the
+       mapping lists, so only the workflow condition fails. A wrong
+       audience or a wrong event is only a meaningful test from a job in
+       one of the four workflows, which have no such job; that waits on a
+       decision.
+     - The pipeline probe's codex job requests `id-token: write` like the
+       real one, references no secret, and expects the App exchange to be
+       refused on a dispatch from main.
+     - A branch run cannot pass the exchange (the mapping needs
+       `job_workflow_ref` at `refs/heads/main`), so the positive check is
+       after the merge: a codex `@review`, one codex fix round, and the
+       canaries on a dispatch from `main`. The results go under this step
+       in a follow-up PR.
 
 ## Open questions
 

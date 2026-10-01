@@ -33,23 +33,32 @@ text are checked by the tests under `tests/`.
   on the job's token, so nothing an agent does or a caller's setup nests can
   place content in a cache a trusted workflow restores (Claude Security
   finding 4629157; design/agent-cache-scope.md).
-- A job that runs the Claude agent references no `OPENAI_API_KEY`. Each
-  reusable workflow runs each engine in a job of its own (`agent` and
+- No job references `OPENAI_API_KEY`. The codex jobs authenticate to
+  OpenAI by API Platform workload identity federation
+  (design/untrusted-agent-job.md, step 7): the `openai-wif-proxy` step
+  exchanges the job's GitHub OIDC token for a short-lived token of a
+  service account in a spend-capped CI project, holds it in a runner-side
+  forwarder that renews it before it expires, and never writes it to a file
+  or a log. OpenAI's mapping matches only the four reusable workflows at
+  `refs/heads/main`, on the events the stubs use, for the Meridian audience
+  and organization; adding an agents workflow or a trigger event means
+  editing the identity provider's transforms, not the mapping. Each
+  reusable workflow still runs each engine in a job of its own (`agent` and
   `agent-codex`, `review` and `review-codex`, `fix` and `fix-codex`), the
   trusted gate's `engine` output selecting exactly one at the job level,
-  which GitHub evaluates before dispatching a job. A secret a step
+  which GitHub evaluates before dispatching a job: a secret a step
   references is delivered to the job's runner whether or not that step's
   `if:` ends up true (the runner builds its `secrets` context from the job
-  message before any step runs), so the codex key is referenced only in the
-  codex job's codex-action step and a Claude-engine run's job message never
-  carries it (Claude Security finding 4629153). Measured, not assumed: the
-  hosted canary (design/credential-separation.md → section 6) shows a
+  message before any step runs), which is why the key, while the codex jobs
+  used one, was referenced in the codex job alone (Claude Security finding
+  4629153). Measured, not assumed: the hosted canary
+  (design/credential-separation.md → section 6) shows a
   referenced-but-skipped secret in the runner's memory and none in a job
   that references nothing, although the caller passed it and a sibling job
   referenced it — delivery is scoped per job. The same canary, in the
   agent workflows' own gate/agent/land shape, finds neither the App
-  secrets the gate and land jobs reference nor the OpenAI key in the
-  Claude agent job's runner memory.
+  secrets the gate and land jobs reference nor the OpenAI key a stub may
+  still pass in either agent job's runner memory.
 - In an agent job of either engine nothing from the checked-out tree
   executes as the runner: a caller's `claude-setup` action is not run, and
   the shared provisioning recipe (uv and a dev-install of the checkout, the
@@ -205,7 +214,10 @@ text are checked by the tests under `tests/`.
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - No runner-side step after a Codex run resolves a command, or its shell
-  interpreter, through a directory the codex user can write or replace. A
+  interpreter, through a directory the codex user can write or replace.
+  Since the codex jobs federate this is hygiene, not the reason a runner
+  compromise there is harmless: the runner holds no credential beyond the
+  read-only job token and the model credential. A
   job that may run codex puts nothing under its workspace on
   `GITHUB_PATH`; before the codex user is given write access to the
   checkout, every hop of every PATH entry (symlink targets included) and
@@ -296,7 +308,9 @@ text are checked by the tests under `tests/`.
   (design/untrusted-agent-job.md, step 4), so the action mints none and
   posts nothing; the dev agent's status comment is the machine account's,
   posted by the gate and finished by the land job from trusted values.
-  The codex jobs request no OIDC token at all. What is left is a runner
+  The codex jobs request an OIDC token only for the OpenAI exchange, and
+  only from step 7 of that design on, which merges after the App's
+  uninstall. What is left is a runner
   compromise in a Claude job making the exchange itself, which the App's
   uninstall (that design's step 6) closes. The agent runs as
   `claude-agent` behind the launcher, which keeps any token other than the

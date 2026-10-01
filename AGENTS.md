@@ -32,7 +32,7 @@ take effect on every repo's next run.
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `qualify-commit-refs`,
   `compose-settings`, `dev-agent-context`,
-  `drop-runner-root`,
+  `drop-runner-root`, `openai-wif-proxy`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).
   Referenced fully-qualified
@@ -162,9 +162,11 @@ take effect on every repo's next run.
   the git dir, `GIT_CONFIG_GLOBAL` and `core.fsmonitor=false` the same way
   (`ls-files` runs no hooks); and every post-codex `git status` passes
   `--ignore-submodules=dirty`; keep all of that when touching them. **The
-  job PATH is part of the same boundary** (finding 4628448, 2026-09-22):
-  the runner prepends every `GITHUB_PATH` entry to every later step's PATH
-  and resolves each step's shell interpreter through it, so a directory
+  job PATH is part of the same machinery** (finding 4628448, 2026-09-22;
+  hygiene, but kept, since step 7 of design/untrusted-agent-job.md left
+  the codex jobs no credential beyond the agent's own): the runner
+  prepends every `GITHUB_PATH` entry to every later step's PATH and
+  resolves each step's shell interpreter through it, so a directory
   the codex user can write there — a workspace venv, after the grant —
   would hand codex the `sudo`, `bash` or `git` the first post-codex step
   runs as `runner`. Never put a path under `$GITHUB_WORKSPACE` on
@@ -196,10 +198,19 @@ take effect on every repo's next run.
   4629153, 2026-09-22): each reusable workflow has a Claude job (`agent`,
   `review`, `fix`) and a codex job (`agent-codex`, `review-codex`,
   `fix-codex`), the gate's `engine` output selecting one at the job level,
-  and the land job `needs` both. `OPENAI_API_KEY` is referenced in the codex
-  job's codex-action step and nowhere else — never add a reference to a
-  job that runs the Claude agent: a referenced secret reaches the runner
-  whatever the step's `if:` says. In an agent job of either engine nothing
+  and the land job `needs` both. No job references `OPENAI_API_KEY` (step 7
+  of design/untrusted-agent-job.md): each codex job runs `openai-wif-proxy`
+  as `runner`, after `Set up Node for codex-action` and before `Create codex
+  user`, which exchanges the job's OIDC token for a short-lived OpenAI
+  service-account token and forwards codex-action's proxy (given a fixed
+  placeholder key and the step's `endpoint`) to api.openai.com with it, so
+  the codex jobs request `id-token: write`. Never add a secret reference
+  to an agent job: a referenced secret reaches the runner whatever the
+  step's `if:` says. The OpenAI mapping matches only the four reusable
+  workflows at `refs/heads/main` and the stubs' events, through two
+  booleans the identity provider derives; adding an agents workflow or a
+  trigger event means editing the provider's transforms, not the mapping.
+  In an agent job of either engine nothing
   from the checkout runs as the runner: no `uses: ./...` (a caller's
   `claude-setup` is never run), and provisioning is `provision-fallback`
   with the engine's agent user (plus the caller's `provision`, else
@@ -247,10 +258,14 @@ is in [THREAT_MODEL.md](THREAT_MODEL.md).
 - No secret of the machine account, and no other secret this repository
   controls, in any job that runs an agent or code from a checkout the org
   does not fully control. Not in `env:`, not as an action input, not through
-  a composite. The model credential (Workload Identity Federation, or
-  `OPENAI_API_KEY` in the codex job alone) and the Claude action's own token
-  are the known exceptions. Where the codex key may be referenced and how an
-  agent job provisions is under "One untrusted job per engine" above.
+  a composite. The model credential and the Claude action's own token are
+  the known exceptions. The model credential is workload identity
+  federation only: Anthropic's, and OpenAI API Platform's for the codex
+  jobs (a project service-account token exchanged from the job's OIDC
+  token, at most an hour and never beyond it, held by the
+  `openai-wif-proxy` forwarder). No long-lived model key is referenced by
+  any job. How an agent job provisions is under "One untrusted job per
+  engine" above.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
   The skills under `skills/` that a maintainer's local agent runs with their

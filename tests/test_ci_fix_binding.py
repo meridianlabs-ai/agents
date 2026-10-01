@@ -642,7 +642,8 @@ def test_the_fix_job_keys_landing_on_step_outcomes_not_on_execution_files():
             "&& 'true' || 'false' }}") in claude_job
     assert "read-only: ${{ steps.codexguard.outcome != 'success' && 'true' || 'false' }}" in codex_job
     assert "      agent_outcome: ${{ steps.claude.outcome }}\n" in claude_job
-    assert ("      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || "
+    assert ("      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.openaiwif.outcome == 'failure' || "
+            "steps.codexuser.outcome == 'failure' || "
             "steps.codexhome.outcome == 'failure' || steps.codexcompose.outcome == 'failure' || "
             "steps.codexfix.outcome == 'failure') && 'failure' || steps.codexfix.outcome }}\n") in codex_job
     land = job_block(text, "land")
