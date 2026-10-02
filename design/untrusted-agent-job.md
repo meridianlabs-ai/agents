@@ -1844,6 +1844,24 @@ THREAT_MODEL.md text that its change makes true.
        `openai-wif-canary.yml` itself for the wrong-event case. The results go under this step
        in a follow-up PR.
 
+     Results (2026-10-02, #199 merged as 2761962):
+     - Engine isolation canary dispatched from `main`:
+       [run 37054028907](https://github.com/meridianlabs-ai/agents/actions/runs/37054028907),
+       success. Both pipeline-probe agent jobs printed `refused` for the
+       Claude App exchange (HTTP 401, not installed).
+     - `openai-wif-canary.yml` on `workflow_run` after it:
+       [run 37054359854](https://github.com/meridianlabs-ai/agents/actions/runs/37054359854),
+       success. A job in no reusable workflow, another reusable workflow and
+       a wrong audience were refused; claude-review.yml's probe with the
+       Meridian audience was exchanged, so the service account ID as the
+       dashboard gave it (`user-4vdBIc98XKYif77VbHOkmScs`) is accepted.
+     - `openai-wif-canary.yml` dispatched from `main`:
+       [run 37054433870](https://github.com/meridianlabs-ai/agents/actions/runs/37054433870),
+       success. Every probe was refused, the Meridian audience included
+       (the mapping does not list `workflow_dispatch`).
+     - Codex `@review`: pending (meridianlabs-ai/ts-mono#726).
+     - Codex fix round: pending, exercised on this PR.
+
 ## Open questions
 
 None. The two left for Ransom were decided on 2026-09-29:
