@@ -46,14 +46,35 @@ Worktree rules (learned the hard way):
 ## 1. Find the queue
 
 ```bash
-gh project item-list 1 --owner meridianlabs-ai --format json --limit 1000 \
-  | jq -r '.items[] | select(.stage == "Merge")
-      | [(.content.number|tostring), .repository, .title,
-         ((.["linked pull requests"] // []) | join(","))] | @tsv'
+gh api graphql --paginate -f query='query($endCursor: String) {
+  organization(login: "meridianlabs-ai") { projectV2(number: 1) {
+    items(first: 100, after: $endCursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        stage: fieldValueByName(name: "Stage") {
+          ... on ProjectV2ItemFieldSingleSelectValue { name } }
+        prs: fieldValueByName(name: "Linked pull requests") {
+          ... on ProjectV2ItemFieldPullRequestValue { pullRequests(first: 20) { nodes { url } } } }
+        content {
+          ... on Issue { number title repository { url } }
+          ... on PullRequest { number title repository { url } }
+          ... on DraftIssue { title } }
+      } } } } }' \
+  --jq '.data.organization.projectV2.items.nodes[] | select(.stage.name == "Merge")
+      | [(.content.number|tostring), .content.repository.url, .content.title,
+         ([.prs.pullRequests.nodes[]?.url] | join(","))] | @tsv'
 ```
 
-- The stage lives in the `stage` field, **not** `status`. Always use
-  `--limit 1000` — the default 30 and even 200 truncate the board silently.
+- The stage lives in the `Stage` field, **not** `Status`.
+- Keep `--paginate`: without it only the first 100 items come back, with no
+  error. gh follows every page and exits non-zero if one fails.
+- Never export the whole board with `gh project item-list` to find items: it
+  fetches every field of every item, about 1 point per item (roughly 850 of
+  Ransom's 5,000-point hourly GraphQL quota for Atlas's 826 items), and
+  every tool running as him shares that quota. This query asks only for
+  what the step uses. `rateLimit(dryRun: true) { cost }` prices it at 1
+  point per page, so 9 points for the whole board (measured 2026-10-02;
+  decision: Ransom, 2026-10-02).
 - **`hold:release` gate**: check each queue issue's labels
   (`gh issue view <n> --repo meridianlabs-ai/inspect_ai --json labels`) and
   SKIP any carrying `hold:release` — approved but deliberately parked until a
