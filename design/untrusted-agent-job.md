@@ -1860,7 +1860,12 @@ THREAT_MODEL.md text that its change makes true.
        success. Every probe was refused, the Meridian audience included
        (the mapping does not list `workflow_dispatch`).
      - Codex `@review`: pending (meridianlabs-ai/ts-mono#726).
-     - Codex fix round: pending, exercised on this PR.
+     - Codex CI-fix round on #203: the deliberately failing probe triggered
+       [run 37055234306](https://github.com/meridianlabs-ai/agents/actions/runs/37055234306),
+       success. The OpenAI forwarder and `fix-codex` job succeeded; landing
+       committed the probe's removal as `11d8fb1`. The subsequent
+       [tests run 37056076774](https://github.com/meridianlabs-ai/agents/actions/runs/37056076774)
+       passed on that commit.
 
 ## Open questions
 
