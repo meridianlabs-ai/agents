@@ -96,7 +96,11 @@ Non-goals:
 - **Keeping the model credential from the agent.** That is the declared
   exception (AGENTS.md → Adding or changing a workflow; decision: Ransom,
   2026-09-23). It stays as it is, and it now covers codex's federated
-  OpenAI token too (Design → Codex jobs).
+  OpenAI token too (Design → Codex jobs). Anthropic's rule no longer
+  matches every Meridian workflow: since 2026-10-01 it admits only the
+  four reusable workflows and the three direct callers that use it, at
+  `refs/heads/main` (decision: Ransom, 2026-09-30; applied 2026-10-01;
+  architecture.md → Why the IDs aren't secrets).
 - **Removing the agent user boundary.** It stays as the second line
   (Design → What stays in the untrusted job).
 - **meridianlabs-ai/actions** (`isolated-agent` and its `model-broker`):
@@ -309,7 +313,7 @@ design (Claude jobs after step 6; codex jobs after step 7):
 | Held in the job | Reachable by `runner`/root | The agent may have it because |
 |---|---|---|
 | Job token: contents, pull requests, issues and actions read | yes | it is the agent's own `GH_TOKEN` (the launcher gives it) |
-| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential. Anthropic WIF and, for the four reusable workflows' jobs, the OpenAI federation mapping are the declared exception. The Claude App exchange has no installation to issue from after step 6. PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` in step 1 and regain it in step 7, after step 6 |
+| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential. Anthropic WIF (since 2026-10-01 only for the workflows its rule names) and, for the four reusable workflows' jobs, the OpenAI federation mapping are the declared exception. The Claude App exchange has no installation to issue from after step 6. PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` in step 1 and regain it in step 7, after step 6 |
 | WIF JWT and the Anthropic access token | yes | the declared model-credential exception |
 | The exchanged OpenAI token (codex jobs, in the `openai-wif-proxy` process) | yes | the declared model-credential exception, job-bound like Anthropic's: at most an hour, never beyond the OIDC token |
 | `ACTIONS_RUNTIME_TOKEN` | yes | cache access is read-only (`cache-mode: read`). Artifact upload in this run reaches only the `landing` artifact, which land already treats as untrusted, and no trusted job consumes an artifact (the rule below) |
@@ -1246,7 +1250,10 @@ Untrusted input reaching the new or moved code:
   Step 5's audit is what makes "no relying party grants more" true, and
   it has to stay true. A new OIDC trust (a cloud role, a publisher) that
   does not pin its workflow must not be added for Meridian repositories.
-  AGENTS.md → Adding or changing a workflow gains that line. Sigstore
+  AGENTS.md → Adding or changing a workflow gains that line. Anthropic's
+  rule pins its workflows since 2026-10-01: before, it matched
+  `repository_owner` alone (decision: Ransom, 2026-09-30; applied
+  2026-10-01). Sigstore
   accepts any token, but binds the certificate to the agent workflow's
   identity, so a verifier pinned to a release workflow rejects it.
 - **What this does not close.**
@@ -1421,6 +1428,8 @@ model or a real secret):
     claude-review.yml at 0aa1f20) and in an inspect_ai fork dev-agent job,
     109170645052 (2026-09-28, claude.yml at 609e20d).
   - After step 6 it must fail, and that failure is the proof of step 6.
+    It did on 2026-10-01 (Implementation plan → step 6 → As done), and
+    the probe now expects `refused` there.
   - Add the same probe to a codex job, where it must fail after step 1
     because the job has no `id-token: write`, and again after step 7
     because the App is gone.
@@ -1709,6 +1718,8 @@ THREAT_MODEL.md text that its change makes true.
      (and environment where set), read on pypi.org and npmjs.com.
    - No other OIDC trust names a Meridian repository.
    - A `claude[bot]` post search over the step-4 week returns nothing.
+
+   Skipped: the App was uninstalled before this ran (step 6 → As done).
 6. **Uninstall the Claude GitHub App** from the Meridian repositories
    (org admin: Ransom).
    - Run the canary: the exchange now fails.
@@ -1716,6 +1727,48 @@ THREAT_MODEL.md text that its change makes true.
      THREAT_MODEL.md and AGENTS.md), the tier-2 premise text,
      credential-separation.md's I1 and I5, and AGENTS.md's paragraphs
      that describe the reclaim as the boundary.
+   - As done (2026-10-01):
+     - An org admin uninstalled the Claude GitHub App from meridianlabs-ai
+       on 2026-10-01 (installation 107795739, selected repositories).
+       claude-design-import and chatgpt-codex-connector are separate Apps
+       and stay installed.
+     - Canary, dispatched on `main` (87fdfab) just before the uninstall:
+       [run 36924348634](https://github.com/meridianlabs-ai/agents/actions/runs/36924348634),
+       success. The Claude probe printed `minted (exchange HTTP 200;
+       revoked, HTTP 204)`, the codex probe `refused (no OIDC request
+       token in this job)`.
+     - The same dispatch just after it:
+       [run 36925108261](https://github.com/meridianlabs-ai/agents/actions/runs/36925108261),
+       failure, as expected while the probe still expected `minted`. The
+       Claude probe printed `refused (exchange HTTP 401: Claude Code is
+       not installed on this repository. Please install the Claude Code
+       GitHub App at https://github.com/apps/claude)`; the codex probe was
+       refused as before. Every other canary job passed.
+     - **Step 5 was skipped.** The uninstall went early, on Ransom's call.
+       Step 4 (#189) merged on 2026-09-30, so the week of normal use after
+       it, and step 5's `claude[bot]` search over that week, were not
+       completed. The last `claude[bot]` post found by search on any
+       Meridian repository is from 2026-09-30 00:48:47 UTC
+       (meridianlabs-ai/inspect_harbor#193, a tag-mode tracking comment
+       from before step 4). Nobody went through the rest of the step-5
+       checklist either: Claude Code on the web sessions, PR auto-fix,
+       project threads, `claude --cloud`, managed Code Review, the PyPI
+       and npm trusted publishers, and other OIDC trusts. Whatever relied
+       on the App on those repositories stopped working on 2026-10-01
+       (Compatibility and migration → Claude GitHub App uninstall).
+     - This step's PR flips the canary's Claude probe to expect `refused`
+       on a dispatch from main. An outage (no answer, a 5xx) still counts
+       as neither and fails it. Other runs still only record the outcome.
+       After it merges, a dispatch of engine-isolation-canary.yml from
+       `main` should pass again.
+     - The text: THREAT_MODEL.md's first guarantee is the job-level one,
+       the provisioning, no-root and Claude PATH text is defence in depth
+       on the Claude jobs, and the installed-App "By design" bullet is
+       gone; the tier-2 rule names the two conditions;
+       credential-separation.md's I1, I5 and section 3.5; AGENTS.md's
+       exceptions bullet and the uid machinery's status. Until step 7 the
+       codex jobs hold `OPENAI_API_KEY`, so on them the uid machinery is
+       still a boundary, and the text says so.
 7. **Codex to OpenAI workload identity federation** (after step 6).
    - Ransom:
      - creates the CI project and its service account, with a hard spend
@@ -1743,7 +1796,7 @@ THREAT_MODEL.md text that its change makes true.
      their agent stubs. The org secret is **not** deleted: actions'
      `inspect-ai-scheduled-tests.yml` and `inspect-swe-nightly-tests.yml`
      still use it (Design → Codex jobs).
-   - As built (2026-10-01; merges only after step 6 is confirmed):
+   - As built (2026-10-01, merged with step 6 on 2026-10-02):
      - The identity provider, service account and audience are the
        `openai-wif-proxy` composite's input defaults, their one copy, so
        the four workflows pass none. The service account is the form the

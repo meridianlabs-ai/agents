@@ -5,16 +5,18 @@
 # `runner`, request an OIDC token for claude-code-action's audience and POST
 # it to the Claude GitHub App token exchange, exactly as the action does when
 # it is given no `github_token` (src/github/token.ts). That is what a runner
-# compromise in an agent job could do while the App is installed.
+# compromise in an agent job could do while the App was installed.
 #
 #   app_token_exchange_probe.sh minted|refused|any
 #
 # The exchange answers only for events and workflows it accepts: a `push`
 # run gets "Invalid OIDC token", and a run whose workflow file differs from
 # the default branch's gets "Workflow validation failed" (measured
-# 2026-09-30). So the caller expects `minted` only where the exchange would
-# answer an agent job, and `any` elsewhere, which records the outcome and
-# asserts nothing about it.
+# 2026-09-30). So the caller asserts an outcome only where the exchange
+# would answer an agent job, a dispatch from main, and passes `any`
+# elsewhere, which records the outcome and asserts nothing about it. On
+# that dispatch it expected `minted` until the App was uninstalled
+# (2026-10-01) and expects `refused` since.
 #
 # `minted`: the exchange returned an App token. The probe revokes it at once
 # (DELETE /installation/token) and prints nothing from it. `refused`: no

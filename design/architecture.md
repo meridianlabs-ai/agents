@@ -108,12 +108,29 @@ We evaluated, in order:
 
 The federation rule, org, service-account, and workspace IDs are *addresses*.
 Security rests on the OIDC token GitHub signs: Anthropic verifies the signature
-against GitHub's keys, then evaluates the rule's CEL condition
-(`repository_owner == "meridianlabs-ai"`) against the *verified* claims. A
-stranger copying the IDs into their own repo presents a token whose
-`repository_owner` is their org → rejected. The other half of the trust
-boundary is claude-code-action's own check that the triggering user has write
-access (so a stranger's `@claude` on a public-repo issue does nothing).
+against GitHub's keys, then evaluates the rule's CEL condition against the
+*verified* claims. A stranger copying the IDs into their own repo presents a
+token whose `repository_owner` is their org → rejected. The other half of the
+trust boundary is claude-code-action's own check that the triggering user has
+write access (so a stranger's `@claude` on a public-repo issue does nothing).
+
+The condition also names the workflows that may use the rule (decision:
+Ransom, 2026-09-30; applied 2026-10-01). Before that it was
+`repository_owner == "meridianlabs-ai"` alone, so any Meridian workflow with
+`id-token: write` could mint tokens in the "Claude Code Agent" workspace. It
+now keeps the owner condition and also requires one of:
+
+- `claims.job_workflow_ref` is one of this repo's four reusable workflows at
+  `refs/heads/main`: `claude.yml`, `claude-review.yml`, `claude-auto.yml`,
+  `claude-auto-review.yml`. That covers every caller's stub, since the
+  exchange runs inside the reusable workflow's job.
+- `claims.workflow_ref` is one of the three direct callers at
+  `refs/heads/main`: inspect_flow `inspect-ai-main-failure.yml` and
+  `inspect-update.yml`, ts-mono `dependabot-fix.yml`.
+
+Each list is matched exactly. So a renamed reusable workflow, a stub that
+calls one at a ref other than `main`, and a new direct caller are all refused
+until the rule is changed (AGENTS.md → Adding or changing a workflow).
 
 ### Debugging history (so the failure modes are recognizable)
 
@@ -130,7 +147,7 @@ distinct signature:
 - **Subject pattern wildcard** (`repo:meridianlabs-ai/*`) was suspected to not
   match multi-segment subjects; we moved the rule to a **CEL expression**
   (`repository_owner == "meridianlabs-ai"`) which is also the cleaner org-wide
-  constraint regardless.
+  constraint regardless. (Narrowed to named workflows on 2026-10-01, above.)
 
 Lesson encoded in the workflows: a "Surface agent errors" post-step reads
 `is_error` from the run's local `claude-execution-output.json` (e.g. a model
@@ -2094,7 +2111,10 @@ The intended Slack story, mostly off-the-shelf:
    extend access as repos are onboarded.
 2. **Workload Identity Federation rule** in the Anthropic Console → Workload
    identity. Issuer: GitHub Actions OIDC. Match: CEL
-   `repository_owner == "meridianlabs-ai"`. Target service account
+   `repository_owner == "meridianlabs-ai"`, and `job_workflow_ref` one of this
+   repo's four reusable workflows or `workflow_ref` one of the three direct
+   callers, all at `refs/heads/main` (since 2026-10-01; the list is under Why
+   the IDs aren't secrets). Target service account
    `claude-code-agent` (`svac_01RL4wYD7ikbypwYKf4wFojv`), which **must be a
    member of** the "Claude Code Agent" workspace (`wrkspc_01RKCQ5DTPBatQ7kHLkaEueD`).
    Org id `be5d0086-bc43-45d2-9184-20ecdd647aa7`, rule `fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y`.

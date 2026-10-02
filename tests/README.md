@@ -385,6 +385,12 @@ Testing a change).
   reported, never forced; the push needs `maintainerCanModify` and a HEAD
   built on the approved commit; the primary clone and a branch worktree
   are refused.
+- `test_merge_queue.py` — the merge queue's lookup (`SKILL.md` section 1),
+  lifted and run against a stub `gh` serving two GraphQL pages: the TSV
+  lists the Merge-stage items from every page, a failed page fails the
+  block, and the query pages the board 100 items at a time with only the
+  Stage, linked-PR and content fields (issue and PR cards), never
+  `gh project item-list`.
 - `test_checks_at_head.py` — the merge queue's deferral of External PR
   trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
   Claude Security 4122327 criterion 2): the decision on canned payloads
@@ -790,9 +796,10 @@ Testing a change).
   prints lengths, never values. The OIDC exchange probe
   (design/untrusted-agent-job.md → Testing): each probe agent job requests
   an OIDC token exactly when the real one does (both, since step 7) and
-  runs `app_token_exchange_probe.sh` before its scan (on a dispatch from
-  main the Claude job `minted` and the codex job `refused`, `any`
-  elsewhere); the script, against a stub `curl`, revokes a minted token
+  runs `app_token_exchange_probe.sh` before its scan (both `refused` on a
+  dispatch from main, since the Claude GitHub App's uninstall, and `any`
+  elsewhere); the script, against a stub `curl`, reports a refusal with
+  its reason, revokes a minted token
   at once, prints no token outside a mask command, counts an outage (no
   answer, 5xx, a token-less 2xx) as neither mint nor refusal, and fails on
   the unexpected outcome or a failed revocation.

@@ -25,9 +25,8 @@ probe keeps their shape, so these checks hold the two together:
 - each probe agent job requests an OIDC token exactly when the real one
   does (both, for their model credential's federation since step 7 of
   design/untrusted-agent-job.md) and runs the OIDC exchange probe before
-  its scan, expecting a minted App token in the Claude job on a dispatch
-  from main and a refusal in the codex job there, since the codex jobs get
-  `id-token: write` back only after the App is uninstalled (elsewhere the
+  its scan, expecting a refusal in both on a dispatch from main, since the
+  Claude GitHub App is uninstalled (step 6 of that design; elsewhere the
   exchange refuses the event or the changed workflow, and the outcome is
   only recorded); the probe script, run against a
   stub curl, revokes a minted token at once, prints no token, counts an
@@ -192,8 +191,10 @@ def test_the_probe_agent_jobs_request_oidc_like_the_real_ones(name):
 
 def test_each_probe_agent_job_runs_the_exchange_probe_before_its_scan():
     probe = jobs(workflow(PROBE))
-    on_dispatch = "${{{{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && '{}' || 'any' }}}}"
-    for job, expect in (("agent", on_dispatch.format("minted")), ("agent-codex", on_dispatch.format("refused"))):
+    # Since the App's uninstall (step 6) a dispatch from main must be
+    # refused; an outage there fails, as it is no evidence either way.
+    dispatch_from_main = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'refused' || 'any' }}"
+    for job, expect in (("agent", dispatch_from_main), ("agent-codex", dispatch_from_main)):
         runs = [s for s in steps(probe[job]) if "app_token_exchange_probe.sh" in s]
         assert len(runs) == 1 and f"        run: bash tests/app_token_exchange_probe.sh {expect}\n" in runs[0], job
         assert steps(probe[job]).index(runs[0]) == len(steps(probe[job])) - 2, job
@@ -260,6 +261,12 @@ def test_exchange_probe_fails_when_the_revocation_fails(tmp_path):
 
 
 @pytest.mark.parametrize("status, body, detail", [
+    # What a dispatch from main has been answered since the App's uninstall
+    # (run 36925108261, 2026-10-01).
+    ("401", '{"error":{"message":"Claude Code is not installed on this repository. Please install the '
+            'Claude Code GitHub App at https://github.com/apps/claude"}}',
+     "exchange HTTP 401: Claude Code is not installed on this repository. Please install the "
+     "Claude Code GitHub App at https://github.com/apps/claude"),
     ("401", '{"error":{"message":"Workflow validation failed"}}', "exchange HTTP 401: Workflow validation failed"),
     ("404", '{"message":"no installation\\n\\u001b[31m"}', "exchange HTTP 404: no installation[31m"),
 ])

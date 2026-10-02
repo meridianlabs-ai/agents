@@ -230,6 +230,14 @@ take effect on every repo's next run.
   as on the codex path. The runner keeps its sudo in both (the reclaims
   need it); the agent's uid never has it, and the Claude launcher checks
   that before the action step and again inside the agent's namespace.
+  This uid machinery (the agent user, the reclaims, the kill loops, the
+  PATH checks) is no longer the boundary on the Claude jobs: since the
+  Claude GitHub App's uninstall (2026-10-01) a Claude job holds nothing
+  the agent may not have, so a runner compromise there gains nothing. It
+  stays as defence in depth and hygiene (it makes the bundle and landing
+  files the agent's final state), so keep the rules above anyway. The same
+  holds on the codex jobs since step 7 of design/untrusted-agent-job.md:
+  their runner holds no model key, only the federated OpenAI credential.
   Once the agent user exists the runner writes nothing into the workspace
   until the reclaim: prompt files go to `$RUNNER_TEMP`, a `settings` file
   is read before the user is created, and `.git/info/exclude` is appended
@@ -258,14 +266,34 @@ is in [THREAT_MODEL.md](THREAT_MODEL.md).
 - No secret of the machine account, and no other secret this repository
   controls, in any job that runs an agent or code from a checkout the org
   does not fully control. Not in `env:`, not as an action input, not through
-  a composite. The model credential and the Claude action's own token are
-  the known exceptions. The model credential is workload identity
-  federation only: Anthropic's, and OpenAI API Platform's for the codex
-  jobs (a project service-account token exchanged from the job's OIDC
-  token, at most an hour and never beyond it, held by the
-  `openai-wif-proxy` forwarder). No long-lived model key is referenced by
+  a composite. The model credential is the one known exception, and it is
+  workload identity federation only: Anthropic's, and OpenAI API
+  Platform's for the codex jobs (a project service-account token exchanged
+  from the job's OIDC token, at most an hour and never beyond it, held by
+  the `openai-wif-proxy` forwarder; step 7 of
+  design/untrusted-agent-job.md). No long-lived model key is referenced by
   any job. How an agent job provisions is under "One untrusted job per
-  engine" above.
+  engine" above. Every claude-code-action step
+  passes `github_token: ${{ github.token }}`, and a job requests
+  `id-token: write` only where it uses Workload Identity Federation. The
+  Claude GitHub App is not installed on Meridian repositories (uninstalled
+  2026-10-01, step 6 of that design), and THREAT_MODEL.md's guarantees
+  rest on that: with it installed, any job with `id-token: write` could
+  mint its write token. A new OIDC
+  trust, whether a cloud role, a publisher or a model provider, pins
+  `job_workflow_ref` or its own workflow file and never matches on
+  `repository_owner` alone.
+- The Anthropic federation rule (`fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y`) admits
+  only the workflows it names, each at `refs/heads/main`: this repo's four
+  reusable workflows by `job_workflow_ref`, and the three direct callers
+  (inspect_flow `inspect-ai-main-failure.yml` and `inspect-update.yml`,
+  ts-mono `dependabot-fix.yml`) by `workflow_ref` (decision: Ransom,
+  2026-09-30; applied 2026-10-01; design/architecture.md → Why the IDs
+  aren't secrets). A new workflow that calls claude-code-action directly
+  needs its own entry in the rule, made by an org admin in the Anthropic
+  Console. Renaming a reusable workflow, or calling one at a ref other than
+  `main`, gets its token exchange refused until the rule is changed to
+  match.
 - No `${{ inputs.* }}`, event text or step output inside a `run:` block; pass
   it through `env:` and expand it as a quoted variable.
   The skills under `skills/` that a maintainer's local agent runs with their
