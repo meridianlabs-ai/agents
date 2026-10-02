@@ -1844,6 +1844,34 @@ THREAT_MODEL.md text that its change makes true.
        `openai-wif-canary.yml` itself for the wrong-event case. The results go under this step
        in a follow-up PR.
 
+     Results (2026-10-02, #199 merged as 2761962):
+     - Engine isolation canary dispatched from `main`:
+       [run 37054028907](https://github.com/meridianlabs-ai/agents/actions/runs/37054028907),
+       success. Both pipeline-probe agent jobs printed `refused` for the
+       Claude App exchange (HTTP 401, not installed).
+     - `openai-wif-canary.yml` on `workflow_run` after it:
+       [run 37054359854](https://github.com/meridianlabs-ai/agents/actions/runs/37054359854),
+       success. A job in no reusable workflow, another reusable workflow and
+       a wrong audience were refused; claude-review.yml's probe with the
+       Meridian audience was exchanged, so the service account ID as the
+       dashboard gave it (`user-4vdBIc98XKYif77VbHOkmScs`) is accepted.
+     - `openai-wif-canary.yml` dispatched from `main`:
+       [run 37054433870](https://github.com/meridianlabs-ai/agents/actions/runs/37054433870),
+       success. Every probe was refused, the Meridian audience included
+       (the mapping does not list `workflow_dispatch`).
+     - Codex `@review` on meridianlabs-ai/ts-mono#726: verification deferred
+       from this results update. The local #203 checkout and supplied review
+       feedback contain no observed outcome or run link, and this
+       credential-free review-fix job cannot trigger the check. A maintainer
+       must verify that reviewer run and record its outcome and run link;
+       step 7's verification remains incomplete until that evidence is recorded.
+     - Codex CI-fix round on #203: the deliberately failing probe triggered
+       [run 37055234306](https://github.com/meridianlabs-ai/agents/actions/runs/37055234306),
+       success. The OpenAI forwarder and `fix-codex` job succeeded; landing
+       committed the probe's removal as `11d8fb1`. The subsequent
+       [tests run 37056076774](https://github.com/meridianlabs-ai/agents/actions/runs/37056076774)
+       passed on that commit.
+
 ## Open questions
 
 None. The two left for Ransom were decided on 2026-09-29:
