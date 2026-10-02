@@ -27,6 +27,28 @@ Testing a change).
   the design review's probe manifest (one review plus 51 `issues[]`
   comments on another issue), the defaults keeping today's acceptance, and
   the four reusable land jobs passing the strict values.
+- `test_openai_wif_proxy.py` — the `openai-wif-proxy` composite's
+  forwarder (`.github/actions/openai-wif-proxy/openai_wif_proxy.py`; step 7
+  of design/untrusted-agent-job.md), run against local stub servers for
+  GitHub's OIDC endpoint, OpenAI's token endpoint and the Responses API:
+  the first exchange sends exactly the five token-exchange fields with a
+  subject token for the configured audience, and a failed one fails
+  start-up with the exchange's error and no forwarder; renewal within 60
+  seconds of expiry with a fresh subject token each time; one re-exchange
+  and one retry of the buffered body on an upstream 401; a failed renewal
+  and an upstream redirect answer 502 with fixed messages; only `POST
+  /v1/responses` is forwarded (other methods, paths, queries, absolute
+  targets, chunked or length-less bodies and bodies over 32 MB are
+  refused); the incoming Authorization is replaced; server-sent events are
+  relayed chunk by chunk and a body with a length byte for byte; no token
+  in any file, log line or response, only in mask commands; `stop` counts
+  and stops; `probe` tells a refusal from an exchange and an outage; the
+  composite's defaults are the configured IDs, its step runs on the system
+  PATH; the canaries (`openai-wif-canary.yml` and its reusable workflow)
+  each expect a refusal on the event that isolates one condition, with
+  claude-review.yml's probe as the positive control on `workflow_run`; and
+  that probe job runs only with the canary's `openai_wif_probe` input,
+  which skips the gate and so every review job.
 - `test_import_codex_final.py` — the `import-codex-final` composite's
   script (`.github/scripts/import_codex_final.py`): a regular file owned by
   the expected user is copied byte for byte; a symlink (to a runner file, or
@@ -680,9 +702,14 @@ Testing a change).
   actor; the workflow's agent steps carry no bot allow-list; and the dev stubs
   exclude both machine logins on the label path like everywhere else.
 - `test_engine_job_isolation.py` — one untrusted job per engine (Claude
-  Security findings 4628446 and 4629153): in each reusable workflow the
-  Claude job references no `OPENAI_API_KEY` and runs no codex, the codex
-  job references it only at its codex-action step, the two are selected by
+  Security findings 4628446 and 4629153): in each reusable workflow no job
+  references `OPENAI_API_KEY` and the Claude job runs no codex; the codex
+  job's codex-action step passes the fixed placeholder key and the
+  `openai-wif-proxy` step's endpoint, that step runs after the Node setup
+  and before `Create codex user` and is stopped after `Codex usage`, the
+  Surface step names its failure, and both agent jobs request `id-token:
+  write` (step 7 of design/untrusted-agent-job.md); this repository's stubs
+  and examples pass no OpenAI key; the two are selected by
   the gate's `engine` output at the job level and gate no step on it, the
   land job waits for both and reads no agent-job output but
   `claude_outcome`, `agent_launched` and `agent_outcome` (no agent job
@@ -768,11 +795,11 @@ Testing a change).
   schedule beside its push and dispatch triggers, and the stand-in action
   prints lengths, never values. The OIDC exchange probe
   (design/untrusted-agent-job.md → Testing): each probe agent job requests
-  an OIDC token exactly when the real one does and runs
-  `app_token_exchange_probe.sh` before its scan (Claude job `refused` on a
+  an OIDC token exactly when the real one does (both, since step 7) and
+  runs `app_token_exchange_probe.sh` before its scan (both `refused` on a
   dispatch from main, since the Claude GitHub App's uninstall, and `any`
-  elsewhere; codex job `refused`); the script, against a stub `curl`, reports
-  a refusal with its reason, revokes a minted token
+  elsewhere); the script, against a stub `curl`, reports a refusal with
+  its reason, revokes a minted token
   at once, prints no token outside a mask command, counts an outage (no
   answer, 5xx, a token-less 2xx) as neither mint nor refusal, and fails on
   the unexpected outcome or a failed revocation.

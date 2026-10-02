@@ -1,0 +1,96 @@
+name: openai-wif-proxy
+description: >-
+  The codex jobs' OpenAI credential (design/untrusted-agent-job.md → Codex
+  jobs: OpenAI API Platform workload identity federation). openai/codex-action's
+  proxy reads one static key at start and accepts only letters, digits, `-`
+  and `_`, so it cannot hold an exchanged token, which expires within the
+  hour. This composite starts, as `runner`, a forwarder
+  (`openai_wif_proxy.py`, stdlib only) that exchanges the job's GitHub OIDC
+  token for a short-lived OpenAI service-account token, renews it with a
+  fresh OIDC token before it expires, and forwards codex-action's proxy's
+  `POST /v1/responses` to api.openai.com with that token. The codex-action
+  step gets a fixed placeholder as `openai-api-key` and this step's
+  `endpoint` output as `responses-api-endpoint`; the forwarder drops the
+  placeholder. The token stays in the forwarder's memory: never in a file, a
+  log or a response.
+
+  `mode: start` (the default) runs the first exchange in the step and fails
+  it with the exchange's error when that fails, so codex never starts
+  without a credential; then the forwarder serves on 127.0.0.1 in its own
+  session until `mode: stop` or the end of the job. Run it after `Set up
+  Node for codex-action` and before `Create codex user`, in a job with
+  `id-token: write`. `mode: stop` writes the forwarder's counts (requests,
+  renewals, refusals) to the job summary and stops it. `mode: probe` is the
+  canaries' single exchange, with `expect` the outcome it must see.
+
+  The three IDs are addresses, not secrets, like the Anthropic WIF IDs, and
+  their one copy is the defaults below: the four reusable workflows pass
+  none of them. The OpenAI mapping matches `iss`, `aud`, `repository_owner`,
+  `repository_owner_id`, and two derived booleans: `job_workflow_ref` is one
+  of the four reusable workflows at `refs/heads/main`, and `event_name` is
+  one the stubs use. Adding an agents workflow or a trigger event means
+  editing the identity provider's transforms, not the mapping. Referenced
+  fully-qualified (meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main);
+  no post step.
+
+inputs:
+  mode:
+    description: "`start` (default), `stop` or `probe`."
+    required: false
+    default: start
+  identity-provider-id:
+    description: The OpenAI identity provider for GitHub Actions OIDC tokens.
+    required: false
+    default: idp_1158bc670035bcb6c1f79de4
+  service-account-id:
+    description: >-
+      The `agents-ci` project's service account, as the OpenAI dashboard
+      shows it. If the exchange refuses this form, the API's form is
+      probably `svc_acct_...`; this default is the one line to change.
+    required: false
+    default: user-4vdBIc98XKYif77VbHOkmScs
+  audience:
+    description: >-
+      The audience the GitHub OIDC token is requested for. The mapping
+      matches exactly this value; the canaries pass a wrong one.
+    required: false
+    default: openai-wif:meridianlabs-ai
+  expect:
+    description: "`probe` mode: `refused`, `exchanged` or `any`."
+    required: false
+    default: ""
+
+outputs:
+  endpoint:
+    description: >-
+      `start` mode: `http://127.0.0.1:<port>/v1/responses`, for
+      codex-action's `responses-api-endpoint`.
+    value: ${{ steps.run.outputs.endpoint }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        IDP: ${{ inputs.identity-provider-id }}
+        SVC: ${{ inputs.service-account-id }}
+        AUDIENCE: ${{ inputs.audience }}
+        EXPECT: ${{ inputs.expect }}
+        SCRIPT: ${{ github.action_path }}/openai_wif_proxy.py
+      run: |
+        set -euo pipefail
+        # The root-owned system directories only: in `stop` mode this runs
+        # after codex (AGENTS.md → the job PATH is part of the boundary).
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin
+        # Runner-only (the script creates it 0700): the forwarder's pid and
+        # log. Never the token.
+        state="$RUNNER_TEMP/openai-wif"
+        ids=(--identity-provider-id "$IDP" --service-account-id "$SVC" --audience "$AUDIENCE")
+        case "$MODE" in
+          start) python3 "$SCRIPT" serve --state-dir "$state" "${ids[@]}" ;;
+          stop)  python3 "$SCRIPT" stop --state-dir "$state" ;;
+          probe) python3 "$SCRIPT" probe --expect "$EXPECT" "${ids[@]}" ;;
+          *) echo "::error::openai-wif-proxy: mode must be start, stop or probe, not '$MODE'"; exit 1 ;;
+        esac

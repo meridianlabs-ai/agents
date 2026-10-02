@@ -217,9 +217,10 @@ The verbs above default to Claude Code. Labeling an issue or PR
 **`engine:codex`** routes its runs — dev agent, reviewer, and both @auto
 loops — to OpenAI Codex instead; removing the label switches back on the
 next run. Same triggers, same markers, same board tracking. Requirements:
-the repo needs the `OPENAI_API_KEY` org secret and the `engine:codex`
-label created (`gh label create engine:codex -c 8250DF -d "route agent
-runs to Codex"`). Codex v1 differences: review findings arrive as one
+the repo needs the `engine:codex` label (`gh label create engine:codex -c
+8250DF -d "route agent runs to Codex"`) and no OpenAI secret: the codex
+jobs get a short-lived OpenAI token from the job's GitHub OIDC token, the
+same way Claude authenticates. Codex v1 differences: review findings arrive as one
 summary comment (no inline comments; codex fix rounds do resolve the
 Claude reviewer's inline threads they report as addressed), and
 external proxy reviews always use Claude. Codex reviews run tests to

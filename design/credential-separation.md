@@ -51,10 +51,9 @@ differ; the exceptions are listed there, not assumed away here.
   `id-token: write`, is not installed on Meridian repositories since
   2026-10-01 (step 6 of [untrusted-agent-job.md](untrusted-agent-job.md);
   section 3.5). So the job as a whole, its `runner` and root included, is
-  untrusted and worth no more than the agent. The codex jobs are the
-  exception until that design's step 7: they hold `OPENAI_API_KEY`, which
-  codex reaches only through codex-action's proxy, so there the agent
-  user's boundary still keeps the key from the agent.
+  untrusted and worth no more than the agent. Since that design's step 7
+  this holds for the codex jobs too: they reference no model key, and
+  their OpenAI credential is federated like Anthropic's (section 3.5).
 - **I2. Every write the agent asks the machine account for happens in a
   landing job.** Pushes,
   PR creation, comments and review replies, thread resolutions, issue
@@ -147,8 +146,9 @@ gate   (trusted)    trigger check by login or permission lookup; the pre-agent
                     action); the codex-home reset (every codex process
                     killed, ~codex/.codex re-created); codex, the reclaim
                     and the deterministic commit; the read-only job token
-                    and OPENAI_API_KEY at the codex-action step — the one
-                    job of the workflow that references it.
+                    and `id-token: write` for the OpenAI exchange
+                    (`openai-wif-proxy`, as runner, before the codex user
+                    exists); references no secret.
   -> land  (trusted, fresh runner; needs both agent jobs)
                     mints its own token; downloads the artifact; validates
                     the manifest; pushes the bundle; opens or adopts the PR;
@@ -171,7 +171,10 @@ called workflow is not documented; the split makes the Claude job's YAML
 reference no key, which is the documented condition for a secret not to be
 delivered, the hosted canary in section 6 measures per-job scoping in this
 gate/agent/land shape (App secrets included), and section 7 records the
-remaining uncertainty.
+remaining uncertainty. Since step 7 of
+[untrusted-agent-job.md](untrusted-agent-job.md) no job references the key:
+the codex jobs federate. The split stays for its other reasons (one agent
+user and one boundary shape per job).
 
 The gate exists because some writes must happen before the agent runs (the
 acknowledgement, the stage move, the loop's attempt counter), and those are
@@ -471,11 +474,12 @@ human step.
 - **The job token, read-only.** In the four reusable workflows every agent
   job's `permissions:` block is
   `contents: read`, `pull-requests: read`, `issues: read` and
-  `actions: read`, plus `id-token: write` on the Claude jobs, for Workload
-  Identity Federation. The codex jobs have requested no OIDC token since
-  2026-09-30: nothing in them uses one, and with it a runner compromise
-  there could mint a Claude App token ([untrusted-agent-job.md](untrusted-agent-job.md)
-  → Stop trusting `claude[bot]`). The checkout runs on it with
+  `actions: read`, plus `id-token: write` on both engines' jobs, for
+  workload identity federation. The codex jobs requested no OIDC token
+  from 2026-09-30, when a runner compromise there could have minted a
+  Claude App token with one ([untrusted-agent-job.md](untrusted-agent-job.md)
+  → Stop trusting `claude[bot]`), until that design's step 7 restored it
+  for the OpenAI exchange, after step 6 uninstalled the App. The checkout runs on it with
   `persist-credentials: false`; the three writing workflows assert right
   after that `http.<server>/.extraheader` is empty
   (`assert-no-persisted-credential`). The `sync-branch` base merge fetches
@@ -519,11 +523,17 @@ human step.
   "meridianlabs-ai"` and, since 2026-10-01, only the four reusable
   workflows and three direct callers it names, at `refs/heads/main`
   (architecture.md → Why the IDs aren't secrets); there is no API key.
-  The codex engine has no such
-  exchange, so `OPENAI_API_KEY` is the one secret an agent job names — the
-  codex job, at its codex-action step, and no other job (section 3.1): the
-  Claude job's YAML references it nowhere, so a Claude-engine run's job
-  message never carries it. The Claude CLI performs the Workload Identity
+  The codex jobs use OpenAI API
+  Platform workload identity federation (step 7 of
+  [untrusted-agent-job.md](untrusted-agent-job.md)): the `openai-wif-proxy`
+  step, as `runner` and before the codex user exists, exchanges the job's
+  OIDC token for a short-lived token of a service account in a
+  spend-capped CI project, under one mapping that matches the four
+  reusable workflows at `refs/heads/main` and the stubs' events. A
+  forwarder on loopback holds it in memory, renews it before it expires
+  and sends codex-action's proxy's requests to api.openai.com with it, so
+  codex can use the credential and never sees it. No job references
+  `OPENAI_API_KEY`. The Claude CLI performs the Workload Identity
   exchange itself, so `claude-agent` reads the audience-bound OIDC JWT
   (through a named-user ACL on the action's identity-token file) and caches
   the Anthropic token it yields in its own config dir; the post-agent
@@ -534,7 +544,7 @@ human step.
   recipe under `sudo -u codex -H` after `create-codex-user`, never the
   caller's `claude-setup` composite as the runner, so a hostile build hook
   or action in a head the pipeline itself authored runs with codex's
-  boundary, not ahead of the key (finding 4628446).
+  boundary, not as `runner` (finding 4628446).
 - **The Actions runtime token, cache-read-only.** The runner gives every
   node action of the job the runtime token (the same value as the OIDC
   request token), and code running as `runner` can recover it from the job's
@@ -758,8 +768,9 @@ A caller repository enables an agent by copying a stub from `examples/` into
 `.github/workflows/`. The stub:
 
 - Passes the machine account's two org secrets, `MARVIN_APP_CLIENT_ID` and
-  `MARVIN_APP_PRIVATE_KEY`, and optionally `OPENAI_API_KEY`, as explicit
-  one-key entries. Never `secrets: inherit`: the reusable workflow is pinned
+  `MARVIN_APP_PRIVATE_KEY`, as explicit one-key entries (an `OPENAI_API_KEY`
+  entry is no longer needed: the reusable workflows still declare it, and
+  no job reads it). Never `secrets: inherit`: the reusable workflow is pinned
   to a mutable `@main` and consumes only what is named. The org admin grants
   both secrets to the repository and adds it to the app's installation; a
   repo without them runs the dev agent with the `github-actions[bot]`
@@ -805,9 +816,8 @@ results against the invariant each one tests.
   run the lifted `run:` scripts against a stub `gh` and check that every
   trust decision is by login or permission, fail-closed (I4).
 - `grep -n 'secrets\.' .github/workflows/<file>` must hit only the
-  `workflow_call` declarations, the `gate` job, the `land` job and the
-  codex job's codex-action step (`openai-api-key: ${{
-  secrets.OPENAI_API_KEY }}`); the Claude job hits nothing (I1, I2;
+  `workflow_call` declarations, the `gate` job and the `land` job; neither
+  agent job hits anything (I1, I2;
   `test_engine_job_isolation.py` checks this, the job-level engine
   selection, the land job's `needs`, and that the codex job runs no
   `./`-local action and provisions with `user: codex` between
@@ -886,8 +896,10 @@ results against the invariant each one tests.
   mint step's shape, through the stand-in action in
   `tests/fixtures/secret-input`), its `agent` and `agent-codex` jobs `need`
   the gate and are selected by its `engine` output at the job level, the
-  Claude job referencing nothing and the codex job the OpenAI key at a step
-  that runs, and every job ends with the root memory scan.
+  Claude job referencing nothing and, until step 7 of
+  untrusted-agent-job.md, the codex job the OpenAI key at a step that runs
+  (since then it references nothing either, and B, still passed, must
+  reach neither agent job), and every job ends with the root memory scan.
   `tests/test_secret_delivery_canary.py` keeps each job's secret references,
   the workflow's secret declarations and the job selection equal to the
   four reusable workflows', so the measurement stands for them. Run on
@@ -1010,9 +1022,10 @@ results against the invariant each one tests.
   share a workflow file with the agent jobs. What the canary does not do is
   scan a real agent run: its jobs are stand-ins with the same references,
   held to the real files by `tests/test_secret_delivery_canary.py`, and a
-  real run's memory is never dumped for real secret values. The stubs keep passing
-  the key to every reusable workflow (the declaration is kept for backward
-  compatibility: a stub naming an undeclared secret fails to load). What
+  real run's memory is never dumped for real secret values. Since step 7 of
+  untrusted-agent-job.md no job references the key, and the stubs stop
+  passing it (the declaration is kept for backward compatibility: a stub
+  naming an undeclared secret fails to load). What
   remains is that this is the platform's current behaviour, not a contract:
   the canary runs weekly on `main` (decision: Ransom, 2026-09-23 — no push
   here would reveal a platform change), on every push that touches the

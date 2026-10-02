@@ -308,8 +308,8 @@ job on a fresh runner**, where nothing the agent job did can reach it:
 ```
 gate job   (trusted: trigger check + pre-agent marvin writes; job token + the machine account's token, minted here; no checkout of PR code)
   -> agent job  (untrusted: checkout, provision, agent; job token ONLY; commits locally; emit-landing)
-                 — since 2026-09-22 one such job per engine, the gate selecting which runs; OPENAI_API_KEY is
-                 named only in the codex job (design/codex-engine.md → One job per engine)
+                 — since 2026-09-22 one such job per engine, the gate selecting which runs; no job names
+                 OPENAI_API_KEY since the codex jobs federate (design/untrusted-agent-job.md, step 7)
   -> land job   (trusted: fresh runner; mints its own token; downloads the artifact; validates; pushes, posts, resolves, stages as marvin)
 ```
 

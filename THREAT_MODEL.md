@@ -29,33 +29,41 @@ text are checked by the tests under `tests/`.
   machine account or of any App reaches it. Every claude-code-action step
   passes the job token as `github_token`, so the action does not ask for a
   Claude App token either (design/untrusted-agent-job.md, steps 1, 4 and
-  6). So a compromise of anything in a Claude job, its `runner` and root
-  included, gains nothing the agent lacks. The codex jobs are the exception
-  until step 7 of that design: their runner holds `OPENAI_API_KEY`, which
-  codex reaches only through codex-action's proxy, so there the agent-user
-  boundary below is still what keeps the key from the agent.
+  6). So a compromise of anything in an agent job, its `runner` and root
+  included, gains nothing the agent lacks. That holds for the codex jobs
+  since step 7 of that design: their model credential is federated too
+  (the `OPENAI_API_KEY` bullet below).
 - No job of the agent workflows can save to the GitHub Actions cache: every
   reusable workflow declares `cache-mode: read`, which the platform enforces
   on the job's token, so nothing an agent does or a caller's setup nests can
   place content in a cache a trusted workflow restores (Claude Security
   finding 4629157; design/agent-cache-scope.md).
-- A job that runs the Claude agent references no `OPENAI_API_KEY`. Each
-  reusable workflow runs each engine in a job of its own (`agent` and
+- No job references `OPENAI_API_KEY`. The codex jobs authenticate to
+  OpenAI by API Platform workload identity federation
+  (design/untrusted-agent-job.md, step 7): the `openai-wif-proxy` step
+  exchanges the job's GitHub OIDC token for a short-lived token of a
+  service account in a spend-capped CI project, holds it in a runner-side
+  forwarder that renews it before it expires, and never writes it to a file
+  or a log. OpenAI's mapping matches only the four reusable workflows at
+  `refs/heads/main`, on the events the stubs use, for the Meridian audience
+  and organization; adding an agents workflow or a trigger event means
+  editing the identity provider's transforms, not the mapping. Each
+  reusable workflow still runs each engine in a job of its own (`agent` and
   `agent-codex`, `review` and `review-codex`, `fix` and `fix-codex`), the
   trusted gate's `engine` output selecting exactly one at the job level,
-  which GitHub evaluates before dispatching a job. A secret a step
+  which GitHub evaluates before dispatching a job: a secret a step
   references is delivered to the job's runner whether or not that step's
   `if:` ends up true (the runner builds its `secrets` context from the job
-  message before any step runs), so the codex key is referenced only in the
-  codex job's codex-action step and a Claude-engine run's job message never
-  carries it (Claude Security finding 4629153). Measured, not assumed: the
-  hosted canary (design/credential-separation.md → section 6) shows a
+  message before any step runs), which is why the key, while the codex jobs
+  used one, was referenced in the codex job alone (Claude Security finding
+  4629153). Measured, not assumed: the hosted canary
+  (design/credential-separation.md → section 6) shows a
   referenced-but-skipped secret in the runner's memory and none in a job
   that references nothing, although the caller passed it and a sibling job
   referenced it — delivery is scoped per job. The same canary, in the
   agent workflows' own gate/agent/land shape, finds neither the App
-  secrets the gate and land jobs reference nor the OpenAI key in the
-  Claude agent job's runner memory.
+  secrets the gate and land jobs reference nor the OpenAI key a stub may
+  still pass in either agent job's runner memory.
 - In an agent job of either engine nothing from the checked-out tree
   executes as the runner: a caller's `claude-setup` action is not run, and
   the shared provisioning recipe (uv and a dev-install of the checkout, the
@@ -97,8 +105,8 @@ text are checked by the tests under `tests/`.
   since the App's uninstall: the job holds nothing the agent may not have
   (the first bullet), so a step from the agent user to `runner` gains
   nothing, and the reclaims keep the bundle and landing files the agent's
-  final state. On the codex jobs it stays a boundary until step 7 of
-  design/untrusted-agent-job.md, for `OPENAI_API_KEY`.
+  final state. The same holds on the codex jobs since step 7 of
+  design/untrusted-agent-job.md, which left them no model key.
 - A `settings` input that names a file is read only from inside the
   workspace, as a regular file of at most 64 KiB with no `..` and no
   symlink anywhere on its path, opened `O_NOFOLLOW`. Anything else fails
@@ -120,8 +128,8 @@ text are checked by the tests under `tests/`.
   stays for a caller that runs an agent as the runner, and a hosted smoke
   workflow checks it). Claude Security finding 4629153, criterion 2;
   design/architecture.md → No root for the agent uid. Like the provisioning
-  bullet above, this is defence in depth on the Claude jobs, where root holds
-  nothing the agent lacks, and a boundary on the codex jobs until step 7.
+  bullet above, this is defence in depth on both engines' jobs, where root
+  holds nothing the agent lacks.
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -218,7 +226,10 @@ text are checked by the tests under `tests/`.
 - The GitHub App has no Workflows permission, so a CI agent's commit that
   touches `.github/workflows/` fails at the push.
 - No runner-side step after a Codex run resolves a command, or its shell
-  interpreter, through a directory the codex user can write or replace. A
+  interpreter, through a directory the codex user can write or replace.
+  Since the codex jobs federate this is hygiene, not the reason a runner
+  compromise there is harmless: the runner holds no credential beyond the
+  read-only job token and the model credential. A
   job that may run codex puts nothing under its workspace on
   `GITHUB_PATH`; before the codex user is given write access to the
   checkout, every hop of every PATH entry (symlink targets included) and
@@ -392,10 +403,9 @@ text are checked by the tests under `tests/`.
 
   The reusable workflows' Claude jobs meet both since the Claude GitHub
   App's uninstall (2026-10-01; design/untrusted-agent-job.md → The tier-2
-  opt-in's premise). Their codex jobs hold `OPENAI_API_KEY`, the codex
-  model credential, until step 7 of that design; codex never sees the key
-  itself, so there the second condition is still the boundary that keeps
-  it from the agent. The rule is per repository, since several writers
+  opt-in's premise), and their codex jobs since step 7 of that design,
+  which replaced `OPENAI_API_KEY` with a federated OpenAI credential. The
+  rule is per repository, since several writers
   push to the same branches. **For tier 2 this is how criterion 2
   of finding 4628446 is met** (decision: Ransom, 2026-09-23, accepting the
   revised criterion): such files land without a human's approval, but

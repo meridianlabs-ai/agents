@@ -23,12 +23,12 @@ probe keeps their shape, so these checks hold the two together:
 - the canary runs weekly (off the hour) as well as on its push paths and by
   hand;
 - each probe agent job requests an OIDC token exactly when the real one
-  does (the Claude job for WIF, the codex job never) and runs the OIDC
-  exchange probe before its scan, expecting a refusal in the Claude job on
-  a dispatch from main, since the Claude GitHub App is uninstalled (step 6
-  of design/untrusted-agent-job.md; elsewhere the exchange refuses the
-  event or the changed workflow, and the outcome is only recorded) and in
-  the codex job on every run; the probe script, run against a
+  does (both, for their model credential's federation since step 7 of
+  design/untrusted-agent-job.md) and runs the OIDC exchange probe before
+  its scan, expecting a refusal in both on a dispatch from main, since the
+  Claude GitHub App is uninstalled (step 6 of that design; elsewhere the
+  exchange refuses the event or the changed workflow, and the outcome is
+  only recorded); the probe script, run against a
   stub curl, revokes a minted token at once, prints no token, counts an
   unreachable exchange, a 5xx or a token-less 2xx as neither mint nor
   refusal, and fails on the unexpected outcome or a failed revocation
@@ -87,8 +87,10 @@ def test_the_probe_references_what_the_design_says():
     probe = jobs(workflow(PROBE))
     assert set(probe) == set(PROBE_JOBS.values())
     assert secret_refs(probe["gate"]) == APP == secret_refs(probe["land"])
-    assert secret_refs(probe["agent"]) == set()
-    assert secret_refs(probe["agent-codex"]) == {OPENAI}
+    # Neither agent job references a secret: the codex jobs federate (step 7
+    # of design/untrusted-agent-job.md). The caller still passes sentinel B
+    # as the OpenAI key, as a stub may, and no job may hold it.
+    assert secret_refs(probe["agent"]) == set() == secret_refs(probe["agent-codex"])
     # The gate and land jobs reference the App secrets in job env as well as
     # at a step that runs, as claude.yml's do.
     for job in ("gate", "land"):
@@ -181,7 +183,7 @@ def test_the_probe_agent_jobs_request_oidc_like_the_real_ones(name):
     for role in ("claude", "codex"):
         wants = "id-token: write" in "\n".join(code_lines(job_permissions(real[real_jobs(name)[role]])))
         has = "id-token: write" in "\n".join(code_lines(job_permissions(probe[PROBE_JOBS[role]])))
-        assert wants == has == (role == "claude"), (name, role)
+        assert wants == has is True, (name, role)
     # A called workflow's jobs get no more than the calling job grants.
     caller = jobs(workflow(CANARY))["pipeline-probe"]
     assert "    permissions:\n      contents: read\n      id-token: write\n" in caller
@@ -192,7 +194,7 @@ def test_each_probe_agent_job_runs_the_exchange_probe_before_its_scan():
     # Since the App's uninstall (step 6) a dispatch from main must be
     # refused; an outage there fails, as it is no evidence either way.
     dispatch_from_main = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'refused' || 'any' }}"
-    for job, expect in (("agent", dispatch_from_main), ("agent-codex", "refused")):
+    for job, expect in (("agent", dispatch_from_main), ("agent-codex", dispatch_from_main)):
         runs = [s for s in steps(probe[job]) if "app_token_exchange_probe.sh" in s]
         assert len(runs) == 1 and f"        run: bash tests/app_token_exchange_probe.sh {expect}\n" in runs[0], job
         assert steps(probe[job]).index(runs[0]) == len(steps(probe[job])) - 2, job

@@ -254,6 +254,27 @@ on:
         required: false
         type: string
         default: ""
+      openai_wif_probe:
+        description: >-
+          For openai-wif-canary.yml only. Empty (the default): the reviewer
+          runs as always. `meridian-audience` or `wrong-audience`: no
+          review runs (the gate is skipped, and every other job with it);
+          the `openai-wif-probe` job requests a GitHub OIDC token for that
+          audience and asks OpenAI's token exchange for a token, expecting
+          `openai_wif_probe_expect`, and drops any token it gets. OpenAI's
+          mapping trusts the four agent workflows, so only a job in one of
+          them can show that the audience and event conditions refuse on
+          their own (design/untrusted-agent-job.md → Testing).
+        required: false
+        type: string
+        default: ""
+      openai_wif_probe_expect:
+        description: >-
+          With `openai_wif_probe`: the outcome the probe must see,
+          `refused`, `exchanged` or `any`.
+        required: false
+        type: string
+        default: refused
     secrets:
       MARVIN_APP_CLIENT_ID:
         description: >-
@@ -288,11 +309,10 @@ on:
         required: false
       OPENAI_API_KEY:
         description: >-
-          OpenAI API key for the codex engine (design/codex-engine.md).
-          Consumed ONLY by the openai/codex-action step, which runs on PRs
-          labeled engine:codex. Optional: absent, codex-labeled reviews fail
-          loudly at that step (never a silent Claude fallback, which would
-          misattribute output).
+          Unused: the codex jobs get their OpenAI credential by workload
+          identity federation (design/untrusted-agent-job.md, step 7), and
+          no job references this secret. Declared only so that a stub still
+          passing it keeps loading; stubs should stop passing it.
         required: false
 
 # Agents never write the Actions cache (Claude Security 4629157;
@@ -322,8 +342,11 @@ jobs:
   # before the agent.
   # Checks out nothing. Its outputs are the trusted context the other two
   # jobs run on (`ok` gates both; the land job's PR/issue pins come from the
-  # event payload directly, `head_ref` from trig's API lookup).
+  # event payload directly, `head_ref` from trig's API lookup). Skipped
+  # when the OpenAI canary calls this workflow for its probe job (input
+  # `openai_wif_probe`), which skips every job that needs it.
   gate:
+    if: inputs.openai_wif_probe == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -719,10 +742,9 @@ jobs:
   # UNTRUSTED, Claude engine: checks out the PR head (or the upstream head
   # in external mode), provisions, runs the agent. Names NO secret — the
   # machine account's token is absent (the invariant at the top of this
-  # file), and OPENAI_API_KEY is the codex job's alone (Claude Security
-  # finding 4629153: a secret a step references reaches the job's runner
-  # whatever the step's `if:` says, so it must not be referenced in a job
-  # the Claude agent runs in); the WIF inputs on the action step are
+  # file), nor any other (Claude Security finding 4629153: a secret a step
+  # references reaches the job's runner whatever the step's `if:` says, so
+  # none may be referenced in a job the Claude agent runs in); the WIF inputs on the action step are
   # identifiers, not secrets (AGENTS.md) — holds a job token that can write
   # nothing (contents, pull requests, issues: read — issue #114) and never
   # posts: everything that must be posted or moved afterwards, the review
@@ -2182,14 +2204,13 @@ jobs:
 
   # UNTRUSTED, codex engine: the same-repo checkout, then the codex user
   # boundary, provisioning AS that user, codex and the review preparation.
-  # The ONLY job of the workflow that names OPENAI_API_KEY (Claude Security
-  # finding 4629153: a secret a step references is delivered to the job's
-  # runner whether or not the step's `if:` ends up true — the runner builds
-  # its `secrets` context from the job message before any step runs — so the
-  # Claude job's message used to carry the codex key too; now this job is
-  # selected by the gate's engine output at the job level, which GitHub
-  # evaluates before dispatching, and a Claude-engine review never has a job
-  # message with the key in it). And the only job that runs the codex user
+  # It names no secret: the forwarder step exchanges the job's OIDC token
+  # for its OpenAI credential (design/untrusted-agent-job.md → Codex jobs:
+  # OpenAI API Platform workload identity federation). Until then it was
+  # the one job that named OPENAI_API_KEY, which is why the gate's engine
+  # output selects the job, at the job level, before GitHub dispatches it
+  # (Claude Security finding 4629153: a secret any step references reaches
+  # the job's runner). And the only job that runs the codex user
   # recipe: nothing from the checked-out tree executes as the runner here
   # (finding 4628446; the provisioning step's comment). The gate never
   # selects codex for external mode or a fork head, so this job has no
@@ -2214,12 +2235,17 @@ jobs:
       group: claude-review-${{ github.repository }}-${{ github.event.issue.number }}
       cancel-in-progress: true
     permissions:
-      # No id-token: write: nothing in this job requests an OIDC token, and
-      # with it a runner compromise here could mint a Claude App token
-      # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
+      # id-token: write is the OpenAI credential's: the forwarder step
+      # exchanges this job's OIDC token for a short-lived OpenAI
+      # service-account token (design/untrusted-agent-job.md → Codex jobs:
+      # OpenAI API Platform workload identity federation). Restored by step
+      # 7 of that design, after step 6 uninstalled the Claude GitHub App, so
+      # no relying party exchanges the token for more than the model
+      # credential.
       contents: read          # read code to review; cannot push
       pull-requests: read     # the diff and the thread; the review is posted by `land` from the manifest (issue #114)
       issues: read
+      id-token: write         # OpenAI workload identity federation
       actions: read
     steps:
       # On an @review comment (issue_comment) the default checkout would be
@@ -2278,6 +2304,21 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      # The OpenAI credential, as `runner` and before the codex user exists
+      # (design/untrusted-agent-job.md → Codex jobs: OpenAI API Platform
+      # workload identity federation). The composite exchanges this job's
+      # OIDC token for a short-lived OpenAI service-account token and starts
+      # a forwarder on loopback that holds it, renews it before it expires
+      # and sends codex-action's proxy's `POST /v1/responses` to
+      # api.openai.com with it. The codex-action step passes a placeholder
+      # key and this step's endpoint. A failed exchange fails this step, so
+      # codex never starts without a credential (the Surface step names it).
+      # Step id is load-bearing: the codex-action step reads its output.
+      - name: Start the OpenAI forwarder
+        id: openaiwif
+        if: needs.gate.outputs.ok == 'true'
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+
       # Codex engine (design/codex-engine.md): the sandbox has no GitHub
       # credentials, so the agent cannot post — it emits a
       # structured review (schema below) and the next step posts it with the
@@ -2292,8 +2333,8 @@ jobs:
       # inspect_ai#389, 2026-08-31). Until fixed upstream, run codex as a
       # dedicated unprivileged user — the README's other blessed strategy for
       # permission profiles: containment is the user boundary plus the
-      # profile sandbox, and the API key stays out of reach (codex has no
-      # sudo). The user/grant recipe is the shared create-codex-user
+      # profile sandbox, and the forwarder's OIDC request token stays out
+      # of reach (codex has no sudo). The user/grant recipe is the shared create-codex-user
       # composite (same as the three landing workflows; its description
       # carries the rationale for each step): the profile here is
       # :workspace so codex can run the provisioned pytest/ruff/mypy —
@@ -2319,8 +2360,8 @@ jobs:
       # boundary exists (Claude Security finding 4628446). The Claude job
       # runs the caller's `claude-setup` composite and the fallback recipe as
       # the runner; a composite action can only run as the runner, and on
-      # this job the runner is a uid with passwordless sudo and — at the
-      # codex-action step below — OPENAI_API_KEY, neither of which the
+      # this job the runner is a uid with passwordless sudo and the OIDC request
+      # token the OpenAI forwarder uses, neither of which the
       # codex user boundary lets codex reach. The PR head this job
       # checks out may be one the pipeline itself authored from an outsider's
       # issue text (pushed and labelled by the machine account, so
@@ -2365,7 +2406,7 @@ jobs:
       # reads ~codex/.codex/config.toml (following a symlink) and writes the
       # merged file back readable by codex, so a config.toml the provisioning
       # had replaced with a link to /proc/self/environ would copy the action
-      # process's environment — the key input — into
+      # process's environment — the OIDC request token — into
       # a file codex can read. After this step nothing runs as codex and the
       # only files codex-action reads before launching codex are the ones the
       # composite wrote. A failure skips codex (the Surface step names it).
@@ -2635,7 +2676,10 @@ jobs:
         if: needs.gate.outputs.ok == 'true'
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # Not a key: a fixed value in the charset codex-action's proxy
+          # accepts. The forwarder drops it and sends the exchanged token.
+          openai-api-key: "meridian-wif-placeholder"
+          responses-api-endpoint: ${{ steps.openaiwif.outputs.endpoint }}
           safety-strategy: unprivileged-user
           codex-user: codex
           model: ${{ inputs.codex_model }}
@@ -2666,6 +2710,16 @@ jobs:
         with:
           requested-model: ${{ inputs.codex_model }}
           requested-effort: ${{ inputs.codex_effort }}
+
+      # The forwarder's counts (requests forwarded, renewals, refusals) in
+      # the job summary, then it stops: nothing after codex needs it. Runs
+      # no git and reads only the forwarder's runner-only log; best-effort.
+      - name: Stop the OpenAI forwarder
+        if: always() && steps.openaiwif.outcome == 'success'
+        continue-on-error: true
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: stop
 
       # Prepare the codex review for the land job. The loop's marker
       # contract — the review body, then the marked verdict comment — is
@@ -2746,6 +2800,7 @@ jobs:
           BASE_OUTCOME: ${{ steps.base.outcome }}
           MENTION: ${{ needs.gate.outputs.mention }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
+          OPENAIWIF_OUTCOME: ${{ steps.openaiwif.outcome }}
           CODEXHOME_OUTCOME: ${{ steps.codexhome.outcome }}
           CODEXINPUTS_OUTCOME: ${{ steps.codexinputs.outcome }}
           CODEXCTX_OUTCOME: ${{ steps.codexctx.outcome }}
@@ -2775,6 +2830,9 @@ jobs:
           if [ -z "$err" ] && [ "${CODEXHOME_OUTCOME:-}" = "failure" ]; then
             err="resetting the codex home after provisioning failed before the agent started — processes were still running as codex after repeated kills (a provisioning survivor?) or the home could not be re-created (see the job logs); nothing was attempted."
           fi
+          if [ -z "$err" ] && [ "${OPENAIWIF_OUTCOME:-}" = "failure" ]; then
+            err="exchanging this job's OIDC token for the OpenAI credential failed before codex started (the forwarder step's error names the cause: a caller job without id-token: write, a GitHub OIDC outage, or the OpenAI exchange refusing the token; see the job logs); nothing was attempted."
+          fi
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
             err="the codex user setup failed before the reviewer started (a job PATH entry inside the workspace or writable by the codex user — only the Node setup step adds to the job PATH before it, and this check makes that directory runner-only, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
           fi
@@ -2785,7 +2843,7 @@ jobs:
             err="composing the codex review context (the PR thread fetch) failed before the reviewer started — usually a transient GitHub API error (see the job logs); re-trigger to retry."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
-            err="the codex review step failed (missing OPENAI_API_KEY, a triggering actor without write access, or a codex-action error — see the job logs)."
+            err="the codex review step failed (an OpenAI credential renewal failing mid-run, a triggering actor without write access, or a codex-action error — see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEXPOST_OUTCOME:-}" = "failure" ]; then
             err="codex produced a review but preparing it for posting failed — no review or verdict reached the PR (see the job logs)."
@@ -3092,3 +3150,37 @@ jobs:
           [ -n "${MENTION:-}" ] && cc=$(printf '\n\ncc @%s' "$MENTION")
           gh issue comment "$NUM" --repo "$REPO" --body "$(printf '⚠️ The review run completed without writing a review (it likely ended its turn expecting to resume — runs cannot). Re-trigger with `@review`.%s' "$cc")" || true
           exit 1
+
+  # CANARY ONLY: runs when openai-wif-canary.yml passes `openai_wif_probe`,
+  # never on a review (the input is empty then, and the gate runs instead).
+  # Its `job_workflow_ref` is this workflow at `refs/heads/main`, which the
+  # OpenAI mapping trusts, so a refusal here comes from the audience or the
+  # event alone, and an exchange on a listed event is the positive control
+  # (design/untrusted-agent-job.md → Testing). It checks out nothing,
+  # references no secret, and drops any token it gets.
+  openai-wif-probe:
+    if: inputs.openai_wif_probe != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write         # the probe's OIDC token
+    steps:
+      - name: Refuse an unknown probe
+        if: inputs.openai_wif_probe != 'meridian-audience' && inputs.openai_wif_probe != 'wrong-audience'
+        run: |
+          echo "::error::openai_wif_probe must be meridian-audience or wrong-audience"
+          exit 1
+      - name: OpenAI exchange with the Meridian audience
+        if: inputs.openai_wif_probe == 'meridian-audience'
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: probe
+          expect: ${{ inputs.openai_wif_probe_expect }}
+      - name: OpenAI exchange with a wrong audience
+        if: inputs.openai_wif_probe == 'wrong-audience'
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: probe
+          audience: openai-wif:meridianlabs-ai-wrong-audience
+          expect: ${{ inputs.openai_wif_probe_expect }}

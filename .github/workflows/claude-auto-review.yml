@@ -290,8 +290,10 @@ on:
         required: false
       OPENAI_API_KEY:
         description: >-
-          OpenAI API key for the codex engine (design/codex-engine.md); used
-          only by fix rounds on PRs labeled engine:codex.
+          Unused: the codex jobs get their OpenAI credential by workload
+          identity federation (design/untrusted-agent-job.md, step 7), and
+          no job references this secret. Declared only so that a stub still
+          passing it keeps loading; stubs should stop passing it.
         required: false
 
 # Agents never write the Actions cache (Claude Security 4629157;
@@ -1111,9 +1113,8 @@ jobs:
 
   # UNTRUSTED: checks out the PR head, provisions, runs the agent. Names NO
   # GitHub-write secret — the machine account's token is absent (the
-  # invariant at the top of this file); the codex engine's OPENAI_API_KEY is
-  # named at its Run step
-  # because codex must hold its own key, and the WIF inputs on the action
+  # invariant at the top of this file); nor does the codex job (its OpenAI
+  # credential is federated), and the WIF inputs on the action
   # step are identifiers, not secrets (AGENTS.md). The agent commits locally
   # and never pushes or posts: the job token is read-only (permissions below),
   # the settings deny `git push` and the gh posting verbs, and everything
@@ -2017,15 +2018,14 @@ jobs:
 
   # UNTRUSTED, codex engine: the same checkout and sync as the Claude job
   # above, then the codex user boundary, provisioning AS that user, codex,
-  # the reclaim and the deterministic commit. The ONLY job of the workflow
-  # that names OPENAI_API_KEY (Claude Security finding 4629153: a secret a
-  # step references is delivered to the job's runner whether or not the
-  # step's `if:` ends up true — the runner builds its `secrets` context
-  # from the job message before any step runs — so the Claude job's message
-  # used to carry the codex key too; now this job is selected by the gate's
-  # engine output at the job level, which GitHub evaluates before
-  # dispatching, and a Claude-engine round never has a job message with the
-  # key in it). And the only job that runs the codex user recipe: nothing
+  # the reclaim and the deterministic commit. It names no secret: the
+  # forwarder step exchanges the job's OIDC token for its OpenAI credential
+  # (design/untrusted-agent-job.md → Codex jobs: OpenAI API Platform
+  # workload identity federation). Until then it was the one job that named
+  # OPENAI_API_KEY, which is why the gate's engine output selects the job,
+  # at the job level, before GitHub dispatches it (Claude Security finding
+  # 4629153: a secret any step references reaches the job's runner). And
+  # the only job that runs the codex user recipe: nothing
   # from the checked-out tree executes as the runner here (finding 4628446;
   # the provisioning step's comment).
   fix-codex:
@@ -2038,12 +2038,17 @@ jobs:
       group: claude-auto-${{ github.repository }}-pr-${{ inputs.pr_number }}
       cancel-in-progress: false
     permissions:
-      # No id-token: write: nothing in this job requests an OIDC token, and
-      # with it a runner compromise here could mint a Claude App token
-      # (design/untrusted-agent-job.md → Stop trusting claude[bot]).
+      # id-token: write is the OpenAI credential's: the forwarder step
+      # exchanges this job's OIDC token for a short-lived OpenAI
+      # service-account token (design/untrusted-agent-job.md → Codex jobs:
+      # OpenAI API Platform workload identity federation). Restored by step
+      # 7 of that design, after step 6 uninstalled the Claude GitHub App, so
+      # no relying party exchanges the token for more than the model
+      # credential.
       contents: read          # checkout, sync fetches; cannot push
       pull-requests: read     # the review reads; cannot comment or resolve
       issues: read
+      id-token: write         # OpenAI workload identity federation
       actions: read
     outputs:
       # What the land job needs from this job: whether the agent step ran
@@ -2053,7 +2058,7 @@ jobs:
       # whose sync or provisioning failed before it started). Step outcomes
       # only: nothing a PR file can forge (the Claude job's comment on the
       # same output). No skipped-step output: the refund it drove is gone.
-      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexhome.outcome == 'failure' || steps.codexfeedback.outcome == 'failure' || steps.codexcompose.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || steps.codexfix.outcome }}
+      agent_outcome: ${{ (steps.codexprep.outcome == 'failure' || steps.openaiwif.outcome == 'failure' || steps.codexuser.outcome == 'failure' || steps.codexhome.outcome == 'failure' || steps.codexfeedback.outcome == 'failure' || steps.codexcompose.outcome == 'failure' || steps.codexfix.outcome == 'failure') && 'failure' || steps.codexfix.outcome }}
     steps:
       # Check out the PR head (the gate's lookup). persist-credentials:false
       # (issue #61): checkout otherwise writes its token into .git/config for
@@ -2207,6 +2212,20 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      # The OpenAI credential, as `runner` and before the codex user exists
+      # (design/untrusted-agent-job.md → Codex jobs: OpenAI API Platform
+      # workload identity federation). The composite exchanges this job's
+      # OIDC token for a short-lived OpenAI service-account token and starts
+      # a forwarder on loopback that holds it, renews it before it expires
+      # and sends codex-action's proxy's `POST /v1/responses` to
+      # api.openai.com with it. The codex-action step passes a placeholder
+      # key and this step's endpoint. A failed exchange fails this step, so
+      # codex never starts without a credential (the Surface step names it).
+      # Step id is load-bearing: the codex-action step reads its output.
+      - name: Start the OpenAI forwarder
+        id: openaiwif
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+
       # codex-action's default safety-strategy (drop-sudo) chmods root-owned
       # service sockets under /run, breaking D-Bus -> systemd-resolved -> DNS;
       # the hosted runner then dies with "lost communication" 52-65 minutes
@@ -2214,8 +2233,8 @@ jobs:
       # inspect_ai#389, 2026-08-31). Until fixed upstream, run codex as a
       # dedicated unprivileged user — the README's other blessed strategy for
       # permission profiles: containment is the user boundary plus the
-      # profile sandbox, and the API key stays out of reach (codex has no
-      # sudo). The user/grant recipe — pre-codex .git/config and embedded-
+      # profile sandbox, and the forwarder's OIDC request token stays out
+      # of reach (codex has no sudo). The user/grant recipe — pre-codex .git/config and embedded-
       # repo snapshots for the reclaim step, the action's
       # examples/unprivileged-user.yml chown/g+rwX, the codex-owned output
       # dir under RUNNER_TEMP, git safe.directory, and network ON in the
@@ -2235,8 +2254,8 @@ jobs:
       # boundary exists (Claude Security finding 4628446). The Claude job
       # runs the caller's `claude-setup` composite and the fallback recipe as
       # the runner; a composite action can only run as the runner, and on
-      # this job the runner is a uid with passwordless sudo and — at the
-      # codex-action step below — OPENAI_API_KEY, neither of which the
+      # this job the runner is a uid with passwordless sudo and the OIDC request
+      # token the OpenAI forwarder uses, neither of which the
       # codex user boundary lets codex reach. The PR head this job
       # checks out may be one the pipeline itself authored from an outsider's
       # issue text (pushed and labelled by the machine account, so
@@ -2288,7 +2307,7 @@ jobs:
       # reads ~codex/.codex/config.toml (following a symlink) and writes the
       # merged file back readable by codex, so a config.toml the provisioning
       # had replaced with a link to /proc/self/environ would copy the action
-      # process's environment — the key input — into
+      # process's environment — the OIDC request token — into
       # a file codex can read. After this step nothing runs as codex and the
       # only files codex-action reads before launching codex are the ones the
       # composite wrote. A failure skips codex (the Surface step names it).
@@ -2447,7 +2466,10 @@ jobs:
         id: codexfix
         uses: openai/codex-action@v1
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # Not a key: a fixed value in the charset codex-action's proxy
+          # accepts. The forwarder drops it and sends the exchanged token.
+          openai-api-key: "meridian-wif-placeholder"
+          responses-api-endpoint: ${{ steps.openaiwif.outputs.endpoint }}
           safety-strategy: unprivileged-user
           codex-user: codex
           model: ${{ inputs.codex_model }}
@@ -2512,6 +2534,16 @@ jobs:
         with:
           requested-model: ${{ inputs.codex_model }}
           requested-effort: ${{ inputs.codex_effort }}
+
+      # The forwarder's counts (requests forwarded, renewals, refusals) in
+      # the job summary, then it stops: nothing after codex needs it. Runs
+      # no git and reads only the forwarder's runner-only log; best-effort.
+      - name: Stop the OpenAI forwarder
+        if: always() && steps.openaiwif.outcome == 'success'
+        continue-on-error: true
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: stop
 
       # Unresolved-merge guard (shared composite): the commit step's `git add
       # -A` would happily stage conflict markers and `git commit` would then
@@ -2757,6 +2789,7 @@ jobs:
           CODEXPREP_OUTCOME: ${{ steps.codexprep.outcome }}
           CODEXCOMPOSE_OUTCOME: ${{ steps.codexcompose.outcome }}
           CODEXUSER_OUTCOME: ${{ steps.codexuser.outcome }}
+          OPENAIWIF_OUTCOME: ${{ steps.openaiwif.outcome }}
           CODEXHOME_OUTCOME: ${{ steps.codexhome.outcome }}
           CODEX_OUTCOME: ${{ steps.codexfix.outcome }}
           CODEXRECLAIM_OUTCOME: ${{ steps.codexreclaim.outcome }}
@@ -2833,11 +2866,14 @@ jobs:
           if [ -z "$err" ] && [ "${CODEXHOME_OUTCOME:-}" = "failure" ]; then
             err="resetting the codex home after provisioning failed before the agent started — processes were still running as codex after repeated kills (a provisioning survivor?) or the home could not be re-created (see the job logs); nothing was attempted."
           fi
+          if [ -z "$err" ] && [ "${OPENAIWIF_OUTCOME:-}" = "failure" ]; then
+            err="exchanging this job's OIDC token for the OpenAI credential failed before codex started (the forwarder step's error names the cause: a caller job without id-token: write, a GitHub OIDC outage, or the OpenAI exchange refusing the token; see the job logs); nothing was attempted."
+          fi
           if [ -z "$err" ] && [ "${CODEXUSER_OUTCOME:-}" = "failure" ]; then
             err="the codex user setup failed before the agent started — no fix was attempted this round (a job PATH entry inside the workspace or writable by the codex user — only the Node setup step adds to the job PATH before it, and this check makes that directory runner-only, so most likely a runner-image change — or adduser/usermod failing; see the job logs)."
           fi
           if [ -z "$err" ] && [ "${CODEX_OUTCOME:-}" = "failure" ]; then
-            err="the codex fix step failed (missing OPENAI_API_KEY, or a codex-action error — see the job logs)."
+            err="the codex fix step failed (an OpenAI credential renewal failing mid-run, or a codex-action error — see the job logs)."
           fi
           # A reclaim that did not succeed SKIPS the guard, the commit step
           # and every later git call (the manifest composer skips git and

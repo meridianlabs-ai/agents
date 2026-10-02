@@ -25,18 +25,19 @@
 #                          for the OpenAI key), a gate and a land job that
 #                          reference the App secrets in job env and as
 #                          action inputs, and the two agent jobs selected by
-#                          the gate's `engine` output. Expected: the Claude
-#                          agent job holds no App secret and no OpenAI key,
-#                          the codex job the OpenAI key alone (finding
-#                          4629153, fix criterion 3). Each agent job also
-#                          asks the Claude App token exchange for a token
-#                          as `runner` (design/untrusted-agent-job.md →
-#                          Testing): on a dispatch from main the Claude job
-#                          is refused, since the App is not installed
-#                          (uninstalled 2026-10-01; other runs only record
-#                          the outcome: the exchange refuses push events and
-#                          changed workflow files); the codex job, with no
-#                          `id-token: write`, cannot ask.
+#                          the gate's `engine` output. Expected: neither
+#                          agent job holds an App secret or the OpenAI key
+#                          (finding 4629153, fix criterion 3; no job
+#                          references the key since the codex jobs
+#                          federate, design/untrusted-agent-job.md step 7).
+#                          Each agent job also asks the Claude App token
+#                          exchange for a token as `runner`
+#                          (design/untrusted-agent-job.md → Testing): on a
+#                          dispatch from main both are refused, since the
+#                          App is not installed (uninstalled 2026-10-01;
+#                          other runs only record the outcome: the
+#                          exchange refuses push events and changed
+#                          workflow files).
 #   provisioning-boundary  the codex-side boundary of THIS revision, with the
 #                          real codex user, real sudo and the composites
 #                          lifted from the checkout (not `@main`, so a branch

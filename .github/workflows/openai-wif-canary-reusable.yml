@@ -1,0 +1,26 @@
+# The `other-reusable-workflow` case of openai-wif-canary.yml: a reusable
+# workflow of this repository that is not one of the four agent workflows,
+# so its jobs' `job_workflow_ref` names this file and the OpenAI mapping must
+# refuse their exchange.
+
+name: openai wif canary (other reusable workflow)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: OpenAI exchange from another reusable workflow (expect refused)
+        uses: meridianlabs-ai/agents/.github/actions/openai-wif-proxy@main
+        with:
+          mode: probe
+          expect: refused

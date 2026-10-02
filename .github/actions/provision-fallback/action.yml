@@ -40,8 +40,8 @@ description: >-
   or a `claude-setup` action; on the codex path that code now runs with
   exactly what codex itself has — the codex uid, no sudo, no GitHub
   token, no OIDC request token, and no way to read the runner's processes
-  — instead of as `runner` ahead of the codex-action step that holds
-  `OPENAI_API_KEY`. The same reasoning is why those jobs use this recipe
+  — instead of as `runner`, which holds sudo and the OIDC request token
+  the OpenAI forwarder exchanges. The same reasoning is why those jobs use this recipe
   even where the caller defines `claude-setup`: a composite action can
   only run as the runner. The Claude jobs keep the runner-side recipe (no
   `user`): the Claude agent itself runs unsandboxed as the runner on every
