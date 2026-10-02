@@ -57,6 +57,7 @@ gh api graphql --paginate -f query='query($endCursor: String) {
           ... on ProjectV2ItemFieldPullRequestValue { pullRequests(first: 20) { nodes { url } } } }
         content {
           ... on Issue { number title repository { url } }
+          ... on PullRequest { number title repository { url } }
           ... on DraftIssue { title } }
       } } } } }' \
   --jq '.data.organization.projectV2.items.nodes[] | select(.stage.name == "Merge")

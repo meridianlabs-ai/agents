@@ -90,6 +90,7 @@ PAGES = [
         [
             item("Merge", issue(512, "External: fix the bridge"), []),
             item("Merge", issue(513, "Promotion, no chip yet")),
+            item("Merge", issue(57, "claude.yml hand-back", "meridianlabs-ai/agents")),  # a standalone PR card
             item(None, {"title": "a draft"}),
         ],
         None,
@@ -127,6 +128,7 @@ def test_the_queue_block_lists_merge_items_from_every_page(tmp_path):
         f"73\t{repo}\trecover: mark incomplete samples\t{FORK}/76,{UP}/5165",
         f"512\t{repo}\tExternal: fix the bridge\t",
         f"513\t{repo}\tPromotion, no chip yet\t",
+        "57\thttps://github.com/meridianlabs-ai/agents\tclaude.yml hand-back\t",
     ]
     assert len(calls) == 1
 
@@ -148,6 +150,11 @@ def test_the_query_pages_the_board_and_reads_only_the_fields_it_uses(tmp_path):
     assert "items(first: 100, after: $endCursor)" in query
     assert "pageInfo { hasNextPage endCursor }" in query
     assert 'fieldValueByName(name: "Stage")' in query
+    # The stub serves the fixtures whatever the query selects, so the
+    # content types the TSV identifies (Atlas carries standalone PR cards
+    # too) are pinned here.
+    for kind in ("Issue", "PullRequest"):
+        assert f"... on {kind} {{ number title repository {{ url }} }}" in query
     assert "Status" not in query
     # Only the three values the TSV needs, no full field export.
     assert "fieldValues" not in query
