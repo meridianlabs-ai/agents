@@ -396,9 +396,7 @@ text are checked by the tests under `tests/`.
   model credential, until step 7 of that design; codex never sees the key
   itself, so there the second condition is still the boundary that keeps
   it from the agent. The rule is per repository, since several writers
-  push to the same branches (ts-mono's `dependabot-fix` continuation,
-  which still runs its agent as `runner` on an earlier agent branch, keeps
-  ts-mono off until it is migrated). **For tier 2 this is how criterion 2
+  push to the same branches. **For tier 2 this is how criterion 2
   of finding 4628446 is met** (decision: Ransom, 2026-09-23, accepting the
   revised criterion): such files land without a human's approval, but
   every automated agent job that executes them holds nothing beyond the

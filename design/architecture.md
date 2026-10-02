@@ -2105,10 +2105,10 @@ The intended Slack story, mostly off-the-shelf:
 
 ### One-time org setup (done; listed for reference / disaster recovery)
 
-1. **Claude GitHub App**: uninstalled from `meridianlabs-ai` on 2026-10-01
-   (step 6 of untrusted-agent-job.md). The workflows no longer use it, and
-   with it installed any job with `id-token: write` could mint its write
-   token, so do not install it for a new repository.
+1. **Claude GitHub App** installed on `meridianlabs-ai` repos
+   (<https://github.com/apps/claude>). Members can request the install; org
+   owners (`dragonstyle`, `jjallaire`) approve. Not all repos are covered yet —
+   extend access as repos are onboarded.
 2. **Workload Identity Federation rule** in the Anthropic Console → Workload
    identity. Issuer: GitHub Actions OIDC. Match: CEL
    `repository_owner == "meridianlabs-ai"`, and `job_workflow_ref` one of this

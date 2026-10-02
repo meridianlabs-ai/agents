@@ -1,7 +1,8 @@
 # Copy this file to .github/workflows/claude.yml in any Meridian repo
 # (or run scripts/enable-claude.sh <org/repo> to open a PR that adds it).
 #
-# Requires the machine account's two org secrets scoped to the repo,
+# Requires the Claude GitHub App installed on the repo (org-level install
+# covers this) and the machine account's two org secrets scoped to it,
 # MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY (the GitHub App the
 # workflow's gate and land jobs act as; without them pushes and PRs come
 # from github-actions[bot] and trigger nothing). Model auth uses Workload
