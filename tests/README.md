@@ -363,6 +363,11 @@ Testing a change).
   reported, never forced; the push needs `maintainerCanModify` and a HEAD
   built on the approved commit; the primary clone and a branch worktree
   are refused.
+- `test_merge_queue.py` — the merge queue's lookup (`SKILL.md` section 1),
+  lifted and run against a stub `gh` serving two GraphQL pages: the TSV
+  lists the Merge-stage items from every page, a failed page fails the
+  block, and the query pages the board 100 items at a time with only the
+  Stage, linked-PR and content fields, never `gh project item-list`.
 - `test_checks_at_head.py` — the merge queue's deferral of External PR
   trees to upstream CI (`skills/merge-approved-prs/checks_at_head.py`,
   Claude Security 4122327 criterion 2): the decision on canned payloads
