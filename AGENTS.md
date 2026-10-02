@@ -219,6 +219,15 @@ take effect on every repo's next run.
   as on the codex path. The runner keeps its sudo in both (the reclaims
   need it); the agent's uid never has it, and the Claude launcher checks
   that before the action step and again inside the agent's namespace.
+  This uid machinery (the agent user, the reclaims, the kill loops, the
+  PATH checks) is no longer the boundary on the Claude jobs: since the
+  Claude GitHub App's uninstall (2026-10-01) a Claude job holds nothing
+  the agent may not have, so a runner compromise there gains nothing. It
+  stays as defence in depth and hygiene (it makes the bundle and landing
+  files the agent's final state), so keep the rules above anyway. On the
+  codex jobs it is still the boundary until step 7 of
+  design/untrusted-agent-job.md: their runner holds `OPENAI_API_KEY`
+  (design/untrusted-agent-job.md → What stays in the untrusted job).
   Once the agent user exists the runner writes nothing into the workspace
   until the reclaim: prompt files go to `$RUNNER_TEMP`, a `settings` file
   is read before the user is created, and `.git/info/exclude` is appended
@@ -248,9 +257,19 @@ is in [THREAT_MODEL.md](THREAT_MODEL.md).
   controls, in any job that runs an agent or code from a checkout the org
   does not fully control. Not in `env:`, not as an action input, not through
   a composite. The model credential (Workload Identity Federation, or
-  `OPENAI_API_KEY` in the codex job alone) and the Claude action's own token
-  are the known exceptions. Where the codex key may be referenced and how an
-  agent job provisions is under "One untrusted job per engine" above.
+  `OPENAI_API_KEY` in the codex job alone until step 7 of
+  design/untrusted-agent-job.md) is the one known exception. Where the
+  codex key may be referenced and how an agent job provisions is under
+  "One untrusted job per engine" above. Every claude-code-action step
+  passes `github_token: ${{ github.token }}`, and a job requests
+  `id-token: write` only where it uses Workload Identity Federation. The
+  Claude GitHub App is not installed on Meridian repositories (uninstalled
+  2026-10-01, step 6 of that design), and THREAT_MODEL.md's guarantees
+  rest on that: with it installed, any job with `id-token: write` could
+  mint its write token. A new OIDC
+  trust, whether a cloud role, a publisher or a model provider, pins
+  `job_workflow_ref` or its own workflow file and never matches on
+  `repository_owner` alone.
 - The Anthropic federation rule (`fdrl_01GpNgJm9jE6ZfvcqoJYQL2Y`) admits
   only the workflows it names, each at `refs/heads/main`: this repo's four
   reusable workflows by `job_workflow_ref`, and the three direct callers

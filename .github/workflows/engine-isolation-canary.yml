@@ -32,11 +32,11 @@
 #                          asks the Claude App token exchange for a token
 #                          as `runner` (design/untrusted-agent-job.md →
 #                          Testing): on a dispatch from main the Claude job
-#                          gets one, revoked at once, while the App is
-#                          installed (other runs only record the outcome:
-#                          the exchange refuses push events and changed
-#                          workflow files); the codex job, with no
-#                          `id-token: write`, cannot.
+#                          is refused, since the App is not installed
+#                          (uninstalled 2026-10-01; other runs only record
+#                          the outcome: the exchange refuses push events and
+#                          changed workflow files); the codex job, with no
+#                          `id-token: write`, cannot ask.
 #   provisioning-boundary  the codex-side boundary of THIS revision, with the
 #                          real codex user, real sudo and the composites
 #                          lifted from the checkout (not `@main`, so a branch

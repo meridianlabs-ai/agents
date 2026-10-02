@@ -763,8 +763,10 @@ Testing a change).
   prints lengths, never values. The OIDC exchange probe
   (design/untrusted-agent-job.md → Testing): each probe agent job requests
   an OIDC token exactly when the real one does and runs
-  `app_token_exchange_probe.sh` before its scan (Claude job `minted` on a
-  dispatch from main and `any` elsewhere, codex job `refused`); the script, against a stub `curl`, revokes a minted token
+  `app_token_exchange_probe.sh` before its scan (Claude job `refused` on a
+  dispatch from main, since the Claude GitHub App's uninstall, and `any`
+  elsewhere; codex job `refused`); the script, against a stub `curl`, reports
+  a refusal with its reason, revokes a minted token
   at once, prints no token outside a mask command, counts an outage (no
   answer, 5xx, a token-less 2xx) as neither mint nor refusal, and fails on
   the unexpected outcome or a failed revocation.
