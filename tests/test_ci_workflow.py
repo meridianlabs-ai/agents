@@ -10,10 +10,11 @@ dogfood @auto stub is examples/claude-auto-stub.yml with its REQUIRED EDIT
 made: its `workflow_run` names tests.yml's `name:`.
 
 Every job in the three dogfood stubs calls a reusable agent workflow and sets
-the same `provision` recipe: a venv on tests.yml's Python with pytest, what
-tests.yml installs, so `python3 -m pytest` runs as the agent user (this repo
-has no pyproject.toml, so without a recipe nothing is provisioned; decision:
-Ransom, 2026-09-24). The examples keep the recipe commented.
+the same `provision` recipe: a venv on tests.yml's Python with pytest and
+pytest-xdist, what tests.yml installs, so `python3 -m pytest -n auto` runs as
+the agent user (this repo has no pyproject.toml, so without a recipe nothing
+is provisioned; decision: Ransom, 2026-09-24). The examples keep the recipe
+commented.
 """
 
 import re
@@ -64,7 +65,7 @@ def test_tests_workflow_runs_the_suite_on_every_pr_and_push_to_main():
         "    branches: [main]",
     ]
     # the command tests/README.md and AGENTS.md document
-    assert "      - run: python3 -m pytest" in code_lines(text)
+    assert "      - run: python3 -m pytest -n auto" in code_lines(text)
 
 
 def test_tests_workflow_holds_no_secret_and_a_read_only_token():
@@ -154,10 +155,10 @@ def provision_recipe(job):
 def test_own_stubs_provision_the_tests_workflows_tools_in_every_job():
     ci = TESTS_YML.read_text()
     (python,) = re.findall(r'^          python-version: "([0-9.]+)"$', ci, re.M)
-    # what tests.yml installs before `python3 -m pytest`: pytest alone; a
-    # new test dependency there belongs in the recipe too
-    assert "      - run: pip install pytest" in code_lines(ci)
-    expected = [f"uv venv --python {python}", "uv pip install pytest"]
+    # what tests.yml installs before `python3 -m pytest -n auto`: pytest
+    # and pytest-xdist; a new test dependency there belongs in the recipe too
+    assert "      - run: pip install pytest pytest-xdist" in code_lines(ci)
+    expected = [f"uv venv --python {python}", "uv pip install pytest pytest-xdist"]
     for stub in STUBS:
         jobs = jobs_by_name((WORKFLOWS / stub).read_text())
         assert jobs, stub

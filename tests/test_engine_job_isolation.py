@@ -1145,6 +1145,8 @@ def test_reset_mode_refuses_while_codex_processes_survive(tmp_path):
                    SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", AGENT_USER="codex")
     (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s\\n" "$1" >>"$LOG"\n')
     write_exe(tmp_path / "bin" / "id", "#!/usr/bin/env bash\nexit 0\n")
+    # the 0.2 s pause between the ten kills, stubbed as the pin-bwrap tests do
+    write_exe(tmp_path / "bin" / "sleep", "#!/usr/bin/env bash\nexit 0\n")
     r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
     assert r.returncode != 0
     log = (tmp_path / "log").read_text().splitlines()

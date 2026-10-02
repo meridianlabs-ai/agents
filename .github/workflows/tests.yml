@@ -1,10 +1,11 @@
-# The repo's unit tests (tests/README.md): the full `python3 -m pytest` suite
-# on every PR and on every push to main. No path filter — the suite lifts
-# `run:` bodies out of the reusable workflows, the composites, the stubs and
-# the examples, so almost any change can break it.
+# The repo's unit tests (tests/README.md): the full suite, `python3 -m
+# pytest -n auto`, on every PR and on every push to main. No path filter —
+# the suite lifts `run:` bodies out of the reusable workflows, the
+# composites, the stubs and the examples, so almost any change can break it.
 #
-# A full run takes about two minutes on the hosted image (pytest step 118 s
-# on PR #160's run, 2026-09-23). It took ~9.5 minutes, ~450 s of it in
+# A serial run takes about two minutes on the hosted image (pytest step
+# 118 s on PR #160's run, 2026-09-23); `-n auto` (pytest-xdist, one worker
+# per core) takes CI_TIMING. It once took ~9.5 minutes, ~450 s of it in
 # test_codex_path.py, while that module's PATH checks listed the image's
 # real /bin, thousands of symlinks; they now check a small fixture tree.
 # The timeout is well above the run time and still stops a hung test early.
@@ -44,5 +45,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest
-      - run: python3 -m pytest
+      - run: pip install pytest pytest-xdist
+      - run: python3 -m pytest -n auto

@@ -9,8 +9,10 @@ GitHub's OIDC endpoint, OpenAI's token endpoint and the upstream:
   exchange fails start-up with the exchange's error and no token, and
   starts no forwarder;
 - renewal happens once the token is within 60 seconds of expiry, with a
-  fresh subject token each time (the stub's tokens live 62 seconds, so the
-  real margin is exercised in seconds);
+  fresh subject token each time (the stub's tokens live 61 seconds, so the
+  real margin is exercised in about a second);
+- a failed OIDC or exchange call is retried after 2 s, then 4 s: the script
+  runs under a wrapper that records each `time.sleep` instead of waiting;
 - an upstream 401 triggers exactly one re-exchange and one retry of the
   buffered body; a failed renewal answers 502 with the fixed message, and
   so does an upstream redirect, which is never followed;
@@ -54,6 +56,19 @@ AUDIENCE = "openai-wif:meridianlabs-ai"
 PLACEHOLDER = "meridian-wif-placeholder"
 RENEWAL_FAILED = b'{"error":{"message":"openai-wif-proxy: token renewal failed","type":"proxy_error"}}'
 REDIRECT_REFUSED = b'{"error":{"message":"openai-wif-proxy: upstream redirect refused","type":"proxy_error"}}'
+# Runs the script as `python3 SCRIPT ...` would, with time.sleep replaced:
+# each call is recorded in $WIF_TEST_SLEEPS and returns at once, so the
+# retry backoff costs no time and its schedule can be asserted. The script
+# sleeps only for that backoff; the renewal tests wait on the real clock.
+NO_SLEEP = (
+    "import os, runpy, sys, time\n"
+    "def sleep(seconds):\n"
+    "    with open(os.environ['WIF_TEST_SLEEPS'], 'a') as f:\n"
+    "        f.write(f'{seconds}\\n')\n"
+    "time.sleep = sleep\n"
+    "sys.argv = sys.argv[1:]\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+)
 
 
 def b64(doc: dict) -> str:
@@ -128,7 +143,8 @@ class Stub:
         self.server.daemon_threads = True
         self.port = self.server.server_address[1]
         self.base = f"http://127.0.0.1:{self.port}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        # shutdown() waits up to one poll interval (0.5 s by default) per test
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
 
     def close(self):
         self.release.set()
@@ -152,19 +168,21 @@ class Run:
         self.state = self.temp / "openai-wif"
         self.output = self.temp / "output"
         self.summary = self.temp / "summary"
+        self.sleeps_file = tmp_path / "sleeps"
         self.outputs = []
 
     def env(self, oidc=True):
         env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "RUNNER_TEMP": str(self.temp),
-               "GITHUB_OUTPUT": str(self.output), "GITHUB_STEP_SUMMARY": str(self.summary)}
+               "GITHUB_OUTPUT": str(self.output), "GITHUB_STEP_SUMMARY": str(self.summary),
+               "WIF_TEST_SLEEPS": str(self.sleeps_file)}
         if oidc:
             env |= {"ACTIONS_ID_TOKEN_REQUEST_URL": f"{self.stub.base}/oidc?api-version=2.0",
                     "ACTIONS_ID_TOKEN_REQUEST_TOKEN": REQ_TOKEN}
         return env
 
     def script(self, *args, oidc=True):
-        r = subprocess.run([sys.executable, str(SCRIPT), *args], env=self.env(oidc), capture_output=True,
-                           text=True, timeout=60)
+        r = subprocess.run([sys.executable, "-c", NO_SLEEP, str(SCRIPT), *args], env=self.env(oidc),
+                           capture_output=True, text=True, timeout=60)
         self.outputs.append(r.stdout + r.stderr)
         return r
 
@@ -203,6 +221,11 @@ class Run:
 
     def log(self):
         return (self.state / "log").read_text() if (self.state / "log").exists() else ""
+
+    def sleeps(self):
+        """The seconds of every sleep the script asked for, in order."""
+        text = self.sleeps_file.read_text() if self.sleeps_file.exists() else ""
+        return [float(s) for s in text.split()]
 
     def kill(self):
         pid = self.pid()
@@ -282,6 +305,10 @@ def test_a_failed_first_exchange_fails_start_up_without_a_token(run, stub, plan,
     r = run.start()
     assert r.returncode == 1
     assert f"::error::openai-wif-proxy: {message}" in r.stdout, r.stdout
+    # Only a 5xx is retried: three attempts, 2 s and 4 s apart.
+    retried = plan[0] >= 500
+    assert len(stub.exchanges) == (3 if retried else 1)
+    assert run.sleeps() == ([2, 4] if retried else [])
     assert run.pid() is None and not run.output.exists()
     run.assert_no_secret_leaked()
 
@@ -291,6 +318,7 @@ def test_a_transient_exchange_failure_is_retried(run, stub):
     r = run.start()
     assert r.returncode == 0, r.stdout
     assert len(stub.exchanges) == 2
+    assert run.sleeps() == [2]
 
 
 def test_no_oidc_request_token_fails_start_up(run, stub):
@@ -309,9 +337,9 @@ def test_a_non_loopback_plain_http_url_is_refused(run, stub):
 
 
 def test_renewal_comes_before_expiry_with_a_fresh_subject_token(run, stub):
-    stub.expires_in = 62                     # fresh for 2 s under the 60 s margin
+    stub.expires_in = 61                     # fresh for 1 s under the 60 s margin
     assert run.start().returncode == 0
-    for pause in (0, 2.5, 0, 2.5):
+    for pause in (0, 1.2, 0, 1.2):
         time.sleep(pause)
         resp, _ = run.post()
         assert resp.status == 200
@@ -321,33 +349,33 @@ def test_renewal_comes_before_expiry_with_a_fresh_subject_token(run, stub):
     assert all(o["query"]["audience"] == [AUDIENCE] for o in stub.oidc)
     used = [u["headers"]["Authorization"] for u in stub.upstream]
     assert used == ["Bearer OAT-SECRET-1", "Bearer OAT-SECRET-2", "Bearer OAT-SECRET-2", "Bearer OAT-SECRET-3"]
-    assert run.log().count("renewed (expiry): valid for 62 s") == 2
+    assert run.log().count("renewed (expiry): valid for 61 s") == 2
     run.assert_no_secret_leaked()
 
 
 def test_the_absolute_expiry_wins_over_a_longer_expires_in(run, stub):
-    # OpenAI's expires_at says the token has 61 s left although expires_in
+    # OpenAI's expires_at says the token has 60.5 s left although expires_in
     # says 300: the forwarder renews once it is inside the 60 s margin.
-    stub.expires_in, stub.expires_at_in = 300, 61
+    stub.expires_in, stub.expires_at_in = 300, 60.5
     assert run.start().returncode == 0
-    assert "token expires_in 300, valid for 61 s on receipt" in run.summary.read_text()
-    time.sleep(1.2)
+    assert "token expires_in 300, valid for 60 s on receipt" in run.summary.read_text()
+    time.sleep(0.7)
     resp, _ = run.post()
     assert resp.status == 200 and len(stub.exchanges) == 2
     assert stub.upstream[0]["headers"]["Authorization"] == "Bearer OAT-SECRET-2"
 
 
 def test_the_time_an_answer_takes_counts_against_expires_in(run, stub):
-    # expires_in counts from issuance, so 1.5 s spent waiting for the
-    # answer leaves 60.5 s of a 62 s token: inside the margin 0.5 s later.
-    stub.expires_in, stub.expires_at_in = 62, False
-    stub.exchange_delays = [1.5]
+    # expires_in counts from issuance, so 0.4 s spent waiting for the
+    # answer leaves 60.2 s of a 60.6 s token: inside the margin 0.2 s later.
+    stub.expires_in, stub.expires_at_in = 60.6, False
+    stub.exchange_delays = [0.4]
     assert run.start().returncode == 0
-    assert "token expires_in 62, valid for 60 s on receipt" in run.summary.read_text()
-    time.sleep(0.7)
+    assert "token expires_in 60.6, valid for 60 s on receipt" in run.summary.read_text()
+    time.sleep(0.3)
     resp, _ = run.post()
     assert resp.status == 200 and len(stub.exchanges) == 2
-    assert "renewed (expiry): valid for 62 s" in run.log()
+    assert "renewed (expiry): valid for 61 s" in run.log()
 
 
 def test_an_already_expired_token_fails_start_up(run, stub):
@@ -377,10 +405,10 @@ def test_an_upstream_401_re_exchanges_once_and_retries_the_body(run, stub):
 
 
 def test_a_failed_renewal_answers_502_with_the_fixed_message(run, stub):
-    stub.expires_in = 61
+    stub.expires_in = 60.5
     assert run.start().returncode == 0
     stub.exchange_plan = [(401, '{"error":"invalid_grant"}')]
-    time.sleep(1.2)
+    time.sleep(0.7)
     resp, data = run.post()
     assert resp.status == 502 and data == RENEWAL_FAILED
     assert stub.upstream == []
@@ -495,11 +523,11 @@ def test_a_body_with_a_length_is_relayed_byte_for_byte(run, stub):
 
 
 def test_stop_reports_the_counts_and_stops_the_forwarder(run, stub):
-    stub.expires_in = 62
+    stub.expires_in = 61
     assert run.start().returncode == 0
     run.post()
     raw(run.port, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-    time.sleep(2.2)
+    time.sleep(1.2)
     run.post()
     pid = run.pid()
     r = run.script("stop", "--state-dir", str(run.state))
@@ -549,6 +577,8 @@ def test_probe_counts_an_outage_as_neither(run, stub, oidc, plan):
         r = probe(run, expect, oidc=oidc)
         assert r.returncode == 1 and ": error (" in r.stdout, r.stdout
     assert probe(run, "any", oidc=oidc).returncode == 0
+    assert len(stub.exchanges) == (9 if plan else 0)
+    assert run.sleeps() == ([2, 4] * 3 if plan else [])
 
 
 # --- the composite -----------------------------------------------------------

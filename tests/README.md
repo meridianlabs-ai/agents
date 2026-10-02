@@ -33,8 +33,10 @@ Testing a change).
   GitHub's OIDC endpoint, OpenAI's token endpoint and the Responses API:
   the first exchange sends exactly the five token-exchange fields with a
   subject token for the configured audience, and a failed one fails
-  start-up with the exchange's error and no forwarder; renewal within 60
-  seconds of expiry with a fresh subject token each time; one re-exchange
+  start-up with the exchange's error and no forwarder; a 5xx exchange
+  retried twice, 2 s then 4 s apart (the script's `time.sleep` is recorded,
+  not waited); renewal within 60 seconds of expiry with a fresh subject
+  token each time; one re-exchange
   and one retry of the buffered body on an upstream 401; a failed renewal
   and an upstream redirect answer 502 with fixed messages; only `POST
   /v1/responses` is forwarded (other methods, paths, queries, absolute
@@ -858,8 +860,9 @@ Testing a change).
   line, which names that workflow's `name:`, its `provision` recipe and
   its uncommented `allow_build_config: true`;
   every job of the three dogfood stubs calling a reusable agent workflow
-  with the same recipe (a venv on tests.yml's Python with pytest, what
-  tests.yml installs), while the examples leave it commented.
+  with the same recipe (a venv on tests.yml's Python with pytest and
+  pytest-xdist, what tests.yml installs), while the examples leave it
+  commented.
 - `test_model_defaults.py` — the four Claude workflows' `model` input
   defaults to the `opus` alias (never a dated id) with `fallback_model`
   `default`, and both still reach Claude Code as `--model` /
@@ -873,9 +876,15 @@ status fails in a test as it would on the runner.
 Run from the repo root:
 
 ```sh
-pip install pytest
-python3 -m pytest
+pip install pytest pytest-xdist
+python3 -m pytest -n auto
 ```
+
+`-n auto` runs one worker per core. A plain `python3 -m pytest` runs the
+same tests serially, and works without pytest-xdist; use it for a single
+file or test, where starting the workers costs more than it saves. The
+tests share no fixed path, port or working directory, so they can run in
+any order and on any worker.
 
 CI: `.github/workflows/tests.yml` (workflow `tests`, job `pytest`) runs the
 same command on Python 3.12 on every PR and every push to main, with no path
