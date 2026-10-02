@@ -1859,7 +1859,12 @@ THREAT_MODEL.md text that its change makes true.
        [run 37054433870](https://github.com/meridianlabs-ai/agents/actions/runs/37054433870),
        success. Every probe was refused, the Meridian audience included
        (the mapping does not list `workflow_dispatch`).
-     - Codex `@review`: pending (meridianlabs-ai/ts-mono#726).
+     - Codex `@review` on meridianlabs-ai/ts-mono#726: verification deferred
+       from this results update. The local #203 checkout and supplied review
+       feedback contain no observed outcome or run link, and this
+       credential-free review-fix job cannot trigger the check. A maintainer
+       must verify that reviewer run and record its outcome and run link;
+       step 7's verification remains incomplete until that evidence is recorded.
      - Codex CI-fix round on #203: the deliberately failing probe triggered
        [run 37055234306](https://github.com/meridianlabs-ai/agents/actions/runs/37055234306),
        success. The OpenAI forwarder and `fix-codex` job succeeded; landing
