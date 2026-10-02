@@ -1428,6 +1428,8 @@ model or a real secret):
     claude-review.yml at 0aa1f20) and in an inspect_ai fork dev-agent job,
     109170645052 (2026-09-28, claude.yml at 609e20d).
   - After step 6 it must fail, and that failure is the proof of step 6.
+    It did on 2026-10-01 (Implementation plan → step 6 → As done), and
+    the probe now expects `refused` there.
   - Add the same probe to a codex job, where it must fail after step 1
     because the job has no `id-token: write`, and again after step 7
     because the App is gone.
@@ -1716,6 +1718,8 @@ THREAT_MODEL.md text that its change makes true.
      (and environment where set), read on pypi.org and npmjs.com.
    - No other OIDC trust names a Meridian repository.
    - A `claude[bot]` post search over the step-4 week returns nothing.
+
+   Skipped: the App was uninstalled before this ran (step 6 → As done).
 6. **Uninstall the Claude GitHub App** from the Meridian repositories
    (org admin: Ransom).
    - Run the canary: the exchange now fails.
@@ -1723,6 +1727,48 @@ THREAT_MODEL.md text that its change makes true.
      THREAT_MODEL.md and AGENTS.md), the tier-2 premise text,
      credential-separation.md's I1 and I5, and AGENTS.md's paragraphs
      that describe the reclaim as the boundary.
+   - As done (2026-10-01):
+     - An org admin uninstalled the Claude GitHub App from meridianlabs-ai
+       on 2026-10-01 (installation 107795739, selected repositories).
+       claude-design-import and chatgpt-codex-connector are separate Apps
+       and stay installed.
+     - Canary, dispatched on `main` (87fdfab) just before the uninstall:
+       [run 36924348634](https://github.com/meridianlabs-ai/agents/actions/runs/36924348634),
+       success. The Claude probe printed `minted (exchange HTTP 200;
+       revoked, HTTP 204)`, the codex probe `refused (no OIDC request
+       token in this job)`.
+     - The same dispatch just after it:
+       [run 36925108261](https://github.com/meridianlabs-ai/agents/actions/runs/36925108261),
+       failure, as expected while the probe still expected `minted`. The
+       Claude probe printed `refused (exchange HTTP 401: Claude Code is
+       not installed on this repository. Please install the Claude Code
+       GitHub App at https://github.com/apps/claude)`; the codex probe was
+       refused as before. Every other canary job passed.
+     - **Step 5 was skipped.** The uninstall went early, on Ransom's call.
+       Step 4 (#189) merged on 2026-09-30, so the week of normal use after
+       it, and step 5's `claude[bot]` search over that week, were not
+       completed. The last `claude[bot]` post found by search on any
+       Meridian repository is from 2026-09-30 00:48:47 UTC
+       (meridianlabs-ai/inspect_harbor#193, a tag-mode tracking comment
+       from before step 4). Nobody went through the rest of the step-5
+       checklist either: Claude Code on the web sessions, PR auto-fix,
+       project threads, `claude --cloud`, managed Code Review, the PyPI
+       and npm trusted publishers, and other OIDC trusts. Whatever relied
+       on the App on those repositories stopped working on 2026-10-01
+       (Compatibility and migration → Claude GitHub App uninstall).
+     - This step's PR flips the canary's Claude probe to expect `refused`
+       on a dispatch from main. An outage (no answer, a 5xx) still counts
+       as neither and fails it. Other runs still only record the outcome.
+       After it merges, a dispatch of engine-isolation-canary.yml from
+       `main` should pass again.
+     - The text: THREAT_MODEL.md's first guarantee is the job-level one,
+       the provisioning, no-root and Claude PATH text is defence in depth
+       on the Claude jobs, and the installed-App "By design" bullet is
+       gone; the tier-2 rule names the two conditions;
+       credential-separation.md's I1, I5 and section 3.5; AGENTS.md's
+       exceptions bullet and the uid machinery's status. Until step 7 the
+       codex jobs hold `OPENAI_API_KEY`, so on them the uid machinery is
+       still a boundary, and the text says so.
 7. **Codex to OpenAI workload identity federation** (after step 6).
    - Ransom:
      - creates the CI project and its service account, with a hard spend

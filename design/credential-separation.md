@@ -39,15 +39,22 @@ workflow, where the Atlas sync, the `actions` repository's workflows and
 the other Meridian repositories' conversions meet them and where they
 differ; the exceptions are listed there, not assumed away here.
 
-- **I1. The agent job holds no credential of the machine account.** A job
-  that runs an agent, or any code from a checkout the org does not fully
+- **I1. The agent job holds nothing the agent may not have.** A job that
+  runs an agent, or any code from a checkout the org does not fully
   control, references no secret of the machine account and no token minted
   from it: not in `env:`, not as an action input, not through a composite.
   What it does hold is its own single-repo, read-only job token, the model
-  credential, and, while the `claude-code-action` step runs, that action's
-  own installation token of the Claude GitHub App, which is write-capable on
-  the caller repository and is fenced by identity and a deny list, not by
-  the job's `permissions:` block (section 3.5).
+  credential, and an OIDC request token that no relying party exchanges
+  for more than that credential. No App token reaches it: every
+  `claude-code-action` step runs on the job token, and the Claude GitHub
+  App, which would mint a write-capable token for any job with
+  `id-token: write`, is not installed on Meridian repositories since
+  2026-10-01 (step 6 of [untrusted-agent-job.md](untrusted-agent-job.md);
+  section 3.5). So the job as a whole, its `runner` and root included, is
+  untrusted and worth no more than the agent. The codex jobs are the
+  exception until that design's step 7: they hold `OPENAI_API_KEY`, which
+  codex reaches only through codex-action's proxy, so there the agent
+  user's boundary still keeps the key from the agent.
 - **I2. Every write the agent asks the machine account for happens in a
   landing job.** Pushes,
   PR creation, comments and review replies, thread resolutions, issue
@@ -87,11 +94,14 @@ differ; the exceptions are listed there, not assumed away here.
   authenticate does so through a credential helper defined in that one step's
   environment, keyed to `github.server_url` so no other host is ever
   answered. The one credential that does sit in the workspace for a bounded
-  time is the Claude action's own token, which the action writes into
-  `remote.origin.url` during its step: the launcher's wrapper removes it
-  before the Claude agent starts (and refuses to launch while it is still
-  there), and the `reset-origin-url` composite repeats the reset after the
-  post-agent reclaim (section 3.5). The Atlas sync's checkout of
+  time is the token claude-code-action writes into `remote.origin.url`
+  during its step, which in every reusable workflow is the read-only job
+  token (`github_token: ${{ github.token }}`): the launcher's wrapper
+  removes it before the Claude agent starts (and refuses to launch while
+  it is still there). Nothing after the post-agent reclaim fetches or
+  pushes, so the post-agent `reset-origin-url` step is retired; the
+  composite stays for direct callers (untrusted-agent-job.md → What stays
+  in the untrusted job). The Atlas sync's checkout of
   this repository, in a trusted job that runs no agent, uses checkout's
   defaults and so persists the job token.
 - **I6. No transcript is uploaded.** The enforced policy is that no agent
@@ -470,35 +480,26 @@ human step.
   after that `http.<server>/.extraheader` is empty
   (`assert-no-persisted-credential`). The `sync-branch` base merge fetches
   with it through a step-scoped helper and never pushes.
-- **The Claude GitHub App's installation token, in the dev agent's job
-  only.** The reviewer and both loops pass `github_token: ${{ github.token }}`
-  to `claude-code-action` (since 2026-09-30), so the action skips its OIDC
-  exchange and its revoke post-step, and those jobs hold no App token.
-  claude.yml's Claude job still passes none, because tag mode needs a write
-  token for its tracking comment (step 4 of untrusted-agent-job.md moves it
-  to agent mode). There the action exchanges the job's OIDC token for its
-  own installation token of the Claude app, requesting contents, pull
-  requests and issues write on the caller repository, plus `actions: read`
-  (`additional_permissions`; its `src/github/token.ts`), and revokes it when
-  the step ends. The job's `permissions:` block does not scope this token.
-  Since plan step 5 of
-  [executed-paths-residual.md](executed-paths-residual.md) it lives only in
-  the action's runner-side process and files: the agent runs as
-  `claude-agent`, started by the launcher's wrapper, which drops every MCP
-  server that carries the token, rebuilds the agent's environment from a
-  fixed allow-list with the read-only job token as `GH_TOKEN`, resets the
-  origin URL the action rewrote, and refuses to launch if the token's value
-  appears anywhere in the agent's argv, environment, settings or
-  `.git/config`; the agent's PID and mount namespace hides the action's
-  process, the step scripts that embed the token and the runner's files.
-  So the agent holds no `claude[bot]` write channel: the composed
-  settings still deny its push and posting commands (`Bash(git push:*)`,
-  the action's `scripts/git-push.sh` wrapper, the `gh` comment, review,
-  create and merge verbs, the reviewer's inline-comment tool) as guard
-  rails, and what slipped past them would fail for want of a credential.
-  Thread resolutions, replies and comments go through the landing
-  manifest. While the App is installed, any job with `id-token: write` can
-  still mint its token (step 6 of untrusted-agent-job.md uninstalls it), so
+- **No Claude GitHub App token.** Every `claude-code-action` step in the
+  four reusable workflows passes `github_token: ${{ github.token }}` (the
+  reviewer and both loops since 2026-09-30, claude.yml since step 4 of
+  [untrusted-agent-job.md](untrusted-agent-job.md) moved it to agent mode),
+  so the action skips its OIDC exchange and its revoke post-step. The App
+  itself was uninstalled from the Meridian repositories on 2026-10-01
+  (that design's step 6), so no job can mint its token any more, whatever
+  runs in it. The agent runs as `claude-agent`, started by the launcher's
+  wrapper, which drops the MCP servers the action composes, rebuilds the
+  agent's environment from a fixed allow-list with the read-only job token
+  as `GH_TOKEN`, resets the origin URL the action rewrote, and refuses to
+  launch if a token other than the job token appears anywhere in the
+  agent's argv, environment, settings or `.git/config`; the agent's PID
+  and mount namespace hides the action's process, the step scripts and the
+  runner's files. The composed settings still deny its push and posting
+  commands (`Bash(git push:*)`, the action's `scripts/git-push.sh`
+  wrapper, the `gh` comment, review, create and merge verbs, the
+  reviewer's inline-comment tool) as guard rails, and what slipped past
+  them would fail for want of a credential. Thread resolutions, replies
+  and comments go through the landing manifest.
   `claude[bot]` is trusted nowhere since 2026-09-30: the review-fix
   workflow's verdict authors are the machine account's two logins
   (`REVIEWER_LOGINS`; `reviewer_login` defaults to empty), a `claude[bot]`
@@ -610,8 +611,9 @@ comment, reopen, assign) and a `stage` move (since 2026-09-22 it refuses
 there). A compromised review job can therefore have the
 machine account post those, de-fanged, on the caller repository; it cannot
 push through its landing job, and its manifest cannot reach another
-repository. The Claude action's own installation token in the review job is
-the separate, write-capable channel that sections 3.5 and 7 describe. The
+repository. The review job holds no other write channel: the action runs
+on the read-only job token, and the Claude GitHub App is uninstalled
+(section 3.5). The
 `denyWrite` entry on the review directory holds on the sandboxed paths
 only.
 
@@ -773,8 +775,8 @@ A caller repository enables an agent by copying a stub from `examples/` into
   `actions` read: the review is posted by the land job as the machine
   account, so the caller's grant bounds the review job's job token at read
   and no regression in the reusable workflow could hand that token write
-  again. The ceiling is on the job token only; the Claude action's own
-  installation token is not bounded by it.
+  again. The ceiling is on the job token, which is the only GitHub token
+  the review job holds (section 3.5).
 - Grants `id-token: write` at the calling job level, because GitHub does not
   pass OIDC tokens to reusable workflows implicitly.
 - Filters comment events on `author_association` (OWNER, MEMBER,

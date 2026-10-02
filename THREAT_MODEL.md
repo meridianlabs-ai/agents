@@ -22,12 +22,18 @@ replaced); and accounts whose write access a permission lookup has verified.
 Each of these holds on `main`; the ones that can be read from the workflow
 text are checked by the tests under `tests/`.
 
-- A job that runs an agent holds no credential of the machine account and no
-  token minted from it; its own job token is read-only. Every
-  claude-code-action step passes that job token as `github_token`, so the
-  action mints no Claude App token (since step 4 of
-  design/untrusted-agent-job.md, the dev agent's included). What the
-  installed App still allows is described under "By design" below.
+- A job that runs an agent holds nothing the agent may not have: its
+  read-only job token, the declared model credential, and an OIDC request
+  token no relying party exchanges for more (the Claude GitHub App is not
+  installed on Meridian repositories since 2026-10-01). No token of the
+  machine account or of any App reaches it. Every claude-code-action step
+  passes the job token as `github_token`, so the action does not ask for a
+  Claude App token either (design/untrusted-agent-job.md, steps 1, 4 and
+  6). So a compromise of anything in a Claude job, its `runner` and root
+  included, gains nothing the agent lacks. The codex jobs are the exception
+  until step 7 of that design: their runner holds `OPENAI_API_KEY`, which
+  codex reaches only through codex-action's proxy, so there the agent-user
+  boundary below is still what keeps the key from the agent.
 - No job of the agent workflows can save to the GitHub Actions cache: every
   reusable workflow declares `cache-mode: read`, which the platform enforces
   on the job's token, so nothing an agent does or a caller's setup nests can
@@ -87,7 +93,12 @@ text are checked by the tests under `tests/`.
   checkout and synthetic secrets (design/credential-separation.md → section
   6), and the Claude launcher up to its launch; adversarial probing of the
   Claude agent's namespace is left to Claude Security scans (decision:
-  Ransom, 2026-09-24).
+  Ransom, 2026-09-24). On the Claude jobs all of this is defence in depth
+  since the App's uninstall: the job holds nothing the agent may not have
+  (the first bullet), so a step from the agent user to `runner` gains
+  nothing, and the reclaims keep the bundle and landing files the agent's
+  final state. On the codex jobs it stays a boundary until step 7 of
+  design/untrusted-agent-job.md, for `OPENAI_API_KEY`.
 - A `settings` input that names a file is read only from inside the
   workspace, as a regular file of at most 64 KiB with no `..` and no
   symlink anywhere on its path, opened `O_NOFOLLOW`. Anything else fails
@@ -108,7 +119,9 @@ text are checked by the tests under `tests/`.
   a, which retired the Claude jobs' `drop-runner-root` step; the composite
   stays for a caller that runs an agent as the runner, and a hosted smoke
   workflow checks it). Claude Security finding 4629153, criterion 2;
-  design/architecture.md → No root for the agent uid.
+  design/architecture.md → No root for the agent uid. Like the provisioning
+  bullet above, this is defence in depth on the Claude jobs, where root holds
+  nothing the agent lacks, and a boundary on the codex jobs until step 7.
 - Every write an agent asks the machine account for lands through a manifest that a stdlib
   validator accepts in full, in a fresh job on a fresh runner that checked out
   no code; a refused manifest causes none of the actions it requested. The
@@ -234,7 +247,8 @@ text are checked by the tests under `tests/`.
   launcher and both reclaims); the one directory the claude-code-action
   step adds to the job PATH is the launcher's root-owned
   `/opt/meridian-agent/bin`, and the smoke workflow runs its cases for that
-  user too.
+  user too. There they are hygiene since the App's uninstall: a runner
+  compromise in a Claude job gains nothing the agent lacks.
 - A `bwrap` the codex user plants is never the one that sandboxes codex's
   commands. Those commands get the provisioned tools' directories on their
   PATH (codex's `config.toml`; never the job PATH), and the directories are
@@ -287,38 +301,15 @@ text are checked by the tests under `tests/`.
 
 ## By design, not a finding
 
-- The Claude GitHub App is still installed on the Meridian repositories,
-  and a job with `id-token: write` can exchange its OIDC token for the
-  App's installation token (contents, pull requests and issues write on
-  the caller repository). No job in the four reusable workflows asks for
-  one: every claude-code-action step passes the job token as
-  `github_token`, the dev agent included since it moved to agent mode
-  (design/untrusted-agent-job.md, step 4), so the action mints none and
-  posts nothing; the dev agent's status comment is the machine account's,
-  posted by the gate and finished by the land job from trusted values.
-  The codex jobs request no OIDC token at all. What is left is a runner
-  compromise in a Claude job making the exchange itself, which the App's
-  uninstall (that design's step 6) closes. The agent runs as
-  `claude-agent` behind the launcher, which keeps any token other than the
-  job token out of its argv, environment, settings, MCP servers and
-  `.git/config`, and the agent's namespace hides the action's process, the
-  step scripts and the runner's files. The agent's `gh` holds the
-  read-only job token, its replies, thread resolutions and comments go
-  through the landing manifest, and the settings denies on push and
-  posting verbs are guard rails behind that. Because the App can still
-  mint tokens, `claude[bot]` is trusted nowhere: the review-fix
-  workflow takes verdicts only from the machine account (or a caller's
-  `reviewer_login`), counts a `claude[bot]` re-review request only when the
-  caller's `review_allowed_bots` names it (empty by default), and the codex
-  fix prompt anchors on the machine account's review comments alone. The
-  reviewer still admits a `claude[bot]` `@review` when the caller's
-  `allowed_bots` names it, as the inspect_ai fork's stub does until it
-  drops the line. The loops' agent steps and the codex reviewer still list
-  `claude` in the action's own actor guard (`allowed_bots`,
-  `allow-bot-users`); the gates in front of them decide, and refuse it. A CI run started by a push from `claude[bot]` — or any bot
-  other than the machine account — is refused by the CI-fix gate's actor
-  check before any write, on both engines (decision: Ransom, 2026-09-22;
-  design/auto-agent.md → Binding the failed run to its PR → Decisions).
+- The settings denies on push and posting verbs are guard rails, not the
+  boundary: the agent's `gh` holds the read-only job token, and its
+  replies, thread resolutions and comments go through the landing
+  manifest. The `claude[bot]` comments posted while the Claude GitHub App
+  was installed (until 2026-10-01) stay on the repositories, and nothing
+  trusts them: verdicts come only from the machine account or a caller's
+  `reviewer_login`, and a `claude[bot]` `@review` counts only where a
+  caller's `allowed_bots` or `review_allowed_bots` names it (both empty by
+  default).
 - The Claude agent can read its model credential: the Claude CLI makes the
   Workload Identity exchange itself (the declared exception, decision:
   Ransom, 2026-09-23). Anthropic's federation rule admits only the
@@ -390,17 +381,29 @@ text are checked by the tests under `tests/`.
   `allow_build_config` input (default false), and the agent's prompt stops
   naming those files as refused. A repository may opt in only when every
   automated agent job that later checks out and runs code from its
-  agent-landed branches provisions and runs its agent — the CLI and every
-  tool call — as an unprivileged user, as the reusable workflows' agent
-  jobs do; the rule is per repository, since several writers push to the
-  same branches (ts-mono's `dependabot-fix` continuation, which still runs
-  its agent as `runner` on an earlier agent branch, keeps ts-mono off
-  until it is migrated). **For tier 2 this is how criterion 2 of finding
-  4628446 is met** (decision: Ransom, 2026-09-23, accepting the revised
-  criterion): such files land without a human's approval, but every
-  automated agent job that executes them does so only as an unprivileged
-  user holding the read-only job token (and the model credential, the
-  declared exception above), which is criterion 1's remedy. Tier 1 meets
+  agent-landed branches meets two conditions:
+
+  1. the job holds nothing beyond the read-only job token and the model
+     credential (the declared exception above), whoever inside it is
+     compromised, `runner` and root included (the boundary);
+  2. it provisions and runs its agent — the CLI and every tool call — as
+     an unprivileged user (depth, still required, and every agent job of
+     the reusable workflows meets it).
+
+  The reusable workflows' Claude jobs meet both since the Claude GitHub
+  App's uninstall (2026-10-01; design/untrusted-agent-job.md → The tier-2
+  opt-in's premise). Their codex jobs hold `OPENAI_API_KEY`, the codex
+  model credential, until step 7 of that design; codex never sees the key
+  itself, so there the second condition is still the boundary that keeps
+  it from the agent. The rule is per repository, since several writers
+  push to the same branches (ts-mono's `dependabot-fix` continuation,
+  which still runs its agent as `runner` on an earlier agent branch, keeps
+  ts-mono off until it is migrated). **For tier 2 this is how criterion 2
+  of finding 4628446 is met** (decision: Ransom, 2026-09-23, accepting the
+  revised criterion): such files land without a human's approval, but
+  every automated agent job that executes them holds nothing beyond the
+  read-only job token and the model credential, and runs them only as an
+  unprivileged user, which is criterion 1's remedy. Tier 1 meets
   criterion 2 literally, by refusal. The rule covers the repository's CI
   and other credentialed automation too (decision: Ransom, 2026-09-24,
   applied to finding 4628446 when the step-6 companions opted in): no
@@ -418,9 +421,8 @@ text are checked by the tests under `tests/`.
 - A Claude reviewer steered by hostile PR content cannot push through its
   landing job, cannot act as the machine account from its own job, and
   cannot have the machine account write outside the caller repository. The
-  review job holds no Claude App token (the action runs on the read-only
-  job token), so it cannot post as `claude[bot]` either;
-  the command denies are guard rails behind that. Its normal output is the review
+  review job holds no token that can post (the action runs on the
+  read-only job token); the command denies are guard rails behind that. Its normal output is the review
   files in its landing
   directory, posted as the review after trigger tokens and loop markers are
   removed, with a verdict that is one of two fixed bodies. Its landing

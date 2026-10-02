@@ -59,8 +59,9 @@ This opens a PR adding both stubs (dev `claude.yml` and reviewer
 `claude-review.yml`); stubs already present are skipped, so it's safe to re-run.
 Merge the PR to activate.
 
-Prerequisite: the Claude GitHub App must have access to the repo (org-wide
-install covers this).
+The Claude GitHub App is not needed: the agents run on the job token and
+the machine account below. It was removed from Meridian repositories on
+2026-10-01.
 
 **The machine account's secrets.** The stubs pass two org secrets by name to
 the reusable workflows: `MARVIN_APP_CLIENT_ID` and `MARVIN_APP_PRIVATE_KEY`,
