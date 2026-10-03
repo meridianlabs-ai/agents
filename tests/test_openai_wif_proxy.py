@@ -366,13 +366,14 @@ def test_the_absolute_expiry_wins_over_a_longer_expires_in(run, stub):
 
 
 def test_the_time_an_answer_takes_counts_against_expires_in(run, stub):
-    # expires_in counts from issuance, so 0.4 s spent waiting for the
-    # answer leaves 60.2 s of a 60.6 s token: inside the margin 0.2 s later.
-    stub.expires_in, stub.expires_at_in = 60.6, False
-    stub.exchange_delays = [0.4]
+    # expires_in counts from issuance, so 0.6 s spent waiting for the
+    # answer leaves 60.4 s of a 61 s token: inside the margin 0.4 s later.
+    # The renewal's own answer may take up to 0.5 s and still log 61 s.
+    stub.expires_in, stub.expires_at_in = 61, False
+    stub.exchange_delays = [0.6]
     assert run.start().returncode == 0
-    assert "token expires_in 60.6, valid for 60 s on receipt" in run.summary.read_text()
-    time.sleep(0.3)
+    assert "token expires_in 61, valid for 60 s on receipt" in run.summary.read_text()
+    time.sleep(0.5)
     resp, _ = run.post()
     assert resp.status == 200 and len(stub.exchanges) == 2
     assert "renewed (expiry): valid for 61 s" in run.log()
