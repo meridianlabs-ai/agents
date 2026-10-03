@@ -19,11 +19,12 @@ take effect on every repo's next run.
   agents run here too. `-stub` suffix because the canonical stub filenames are
   taken by the reusable definitions; keep them in sync with `examples/`. The
   @auto stub has both halves: its CI-fix half watches `tests` (below). Every
-  job sets a `provision` recipe (a venv with pytest, on the Python `tests`
-  uses) so the agents can run the suite; the examples leave it commented.
+  job sets a `provision` recipe (a venv with pytest and pytest-xdist, on the
+  Python `tests` uses) so the agents can run the suite; the examples leave it
+  commented.
 - `.github/workflows/tests.yml` — this repo's CI (workflow `name: tests`): the
-  full `python3 -m pytest` suite on every PR and push to main, with a
-  read-only token and no secrets (see Testing a change).
+  full suite, `python3 -m pytest -n auto`, on every PR and push to main, with
+  a read-only token and no secrets (see Testing a change).
 - `.github/actions/*` — composite actions holding step logic shared across the
   reusable workflows (`set-stage`, `sync-branch`, `assert-no-persisted-credential`,
   `reset-origin-url`, `create-codex-user`, `assert-runner-only-path`,
@@ -46,8 +47,8 @@ take effect on every repo's next run.
   job; the manifest schema is in `.github/actions/emit-landing/README.md`.
 - `.github/scripts/validate_manifest.py` — the land job's manifest validator
   (stdlib only; fails closed). `tests/` holds its pytest suite and the
-  `land` helpers' tests — the repo's only unit tests: `python3 -m pytest`
-  from the root.
+  `land` helpers' tests — the repo's only unit tests: `python3 -m pytest -n
+  auto` from the root.
 - `examples/` — stubs copied into caller repos by `scripts/enable-claude.sh`.
 - `design/` — rationale and history; read [design/architecture.md](design/architecture.md)
   before changing how the agents work.
@@ -311,14 +312,18 @@ is in [THREAT_MODEL.md](THREAT_MODEL.md).
   narrowest `repositories` and `permission-*` inputs, and read it from
   `steps.mint.outputs.token` only.
 - Stubs pass secrets as explicit one-key entries, never `secrets: inherit`.
-- Run `actionlint` as well as `python3 -m pytest` (Testing a change) before
-  opening the PR.
+- Run `actionlint` as well as `python3 -m pytest -n auto` (Testing a change)
+  before opening the PR.
 
 ## Testing a change
 
 The unit tests are in `tests/` (tests/README.md lists what each file
-covers): `python3 -m pytest` from the root. Run it before pushing any change
-to a workflow, composite, stub, example or script. CI runs the same command
+covers): `python3 -m pytest -n auto` from the root, with pytest and
+pytest-xdist installed. `-n auto` runs one worker per core; the suite spends
+its time starting processes, so a serial run takes several times longer.
+Without pytest-xdist, or for a single file or test, leave `-n auto` out.
+Run it before pushing any change to a workflow, composite, stub, example or
+script. CI runs the same command
 on every PR and every push to main (`.github/workflows/tests.yml`, check
 `tests / pytest`; no secrets, read-only token), so drift between the
 reusable workflows and the tests that lift their steps shows up on the PR.
