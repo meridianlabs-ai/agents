@@ -1474,7 +1474,14 @@ jobs:
           # strip or appears mid-run changes nothing. Spliced AFTER the
           # caller's claude_args: the action takes the last --setting-sources
           # it sees. Same-repo heads are untouched.
+          # `--permission-mode default` (issue #200): with no mode, Claude Code
+          # 2.1.287 runs headless in auto mode, which lets Write and redirects
+          # into the workspace through and sends commands no rule matches to a
+          # model classifier, so the `settings` allow and deny lists would no
+          # longer be the boundary. It comes before the caller's claude_args,
+          # which may override it.
           claude_args: >-
+            --permission-mode default
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ inputs.append_system_prompt != '' && format('--append-system-prompt {0}', toJSON(inputs.append_system_prompt)) || '' }}

@@ -867,6 +867,10 @@ Testing a change).
   defaults to the `opus` alias (never a dated id) with `fallback_model`
   `default`, and both still reach Claude Code as `--model` /
   `--fallback-model` (design/architecture.md → Model selection).
+- `test_permission_mode.py` — every step that runs claude-code-action
+  passes `--permission-mode default` first in `claude_args`, so a headless
+  run never starts in auto mode, and a caller's `claude_args` come after it;
+  no stub or example passes another mode (issue #200).
 
 The lifted `run:` scripts execute under the runner's shell options — `bash
 -e` for a workflow step without a `shell:` key, `bash --noprofile --norc

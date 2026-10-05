@@ -1796,7 +1796,14 @@ jobs:
           # process left in /tmp/inline-comments-buffer.jsonl (the agent's
           # /tmp is private anyway; belt and braces).
           classify_inline_comments: "false"
+          # `--permission-mode default` (issue #200): with no mode, Claude Code
+          # 2.1.287 runs headless in auto mode, which lets Write and redirects
+          # into the workspace through and sends commands no rule matches to a
+          # model classifier, so the `settings` allow and deny lists would no
+          # longer be the boundary. It comes before the caller's claude_args,
+          # which may override it.
           claude_args: >-
+            --permission-mode default
             ${{ inputs.model != '' && format('--model {0}', inputs.model) || '' }}
             ${{ inputs.model != '' && inputs.fallback_model != '' && format('--fallback-model {0}', inputs.fallback_model) || '' }}
             ${{ steps.sysprompt.outputs.value != '' && format('--append-system-prompt {0}', toJSON(steps.sysprompt.outputs.value)) || '' }}
