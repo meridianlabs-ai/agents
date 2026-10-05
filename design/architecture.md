@@ -1218,6 +1218,31 @@ passes `--permission-mode default` first in `claude_args`, which keeps the
 allow-list above as the boundary; a caller's `claude_args` come later and may
 override it (issue #200, tests/test_permission_mode.py).
 
+That test checks the flag, not what the CLI does with it. Repeat the
+permission check whenever claude-code-action@v1 moves to another Claude Code
+release (the launcher installs whatever release the action pins), and when a
+job's default `settings` or `claude_args` change:
+
+- Run the official Linux x64 and ARM64 builds in an Ubuntu container as an
+  unprivileged user, against a stand-in Messages API that asks for a fixed
+  list of tool calls. Use each job's composed settings and `claude_args`,
+  and leave every target path writable, so a refusal comes from the
+  permission engine and not the filesystem.
+- Compare each case with 2.1.278, the last release checked that did not
+  start in auto mode. Expected: the reviewer's writes and redirects into its
+  landing directory run; the dev and fix agents' Edit and Write run; writes
+  and redirects into the working directory by the reviewer, redirects there
+  by any job, commands no rule matches (beyond the read-only ones Claude Code
+  allows itself, such as `git status`), and the denied push and posting
+  commands are refused.
+
+The harness and its results are kept in Ransom's notes, not in this
+repository. On 2026-10-05, 2.1.289 with `--permission-mode default` matched
+2.1.278 in all 57 cases (25 with the settings of meridianlabs-ai/actions'
+triage job, 32 with this repo's dev and reviewer settings) on both
+architectures. With no mode, 2.1.289 still started in auto mode: workspace
+writes ran and some allowed commands were refused.
+
 Allow-list brittleness is real: `Bash(python:*)` does not match `python3 ...`,
 and `gh` was initially missing (so the dev agent's `gh pr create` was silently
 denied and it fell back to a compare link). Both invocation forms and `gh` are
