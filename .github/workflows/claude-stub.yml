@@ -140,13 +140,14 @@ jobs:
       #   uv sync --dev
       # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
       # pyproject.toml, so without a recipe nothing is provisioned and the
-      # agent had to install pytest itself. The suite needs only pytest, on
-      # tests.yml's Python; the venv's bin leads the agent's PATH, so
-      # `python3 -m pytest` (AGENTS.md → Testing a change) runs in it. The
-      # same in every job here; tests/test_ci_workflow.py checks it.
+      # agent had to install pytest itself. The suite needs pytest and
+      # pytest-xdist, on tests.yml's Python; the venv's bin leads the agent's
+      # PATH, so `python3 -m pytest -n auto` (AGENTS.md → Testing a change)
+      # runs in it. The same in every job here; tests/test_ci_workflow.py
+      # checks it.
       provision: |
         uv venv --python 3.12
-        uv pip install pytest
+        uv pip install pytest pytest-xdist
       # trigger_phrase is single-valued, so resolve it from the SAME source the
       # action will check for this event (comment > review > issue), not from a
       # union of all sources — otherwise a stale @claude in an enclosing issue
@@ -287,13 +288,14 @@ jobs:
       #   uv sync --dev
       # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
       # pyproject.toml, so without a recipe nothing is provisioned and the
-      # agent had to install pytest itself. The suite needs only pytest, on
-      # tests.yml's Python; the venv's bin leads the agent's PATH, so
-      # `python3 -m pytest` (AGENTS.md → Testing a change) runs in it. The
-      # same in every job here; tests/test_ci_workflow.py checks it.
+      # agent had to install pytest itself. The suite needs pytest and
+      # pytest-xdist, on tests.yml's Python; the venv's bin leads the agent's
+      # PATH, so `python3 -m pytest -n auto` (AGENTS.md → Testing a change)
+      # runs in it. The same in every job here; tests/test_ci_workflow.py
+      # checks it.
       provision: |
         uv venv --python 3.12
-        uv pip install pytest
+        uv pip install pytest pytest-xdist
       trigger_phrase: "@auto"
       label_trigger: "auto"
       # allow_build_config (optional, default false; agents repo:
