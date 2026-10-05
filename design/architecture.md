@@ -1211,6 +1211,13 @@ granted a **scoped Bash allow-list** for the test/lint loop (`pytest`, `ruff`,
 told it to run the trio before opening a PR. A re-run then caught and fixed a
 real test bug. We deliberately did **not** grant full Bash.
 
+Since Claude Code 2.1.287 a headless run with no `--permission-mode` starts in
+auto mode, which lets Write and redirects into the working directory through
+and sends commands no rule matches to a model classifier. So every Claude job
+passes `--permission-mode default` first in `claude_args`, which keeps the
+allow-list above as the boundary; a caller's `claude_args` come later and may
+override it (issue #200, tests/test_permission_mode.py).
+
 Allow-list brittleness is real: `Bash(python:*)` does not match `python3 ...`,
 and `gh` was initially missing (so the dev agent's `gh pr create` was silently
 denied and it fell back to a compare link). Both invocation forms and `gh` are
