@@ -1859,18 +1859,24 @@ THREAT_MODEL.md text that its change makes true.
        [run 37054433870](https://github.com/meridianlabs-ai/agents/actions/runs/37054433870),
        success. Every probe was refused, the Meridian audience included
        (the mapping does not list `workflow_dispatch`).
-     - Codex `@review` on meridianlabs-ai/ts-mono#726: verification deferred
-       from this results update. The local #203 checkout and supplied review
-       feedback contain no observed outcome or run link, and this
-       credential-free review-fix job cannot trigger the check. A maintainer
-       must verify that reviewer run and record its outcome and run link;
-       step 7's verification remains incomplete until that evidence is recorded.
+     - Codex `@review` on meridianlabs-ai/ts-mono#726 (with a temporary
+       `engine:codex` label):
+       [run 37054590094](https://github.com/meridianlabs-ai/ts-mono/actions/runs/37054590094),
+       success. `review-codex` ran (`review` skipped); the forwarder logged
+       `exchanged; token expires_in 299 … GitHub OIDC token lifetime
+       (exp - iat) 300 s`, then 13 requests forwarded with 1 renewal before
+       expiry and no failed renewals or upstream errors. The exchanged token
+       lives about five minutes, bounded by the OIDC token, not the hour the
+       OpenAI documentation allows. The review and its verdict landed as
+       `meridian-marvin[bot]`.
      - Codex CI-fix round on #203: the deliberately failing probe triggered
        [run 37055234306](https://github.com/meridianlabs-ai/agents/actions/runs/37055234306),
        success. The OpenAI forwarder and `fix-codex` job succeeded; landing
        committed the probe's removal as `11d8fb1`. The subsequent
        [tests run 37056076774](https://github.com/meridianlabs-ai/agents/actions/runs/37056076774)
        passed on that commit.
+     - The `agents-ci` project's usage page (usage under its spend limit):
+       an org admin's check, recorded separately.
 
 ## Open questions
 
