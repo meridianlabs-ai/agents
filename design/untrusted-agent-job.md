@@ -1437,7 +1437,7 @@ model or a real secret):
   - After step 6 it must fail, and that failure is the proof of step 6.
     It did on 2026-10-01 (Implementation plan → step 6 → As done), and
     the probe now expects `refused` there. Since the App was reinstalled
-    and kept suspended outside scan windows (2026-10-05) the weekly
+    and kept suspended outside scan windows (2026-10-05) the daily
     scheduled run expects `refused` too: the exchange answers a
     scheduled run from `main` (the run of 2026-10-05 was answered "not
     installed"), so an installation left active fails the canary within a
@@ -1818,8 +1818,8 @@ THREAT_MODEL.md text that its change makes true.
        mint a `claude[bot]` token with the App's full permission set,
        Workflows and Repository hooks write included. Keeping the window
        short and quiet is the mitigation; the residual is accepted.
-     - The canary's weekly schedule expects a refusal too, so an
-       installation left active fails the canary within a week. The
+     - The canary runs daily, and its schedule expects a refusal too, so
+       an installation left active fails the canary within a day. The
        canary probes this repository only. A refusal there speaks for
        the installation only while this repository is one of the
        selected ones; otherwise the exchange answers "not installed"

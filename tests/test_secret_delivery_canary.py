@@ -20,12 +20,12 @@ probe keeps their shape, so these checks hold the two together:
   selected agent job succeeded;
 - the canary calls the probe once per engine with A for both App secrets
   and B for the OpenAI key, from the repository's sentinel secrets only;
-- the canary runs weekly (off the hour) as well as on its push paths and by
+- the canary runs daily (off the hour) as well as on its push paths and by
   hand;
 - each probe agent job requests an OIDC token exactly when the real one
   does (both, for their model credential's federation since step 7 of
   design/untrusted-agent-job.md) and runs the OIDC exchange probe before
-  its scan, expecting a refusal in both on the weekly schedule and a
+  its scan, expecting a refusal in both on the daily schedule and a
   dispatch from main, since the Claude GitHub App is suspended outside
   scan windows (step 6 of that design → Suspended except during scan
   windows; elsewhere the exchange refuses the event or the changed
@@ -152,9 +152,11 @@ def test_the_stand_in_action_prints_lengths_only():
     assert echoes and all(re.fullmatch(r'echo "[^$]*(\$\{#[A-Z_]+\}[^$]*)+"', e) for e in echoes), echoes
 
 
-def test_the_canary_runs_weekly_as_well_as_on_push_and_by_hand():
+def test_the_canary_runs_daily_as_well_as_on_push_and_by_hand():
     # Per-job delivery is measured platform behaviour, not a contract, and no
-    # push here would reveal a change in it (decision: Ransom, 2026-09-23).
+    # push here would reveal a change in it (decision: Ransom, 2026-09-23);
+    # daily so an active Claude App installation fails within a day
+    # (decision: Ransom, 2026-10-05).
     text = workflow(CANARY)
     on = text[text.index("\non:\n"):text.index("\npermissions:\n")]
     assert "\n  workflow_dispatch:\n" in on
@@ -163,7 +165,7 @@ def test_the_canary_runs_weekly_as_well_as_on_push_and_by_hand():
     assert len(cron) == 1
     minute, hour, dom, month, dow = cron[0].split()
     assert minute.isdigit() and minute != "0", "off the top of the hour"
-    assert hour.isdigit() and (dom, month) == ("*", "*") and dow.isdigit(), "once a week"
+    assert hour.isdigit() and (dom, month, dow) == ("*", "*", "*"), "once a day"
 
 
 # --- the OIDC exchange probe (design/untrusted-agent-job.md → Testing) -------
@@ -195,8 +197,8 @@ def test_each_probe_agent_job_runs_the_exchange_probe_before_its_scan():
     probe = jobs(workflow(PROBE))
     # Since the App's uninstall (step 6) a dispatch from main must be
     # refused, and since it was reinstalled suspended outside scan windows
-    # (2026-10-05) the weekly schedule too, so an installation left active
-    # fails within a week; an outage there fails, as it is no evidence
+    # (2026-10-05) the daily schedule too, so an installation left active
+    # fails within a day; an outage there fails, as it is no evidence
     # either way.
     on_main = ("${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')"
                " && github.ref == 'refs/heads/main' && 'refused' || 'any' }}")

@@ -30,7 +30,7 @@
 #                              must be exchanged, the positive control that
 #                              makes the refusals mean something.
 #
-# Runs after each `main` run of the engine isolation canary (weekly, on its
+# Runs after each `main` run of the engine isolation canary (daily, on its
 # push paths and by hand), weekly on its own schedule (the wrong-event case),
 # and by hand. A `workflow_run` workflow runs from the default branch only,
 # and the reviewer's probe input exists only on `main` once this lands, so

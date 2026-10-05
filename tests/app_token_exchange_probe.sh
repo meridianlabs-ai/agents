@@ -13,7 +13,7 @@
 # run gets "Invalid OIDC token", and a run whose workflow file differs from
 # the default branch's gets "Workflow validation failed" (measured
 # 2026-09-30). So the caller asserts an outcome only where the exchange
-# would answer an agent job, a dispatch from main or the weekly schedule
+# would answer an agent job, a dispatch from main or the daily schedule
 # (the 2026-10-05 scheduled run was answered "not installed"), and passes
 # `any` elsewhere, which records the outcome and asserts nothing about it.
 # On that dispatch it expected `minted` until the App was uninstalled

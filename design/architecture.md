@@ -2199,8 +2199,8 @@ A scan window is short and quiet:
    exchange probe must be refused, which confirms the re-suspension. Then
    enable the scheduled workflows again.
 
-The canary's weekly scheduled run expects the same refusal, so an
-installation left active fails it within a week. It probes this
+The canary's daily scheduled run expects the same refusal, so an
+installation left active fails it within a day. It probes this
 repository only, so it speaks for the installation only while this
 repository is one of the selected ones.
 

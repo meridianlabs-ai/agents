@@ -33,11 +33,11 @@
 #                          Each agent job also asks the Claude App token
 #                          exchange for a token as `runner`
 #                          (design/untrusted-agent-job.md → Testing): on
-#                          the weekly schedule and a dispatch from main
+#                          the daily schedule and a dispatch from main
 #                          both are refused, since the App is suspended
 #                          outside Claude Security scan windows (decision:
 #                          Ransom, 2026-10-05), so an installation left
-#                          active fails the canary within a week; other
+#                          active fails the canary within a day; other
 #                          runs only record the outcome (the exchange
 #                          refuses push events and changed workflow
 #                          files).
@@ -122,13 +122,15 @@
 #                          directory (a warning, not a failure, if the image
 #                          stops shipping it writable). A codex-action
 #                          release that adds another codex-writable PATH
-#                          entry fails this job, weekly at the latest, before
+#                          entry fails this job, daily at the latest, before
 #                          it fails every real run.
 #
 # Runs on pushes that touch the composites, the harness, the scanner or the
-# fixtures, by hand, and weekly on `main`: per-job secret delivery is the
+# fixtures, by hand, and daily on `main`: per-job secret delivery is the
 # platform's measured behaviour, not a contract, and no push here would
-# reveal a change in it (decision: Ransom, 2026-09-23). GitHub emails a
+# reveal a change in it (decision: Ransom, 2026-09-23, weekly), and an
+# active Claude App installation should fail within a day of a missed
+# re-suspension (decision: Ransom, 2026-10-05, daily). GitHub emails a
 # failed scheduled run to the user who last modified the cron line, and
 # disables a scheduled workflow after 60 days without repository activity
 # (this repository is public).
@@ -138,7 +140,7 @@ name: engine isolation canary
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 6 * * 1"   # Mondays 06:17 UTC, off the top-of-hour rush
+    - cron: "17 6 * * *"   # daily 06:17 UTC, off the top-of-hour rush
   push:
     paths:
       - ".github/actions/assert-runner-only-path/**"
@@ -159,7 +161,7 @@ on:
 # to its branch in a few minutes, and each used to queue a full canary run;
 # a newer push to the same branch now cancels the older run, since only the
 # branch's latest revision matters. Runs on main (the post-merge evidence),
-# the weekly schedule and manual dispatches are never cancelled: they queue
+# the daily schedule and manual dispatches are never cancelled: they queue
 # behind a run in their own group instead.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}

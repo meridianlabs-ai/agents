@@ -344,9 +344,9 @@ text are checked by the tests under `tests/`.
   window is short and quiet (no agent run triggered there, the scheduled
   agent workflows disabled for it), and ends with the re-suspension
   confirmed by a dispatch of the engine isolation canary from `main`,
-  whose Claude App exchange probe must be refused. The canary's weekly
+  whose Claude App exchange probe must be refused. The canary's daily
   run expects the same refusal, so an installation left active fails it
-  within a week (design/untrusted-agent-job.md → Implementation plan →
+  within a day (design/untrusted-agent-job.md → Implementation plan →
   step 6 → Suspended except during scan windows).
 - The Claude agent can read its model credential: the Claude CLI makes the
   Workload Identity exchange itself (the declared exception, decision:
