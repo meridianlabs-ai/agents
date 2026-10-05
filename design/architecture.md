@@ -1229,19 +1229,23 @@ job's default `settings` or `claude_args` change:
   and leave every target path writable, so a refusal comes from the
   permission engine and not the filesystem.
 - Compare each case with 2.1.278, the last release checked that did not
-  start in auto mode. Expected: the reviewer's writes and redirects into its
-  landing directory run; the dev and fix agents' Edit and Write run; writes
-  and redirects into the working directory by the reviewer, redirects there
-  by any job, commands no rule matches (beyond the read-only ones Claude Code
-  allows itself, such as `git status`), and the denied push and posting
-  commands are refused.
+  start in auto mode. Expected: the dev and fix agents' Edit and Write run.
+  For same-repository reviews, writes and redirects into the landing
+  directory run. For fork-head and External reviews, the built-in Write
+  tool can write the review files, but Bash and its children must not write
+  or redirect into the landing directory or the checkout; sandboxed writes
+  stay in the scratch copy. Refused in every job: writes and redirects into
+  the working directory by the reviewer, redirects there by any job,
+  commands no rule matches (beyond the read-only ones Claude Code allows
+  itself, such as `git status`), and the denied push and posting commands.
 
 The harness and its results are kept in Ransom's notes, not in this
 repository. On 2026-10-05, 2.1.289 with `--permission-mode default` matched
 2.1.278 in all 57 cases (25 with the settings of meridianlabs-ai/actions'
-triage job, 32 with this repo's dev and reviewer settings) on both
-architectures. With no mode, 2.1.289 still started in auto mode: workspace
-writes ran and some allowed commands were refused.
+triage job, 32 with this repo's dev and same-repository reviewer settings)
+on both architectures. The fork-head and External reviewer settings, with
+their sandbox, were not run. With no mode, 2.1.289 still started in auto
+mode: workspace writes ran and some allowed commands were refused.
 
 Allow-list brittleness is real: `Bash(python:*)` does not match `python3 ...`,
 and `gh` was initially missing (so the dev agent's `gh pr create` was silently
