@@ -27,6 +27,15 @@ the public `meridianlabs-ai/inspect_ai` fork run them through thin stubs
 pinned to this repository's `main`; the `meridianlabs-ai/actions` repository
 builds two more agent workflows on the same composites.
 
+## The Claude GitHub App
+
+The Claude GitHub App is installed only on the repositories Claude Security
+scans, and an org owner keeps it suspended outside scan windows. Nothing in
+these workflows acts as `claude[bot]`: they land as the machine account, and
+the scanner only reads. A push, comment, label, review or pull request by
+`claude[bot]` is unexpected; report it as above. What the App could do
+during a scan window is in THREAT_MODEL.md.
+
 ## Threat model
 
 The trust boundaries, the guarantees and what is by design, not a finding,

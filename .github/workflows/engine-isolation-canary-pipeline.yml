@@ -40,13 +40,19 @@
 # `id-token: write` (Workload Identity Federation: Anthropic's for the
 # Claude job, OpenAI's for the codex job since step 7 of the design). As
 # `runner`, the probe asks the Claude App token exchange for a token and
-# revokes any it gets. Expected: on a dispatch from main both jobs are
-# refused, since the Claude GitHub App is not installed on this repository
-# (uninstalled 2026-10-01, step 6 of the design; before that the same
-# dispatch minted a token in the Claude job, the evidence the design rests
-# on); on other runs the outcome is recorded only (the exchange refuses
-# push events and workflow files that differ from main's whatever the
-# App). An outage (no answer, a 5xx) is neither, and fails the dispatch.
+# revokes any it gets. Expected: on the daily schedule and on a dispatch
+# from main both jobs are refused, since the Claude GitHub App has no
+# active installation on this repository outside a scan window
+# (uninstalled 2026-10-01, step 6 of the design; reinstalled for Claude
+# Security scans and suspended outside their windows since 2026-10-05,
+# step 6 → Suspended except during scan windows; before the uninstall the
+# same dispatch minted a token in the Claude job, the evidence the design
+# rests on). Any 4xx counts as a refusal, whatever its message. So an
+# installation left active fails the canary within a day, and the
+# dispatch after a scan window confirms the re-suspension. On other runs
+# the outcome is recorded only (the exchange refuses push events and
+# workflow files that differ from main's whatever the App). An outage (no
+# answer, a 5xx) is neither, and fails the scheduled or dispatched run.
 
 name: engine isolation canary (pipeline probe)
 
@@ -111,12 +117,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # The exchange answers a `workflow_dispatch` run of this file as it is
-      # on the default branch, and with the App uninstalled it refuses it; a
-      # push run, or a branch whose canary files differ from main's, is
-      # refused whatever the App, so there the outcome is only recorded.
-      - name: OIDC exchange probe (expect a refusal on a dispatch from main; the App is uninstalled)
-        run: bash tests/app_token_exchange_probe.sh ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'refused' || 'any' }}
+      # The exchange answers a `workflow_dispatch` or `schedule` run of this
+      # file as it is on the default branch, and with no active App
+      # installation it refuses it; a push run, or a branch whose canary
+      # files differ from main's, is refused whatever the App, so there the
+      # outcome is only recorded.
+      - name: OIDC exchange probe (expect a refusal on the schedule and a dispatch from main; the App is suspended)
+        run: bash tests/app_token_exchange_probe.sh ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main' && 'refused' || 'any' }}
       - name: Scan runner memory (expect neither sentinel)
         run: sudo python3 tests/secret_delivery_scan.py absent absent
 
@@ -132,8 +139,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: OIDC exchange probe (expect no App token on a dispatch from main; the App is uninstalled)
-        run: bash tests/app_token_exchange_probe.sh ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'refused' || 'any' }}
+      - name: OIDC exchange probe (expect no App token on the schedule and a dispatch from main; the App is suspended)
+        run: bash tests/app_token_exchange_probe.sh ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main' && 'refused' || 'any' }}
       - name: Scan runner memory (expect neither sentinel)
         run: sudo python3 tests/secret_delivery_scan.py absent absent
 

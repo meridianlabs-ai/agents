@@ -793,15 +793,17 @@ Testing a change).
   jobs are selected by the gate's `engine` output like the real ones and
   the land job needs all three under `always()`; each probe job ends with
   the memory scan its references imply, the canary calls the probe per
-  engine with the two sentinels only, the canary keeps a weekly off-the-hour
+  engine with the two sentinels only, the canary keeps a daily off-the-hour
   schedule beside its push and dispatch triggers, and the stand-in action
   prints lengths, never values. The OIDC exchange probe
   (design/untrusted-agent-job.md → Testing): each probe agent job requests
   an OIDC token exactly when the real one does (both, since step 7) and
   runs `app_token_exchange_probe.sh` before its scan (both `refused` on a
-  dispatch from main, since the Claude GitHub App's uninstall, and `any`
-  elsewhere); the script, against a stub `curl`, reports a refusal with
-  its reason, revokes a minted token
+  dispatch from main, since the Claude GitHub App's uninstall, and on the
+  daily schedule, since it was reinstalled and kept suspended outside
+  scan windows; `any` elsewhere); the script, against a stub `curl`,
+  reports a refusal with its reason, any 4xx message counting, revokes a
+  minted token
   at once, prints no token outside a mask command, counts an outage (no
   answer, 5xx, a token-less 2xx) as neither mint nor refusal, and fails on
   the unexpected outcome or a failed revocation.

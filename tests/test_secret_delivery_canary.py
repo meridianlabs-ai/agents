@@ -20,16 +20,18 @@ probe keeps their shape, so these checks hold the two together:
   selected agent job succeeded;
 - the canary calls the probe once per engine with A for both App secrets
   and B for the OpenAI key, from the repository's sentinel secrets only;
-- the canary runs weekly (off the hour) as well as on its push paths and by
+- the canary runs daily (off the hour) as well as on its push paths and by
   hand;
 - each probe agent job requests an OIDC token exactly when the real one
   does (both, for their model credential's federation since step 7 of
   design/untrusted-agent-job.md) and runs the OIDC exchange probe before
-  its scan, expecting a refusal in both on a dispatch from main, since the
-  Claude GitHub App is uninstalled (step 6 of that design; elsewhere the
-  exchange refuses the event or the changed workflow, and the outcome is
-  only recorded); the probe script, run against a
-  stub curl, revokes a minted token at once, prints no token, counts an
+  its scan, expecting a refusal in both on the daily schedule and a
+  dispatch from main, since the Claude GitHub App is suspended outside
+  scan windows (step 6 of that design → Suspended except during scan
+  windows; elsewhere the exchange refuses the event or the changed
+  workflow, and the outcome is only recorded); the probe script, run
+  against a stub curl, counts any 4xx as a refusal whatever its message,
+  revokes a minted token at once, prints no token, counts an
   unreachable exchange, a 5xx or a token-less 2xx as neither mint nor
   refusal, and fails on the unexpected outcome or a failed revocation
   (design/untrusted-agent-job.md → Testing).
@@ -150,9 +152,11 @@ def test_the_stand_in_action_prints_lengths_only():
     assert echoes and all(re.fullmatch(r'echo "[^$]*(\$\{#[A-Z_]+\}[^$]*)+"', e) for e in echoes), echoes
 
 
-def test_the_canary_runs_weekly_as_well_as_on_push_and_by_hand():
+def test_the_canary_runs_daily_as_well_as_on_push_and_by_hand():
     # Per-job delivery is measured platform behaviour, not a contract, and no
-    # push here would reveal a change in it (decision: Ransom, 2026-09-23).
+    # push here would reveal a change in it (decision: Ransom, 2026-09-23);
+    # daily so an active Claude App installation fails within a day
+    # (decision: Ransom, 2026-10-05).
     text = workflow(CANARY)
     on = text[text.index("\non:\n"):text.index("\npermissions:\n")]
     assert "\n  workflow_dispatch:\n" in on
@@ -161,7 +165,7 @@ def test_the_canary_runs_weekly_as_well_as_on_push_and_by_hand():
     assert len(cron) == 1
     minute, hour, dom, month, dow = cron[0].split()
     assert minute.isdigit() and minute != "0", "off the top of the hour"
-    assert hour.isdigit() and (dom, month) == ("*", "*") and dow.isdigit(), "once a week"
+    assert hour.isdigit() and (dom, month, dow) == ("*", "*", "*"), "once a day"
 
 
 # --- the OIDC exchange probe (design/untrusted-agent-job.md → Testing) -------
@@ -192,9 +196,13 @@ def test_the_probe_agent_jobs_request_oidc_like_the_real_ones(name):
 def test_each_probe_agent_job_runs_the_exchange_probe_before_its_scan():
     probe = jobs(workflow(PROBE))
     # Since the App's uninstall (step 6) a dispatch from main must be
-    # refused; an outage there fails, as it is no evidence either way.
-    dispatch_from_main = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'refused' || 'any' }}"
-    for job, expect in (("agent", dispatch_from_main), ("agent-codex", dispatch_from_main)):
+    # refused, and since it was reinstalled suspended outside scan windows
+    # (2026-10-05) the daily schedule too, so an installation left active
+    # fails within a day; an outage there fails, as it is no evidence
+    # either way.
+    on_main = ("${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')"
+               " && github.ref == 'refs/heads/main' && 'refused' || 'any' }}")
+    for job, expect in (("agent", on_main), ("agent-codex", on_main)):
         runs = [s for s in steps(probe[job]) if "app_token_exchange_probe.sh" in s]
         assert len(runs) == 1 and f"        run: bash tests/app_token_exchange_probe.sh {expect}\n" in runs[0], job
         assert steps(probe[job]).index(runs[0]) == len(steps(probe[job])) - 2, job
@@ -269,6 +277,10 @@ def test_exchange_probe_fails_when_the_revocation_fails(tmp_path):
      "Claude Code GitHub App at https://github.com/apps/claude"),
     ("401", '{"error":{"message":"Workflow validation failed"}}', "exchange HTTP 401: Workflow validation failed"),
     ("404", '{"message":"no installation\\n\\u001b[31m"}', "exchange HTTP 404: no installation[31m"),
+    # A suspended installation: the message is not measured, and any 4xx
+    # passes as a refusal whatever it says.
+    ("403", '{"message":"This installation has been suspended"}',
+     "exchange HTTP 403: This installation has been suspended"),
 ])
 def test_exchange_probe_reports_a_refusal(tmp_path, status, body, detail):
     r, calls, _ = run_probe(tmp_path, "refused", status=status, body=body)

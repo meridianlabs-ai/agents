@@ -22,7 +22,10 @@ holds more than the agent may have:
 - **The Claude GitHub App's installation token.** None of the four
   reusable workflows passes `github_token` to claude-code-action, so the
   action mints the App token itself. That token has contents, pull
-  requests and issues write on the caller repository. The agent jobs'
+  requests and issues write on the caller repository, and a request may
+  ask for more of the App's permissions, Workflows write included
+  (Implementation plan → step 6 → Suspended except during scan
+  windows). The agent jobs'
   permission comment says so: `id-token: write  # WIF auth (and the
   action's own App token)` (claude.yml:1120).
 - **The means to mint that token again.** The action gets the token by
@@ -313,7 +316,7 @@ design (Claude jobs after step 6; codex jobs after step 7):
 | Held in the job | Reachable by `runner`/root | The agent may have it because |
 |---|---|---|
 | Job token: contents, pull requests, issues and actions read | yes | it is the agent's own `GH_TOKEN` (the launcher gives it) |
-| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential. Anthropic WIF (since 2026-10-01 only for the workflows its rule names) and, for the four reusable workflows' jobs, the OpenAI federation mapping are the declared exception. The Claude App exchange has no installation to issue from after step 6. PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` in step 1 and regain it in step 7, after step 6 |
+| OIDC request token (`ACTIONS_ID_TOKEN_REQUEST_*`) | yes | no relying party grants more than the model credential. Anthropic WIF (since 2026-10-01 only for the workflows its rule names) and, for the four reusable workflows' jobs, the OpenAI federation mapping are the declared exception. The Claude App exchange has no active installation to issue from after step 6, except during a scan window (step 6 → Suspended except during scan windows). PyPI and npm publishers pin their own workflow file (step 5 verifies). Codex jobs lose `id-token: write` in step 1 and regain it in step 7, after step 6 |
 | WIF JWT and the Anthropic access token | yes | the declared model-credential exception |
 | The exchanged OpenAI token (codex jobs, in the `openai-wif-proxy` process) | yes | the declared model-credential exception, job-bound like Anthropic's: at most an hour, never beyond the OIDC token |
 | `ACTIONS_RUNTIME_TOKEN` | yes | cache access is read-only (`cache-mode: read`). Artifact upload in this run reaches only the `landing` artifact, which land already treats as untrusted, and no trusted job consumes an artifact (the rule below) |
@@ -1264,6 +1267,10 @@ Untrusted input reaching the new or moved code:
     still mint an App token. Steps 1 to 4 remove every reason to trust
     `claude[bot]` and every token the action mints, but not the exchange.
     So step 6 should follow step 4 promptly.
+  - During a Claude Security scan window the same holds on the selected
+    repositories, with the App's full permission set, Workflows write
+    included (Implementation plan → step 6 → Suspended except during
+    scan windows).
 
 ## Testing
 
@@ -1429,7 +1436,13 @@ model or a real secret):
     109170645052 (2026-09-28, claude.yml at 609e20d).
   - After step 6 it must fail, and that failure is the proof of step 6.
     It did on 2026-10-01 (Implementation plan → step 6 → As done), and
-    the probe now expects `refused` there.
+    the probe now expects `refused` there. Since the App was reinstalled
+    and kept suspended outside scan windows (2026-10-05) the daily
+    scheduled run expects `refused` too: the exchange answers a
+    scheduled run from `main` (the run of 2026-10-05 was answered "not
+    installed"), so an installation left active fails the canary within a
+    week. Any 4xx counts, whatever message a suspended installation
+    produces.
   - Add the same probe to a codex job, where it must fail after step 1
     because the job has no `id-token: write`, and again after step 7
     because the App is gone.
@@ -1769,6 +1782,52 @@ THREAT_MODEL.md text that its change makes true.
        exceptions bullet and the uid machinery's status. Until step 7 the
        codex jobs hold `OPENAI_API_KEY`, so on them the uid machinery is
        still a boundary, and the text says so.
+   - **Suspended except during scan windows** (decision: Ransom,
+     2026-10-05). Claude Security's hosted scanner needs the App to read a
+     repository. So the App is installed again, on the repositories that
+     are scanned only, and an org owner keeps the installation suspended
+     outside scan windows. A suspended installation's API access is
+     blocked, so the exchange yields no usable token, and this step's
+     property holds outside a window.
+     - Why suspended and not just installed. While the installation is
+       active, any job on a selected repository with `id-token: write`
+       (every agent job, for its model federation) can exchange its OIDC
+       token for an App installation token. GitHub cannot restrict which
+       audiences a job requests, and the exchange applies no per-workflow
+       policy: it checks only that the OIDC `actor` has write access. The
+       App's permissions are accepted whole on install, and they are
+       broader than this design said: per the Claude Code docs, Actions,
+       Checks, Contents, Discussions, Issues, Pull requests, Repository
+       hooks and Workflows, all read and write. claude-code-action
+       documents `workflows: write` as a supported
+       `additional_permissions` value. So an active App turns a runner
+       compromise in an agent job into write access, workflow files
+       included.
+     - A scan window is short and quiet:
+       1. Disable the scheduled workflows that run an agent on the
+          selected repositories, and trigger no agent run there (no
+          `@claude`, `@review` or `@auto`, no `claude` label) until the
+          window ends.
+       2. An org owner unsuspends the installation, the scan runs, and
+          the owner suspends it again.
+       3. Dispatch engine-isolation-canary.yml from `main`. It passes
+          only if the exchange refuses, which confirms the re-suspension.
+          Then enable the scheduled workflows again.
+     - During a window this design's boundary does not hold on the
+       selected repositories: a runner compromise in an agent job could
+       mint a `claude[bot]` token with the App's full permission set,
+       Workflows and Repository hooks write included. Keeping the window
+       short and quiet is the mitigation; the residual is accepted.
+     - The canary runs daily, and its schedule expects a refusal too, so
+       an installation left active fails the canary within a day. The
+       canary probes this repository only. A refusal there speaks for
+       the installation only while this repository is one of the
+       selected ones; otherwise the exchange answers "not installed"
+       whatever the installation's state.
+     - `claude[bot]` stays trusted nowhere. The workflows land as the
+       machine account and the scanner only reads, so any `claude[bot]`
+       push, comment, label, review or PR is unexpected and is treated
+       as an incident.
 7. **Codex to OpenAI workload identity federation** (after step 6).
    - Ransom:
      - creates the CI project and its service account, with a hard spend

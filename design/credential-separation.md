@@ -48,9 +48,11 @@ differ; the exceptions are listed there, not assumed away here.
   for more than that credential. No App token reaches it: every
   `claude-code-action` step runs on the job token, and the Claude GitHub
   App, which would mint a write-capable token for any job with
-  `id-token: write`, is not installed on Meridian repositories since
+  `id-token: write`, was uninstalled from Meridian repositories on
   2026-10-01 (step 6 of [untrusted-agent-job.md](untrusted-agent-job.md);
-  section 3.5). So the job as a whole, its `runner` and root included, is
+  section 3.5), and since 2026-10-05 is installed only on the scanned
+  repositories and suspended outside Claude Security scan windows (that
+  step → Suspended except during scan windows). So the job as a whole, its `runner` and root included, is
   untrusted and worth no more than the agent. Since that design's step 7
   this holds for the codex jobs too: they reference no model key, and
   their OpenAI credential is federated like Anthropic's (section 3.5).
@@ -491,7 +493,8 @@ human step.
   so the action skips its OIDC exchange and its revoke post-step. The App
   itself was uninstalled from the Meridian repositories on 2026-10-01
   (that design's step 6), so no job can mint its token any more, whatever
-  runs in it. The agent runs as `claude-agent`, started by the launcher's
+  runs in it, except on a scanned repository during a Claude Security
+  scan window (that step → Suspended except during scan windows). The agent runs as `claude-agent`, started by the launcher's
   wrapper, which drops the MCP servers the action composes, rebuilds the
   agent's environment from a fixed allow-list with the read-only job token
   as `GH_TOKEN`, resets the origin URL the action rewrote, and refuses to
@@ -622,8 +625,8 @@ there). A compromised review job can therefore have the
 machine account post those, de-fanged, on the caller repository; it cannot
 push through its landing job, and its manifest cannot reach another
 repository. The review job holds no other write channel: the action runs
-on the read-only job token, and the Claude GitHub App is uninstalled
-(section 3.5). The
+on the read-only job token, and the Claude GitHub App has no active
+installation outside a scan window (section 3.5). The
 `denyWrite` entry on the review directory holds on the sandboxed paths
 only.
 
@@ -841,7 +844,7 @@ results against the invariant each one tests.
 - The engine split's hosted canary, `.github/workflows/engine-isolation-canary.yml`
   (`gh workflow run engine-isolation-canary.yml --repo meridianlabs-ai/agents
   --ref <branch>`, a push touching the composites or the harness, or its
-  weekly schedule on `main`, Mondays 06:17 UTC): the
+  daily schedule on `main`, 06:17 UTC): the
   `probe` job passes two synthetic repository secrets to a called workflow
   shaped like the agent workflows and scans the runner processes' memory
   as root in three jobs — a secret referenced in a never-run step is
@@ -1027,14 +1030,15 @@ results against the invariant each one tests.
   passing it (the declaration is kept for backward compatibility: a stub
   naming an undeclared secret fails to load). What
   remains is that this is the platform's current behaviour, not a contract:
-  the canary runs weekly on `main` (decision: Ransom, 2026-09-23 — no push
-  here would reveal a platform change), on every push that touches the
+  the canary runs on a schedule on `main` (weekly from 2026-09-23 — no push
+  here would reveal a platform change; daily since 2026-10-05, for the
+  Claude App's suspension), on every push that touches the
   composites or the harness, and by hand, and a change in delivery scoping
   would turn its `unreferencing` and pipeline-probe agent jobs red. GitHub
   emails a failed scheduled run to the user who last modified the cron
   line, and disables a scheduled workflow after 60 days without repository
   activity; a quiet stretch in this repository can therefore stop the
-  weekly run, and re-enabling it (`gh workflow enable
+  scheduled run, and re-enabling it (`gh workflow enable
   engine-isolation-canary.yml`) is manual.
 - **The Claude job executes the checkout as `claude-agent`** (since
   2026-09-24, plan step 5 of
