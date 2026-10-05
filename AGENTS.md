@@ -234,7 +234,8 @@ take effect on every repo's next run.
   This uid machinery (the agent user, the reclaims, the kill loops, the
   PATH checks) is no longer the boundary on the Claude jobs: since the
   Claude GitHub App's uninstall (2026-10-01) a Claude job holds nothing
-  the agent may not have, so a runner compromise there gains nothing. It
+  the agent may not have, so a runner compromise there gains nothing
+  (outside a scan window, below). It
   stays as defence in depth and hygiene (it makes the bundle and landing
   files the agent's final state), so keep the rules above anyway. The same
   holds on the codex jobs since step 7 of design/untrusted-agent-job.md:
@@ -277,10 +278,14 @@ is in [THREAT_MODEL.md](THREAT_MODEL.md).
   engine" above. Every claude-code-action step
   passes `github_token: ${{ github.token }}`, and a job requests
   `id-token: write` only where it uses Workload Identity Federation. The
-  Claude GitHub App is not installed on Meridian repositories (uninstalled
-  2026-10-01, step 6 of that design), and THREAT_MODEL.md's guarantees
-  rest on that: with it installed, any job with `id-token: write` could
-  mint its write token. A new OIDC
+  Claude GitHub App was uninstalled on 2026-10-01 (step 6 of that
+  design). Since 2026-10-05 it is installed only on the repositories
+  Claude Security scans, and kept suspended outside scan windows
+  (decision: Ransom, 2026-10-05; design/architecture.md → Claude GitHub
+  App scan windows). THREAT_MODEL.md's guarantees rest on that: while its
+  installation is active, any job there with `id-token: write` can mint
+  its token, which has Workflows write. `claude[bot]` is trusted nowhere,
+  and any `claude[bot]` activity is unexpected. A new OIDC
   trust, whether a cloud role, a publisher or a model provider, pins
   `job_workflow_ref` or its own workflow file and never matches on
   `repository_owner` alone.

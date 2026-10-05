@@ -225,7 +225,7 @@ changes who pushes. Per step:
 | codex commit steps | none — in all three workflows (#82, #83, #84) the codex step only commits; the `land` job pushes |
 | hand-back, unlanded-work, open-PR and verify fetches | gone with the landing-job split (#82, #83, #84): the land job opens the PR and posts the hand-back from the manifest, and knows what it pushed |
 | `unresolved-merge-guard` | none — it only reads the local index and tree |
-| the claude-code-action step | the reviewer and both loops: `github_token: ${{ github.token }}` since 2026-09-30, so the action runs on the read-only job token and mints no App token (untrusted-agent-job.md → Stop trusting `claude[bot]`). `claude.yml`: no `github_token` (since #84; tag mode needs a write token until that design's step 4), so the action's own App token. Every Claude job keeps `id-token: write` for Workload Identity Federation, so while the Claude App is installed a runner compromise in any of them can still exchange the job's OIDC token for an App token itself. All four also get a job-token credential helper for their fetches — load-bearing in `claude.yml`, see below |
+| the claude-code-action step | the reviewer and both loops: `github_token: ${{ github.token }}` since 2026-09-30, so the action runs on the read-only job token and mints no App token (untrusted-agent-job.md → Stop trusting `claude[bot]`). `claude.yml`: no `github_token` (since #84; tag mode needs a write token until that design's step 4), so the action's own App token. Every Claude job keeps `id-token: write` for Workload Identity Federation, so while the Claude App's installation is active a runner compromise in any of them can still exchange the job's OIDC token for an App token itself (since 2026-10-05 only during a scan window on a scanned repository; Operations reference → Claude GitHub App scan windows). All four also get a job-token credential helper for their fetches — load-bearing in `claude.yml`, see below |
 | the `land` composite (all four workflows) | the machine account's token for every write — the installation token the land job minted (`\|\| github.token` in `claude.yml` only, the marvin-less degradation; the reviewer's was retired by #114, and the `MARVIN_TOKEN` PAT fallback by the Phase 2 retirement, 2026-09-18) — the job token for its reads — on a fresh runner, in a job that never checked out PR code (Landing job, below) |
 | `reset-origin-url` (after the action step and the post-agent reclaim, all three) | none — local `git remote set-url`, no network |
 
@@ -2141,10 +2141,13 @@ The intended Slack story, mostly off-the-shelf:
 
 ### One-time org setup (done; listed for reference / disaster recovery)
 
-1. **Claude GitHub App** installed on `meridianlabs-ai` repos
-   (<https://github.com/apps/claude>). Members can request the install; org
-   owners (`dragonstyle`, `jjallaire`) approve. Not all repos are covered yet —
-   extend access as repos are onboarded.
+1. **Claude GitHub App** (<https://github.com/apps/claude>). The workflows
+   no longer need it: every claude-code-action step runs on the job token.
+   It was uninstalled from `meridianlabs-ai` on 2026-10-01
+   (untrusted-agent-job.md, step 6), and since 2026-10-05 it is installed
+   only on the repositories Claude Security scans and kept suspended
+   outside scan windows (Claude GitHub App scan windows, below). Install
+   it on a repository only when Claude Security will scan it.
 2. **Workload Identity Federation rule** in the Anthropic Console → Workload
    identity. Issuer: GitHub Actions OIDC. Match: CEL
    `repository_owner == "meridianlabs-ai"`, and `job_workflow_ref` one of this
@@ -2162,6 +2165,48 @@ The intended Slack story, mostly off-the-shelf:
 4. **`SYNC_TOKEN`** secret on the inspect_ai fork: an admin-owned fine-grained
    PAT (Contents read/write, that repo only) for the upstream-sync workflow.
    Renew before it expires — the sync fails loudly when it lapses.
+
+### Claude GitHub App scan windows
+
+Claude Security's hosted scanner needs the Claude GitHub App to read a
+repository, so the App is installed on the scanned repositories only, and
+an org owner keeps the installation suspended outside scan windows
+(decision: Ransom, 2026-10-05). A suspended installation's API access is
+blocked, so the Claude App token exchange yields no usable token.
+
+The suspension matters because of what an active installation allows.
+Any job on a selected repository with `id-token: write`, every agent job
+included, can exchange its OIDC token at Anthropic's endpoint for an App
+installation token. GitHub cannot restrict which audiences a job
+requests, and the exchange checks only that the OIDC `actor` has write
+access. The App's permission set is accepted whole on install. Per the
+Claude Code docs it is Actions, Checks, Contents, Discussions, Issues,
+Pull requests, Repository hooks and Workflows, all read and write, and
+claude-code-action documents `workflows: write` as a supported
+`additional_permissions` value. So during a window "the agent job holds
+nothing the agent may not have" does not hold on the selected
+repositories: a runner compromise could mint a `claude[bot]` token that
+can change workflow files.
+
+A scan window is short and quiet:
+
+1. Disable the scheduled workflows that run an agent on the selected
+   repositories, and trigger no agent run there (no `@claude`, `@review`
+   or `@auto`, no `claude` label) until the window ends.
+2. An org owner unsuspends the installation, the scan runs, and the owner
+   suspends it again.
+3. Dispatch `engine-isolation-canary.yml` from `main`. Its Claude App
+   exchange probe must be refused, which confirms the re-suspension. Then
+   enable the scheduled workflows again.
+
+The canary's weekly scheduled run expects the same refusal, so an
+installation left active fails it within a week. It probes this
+repository only, so it speaks for the installation only while this
+repository is one of the selected ones.
+
+`claude[bot]` stays trusted nowhere. The workflows land as the machine
+account and the scanner only reads, so any `claude[bot]` push, comment,
+label, review or PR is unexpected.
 
 ### Caller requirements (handled by the stubs)
 

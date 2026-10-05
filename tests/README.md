@@ -799,9 +799,11 @@ Testing a change).
   (design/untrusted-agent-job.md → Testing): each probe agent job requests
   an OIDC token exactly when the real one does (both, since step 7) and
   runs `app_token_exchange_probe.sh` before its scan (both `refused` on a
-  dispatch from main, since the Claude GitHub App's uninstall, and `any`
-  elsewhere); the script, against a stub `curl`, reports a refusal with
-  its reason, revokes a minted token
+  dispatch from main, since the Claude GitHub App's uninstall, and on the
+  weekly schedule, since it was reinstalled and kept suspended outside
+  scan windows; `any` elsewhere); the script, against a stub `curl`,
+  reports a refusal with its reason, any 4xx message counting, revokes a
+  minted token
   at once, prints no token outside a mask command, counts an outage (no
   answer, 5xx, a token-less 2xx) as neither mint nor refusal, and fails on
   the unexpected outcome or a failed revocation.

@@ -32,12 +32,15 @@
 #                          federate, design/untrusted-agent-job.md step 7).
 #                          Each agent job also asks the Claude App token
 #                          exchange for a token as `runner`
-#                          (design/untrusted-agent-job.md → Testing): on a
-#                          dispatch from main both are refused, since the
-#                          App is not installed (uninstalled 2026-10-01;
-#                          other runs only record the outcome: the
-#                          exchange refuses push events and changed
-#                          workflow files).
+#                          (design/untrusted-agent-job.md → Testing): on
+#                          the weekly schedule and a dispatch from main
+#                          both are refused, since the App is suspended
+#                          outside Claude Security scan windows (decision:
+#                          Ransom, 2026-10-05), so an installation left
+#                          active fails the canary within a week; other
+#                          runs only record the outcome (the exchange
+#                          refuses push events and changed workflow
+#                          files).
 #   provisioning-boundary  the codex-side boundary of THIS revision, with the
 #                          real codex user, real sudo and the composites
 #                          lifted from the checkout (not `@main`, so a branch

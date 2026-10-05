@@ -24,9 +24,11 @@ text are checked by the tests under `tests/`.
 
 - A job that runs an agent holds nothing the agent may not have: its
   read-only job token, the declared model credential, and an OIDC request
-  token no relying party exchanges for more (the Claude GitHub App is not
-  installed on Meridian repositories since 2026-10-01). No token of the
-  machine account or of any App reaches it. Every claude-code-action step
+  token no relying party exchanges for more (the Claude GitHub App was
+  uninstalled from Meridian repositories on 2026-10-01; since 2026-10-05
+  it is installed on the scanned repositories only and suspended outside
+  Claude Security scan windows, the exception under By design). No token
+  of the machine account or of any App reaches it. Every claude-code-action step
   passes the job token as `github_token`, so the action does not ask for a
   Claude App token either (design/untrusted-agent-job.md, steps 1, 4 and
   6). So a compromise of anything in an agent job, its `runner` and root
@@ -102,7 +104,7 @@ text are checked by the tests under `tests/`.
   6), and the Claude launcher up to its launch; adversarial probing of the
   Claude agent's namespace is left to Claude Security scans (decision:
   Ransom, 2026-09-24). On the Claude jobs all of this is defence in depth
-  since the App's uninstall: the job holds nothing the agent may not have
+  outside a scan window: the job holds nothing the agent may not have
   (the first bullet), so a step from the agent user to `runner` gains
   nothing, and the reclaims keep the bundle and landing files the agent's
   final state. The same holds on the codex jobs since step 7 of
@@ -223,8 +225,10 @@ text are checked by the tests under `tests/`.
   review manifest cannot re-trigger the reviewer from its own land job
   (Claude Security findings 4628442 and 4628439, 2026-09-22); its
   `refuse-pr` states the PR-side refusal on its own (issue #138).
-- The GitHub App has no Workflows permission, so a CI agent's commit that
-  touches `.github/workflows/` fails at the push.
+- The machine account's GitHub App has no Workflows permission, so a CI
+  agent's commit that touches `.github/workflows/` fails at the push. (The
+  Claude GitHub App does have Workflows write; see the scan-window bullet
+  under By design.)
 - No runner-side step after a Codex run resolves a command, or its shell
   interpreter, through a directory the codex user can write or replace.
   Since the codex jobs federate this is hygiene, not the reason a runner
@@ -258,7 +262,7 @@ text are checked by the tests under `tests/`.
   launcher and both reclaims); the one directory the claude-code-action
   step adds to the job PATH is the launcher's root-owned
   `/opt/meridian-agent/bin`, and the smoke workflow runs its cases for that
-  user too. There they are hygiene since the App's uninstall: a runner
+  user too. There they are hygiene outside a scan window: a runner
   compromise in a Claude job gains nothing the agent lacks.
 - A `bwrap` the codex user plants is never the one that sandboxes codex's
   commands. Those commands get the provisioned tools' directories on their
@@ -320,7 +324,30 @@ text are checked by the tests under `tests/`.
   trusts them: verdicts come only from the machine account or a caller's
   `reviewer_login`, and a `claude[bot]` `@review` counts only where a
   caller's `allowed_bots` or `review_allowed_bots` names it (both empty by
-  default).
+  default). Nothing should post as `claude[bot]` now: the workflows land
+  as the machine account and the scanner only reads, so any `claude[bot]`
+  push, comment, label, review or PR is unexpected.
+- The Claude GitHub App is installed on the repositories Claude Security
+  scans, because its hosted scanner needs it, and only there (decision:
+  Ransom, 2026-10-05). An org owner keeps the installation suspended
+  outside scan windows. A suspended installation's API access is blocked,
+  so the first guarantee holds outside a window. While the installation
+  is active, any job on a selected repository with `id-token: write`,
+  every agent job included, can exchange its OIDC token for an App token:
+  the exchange checks only that the OIDC `actor` has write access, with
+  no per-workflow policy. The App's permissions include Actions, Checks,
+  Contents, Discussions, Issues, Pull requests, Repository hooks and
+  Workflows, all read and write. So during a window the first guarantee
+  does not hold on the selected repositories: a runner compromise in an
+  agent job could mint a `claude[bot]` token with all of those,
+  workflow files included. That residual is accepted, and kept small: a
+  window is short and quiet (no agent run triggered there, the scheduled
+  agent workflows disabled for it), and ends with the re-suspension
+  confirmed by a dispatch of the engine isolation canary from `main`,
+  whose Claude App exchange probe must be refused. The canary's weekly
+  run expects the same refusal, so an installation left active fails it
+  within a week (design/untrusted-agent-job.md → Implementation plan →
+  step 6 → Suspended except during scan windows).
 - The Claude agent can read its model credential: the Claude CLI makes the
   Workload Identity exchange itself (the declared exception, decision:
   Ransom, 2026-09-23). Anthropic's federation rule admits only the
@@ -403,7 +430,9 @@ text are checked by the tests under `tests/`.
 
   The reusable workflows' Claude jobs meet both since the Claude GitHub
   App's uninstall (2026-10-01; design/untrusted-agent-job.md → The tier-2
-  opt-in's premise), and their codex jobs since step 7 of that design,
+  opt-in's premise), outside its scan windows since it was reinstalled
+  suspended (2026-10-05; the scan-window bullet above), and their codex
+  jobs, on the same terms, since step 7 of that design,
   which replaced `OPENAI_API_KEY` with a federated OpenAI credential. The
   rule is per repository, since several writers
   push to the same branches. **For tier 2 this is how criterion 2

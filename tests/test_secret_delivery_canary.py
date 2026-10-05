@@ -25,11 +25,13 @@ probe keeps their shape, so these checks hold the two together:
 - each probe agent job requests an OIDC token exactly when the real one
   does (both, for their model credential's federation since step 7 of
   design/untrusted-agent-job.md) and runs the OIDC exchange probe before
-  its scan, expecting a refusal in both on a dispatch from main, since the
-  Claude GitHub App is uninstalled (step 6 of that design; elsewhere the
-  exchange refuses the event or the changed workflow, and the outcome is
-  only recorded); the probe script, run against a
-  stub curl, revokes a minted token at once, prints no token, counts an
+  its scan, expecting a refusal in both on the weekly schedule and a
+  dispatch from main, since the Claude GitHub App is suspended outside
+  scan windows (step 6 of that design → Suspended except during scan
+  windows; elsewhere the exchange refuses the event or the changed
+  workflow, and the outcome is only recorded); the probe script, run
+  against a stub curl, counts any 4xx as a refusal whatever its message,
+  revokes a minted token at once, prints no token, counts an
   unreachable exchange, a 5xx or a token-less 2xx as neither mint nor
   refusal, and fails on the unexpected outcome or a failed revocation
   (design/untrusted-agent-job.md → Testing).
@@ -192,9 +194,13 @@ def test_the_probe_agent_jobs_request_oidc_like_the_real_ones(name):
 def test_each_probe_agent_job_runs_the_exchange_probe_before_its_scan():
     probe = jobs(workflow(PROBE))
     # Since the App's uninstall (step 6) a dispatch from main must be
-    # refused; an outage there fails, as it is no evidence either way.
-    dispatch_from_main = "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && 'refused' || 'any' }}"
-    for job, expect in (("agent", dispatch_from_main), ("agent-codex", dispatch_from_main)):
+    # refused, and since it was reinstalled suspended outside scan windows
+    # (2026-10-05) the weekly schedule too, so an installation left active
+    # fails within a week; an outage there fails, as it is no evidence
+    # either way.
+    on_main = ("${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')"
+               " && github.ref == 'refs/heads/main' && 'refused' || 'any' }}")
+    for job, expect in (("agent", on_main), ("agent-codex", on_main)):
         runs = [s for s in steps(probe[job]) if "app_token_exchange_probe.sh" in s]
         assert len(runs) == 1 and f"        run: bash tests/app_token_exchange_probe.sh {expect}\n" in runs[0], job
         assert steps(probe[job]).index(runs[0]) == len(steps(probe[job])) - 2, job
@@ -269,6 +275,10 @@ def test_exchange_probe_fails_when_the_revocation_fails(tmp_path):
      "Claude Code GitHub App at https://github.com/apps/claude"),
     ("401", '{"error":{"message":"Workflow validation failed"}}', "exchange HTTP 401: Workflow validation failed"),
     ("404", '{"message":"no installation\\n\\u001b[31m"}', "exchange HTTP 404: no installation[31m"),
+    # A suspended installation: the message is not measured, and any 4xx
+    # passes as a refusal whatever it says.
+    ("403", '{"message":"This installation has been suspended"}',
+     "exchange HTTP 403: This installation has been suspended"),
 ])
 def test_exchange_probe_reports_a_refusal(tmp_path, status, body, detail):
     r, calls, _ = run_probe(tmp_path, "refused", status=status, body=body)
