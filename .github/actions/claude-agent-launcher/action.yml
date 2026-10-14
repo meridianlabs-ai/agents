@@ -13,7 +13,8 @@ description: >-
   2. Claude Code is installed root-owned under /opt/meridian-agent/claude/,
      at the version claude-code-action pins: the `claudeCodeVersion`
      literal in the downloaded action's `src/entrypoints/run.ts`
-     (`<RUNNER_WORKSPACE>/../_actions/anthropics/claude-code-action/v1`),
+     (`<RUNNER_WORKSPACE>/../_actions/anthropics/claude-code-action/<ref>`,
+     the tag or commit SHA the job names; exactly one ref must be there),
      read fail-closed (exactly one match, a plain x.y.z), and installed with
      the installer the action uses, run as root with `HOME` set to that
      directory. The runner downloads every action a job names at job start,
@@ -146,8 +147,15 @@ runs:
         fi
 
         # 2. The CLI, at the action's pinned version, root-owned.
-        run_ts="${RUNNER_WORKSPACE%/*}/_actions/anthropics/claude-code-action/v1/src/entrypoints/run.ts"
-        [ -f "$run_ts" ] || err "claude-code-action@v1 is not downloaded ($run_ts is missing) — the job must name the action"
+        # The runner downloads the action to _actions/<owner>/<repo>/<ref>: a tag
+        # directory (v1) or a commit SHA when the job pins the action.
+        actions_dir="${RUNNER_WORKSPACE%/*}/_actions/anthropics/claude-code-action"
+        shopt -s nullglob
+        run_ts_all=("$actions_dir"/*/src/entrypoints/run.ts)
+        shopt -u nullglob
+        [ "${#run_ts_all[@]}" -gt 0 ] || err "claude-code-action is not downloaded (no $actions_dir/<ref>/src/entrypoints/run.ts) — the job must name the action"
+        [ "${#run_ts_all[@]}" -eq 1 ] || err "claude-code-action is downloaded at more than one ref (${run_ts_all[*]}) — the job must name it at one ref"
+        run_ts=${run_ts_all[0]}
         pattern='^[[:space:]]*const claudeCodeVersion = "([0-9]+\.[0-9]+\.[0-9]+)";[[:space:]]*$'
         [ "$(grep -cE "$pattern" "$run_ts")" = 1 ] || err "cannot read the pinned claudeCodeVersion from $run_ts (not exactly one plain x.y.z literal)"
         version=$(sed -nE "s/$pattern/\1/p" "$run_ts")

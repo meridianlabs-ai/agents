@@ -534,9 +534,13 @@ jobs:
           bad=$(sudo find "$opt" \( ! -user root -o -perm /022 \) ! -type l -print)
           [ -z "$bad" ] || fail "not root-owned or writable by others: $bad"
           for f in claude agent-ns-launch agent-ns-init; do [ -x "$opt/bin/$f" ] || fail "$opt/bin/$f is not executable"; done
-          run_ts="${RUNNER_WORKSPACE%/*}/_actions/anthropics/claude-code-action/v1/src/entrypoints/run.ts"
+          shopt -s nullglob
+          run_ts_all=("${RUNNER_WORKSPACE%/*}"/_actions/anthropics/claude-code-action/*/src/entrypoints/run.ts)
+          shopt -u nullglob
+          [ "${#run_ts_all[@]}" -eq 1 ] || fail "expected one downloaded claude-code-action ref, found: ${run_ts_all[*]:-none}"
+          run_ts=${run_ts_all[0]}
           pinned=$(sed -nE 's/^[[:space:]]*const claudeCodeVersion = "([0-9.]+)";.*/\1/p' "$run_ts")
-          echo "claude-code-action@v1 pins Claude Code $pinned"
+          echo "claude-code-action pins Claude Code $pinned"
           cli=$(cat "$opt/run/cli")
           case "$cli" in "$opt/claude/"*) ;; *) fail "run/cli is '$cli'" ;; esac
           "$cli" --version | grep -qF "$pinned" || fail "the installed CLI is not $pinned"
