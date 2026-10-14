@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs with a `# vX.Y.Z` comment; Dependabot
+  # bumps both. The cooldown gives a compromised release time to be caught
+  # before it is proposed; security updates skip it. examples/ is not
+  # scanned: update its pins by hand when the workflows' pins move.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    # The "Set up Node for codex-action" steps pin setup-node to the commit
+    # openai/codex-action runs internally; it moves with codex-action by hand.
+    ignore:
+      - dependency-name: "actions/setup-node"
+    groups:
+      # One PR per week for every other action update, majors included.
+      github-actions:
+        patterns:
+          - "*"
+        # Its own PR: a codex-action bump can change the setup-node pin the
+        # codex jobs must match (see the "Set up Node for codex-action" steps).
+        exclude-patterns:
+          - "openai/codex-action"
