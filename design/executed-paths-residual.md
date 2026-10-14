@@ -521,7 +521,7 @@ pre-agent reclaim. It does four things:
 
 1. **Installs Claude Code root-owned** under `/opt/meridian-agent/claude/`,
    at the version the action pins. It reads the version from the downloaded
-   action (`$(dirname "$RUNNER_WORKSPACE")/_actions/anthropics/claude-code-action/v1/src/entrypoints/run.ts`,
+   action (`$(dirname "$RUNNER_WORKSPACE")/_actions/anthropics/claude-code-action/<ref>/src/entrypoints/run.ts`, `<ref>` the tag or SHA the job names,
    the `claudeCodeVersion` literal) and fails closed if it cannot. The
    installer is the one the action uses, run as root with `HOME` set to that
    directory.

@@ -398,6 +398,36 @@ sudo() {{ {'return 0' if writable else 'return 1'}; }}
                           check=False, env={"PATH": os.environ["PATH"], "RUNNER_TEMP": str(rt), "CONTEXT_DIR": context_dir})
 
 
+def cli_version_lookup(tmp_path, refs, *, version="2.1.300"):
+    """The composite's lookup of claude-code-action's pinned CLI version, lifted
+    and run against a runner _actions tree holding the action at `refs`."""
+    workspace = tmp_path / "work" / "repo"
+    workspace.mkdir(parents=True)
+    for ref in refs:
+        entry = tmp_path / "work" / "_actions" / "anthropics" / "claude-code-action" / ref / "src" / "entrypoints"
+        entry.mkdir(parents=True)
+        (entry / "run.ts").write_text(f'  const claudeCodeVersion = "{version}";\n')
+    body = composite_runs(ACTION)[0]
+    start = body.index('        actions_dir="${RUNNER_WORKSPACE%/*}/_actions/'.strip())
+    end = body.index("\n", body.index('version=$(sed -nE'))
+    script = 'set -euo pipefail\nerr() { echo "ERR: $*"; exit 1; }\n' + body[start:end] + '\necho "$version"\n'
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False,
+                          env={"PATH": os.environ["PATH"], "RUNNER_WORKSPACE": str(workspace)})
+
+
+@pytest.mark.parametrize("ref", ["v1", "6c690188da61cf16ee7debb28383ba67f02abb4c"])
+def test_the_cli_version_is_read_from_the_action_at_its_tag_or_pinned_sha(tmp_path, ref):
+    result = cli_version_lookup(tmp_path, [ref])
+    assert result.stdout.strip() == "2.1.300", result.stdout + result.stderr
+
+
+def test_the_cli_version_lookup_fails_closed_without_exactly_one_downloaded_ref(tmp_path):
+    missing = cli_version_lookup(tmp_path / "none", [])
+    assert "ERR: claude-code-action is not downloaded" in missing.stdout
+    both = cli_version_lookup(tmp_path / "both", ["v1", "6c690188da61cf16ee7debb28383ba67f02abb4c"])
+    assert "ERR: claude-code-action is downloaded at more than one ref" in both.stdout
+
+
 def test_the_context_dir_is_recorded_and_checked(tmp_path):
     rt = tmp_path / "temp"
     (rt / "agent-context").mkdir(parents=True)
