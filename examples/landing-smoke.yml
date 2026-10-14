@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     # No `secrets.` anywhere in this job: it holds the job token only.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: meridianlabs-ai/agents/.github/actions/assert-no-persisted-credential@main
@@ -139,7 +139,7 @@ jobs:
           set -euo pipefail
           jq '.branch = "main"' "$DIR/manifest.json" >"$DIR/m.json" && mv "$DIR/m.json" "$DIR/manifest.json"
       - if: inputs.tamper == 'main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: landing
           path: ${{ runner.temp }}/landing
@@ -156,7 +156,7 @@ jobs:
       # the app's, scoped to this repo's contents / issues / pull requests.
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}

@@ -88,15 +88,15 @@ def test_tests_workflow_checkouts_persist_no_credential():
         assert lines[i + 1:i + 3] == ["        with:", "          persist-credentials: false"]
 
 
-def test_tests_workflow_pins_actions_by_major_tag_and_starts_no_agent():
+def test_tests_workflow_pins_actions_by_sha_and_starts_no_agent():
     code = code_lines(TESTS_YML.read_text())
     uses = [line.split("uses:", 1)[1].strip() for line in code if "uses:" in line]
     assert uses
-    # pinned the way the other workflows pin (actions/checkout@v4, ...): a
-    # third-party action at its major tag, never a branch; nothing from this
-    # repo, so no reusable agent workflow and no composite runs
+    # pinned the way the other workflows pin: a third-party action at a
+    # commit SHA with its version in a comment, never a branch; nothing from
+    # this repo, so no reusable agent workflow and no composite runs
     for ref in uses:
-        assert re.fullmatch(r"actions/[a-z-]+@v\d+", ref), ref
+        assert re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40} # v\S+", ref), ref
     assert not [line for line in code if re.search(r"\bgh\b|@claude|@review|@auto", line)]
 
 

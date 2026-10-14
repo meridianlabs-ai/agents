@@ -21,7 +21,7 @@ from test_app_token_minting import AGENT_JOBS, REUSABLE, code_lines, jobs, steps
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-CLAUDE_ACTION = "anthropics/claude-code-action@v1"
+CLAUDE_ACTION = "anthropics/claude-code-action@"
 FLAG = "--permission-mode default"
 
 

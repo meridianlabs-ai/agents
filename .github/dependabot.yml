@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs with a `# vX.Y.Z` comment; Dependabot
+  # bumps both. The cooldown gives a compromised release time to be caught
+  # before it is proposed; security updates skip it. examples/ is not
+  # scanned: update its pins by hand when the workflows' pins move.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    ignore:
+      # The "Set up Node for codex-action" steps pin setup-node to the commit
+      # openai/codex-action runs internally; it moves with codex-action by hand.
+      - dependency-name: "actions/setup-node"
+      # The cache-mode canaries need a client older than @actions/cache 6.2.0
+      # (see cache-mode-canary-reusable.yml); actions/cache is only used there.
+      - dependency-name: "actions/cache*"
+    groups:
+      # One PR per week for every other action update, majors included.
+      github-actions:
+        patterns:
+          - "*"
+        # Its own PR: before merging a codex-action bump, check the
+        # actions/setup-node commit the new version runs and update the
+        # "Set up Node for codex-action" pins and NODE_STEP in
+        # tests/test_codex_path.py to match. CI does not catch a mismatch.
+        exclude-patterns:
+          - "openai/codex-action"

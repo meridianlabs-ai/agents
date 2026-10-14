@@ -391,7 +391,7 @@ jobs:
       # 2026-09-18; the gate used to skip with a log line when it was absent).
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -1164,7 +1164,7 @@ jobs:
       # agent never pushes, so the identity behind it no longer matters
       # here). The fetch itself is a read, so the job token is enough for it.
       - name: Check out PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           ref: ${{ needs.gate.outputs.head_branch }}
@@ -1434,7 +1434,7 @@ jobs:
       # too: the agent never pushes, and the helper is scoped to this
       # server's URL, so a `git fetch` the agent aims at any other host gets
       # no credential.
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
         id: claude
         env:
           GIT_TOKEN: ${{ github.token }}
@@ -2076,7 +2076,7 @@ jobs:
       # fetches. The fetch itself is a read, so the job token is enough for
       # it.
       - name: Check out PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           ref: ${{ needs.gate.outputs.head_branch }}
@@ -2470,7 +2470,7 @@ jobs:
 
       - name: Run Codex fix
         id: codexfix
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
           # Not a key: a fixed value in the charset codex-action's proxy
           # accepts. The forwarder drops it and sends the exchanged token.
@@ -3172,7 +3172,7 @@ jobs:
       # ""`), so no other repository is in scope. Revoked when the job ends.
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}

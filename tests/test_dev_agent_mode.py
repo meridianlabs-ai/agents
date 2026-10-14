@@ -420,7 +420,7 @@ def test_the_finishing_step_reads_no_agent_text():
 
 def claude_action_step():
     agent = job_block(CLAUDE.read_text(), "agent")
-    return next(s for s in agent.split("\n      - ") if "anthropics/claude-code-action@v1" in s)
+    return next(s for s in agent.split("\n      - ") if "anthropics/claude-code-action@" in s)
 
 
 def test_the_action_runs_agent_mode_on_the_job_token():
@@ -448,7 +448,7 @@ def test_no_job_can_mint_a_claude_app_token():
     for name in REUSABLE:
         for job, block in jobs((WORKFLOWS / name).read_text()).items():
             for s in steps(block):
-                if "anthropics/claude-code-action@v1" in s:
+                if "anthropics/claude-code-action@" in s:
                     assert "          github_token: ${{ github.token }}\n" in s, (name, job)
 
 

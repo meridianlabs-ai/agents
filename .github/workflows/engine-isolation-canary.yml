@@ -90,7 +90,7 @@
 #                          with `user: claude-agent`, then
 #                          `claude-agent-launcher`. Asserted: Claude Code is
 #                          installed root-owned at the version
-#                          claude-code-action@v1 pins, the wrapper, the
+#                          claude-code-action pins, the wrapper, the
 #                          namespace script and the check are root-owned and
 #                          closed to others, the run directory records this
 #                          job's values, `--version` passes through the
@@ -108,7 +108,7 @@
 #                          (design/codex-engine.md → Runner-side search
 #                          path), in the codex jobs' step order: the Node
 #                          setup step, `create-codex-user` and its
-#                          `reset-home` mode, then `openai/codex-action@v1`
+#                          `reset-home` mode, then `openai/codex-action`
 #                          with no key and no prompt, so it runs its
 #                          setup-node, its write-access check and its two
 #                          `npm install -g` steps and stops (every later
@@ -199,7 +199,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -285,7 +285,7 @@ jobs:
       matrix:
         fixture: [inspect-ai-like, inspect-flow-like, inspect-harbor-like, ts-mono-like]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -471,16 +471,16 @@ jobs:
       matrix:
         grant: [workspace, none]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
-      # Never runs: it names claude-code-action@v1 so the runner downloads
+      # Never runs: it names claude-code-action so the runner downloads
       # it at job start, which is where the launcher reads the pinned CLI
       # version from, as it will in the agent jobs.
       - name: claude-code-action (downloaded, not run)
         if: false
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
 
       - name: Create the claude-agent user (this revision)
         id: agentuser
@@ -610,12 +610,12 @@ jobs:
       matrix:
         node-first: [true, false]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
       # The codex jobs' step, verbatim: the same pin and version as
-      # openai/codex-action@v1's own setup-node.
+      # openai/codex-action's own setup-node.
       - name: Set up Node for codex-action
         if: matrix.node-first
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
@@ -636,7 +636,7 @@ jobs:
       # check, `npm install -g` for the CLI and the proxy, and resolves the
       # codex home; the proxy and `codex exec` steps are skipped.
       - name: openai/codex-action, without a key or a prompt
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
           safety-strategy: unprivileged-user
           codex-user: codex

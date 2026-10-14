@@ -474,7 +474,7 @@ jobs:
       - name: Mint the machine account's token
         id: mint
         if: env.HAS_APP_SECRETS == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -1265,7 +1265,7 @@ jobs:
       # persisted git credentials"): the runner-side steps and the
       # claude-code-action step through a step-scoped credential helper on
       # the job token. The agent itself never pushes (issue #84).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         id: checkout
         with:
           fetch-depth: 0
@@ -1764,7 +1764,7 @@ jobs:
       # any other host (its allow-list permits the verb) gets no credential.
       # The agent never pushes; the land job pushes the commits and opens
       # the PR.
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
         id: claude
         env:
           GIT_TOKEN: ${{ github.token }}
@@ -2545,7 +2545,7 @@ jobs:
       # persisted git credentials"): the runner-side steps and the
       # codex prep step through a step-scoped credential helper on the job
       # token. The agent itself never pushes (issue #84).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         id: checkout
         with:
           fetch-depth: 0
@@ -2999,7 +2999,7 @@ jobs:
 
       - name: Run Codex
         id: codexrun
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
           # Not a key: a fixed value in the charset codex-action's proxy
           # accepts. The forwarder drops it and sends the exchanged token.
@@ -3855,7 +3855,7 @@ jobs:
       - name: Mint the machine account's token
         id: mint
         if: env.HAS_APP_SECRETS == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
