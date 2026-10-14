@@ -12,16 +12,21 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
-    # The "Set up Node for codex-action" steps pin setup-node to the commit
-    # openai/codex-action runs internally; it moves with codex-action by hand.
     ignore:
+      # The "Set up Node for codex-action" steps pin setup-node to the commit
+      # openai/codex-action runs internally; it moves with codex-action by hand.
       - dependency-name: "actions/setup-node"
+      # The cache-mode canaries need a client older than @actions/cache 6.2.0
+      # (see cache-mode-canary-reusable.yml); actions/cache is only used there.
+      - dependency-name: "actions/cache*"
     groups:
       # One PR per week for every other action update, majors included.
       github-actions:
         patterns:
           - "*"
-        # Its own PR: a codex-action bump can change the setup-node pin the
-        # codex jobs must match (see the "Set up Node for codex-action" steps).
+        # Its own PR: before merging a codex-action bump, check the
+        # actions/setup-node commit the new version runs and update the
+        # "Set up Node for codex-action" pins and NODE_STEP in
+        # tests/test_codex_path.py to match. CI does not catch a mismatch.
         exclude-patterns:
           - "openai/codex-action"

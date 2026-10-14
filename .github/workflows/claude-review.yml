@@ -1512,7 +1512,7 @@ jobs:
       # sandboxing → setting sources; Claude Security 4628445). (The overlay's
       # `.git/config` mask, which needed 2.1.221, is gone: see the
       # credentials.files paragraph above.) The launcher installs the CLI at
-      # the version claude-code-action@v1 pins, and the action puts the
+      # the version claude-code-action pins, and the action puts the
       # wrapper's directory on GITHUB_PATH from inside its own step, so
       # `claude --version` (the wrapper's passthrough to the real CLI) works
       # only AFTER the agent step — the check cannot run before it. An older
