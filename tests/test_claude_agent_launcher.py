@@ -738,7 +738,7 @@ def test_the_canary_runs_the_launcher_per_grant_mode_without_the_action():
     job = text[text.index("\n  claude-launcher:\n"):]
     assert "grant: [workspace, none]" in job
     # claude-code-action is named (so the runner downloads it) and never run.
-    assert "        if: false\n        uses: anthropics/claude-code-action@v1\n" in job
+    assert re.search(r"        if: false\n        uses: anthropics/claude-code-action@[0-9a-f]{40} # v\S+\n", job)
     # The launcher checks a real context directory there.
     assert "          context-dir: ${{ runner.temp }}/agent-context\n" in job
     assert '"context-dir=$RUNNER_TEMP/agent-context"' in job and "run/head" in job

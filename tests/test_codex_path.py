@@ -1465,7 +1465,8 @@ def test_the_canary_runs_the_real_codex_action_between_the_user_and_the_reclaim(
     order = ["      - name: Set up Node for codex-action\n        if: matrix.node-first\n        " + NODE_STEP,
              "uses: ./.github/actions/create-codex-user\n",
              "uses: ./.github/actions/create-codex-user\n        with:\n          mode: reset-home\n",
-             "uses: openai/codex-action@v1\n        with:\n          safety-strategy: unprivileged-user\n"
+             re.search(r"uses: openai/codex-action@[0-9a-f]{40} # v\S+\n", job).group(0)
+             + "        with:\n          safety-strategy: unprivileged-user\n"
              "          codex-user: codex\n\n",
              "continue-on-error: ${{ !matrix.node-first }}\n",
              "uses: ./.github/actions/reclaim-codex-workspace\n",

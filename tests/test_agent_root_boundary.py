@@ -39,8 +39,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_app_token_minting import AGENT_JOBS, REUSABLE, code_lines, jobs, steps  # noqa: E402
 from test_land_helpers import lift_run, sh  # noqa: E402
 
-CLAUDE_ACTION = "anthropics/claude-code-action@v1"
-CODEX_ACTION = "openai/codex-action@v1"
+CLAUDE_ACTION = "anthropics/claude-code-action@"
+CODEX_ACTION = "openai/codex-action@"
 
 
 def workflow_text(name: str) -> str:

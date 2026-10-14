@@ -42,7 +42,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 EXAMPLES = ROOT / "examples"
 
-MINT_ACTION = "actions/create-github-app-token@v2"
+MINT_ACTION = "actions/create-github-app-token"
+# Third-party actions are pinned to a commit SHA with a version comment.
+PINNED = r"@[0-9a-f]{40} # v\S+"
 TOKEN_EXPR = "steps.mint.outputs.token"
 # The Atlas sync's second token (ts-mono, read-only), the same shape.
 TS_MONO_TOKEN_EXPR = "steps.mint_ts_mono.outputs.token"
@@ -166,7 +168,7 @@ def test_trusted_job_mints_first_for_exactly_its_write_set(name, job):
     first, *_ = steps(block)
     mint = mint_step(block)
     assert first == mint, "the mint step is the job's first step"
-    assert f"        uses: {MINT_ACTION}\n" in mint
+    assert re.search(rf"^        uses: {MINT_ACTION}{PINNED}\n", mint, re.M)
     if (name, job) in CONDITIONAL_MINT:
         # Gated on the job-level boolean, which is the only `secrets` read in
         # an `if`-adjacent position (a step `if:` cannot read the context).
@@ -301,7 +303,7 @@ def test_atlas_sync_mints_a_read_only_ts_mono_token_second():
     sync = jobs(workflow("atlas-sync.yml"))["sync"]
     first, second, *_ = steps(sync)
     assert "\n        id: mint\n" in first and "\n        id: mint_ts_mono\n" in second
-    assert f"        uses: {MINT_ACTION}\n" in second
+    assert re.search(rf"^        uses: {MINT_ACTION}{PINNED}\n", second, re.M)
     # Unconditional, like the first: the sync cannot run without the secrets.
     assert not re.search(r"^        if:", second, re.M)
     assert "          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}\n" in second

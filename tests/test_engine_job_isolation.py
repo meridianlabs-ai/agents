@@ -84,8 +84,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_app_token_minting import AGENT_JOBS, REUSABLE, code_lines, jobs, steps  # noqa: E402
 from test_land_helpers import lift_run, sh, step_block  # noqa: E402
 
-CODEX_ACTION = "openai/codex-action@v1"
-CLAUDE_ACTION = "anthropics/claude-code-action@v1"
+CODEX_ACTION = "openai/codex-action@"
+CLAUDE_ACTION = "anthropics/claude-code-action@"
 KEY = "OPENAI_API_KEY"
 LAND_NEEDS = {"claude.yml": "needs: [gate, agent, agent-codex]", "claude-review.yml": "needs: [gate, review, review-codex]",
               "claude-auto.yml": "needs: [gate, fix, fix-codex]", "claude-auto-review.yml": "needs: [gate, fix, fix-codex]"}
