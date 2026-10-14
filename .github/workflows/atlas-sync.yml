@@ -61,7 +61,7 @@ jobs:
       # Actions runs read for the live-run check. Revoked when the job ends.
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -82,7 +82,7 @@ jobs:
       # scope; revoked when the job ends.
       - name: Mint the ts-mono read token
         id: mint_ts_mono
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
           private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
@@ -91,7 +91,7 @@ jobs:
           permission-metadata: read
           permission-pull-requests: read
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # An installation token reports no OAuth scopes, so the checks are
       # real reads: the Atlas project with the fork token, the ts-mono
