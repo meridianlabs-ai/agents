@@ -199,7 +199,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -285,7 +285,7 @@ jobs:
       matrix:
         fixture: [inspect-ai-like, inspect-flow-like, inspect-harbor-like, ts-mono-like]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -471,7 +471,7 @@ jobs:
       matrix:
         grant: [workspace, none]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -480,7 +480,7 @@ jobs:
       # version from, as it will in the agent jobs.
       - name: claude-code-action (downloaded, not run)
         if: false
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
 
       - name: Create the claude-agent user (this revision)
         id: agentuser
@@ -610,7 +610,7 @@ jobs:
       matrix:
         node-first: [true, false]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -636,7 +636,7 @@ jobs:
       # check, `npm install -g` for the CLI and the proxy, and resolves the
       # codex home; the proxy and `codex exec` steps are skipped.
       - name: openai/codex-action, without a key or a prompt
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
           safety-strategy: unprivileged-user
           codex-user: codex

@@ -83,7 +83,7 @@ jobs:
       ok: ${{ steps.trig.outputs.ok }}
       engine: ${{ steps.trig.outputs.engine }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Trigger check stand-in
@@ -114,7 +114,7 @@ jobs:
       contents: read
       id-token: write         # as the real Claude job's (WIF auth)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       # The exchange answers a `workflow_dispatch` or `schedule` run of this
@@ -136,7 +136,7 @@ jobs:
       contents: read
       id-token: write         # as the real codex job's (OpenAI WIF)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: OIDC exchange probe (expect no App token on the schedule and a dispatch from main; the App is suspended)
@@ -153,7 +153,7 @@ jobs:
       HAS_APP_SECRETS: ${{ secrets.MARVIN_APP_CLIENT_ID != '' }}
       AGENT_RESULT: ${{ needs.gate.outputs.engine == 'codex' && needs.agent-codex.result || needs.agent.result }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Mint step stand-in (uses the App secrets)

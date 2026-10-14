@@ -380,7 +380,7 @@ jobs:
       # 2026-09-18).
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -801,7 +801,7 @@ jobs:
       # still in `.git/config` — design/executed-paths-residual.md → The
       # launcher.)
       - if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.mode != 'external'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -823,7 +823,7 @@ jobs:
       # this needs an authenticated remote. See design/architecture.md →
       # Untrusted checkouts.
       - if: needs.gate.outputs.ok == 'true' && needs.gate.outputs.mode == 'external'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ needs.gate.outputs.up_repo }}
           ref: refs/pull/${{ needs.gate.outputs.up_num }}/head
@@ -1434,7 +1434,7 @@ jobs:
             echo "SETTINGS_EOF"
           } >>"$GITHUB_OUTPUT"
 
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
         if: needs.gate.outputs.ok == 'true'
         id: claude
         with:
@@ -2264,7 +2264,7 @@ jobs:
       # is told not to fetch. Never external mode here: the gate routes
       # external and fork-head reviews to the Claude job.
       - if: needs.gate.outputs.ok == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -2681,7 +2681,7 @@ jobs:
       - name: Run Codex review
         id: codex
         if: needs.gate.outputs.ok == 'true'
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
           # Not a key: a fixed value in the charset codex-action's proxy
           # accepts. The forwarder drops it and sends the exchanged token.
@@ -2984,7 +2984,7 @@ jobs:
       # job ends.
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
