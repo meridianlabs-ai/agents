@@ -141,6 +141,13 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # uv_no_group (optional): uv dependency groups to leave out, names
+      # separated by spaces. Set it when [tool.uv] default-groups names a group
+      # CI leaves out, such as a `doc` group with quarto-cli: it becomes
+      # UV_NO_GROUP for provisioning and for every command the agent runs, so
+      # `uv run` does not sync that group back in. Leave it unset otherwise; uv
+      # errors on a group the project does not define.
+      # uv_no_group: doc
       # trigger_phrase is single-valued, so resolve it from the SAME source the
       # action will check for this event (comment > review > issue), not from a
       # union of all sources — otherwise a stale @claude in an enclosing issue
@@ -279,6 +286,13 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # uv_no_group (optional): uv dependency groups to leave out, names
+      # separated by spaces. Set it when [tool.uv] default-groups names a group
+      # CI leaves out, such as a `doc` group with quarto-cli: it becomes
+      # UV_NO_GROUP for provisioning and for every command the agent runs, so
+      # `uv run` does not sync that group back in. Leave it unset otherwise; uv
+      # errors on a group the project does not define.
+      # uv_no_group: doc
       trigger_phrase: "@auto"
       label_trigger: "auto"
       # allow_build_config (optional, default false; agents repo:

@@ -73,6 +73,17 @@ description: >-
   `pyproject.toml`: a Node repository's recipe runs too (the workflows'
   `if:`), and only the generic recipe needs the Python project.
 
+  The `uv-no-group` input (meridianlabs-ai/inspect-docs#7; decision:
+  Ransom, 2026-10-21): the caller's `uv_no_group`, one or more uv
+  dependency-group names separated by spaces. Set, it is `UV_NO_GROUP` in
+  the recipe's environment, so a recipe's `uv sync` leaves those groups out
+  even when `[tool.uv] default-groups` names them (a `doc` group whose
+  quarto-cli builds from source). The agent's own commands get the same
+  variable from the Claude launcher and codex's `config.toml`. A value that
+  is not uv group names fails the step before the recipe runs. Empty (the
+  default) sets nothing: `UV_NO_GROUP` errors on a group the project does
+  not define, so it is the caller's opt-in.
+
   The `bin` output is the provisioned tools' directories, colon-separated
   and absolute — `<workspace>/.venv/bin`, `<workspace>/node_modules/.bin`
   and, under `user`, `/home/<user>/.local/bin` (where a recipe's `corepack
@@ -163,6 +174,13 @@ inputs:
       description.
     required: false
     default: ""
+  uv-no-group:
+    description: >-
+      uv dependency groups to leave out (the reusable workflows'
+      `uv_no_group`), separated by spaces: `UV_NO_GROUP` in the recipe's
+      environment. Empty (the default) sets nothing. See the description.
+    required: false
+    default: ""
   user:
     description: >-
       Run the recipe as this unprivileged user (`sudo -u <user> -H`) instead
@@ -192,8 +210,22 @@ runs:
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         RECIPE: ${{ github.action_path }}/provision.sh
         CALLER_RECIPE: ${{ inputs.recipe }}
+        UV_NO_GROUP_INPUT: ${{ inputs.uv-no-group }}
       run: |
         set -euo pipefail
+        # UV_NO_GROUP for the recipe, only when the caller set it: uv group
+        # names separated by single spaces, nothing else.
+        uv_no_group=${UV_NO_GROUP_INPUT:-}
+        uv_env=()
+        if [ -n "$uv_no_group" ]; then
+          name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'
+          groups="^$name( $name)*\$"
+          if ! [[ "$uv_no_group" =~ $groups ]]; then
+            echo "::error::uv-no-group must be uv dependency-group names separated by spaces, not '$uv_no_group'"
+            exit 1
+          fi
+          uv_env=("UV_NO_GROUP=$uv_no_group")
+        fi
         # The caller's recipe, if any, as a file under RUNNER_TEMP (readable
         # by the user); passed as the script's one argument, never as
         # environment (sudo resets it) and never as shell text.
@@ -207,7 +239,7 @@ runs:
         if [ -z "${AS_USER:-}" ]; then
           # As the runner: the job PATH only when asked (ADD_TO_PATH reaches
           # the script through this step's environment).
-          bash "$RECIPE" ${args[@]+"${args[@]}"}
+          env ${uv_env[@]+"${uv_env[@]}"} bash "$RECIPE" ${args[@]+"${args[@]}"}
         else
           # A copy under RUNNER_TEMP (755 runner:runner on the hosted image,
           # so readable by the user) rather than the action's own path, and
@@ -218,7 +250,8 @@ runs:
           # runner's `$XDG_CONFIG_HOME/uv` (EACCES, three times, provisioning
           # failed). HOME, USER and LOGNAME are the user's; PATH is the
           # image's system path (the recipe prepends ~/.local/bin itself);
-          # no GITHUB_*, no runner PATH, no XDG_* reaches the recipe. sudo
+          # no GITHUB_*, no runner PATH, no XDG_* reaches the recipe, and
+          # UV_NO_GROUP only when `uv-no-group` is set. sudo
           # keeps the working directory, so the venv lands in the checkout
           # as in the runner case.
           install -m 644 "$RECIPE" "$RUNNER_TEMP/provision-fallback.sh"
@@ -226,5 +259,6 @@ runs:
           sudo -u "$AS_USER" -H -- env -i \
             HOME="/home/$AS_USER" USER="$AS_USER" LOGNAME="$AS_USER" LANG=C.UTF-8 \
             PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            ${uv_env[@]+"${uv_env[@]}"} \
             bash "$RUNNER_TEMP/provision-fallback.sh" ${args[@]+"${args[@]}"}
         fi

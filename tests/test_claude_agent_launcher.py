@@ -45,6 +45,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_codex_path import composite_runs, composite_steps  # noqa: E402
+from test_engine_job_isolation import UV_GROUPS_BAD, UV_GROUPS_OK  # noqa: E402
 from test_land_helpers import git  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -132,7 +133,7 @@ def w(tmp_path):
     run = {
         "grant": "workspace", "cli": str(cli), "workspace": str(ws), "runner-temp": str(rt),
         "path": "/ws/.venv/bin:/opt/meridian-agent/claude/.local/bin:/usr/bin:/bin",
-        "runner-root": "/runner-root", "context-dir": "",
+        "runner-root": "/runner-root", "context-dir": "", "uv-no-group": "",
         "system-path": ":".join([str(stub), *sorted(tools), "/usr/bin", "/bin"]),
     }
     for k, v in run.items():
@@ -245,6 +246,16 @@ def test_the_agent_env_is_the_allow_list_with_the_job_token(w):
     for gone in ("GITHUB_ENV", "GITHUB_OUTPUT", "PROMPT", "DEFAULT_WORKFLOW_TOKEN", "RUNNER_WORKSPACE"):
         assert gone not in env
     assert not any(APP in v for v in env.values())
+
+
+def test_the_agent_env_carries_uv_no_group_only_when_the_launcher_recorded_one(w):
+    # meridianlabs-ai/inspect-docs#7: from the run directory, never from the
+    # environment the SDK hands the wrapper.
+    assert launch(w, *BASE, UV_NO_GROUP="other").returncode == 0
+    assert "UV_NO_GROUP" not in envmap(handoff(w))
+    (w["opt"] / "run" / "uv-no-group").write_text("doc docs\n")
+    assert launch(w, *BASE).returncode == 0
+    assert envmap(handoff(w))["UV_NO_GROUP"] == "doc docs"
 
 
 def test_the_five_action_servers_and_any_token_bearing_server_are_dropped(w):
@@ -396,6 +407,27 @@ sudo() {{ {'return 0' if writable else 'return 1'}; }}
     rt = tmp_path / "temp"
     return subprocess.run(["bash", "-c", stub + body[start:end] + 'echo OK\n'], capture_output=True, text=True,
                           check=False, env={"PATH": os.environ["PATH"], "RUNNER_TEMP": str(rt), "CONTEXT_DIR": context_dir})
+
+
+def uv_no_group_check(value):
+    """The composite's uv-no-group validation, lifted."""
+    body = composite_runs(ACTION)[0]
+    start = body.index("uv_no_group=${UV_NO_GROUP_INPUT:-}")
+    end = body.index("\nfi\n", start) + len("\nfi\n")
+    return subprocess.run(["bash", "-c", 'err() { echo "ERR: $*"; exit 1; }\n' + body[start:end] + "echo OK\n"],
+                          capture_output=True, text=True, check=False,
+                          env={"PATH": os.environ["PATH"], "UV_NO_GROUP_INPUT": value})
+
+
+def test_uv_no_group_is_checked_and_recorded():
+    for value in ["", *UV_GROUPS_OK]:
+        assert uv_no_group_check(value).stdout.strip() == "OK", value
+    for value in UV_GROUPS_BAD:
+        r = uv_no_group_check(value)
+        assert "ERR: uv-no-group must be uv dependency-group names" in r.stdout, (value, r.stdout, r.stderr)
+    body = composite_runs(ACTION)[0]
+    assert '\nrecord uv-no-group "$uv_no_group"\n' in body
+    assert body.index("uv_no_group=${UV_NO_GROUP_INPUT:-}") < body.index("# 2. The CLI")
 
 
 def cli_version_lookup(tmp_path, refs, *, version="2.1.300"):

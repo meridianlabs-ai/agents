@@ -178,7 +178,10 @@ description: >-
   because codex skips a candidate whose resolved path is under the
   command's working directory, and no directory but `/` contains both. A
   `bwrap` codex or its provisioning plants is then never the one that
-  sandboxes codex's commands.
+  sandboxes codex's commands. The pass also takes the `uv-no-group` input
+  (the reusable workflows' `uv_no_group`; meridianlabs-ai/inspect-docs#7)
+  and writes it into the same table as `UV_NO_GROUP`, so every `uv sync`
+  and `uv run` codex runs leaves those dependency groups out.
 
   Runs no git command against the checkout. Referenced fully-qualified
   (meridianlabs-ai/agents/.github/actions/create-codex-user@main); NO post
@@ -193,7 +196,7 @@ description: >-
   The `user` and `grant` inputs (defaults `codex` and `workspace`, which are
   everything above) let the Claude jobs create their `claude-agent` user
   with the same body (design/executed-paths-residual.md → The agent user);
-  `bin` is reset-home only.
+  `bin` and `uv-no-group` are reset-home only.
 
 inputs:
   user:
@@ -261,6 +264,15 @@ inputs:
       default, and what a skipped provisioning step passes) leaves codex's
       commands on sudo's PATH and installs nothing. Ignored by `create`,
       which runs before provisioning.
+    required: false
+    default: ""
+  uv-no-group:
+    description: >-
+      `reset-home` only: uv dependency groups to leave out (the reusable
+      workflows' `uv_no_group`), group names separated by spaces. Non-empty,
+      it is written into the re-created `config.toml` as `UV_NO_GROUP` in
+      the environment of every command codex runs; any other value fails the
+      step. Empty (the default) sets nothing. Ignored by `create`.
     required: false
     default: ""
 
@@ -387,6 +399,7 @@ runs:
         PIN_SCRIPT: ${{ github.action_path }}/pin-bwrap.sh
         SYSTEM_PATH: /usr/sbin:/usr/bin:/sbin:/bin
         BIN: ${{ inputs.bin }}
+        UV_NO_GROUP_INPUT: ${{ inputs.uv-no-group }}
         AGENT_USER: ${{ inputs.user }}
       run: |
         set -euo pipefail
@@ -423,5 +436,5 @@ runs:
         # `bwrap` planted there would otherwise be the one it runs); then
         # the home, from scratch, with that PATH.
         if [ -n "$BIN" ]; then bash "$PIN_SCRIPT" codex; fi
-        bash "$HOME_SCRIPT" codex "$BIN"
+        bash "$HOME_SCRIPT" codex "$BIN" "${UV_NO_GROUP_INPUT:-}"
         echo "codex home reset: no codex processes, ~codex/.codex re-created"

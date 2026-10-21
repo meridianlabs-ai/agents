@@ -440,6 +440,35 @@ def test_this_repos_own_stubs_opt_in_to_build_config(stub):
     assert "# allow_build_config: true" not in text
 
 
+@pytest.mark.parametrize("name", REUSABLE)
+def test_uv_no_group_reaches_provisioning_and_both_agents(name):
+    # meridianlabs-ai/inspect-docs#7: an optional string, empty by default,
+    # passed to the provisioning composite in both agent jobs and to what
+    # builds each agent's environment: the Claude launcher, codex's reset home.
+    text = workflow_text(name)
+    block = re.search(r"\n      uv_no_group:\n((?:        .*\n)+)", text)
+    assert block and '        type: string\n        default: ""\n' in block.group(1)
+    wire = "          uv-no-group: ${{ inputs.uv_no_group }}\n"
+    claude, codex = AGENT_JOBS[name]
+    for job, agent in ((claude, "launcher"), (codex, "codexhome")):
+        by_id = {step_id(s): s for s in steps(jobs(text)[job])}
+        assert wire in by_id["setup"], (job, "setup")
+        assert wire in by_id[agent], (job, agent)
+    assert text.count(wire) == 4
+
+
+@pytest.mark.parametrize("stub", ["claude-stub.yml", "claude-auto-stub.yml", "claude-review-stub.yml"])
+def test_the_stubs_show_uv_no_group_commented(stub):
+    # Each job of each example and of this repository's own stubs (which has
+    # no doc group) shows the input commented, and none sets it.
+    for path in (ROOT / "examples" / stub, WORKFLOWS / stub):
+        text = path.read_text()
+        assert not [line for line in code_lines(text) if "uv_no_group" in line], path
+        calls = [line for line in text.splitlines() if line.startswith("    uses: meridianlabs-ai/agents/.github/workflows/")]
+        shown = re.findall(r"^(?:      # |    #   )uv_no_group: doc$", text, re.M)
+        assert calls and len(shown) == len(calls), (path, len(shown), len(calls))
+
+
 CLAUDE_RECIPE_SET = "hashFiles('pyproject.toml') != '' || inputs.provision != '' || inputs.codex_provision != ''"
 SANDBOXED = "(needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true')"
 
@@ -714,9 +743,10 @@ def write_exe(path: Path, body: str) -> Path:
     return path
 
 
-def dispatch(tmp_path: Path, user: str, caller_recipe: str = ""):
+def dispatch(tmp_path: Path, user: str, caller_recipe: str = "", uv_no_group: str = None):
     """Run the composite's step with a stub sudo and a stub recipe that
-    records who ran it, from where and with which arguments."""
+    records who ran it, from where and with which arguments (and, as the
+    runner, the UV_NO_GROUP it got)."""
     bins = tmp_path / "bin"
     bins.mkdir()
     log = tmp_path / "log"
@@ -725,13 +755,15 @@ def dispatch(tmp_path: Path, user: str, caller_recipe: str = ""):
     # recipe stub keeps the test's LOG variable.
     write_exe(bins / "sudo", '#!/usr/bin/env bash\nprintf "sudo %s\\n" "$*" >>"$LOG"\n'
               'while [ "$#" -gt 0 ]; do case "$1" in -u) shift 2 ;; -H|--|env|-i|*=*) shift ;; *) break ;; esac; done\nexec "$@"\n')
-    recipe = write_exe(tmp_path / "recipe.sh", '#!/usr/bin/env bash\nprintf "recipe %s %s%s\\n" "$0" "$(pwd)" "${1:+ arg=$1}" >>"$LOG"\n')
+    recipe = write_exe(tmp_path / "recipe.sh", '#!/usr/bin/env bash\nprintf "recipe %s %s%s%s\\n" "$0" "$(pwd)" "${1:+ arg=$1}" "${UV_NO_GROUP+ UV_NO_GROUP=$UV_NO_GROUP}" >>"$LOG"\n')
     temp = tmp_path / "runner-temp"
     temp.mkdir()
     work = tmp_path / "work"
     work.mkdir()
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "LOG": str(log), "AS_USER": user, "RECIPE": str(recipe),
            "RUNNER_TEMP": str(temp), "HOME": str(tmp_path), "CALLER_RECIPE": caller_recipe}
+    if uv_no_group is not None:
+        env["UV_NO_GROUP_INPUT"] = uv_no_group
     r = sh("bash", "-eo", "pipefail", "-c", composite_step(), cwd=work, check=False, env=env)
     return r, log.read_text() if log.exists() else "", temp
 
@@ -765,6 +797,55 @@ def test_composite_hands_the_caller_recipe_to_the_script_as_a_runner_temp_file(t
 def test_composite_refuses_a_caller_recipe_that_is_not_bash(tmp_path):
     r, log, temp = dispatch(tmp_path, "codex", caller_recipe="if [ x; then\n")
     assert r.returncode != 0 and log == ""
+
+
+# The caller's `uv_no_group` (meridianlabs-ai/inspect-docs#7): uv group names
+# separated by single spaces, the format uv reads UV_NO_GROUP in. Every
+# consumer (this composite, the Claude launcher, codex-home.sh) accepts and
+# refuses the same values.
+UV_GROUPS_OK = ["doc", "doc docs", "a", "docs.v2_x-y"]
+UV_GROUPS_BAD = ["doc,docs", "doc ", " doc", "doc  docs", "-doc", "doc-", "doc'", "doc\nx", "doc;id", "$(id)"]
+UV_GROUP_CHECK = ["name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'", 'groups="^$name( $name)*\\$"']
+
+
+def test_composite_puts_uv_no_group_in_the_recipe_environment(tmp_path):
+    # As the user: one more `env -i` entry, before the script; as the runner:
+    # in the script's environment.
+    (tmp_path / "user").mkdir()
+    r, log, temp = dispatch(tmp_path / "user", "codex", uv_no_group="doc")
+    assert r.returncode == 0, r.stderr
+    copy = temp / "provision-fallback.sh"
+    assert log.splitlines()[0] == ("sudo -u codex -H -- env -i HOME=/home/codex USER=codex LOGNAME=codex LANG=C.UTF-8 "
+                                   f"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UV_NO_GROUP=doc bash {copy}")
+    (tmp_path / "runner").mkdir()
+    r, log, _ = dispatch(tmp_path / "runner", "", uv_no_group="doc docs")
+    assert r.returncode == 0, r.stderr
+    assert log == f"recipe {tmp_path / 'runner' / 'recipe.sh'} {tmp_path / 'runner' / 'work'} UV_NO_GROUP=doc docs\n"
+
+
+@pytest.mark.parametrize("user", ["", "codex"])
+def test_composite_sets_no_uv_no_group_when_the_input_is_empty(tmp_path, user):
+    r, log, _ = dispatch(tmp_path, user, uv_no_group="")
+    assert r.returncode == 0, r.stderr
+    assert "UV_NO_GROUP" not in log
+
+
+@pytest.mark.parametrize("value", UV_GROUPS_OK + UV_GROUPS_BAD)
+def test_composite_refuses_a_uv_no_group_that_is_not_group_names(tmp_path, value):
+    r, log, _ = dispatch(tmp_path, "codex", uv_no_group=value)
+    if value in UV_GROUPS_OK:
+        assert r.returncode == 0 and f"UV_NO_GROUP={value} bash" in log, r.stderr
+    else:
+        assert r.returncode != 0 and log == ""
+        assert "uv-no-group must be uv dependency-group names" in r.stdout
+
+
+def test_every_uv_no_group_consumer_runs_the_same_check():
+    for path in (COMPOSITE / "action.yml", CODEX_USER / "codex-home.sh",
+                 ROOT / ".github" / "actions" / "claude-agent-launcher" / "action.yml"):
+        lines = [line.strip() for line in path.read_text().splitlines()]
+        for check in UV_GROUP_CHECK:
+            assert check in lines, (path, check)
 
 
 def test_composite_fails_when_sudo_fails(tmp_path):
@@ -972,6 +1053,36 @@ def test_codex_home_script_writes_no_command_path_without_bin_dirs(tmp_path):
     assert "shell_environment_policy" not in (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text()
 
 
+def test_codex_home_script_sets_uv_no_group_for_codex_commands(tmp_path):
+    # With the bin directories, after PATH in the same table; without them,
+    # the table holds only UV_NO_GROUP (no pin needed: no PATH is written).
+    env = home_env(tmp_path)
+    pin, pin_copy = make_pin(tmp_path)
+    r = run_home_script(tmp_path, env, "/ws/.venv/bin", "doc docs")
+    assert r.returncode == 0, r.stderr
+    lines = (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text().splitlines()
+    assert lines[1:] == PROFILE + ['[shell_environment_policy.set]',
+                                   f"PATH = '{pin}:{pin_copy}:/ws/.venv/bin:{env['PATH']}'",
+                                   "UV_NO_GROUP = 'doc docs'"]
+    import tomllib
+    assert tomllib.loads("\n".join(lines))["shell_environment_policy"]["set"]["UV_NO_GROUP"] == "doc docs"
+    other = tmp_path / "no-bin"
+    other.mkdir()
+    r = run_home_script(other, home_env(other), "", "doc")
+    assert r.returncode == 0, r.stderr
+    lines = (other / "home" / "codex" / ".codex" / "config.toml").read_text().splitlines()
+    assert lines[1:] == PROFILE + ['[shell_environment_policy.set]', "UV_NO_GROUP = 'doc'"]
+
+
+@pytest.mark.parametrize("value", UV_GROUPS_BAD)
+def test_codex_home_script_refuses_a_uv_no_group_that_is_not_group_names(tmp_path, value):
+    make_pin(tmp_path)
+    r = run_home_script(tmp_path, home_env(tmp_path), "/ws/.venv/bin", value)
+    assert r.returncode != 0
+    assert "uv-no-group must be uv dependency-group names" in r.stderr
+    assert "shell_environment_policy" not in (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text()
+
+
 @pytest.mark.parametrize("bin_dirs, message", [
     ("/ws/.venv/bin:relative/bin", "empty or relative entry"),
     ("/ws/.venv/bin::/home/codex/.local/bin", "empty or relative entry"),
@@ -1116,16 +1227,18 @@ def test_reset_mode_kills_codex_processes_then_recreates_the_home(tmp_path):
     env = home_env(tmp_path, HOME_SCRIPT=str(tmp_path / "home.sh"), PIN_SCRIPT=str(tmp_path / "pin.sh"),
                    SYSTEM_PATH=f"{tmp_path / 'bin'}:/usr/bin:/bin", BIN="/ws/.venv/bin:/home/codex/.local/bin",
                    AGENT_USER="codex")
-    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s bin=%s\\n" "$1" "$2" >>"$LOG"\n')
+    (tmp_path / "home.sh").write_text('#!/usr/bin/env bash\nprintf "home %s bin=%s uv=%s\\n" "$1" "$2" "$3" >>"$LOG"\n')
     (tmp_path / "pin.sh").write_text('#!/usr/bin/env bash\nprintf "pin %s\\n" "$1" >>"$LOG"\n')
+    env["UV_NO_GROUP_INPUT"] = "doc"
     bins = tmp_path / "bin"
     write_exe(bins / "id", "#!/usr/bin/env bash\nexit 0\n")
     r = sh("bash", "-eo", "pipefail", "-c", reset_step(), check=False, env=env)
     assert r.returncode == 0, r.stderr + r.stdout
     assert (tmp_path / "log").read_text() == ("pkill pkill -KILL -u codex\npin codex\n"
-                                              "home codex bin=/ws/.venv/bin:/home/codex/.local/bin\n")
+                                              "home codex bin=/ws/.venv/bin:/home/codex/.local/bin uv=doc\n")
     text = (CODEX_USER / "action.yml").read_text()
     assert "        BIN: ${{ inputs.bin }}\n" in text
+    assert "        UV_NO_GROUP_INPUT: ${{ inputs.uv-no-group }}\n" in text
     assert "        PIN_SCRIPT: ${{ github.action_path }}/pin-bwrap.sh\n" in text
 
 

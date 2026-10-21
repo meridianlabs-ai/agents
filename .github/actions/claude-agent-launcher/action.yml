@@ -29,8 +29,10 @@ description: >-
      PATH (`path-prefix` — the provisioning `bin` output — then the CLI's
      directory and the system directories), the workspace, the runner's
      temp and home directories, the runner's install directory (for the
-     isolation check), the wrapper's own PATH and the caller's
-     `context-dir`, if any, which the namespace binds read-only.
+     isolation check), the wrapper's own PATH, the caller's
+     `context-dir`, if any, which the namespace binds read-only, and the
+     caller's `uv-no-group`, which the wrapper sets as `UV_NO_GROUP` in the
+     agent's environment when it is not empty.
   5. The pre-action user check (`check-isolation.sh --phase pre`) runs as
      the user with plain `sudo -n -u claude-agent`: no sudo, no Docker, Yama
      ptrace_scope 1 or more. What depends on the namespace, the action's
@@ -81,6 +83,15 @@ inputs:
       default) binds nothing more.
     required: false
     default: ""
+  uv-no-group:
+    description: >-
+      uv dependency groups to leave out of every `uv sync` and `uv run` the
+      agent runs (the reusable workflows' `uv_no_group`; meridianlabs-ai/inspect-docs#7):
+      group names separated by spaces, set as `UV_NO_GROUP` in the agent's
+      environment. Any other value fails the step. Empty (the default) sets
+      nothing.
+    required: false
+    default: ""
   system-path:
     description: >-
       The PATH this composite's commands, and the wrapper's, run with: the
@@ -107,6 +118,7 @@ runs:
         GRANT: ${{ inputs.grant }}
         PATH_PREFIX: ${{ inputs.path-prefix }}
         CONTEXT_DIR: ${{ inputs.context-dir }}
+        UV_NO_GROUP_INPUT: ${{ inputs.uv-no-group }}
         SYSTEM_PATH: ${{ inputs.system-path }}
         SOURCE_DIR: ${{ github.action_path }}
       run: |
@@ -144,6 +156,12 @@ runs:
           [ -d "$CONTEXT_DIR" ] && [ ! -L "$CONTEXT_DIR" ] || err "context-dir '$CONTEXT_DIR' is not a plain directory"
           [ "$(stat -c '%u' "$CONTEXT_DIR")" = "$(id -u)" ] || err "context-dir '$CONTEXT_DIR' is not owned by the runner"
           if sudo -n -u "$user" test -w "$CONTEXT_DIR"; then err "context-dir '$CONTEXT_DIR' is writable by $user"; fi
+        fi
+        uv_no_group=${UV_NO_GROUP_INPUT:-}
+        if [ -n "$uv_no_group" ]; then
+          name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'
+          groups="^$name( $name)*\$"
+          [[ "$uv_no_group" =~ $groups ]] || err "uv-no-group must be uv dependency-group names separated by spaces, not '$uv_no_group'"
         fi
 
         # 2. The CLI, at the action's pinned version, root-owned.
@@ -204,6 +222,7 @@ runs:
         record runner-root "$runner_root"
         record system-path "$SYSTEM_PATH"
         record context-dir "$CONTEXT_DIR"
+        record uv-no-group "$uv_no_group"
 
         # 5. The pre-action user check.
         (cd / && sudo -n -u "$user" -H -- env -i PATH="$SYSTEM_PATH" HOME="/home/$user" \

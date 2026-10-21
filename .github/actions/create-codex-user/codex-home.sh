@@ -9,11 +9,14 @@
 # moment codex-action starts — whatever a process running as codex did to it
 # in between. Takes the user and, optionally, the provisioning composite's
 # `bin` directories (colon-separated, absolute; the reset-home mode passes
-# them), which go on the PATH codex gives the commands it runs (below).
+# them), which go on the PATH codex gives the commands it runs (below), and,
+# optionally, the uv dependency groups those commands leave out
+# (`UV_NO_GROUP`, below).
 # Runs everything through sudo.
 set -euo pipefail
 user="$1"
 bin="${2:-}"
+uv_no_group="${3:-}"
 # The pinned bubblewrap's two directories (pin-bwrap.sh), first on that PATH.
 pin=/usr/lib/codex-bwrap
 pin_copy=/var/lib/codex-bwrap
@@ -76,6 +79,19 @@ printf '%s\n' \
 # literal string, so a character one cannot hold (a single quote, a control
 # character) is refused rather than escaped, and so is an entry that is not
 # an absolute directory (an empty one would mean the working directory).
+# The same table carries the caller's `uv_no_group` as UV_NO_GROUP
+# (meridianlabs-ai/inspect-docs#7), refused unless it is uv dependency-group
+# names separated by spaces, so it too is a plain literal string.
+set_lines=()
+if [ -n "$uv_no_group" ]; then
+  name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'
+  groups="^$name( $name)*\$"
+  if ! [[ "$uv_no_group" =~ $groups ]]; then
+    echo "::error::uv-no-group must be uv dependency-group names separated by spaces, not '$uv_no_group'" >&2
+    exit 1
+  fi
+  set_lines+=("UV_NO_GROUP = '$uv_no_group'")
+fi
 if [ -n "$bin" ]; then
   if [ ! -L "$pin/bwrap" ] || [ -L "$pin_copy/bwrap" ] || [ ! -f "$pin_copy/bwrap" ]; then
     echo "::error::no pinned bwrap at $pin/bwrap and $pin_copy/bwrap (pin-bwrap.sh runs first); refusing to put codex-writable directories on codex's command PATH" >&2
@@ -95,9 +111,10 @@ if [ -n "$bin" ]; then
     echo "::error::the codex command PATH has an empty or relative entry: $path" >&2
     exit 1
   fi
-  printf '%s\n' \
-    '[shell_environment_policy.set]' \
-    "PATH = '$path'" \
+  set_lines=("PATH = '$path'" ${set_lines[@]+"${set_lines[@]}"})
+fi
+if [ "${#set_lines[@]}" -gt 0 ]; then
+  printf '%s\n' '[shell_environment_policy.set]' "${set_lines[@]}" \
     | sudo -u "$user" tee -a "$codex_home/config.toml" >/dev/null
 fi
 sudo chmod 644 "$codex_home/config.toml"
@@ -111,4 +128,4 @@ if [ -L "$codex_home" ] || [ ! -d "$codex_home" ]; then
   echo "::error::$codex_home is not a directory after creating it" >&2
   exit 1
 fi
-echo "codex home $codex_home: config.toml written (workspace_net profile${bin:+, command PATH $path}), $GITHUB_RUN_ID.json pre-touched"
+echo "codex home $codex_home: config.toml written (workspace_net profile${bin:+, command PATH $path}${uv_no_group:+, UV_NO_GROUP $uv_no_group}), $GITHUB_RUN_ID.json pre-touched"

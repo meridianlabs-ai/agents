@@ -101,6 +101,13 @@ there makes the run fail validation. A failed provisioning fails the run, so
 keep the recipe green. See [design/architecture.md](design/architecture.md)
 for the mechanics and the inspect_ai-fork caveat.
 
+If `[tool.uv] default-groups` names a group your CI leaves out, such as a
+`doc` group with quarto-cli, set `uv_no_group: doc` in your stubs as well.
+It becomes `UV_NO_GROUP` for the recipe and for every command the agents
+run, so their `uv run` does not install that group. Leave it unset in a
+project without that group: uv errors on a group the project does not
+define.
+
 **Optional — let the agents change dependencies.** By default the land job
 refuses agent commits that change build and dependency configuration
 (`pyproject.toml`, `setup.py`, `uv.lock`, `requirements*.txt`, `package.json`,

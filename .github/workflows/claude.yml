@@ -144,6 +144,21 @@ on:
         required: false
         type: string
         default: ""
+      uv_no_group:
+        description: >-
+          uv dependency groups to leave out, as group names separated by
+          spaces (`doc`): `UV_NO_GROUP` in the provisioning recipe's
+          environment and in the environment of every command the agent runs,
+          on both engines (meridianlabs-ai/inspect-docs#7; decision: Ransom,
+          2026-10-21). Set it when `[tool.uv] default-groups` names a group
+          CI leaves out, such as a `doc` group with quarto-cli, which builds
+          from source: `uv run` re-syncs the default groups unless told not
+          to. Empty (the default) sets nothing; uv errors on a group the
+          project does not define, so leave it empty elsewhere. Any other
+          value fails provisioning and the agent's launch.
+        required: false
+        type: string
+        default: ""
       allow_build_config:
         description: >-
           Whether the agent's commits may change build and dependency
@@ -1567,6 +1582,7 @@ jobs:
         with:
           user: claude-agent
           recipe: ${{ inputs.provision || inputs.codex_provision }}
+          uv-no-group: ${{ inputs.uv_no_group }}
 
       # The pre-agent reclaim (design/executed-paths-residual.md → Pre-agent
       # reclaim): the action's prepare runs git as the runner in the
@@ -1598,6 +1614,7 @@ jobs:
         with:
           path-prefix: ${{ steps.setup.outputs.bin }}
           context-dir: ${{ runner.temp }}/agent-context
+          uv-no-group: ${{ inputs.uv_no_group }}
 
       # Compose the appended-system-prompt sources into ONE value, so we emit a
       # single --append-system-prompt flag. Multiple flags would force a bet on
@@ -2879,6 +2896,7 @@ jobs:
           # counterpart of its claude-setup): `provision`, else the earlier
           # `codex_provision`; both empty runs the generic dev-install.
           recipe: ${{ inputs.provision || inputs.codex_provision }}
+          uv-no-group: ${{ inputs.uv_no_group }}
 
       # The boundary between provisioning-as-codex and codex-action (Claude
       # Security finding 4628446, review round 1): kill every process still
@@ -2899,6 +2917,7 @@ jobs:
           # The provisioned tools on the PATH of codex's own commands, never
           # the job PATH (create-codex-user's `bin` input).
           bin: ${{ steps.setup.outputs.bin }}
+          uv-no-group: ${{ inputs.uv_no_group }}
 
       - name: Compose codex prompt
         id: codexcompose

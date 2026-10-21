@@ -86,6 +86,13 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # uv_no_group (optional): uv dependency groups to leave out, names
+      # separated by spaces. Set it when [tool.uv] default-groups names a group
+      # CI leaves out, such as a `doc` group with quarto-cli: it becomes
+      # UV_NO_GROUP for provisioning and for every command the agent runs, so
+      # `uv run` does not sync that group back in. Leave it unset otherwise; uv
+      # errors on a group the project does not define.
+      # uv_no_group: doc
       # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
       # pyproject.toml, so without a recipe nothing is provisioned and the
       # agent had to install pytest itself. The suite needs pytest and
@@ -154,6 +161,13 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # uv_no_group (optional): uv dependency groups to leave out, names
+      # separated by spaces. Set it when [tool.uv] default-groups names a group
+      # CI leaves out, such as a `doc` group with quarto-cli: it becomes
+      # UV_NO_GROUP for provisioning and for every command the agent runs, so
+      # `uv run` does not sync that group back in. Leave it unset otherwise; uv
+      # errors on a group the project does not define.
+      # uv_no_group: doc
       # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
       # pyproject.toml, so without a recipe nothing is provisioned and the
       # agent had to install pytest itself. The suite needs pytest and

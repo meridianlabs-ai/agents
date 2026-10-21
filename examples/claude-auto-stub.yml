@@ -83,6 +83,13 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # uv_no_group (optional): uv dependency groups to leave out, names
+      # separated by spaces. Set it when [tool.uv] default-groups names a group
+      # CI leaves out, such as a `doc` group with quarto-cli: it becomes
+      # UV_NO_GROUP for provisioning and for every command the agent runs, so
+      # `uv run` does not sync that group back in. Leave it unset otherwise; uv
+      # errors on a group the project does not define.
+      # uv_no_group: doc
       head_branch: ${{ github.event.workflow_run.head_branch }}
       pr_number: ${{ github.event.workflow_run.pull_requests[0].number }}
       ci_run_id: ${{ github.event.workflow_run.id }}
@@ -141,6 +148,13 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # uv_no_group (optional): uv dependency groups to leave out, names
+      # separated by spaces. Set it when [tool.uv] default-groups names a group
+      # CI leaves out, such as a `doc` group with quarto-cli: it becomes
+      # UV_NO_GROUP for provisioning and for every command the agent runs, so
+      # `uv run` does not sync that group back in. Leave it unset otherwise; uv
+      # errors on a group the project does not define.
+      # uv_no_group: doc
       pr_number: ${{ github.event.issue.number }}
       comment_author: ${{ github.event.comment.user.login }}
       # allow_build_config (optional, default false; agents repo:

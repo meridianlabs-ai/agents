@@ -642,11 +642,14 @@ Testing a change).
   `github_token` override other than the job token treated as privileged;
   malformed and file-path `--mcp-config`, `plugin` and a second
   `--settings` refused; `--version` and non-action calls passed through;
-  the env allow-list; the origin URL reset and the snapshot retaken; and
+  the env allow-list, with `UV_NO_GROUP` only when the launcher recorded
+  a `uv-no-group`; the origin URL reset and the snapshot retaken; and
   no lookup on origin whatever branch is checked out (launch step 6 is
   retired). The composite's `context-dir` check, lifted: a plain
   runner-owned directory under `$RUNNER_TEMP` the agent user cannot write,
-  and not one the launch already binds. `agent_ns.py`'s pure parts: the
+  and not one the launch already binds. Its `uv-no-group` check, lifted:
+  uv group names separated by spaces, recorded for the wrapper.
+  `agent_ns.py`'s pure parts: the
   handoff format, the bind plan per grant mode and with a context
   directory (read-only, last), the POSIX ACL encoding, the action-process check against a
   fake `/proc`, the run-file and handoff-file checks. The composite as
@@ -749,7 +752,11 @@ Testing a change).
   `timeout-minutes` under 30 (4773341); the reviewer's sandboxed paths create the user and launch with
   `grant: none`, hand it the scratch copy and drop the overlay's
   `.git/config` mask. `provision` and `codex_provision` are declared with a
-  type and reach only the two provisioning steps. The tier-2 opt-in
+  type and reach only the two provisioning steps. `uv_no_group`
+  (meridianlabs-ai/inspect-docs#7) is an optional string, empty by default,
+  passed to both provisioning steps, the Claude launcher and the codex
+  reset step; every example and own stub shows it commented in each job and
+  none sets it. The tier-2 opt-in
   (Land: tier-2 opt-in): `claude.yml`, `claude-auto.yml` and
   `claude-auto-review.yml` declare `allow_build_config` as a boolean,
   default false, read only by the land step (as `allow-build-config`) and
@@ -761,7 +768,9 @@ Testing a change).
   `provision-fallback`'s dispatch (a `$RUNNER_TEMP` copy under `sudo -u
   codex -H` when `user` is set, the recipe directly otherwise, a caller
   recipe handed over as a `$RUNNER_TEMP` file and refused when it is not
-  bash, a failing sudo fails the step), `provision.sh` against stub
+  bash, a failing sudo fails the step, `uv-no-group` as `UV_NO_GROUP` in
+  the recipe's environment only when set, a value that is not uv group
+  names refused before the recipe runs), `provision.sh` against stub
   `curl`/`uv` (the venv and the `.[dev]` / `--group dev` install, a caller
   recipe replacing them after the uv bootstrap, the `.git/info/exclude`
   lines, the `GITHUB_PATH` appends made only when that file is there),
@@ -772,14 +781,16 @@ Testing a change).
   the `shell_environment_policy.set` PATH of codex's commands, and refuses
   an empty or relative entry or a character a TOML literal string cannot
   hold, and puts the two bwrap pin directories first, refusing without
-  them), `pin-bwrap.sh` against stub `sudo`/`apt-get`/`stat`/`install`
+  them; given a `uv-no-group` it writes it as the table's `UV_NO_GROUP`,
+  with or without the PATH, and refuses a value that is not uv group
+  names; the three consumers of that input share one check), `pin-bwrap.sh` against stub `sudo`/`apt-get`/`stat`/`install`
   (installs bubblewrap when missing, refreshing the lists and retrying on a
   failed install and giving up after three; re-creates the link pin and
   the copy pin, each holding only `bwrap`, in trees that share nothing but
   `/`; refuses a binary, copy or directory hop that is not root's alone and
   a pin the codex user could write) and its `reset-home` step (kills,
   then the pin when there are bin directories, then the home script with
-  the `bin` input; refuses while `pkill` keeps finding codex processes),
+  the `bin` and `uv-no-group` inputs; refuses while `pkill` keeps finding codex processes),
   and every codex job's reset step passes the provisioning step's `bin`
   output.
   The four composer tests lift each engine's composer from its own job

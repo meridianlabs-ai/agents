@@ -146,6 +146,10 @@ add_env PATH "$agent_path"
 add_env SHELL /bin/bash
 add_env DISABLE_AUTOUPDATER 1
 pass_env LANG
+# The caller's `uv_no_group`, as the launcher recorded it: the groups every
+# `uv sync` and `uv run` the agent runs leaves out (meridianlabs-ai/inspect-docs#7).
+uv_no_group=$(read_run uv-no-group)
+if [ -n "$uv_no_group" ]; then add_env UV_NO_GROUP "$uv_no_group"; fi
 pass_env CLAUDE_CODE_ACTION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS \
   CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY \
   CLAUDE_AGENT_SDK_VERSION DETAILED_PERMISSION_MESSAGES GITHUB_ACTION_INPUTS
