@@ -804,7 +804,14 @@ def test_composite_refuses_a_caller_recipe_that_is_not_bash(tmp_path):
 # consumer (this composite, the Claude launcher, codex-home.sh) accepts and
 # refuses the same values.
 UV_GROUPS_OK = ["doc", "doc docs", "a", "docs.v2_x-y"]
-UV_GROUPS_BAD = ["doc,docs", "doc ", " doc", "doc  docs", "-doc", "doc-", "doc'", "doc\nx", "doc;id", "$(id)"]
+UV_GROUPS_BAD = ["doc,docs", "doc ", " doc", "doc  docs", "-doc", "doc-", "doc'", "doc\nx", "doc;id", "$(id)",
+                 "doc\n::add-mask::PROBE"]
+
+
+def no_echoed_command(out: str) -> bool:
+    """A refused value is never echoed: a line break in it would start a
+    workflow command (review round 1)."""
+    return "::add-mask::" not in out and "PROBE" not in out
 UV_GROUP_CHECK = ["name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'", 'groups="^$name( $name)*\\$"']
 
 
@@ -838,6 +845,7 @@ def test_composite_refuses_a_uv_no_group_that_is_not_group_names(tmp_path, value
     else:
         assert r.returncode != 0 and log == ""
         assert "uv-no-group must be uv dependency-group names" in r.stdout
+        assert no_echoed_command(r.stdout + r.stderr)
 
 
 def test_every_uv_no_group_consumer_runs_the_same_check():
@@ -1080,6 +1088,7 @@ def test_codex_home_script_refuses_a_uv_no_group_that_is_not_group_names(tmp_pat
     r = run_home_script(tmp_path, home_env(tmp_path), "/ws/.venv/bin", value)
     assert r.returncode != 0
     assert "uv-no-group must be uv dependency-group names" in r.stderr
+    assert no_echoed_command(r.stdout + r.stderr)
     assert "shell_environment_policy" not in (tmp_path / "home" / "codex" / ".codex" / "config.toml").read_text()
 
 

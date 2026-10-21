@@ -45,7 +45,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_codex_path import composite_runs, composite_steps  # noqa: E402
-from test_engine_job_isolation import UV_GROUPS_BAD, UV_GROUPS_OK  # noqa: E402
+from test_engine_job_isolation import UV_GROUPS_BAD, UV_GROUPS_OK, no_echoed_command  # noqa: E402
 from test_land_helpers import git  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -425,6 +425,7 @@ def test_uv_no_group_is_checked_and_recorded():
     for value in UV_GROUPS_BAD:
         r = uv_no_group_check(value)
         assert "ERR: uv-no-group must be uv dependency-group names" in r.stdout, (value, r.stdout, r.stderr)
+        assert no_echoed_command(r.stdout + r.stderr), value
     body = composite_runs(ACTION)[0]
     assert '\nrecord uv-no-group "$uv_no_group"\n' in body
     assert body.index("uv_no_group=${UV_NO_GROUP_INPUT:-}") < body.index("# 2. The CLI")

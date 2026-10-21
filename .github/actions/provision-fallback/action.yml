@@ -214,14 +214,15 @@ runs:
       run: |
         set -euo pipefail
         # UV_NO_GROUP for the recipe, only when the caller set it: uv group
-        # names separated by single spaces, nothing else.
+        # names separated by single spaces, nothing else. A refused value is
+        # not echoed: a line break in it could start a workflow command.
         uv_no_group=${UV_NO_GROUP_INPUT:-}
         uv_env=()
         if [ -n "$uv_no_group" ]; then
           name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'
           groups="^$name( $name)*\$"
           if ! [[ "$uv_no_group" =~ $groups ]]; then
-            echo "::error::uv-no-group must be uv dependency-group names separated by spaces, not '$uv_no_group'"
+            echo "::error::uv-no-group must be uv dependency-group names separated by spaces"
             exit 1
           fi
           uv_env=("UV_NO_GROUP=$uv_no_group")

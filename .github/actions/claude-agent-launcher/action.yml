@@ -157,11 +157,13 @@ runs:
           [ "$(stat -c '%u' "$CONTEXT_DIR")" = "$(id -u)" ] || err "context-dir '$CONTEXT_DIR' is not owned by the runner"
           if sudo -n -u "$user" test -w "$CONTEXT_DIR"; then err "context-dir '$CONTEXT_DIR' is writable by $user"; fi
         fi
+        # uv group names separated by single spaces; a refused value is not
+        # echoed (a line break in it could start a workflow command).
         uv_no_group=${UV_NO_GROUP_INPUT:-}
         if [ -n "$uv_no_group" ]; then
           name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'
           groups="^$name( $name)*\$"
-          [[ "$uv_no_group" =~ $groups ]] || err "uv-no-group must be uv dependency-group names separated by spaces, not '$uv_no_group'"
+          [[ "$uv_no_group" =~ $groups ]] || err "uv-no-group must be uv dependency-group names separated by spaces"
         fi
 
         # 2. The CLI, at the action's pinned version, root-owned.

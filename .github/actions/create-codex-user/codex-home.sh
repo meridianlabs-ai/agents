@@ -81,13 +81,14 @@ printf '%s\n' \
 # an absolute directory (an empty one would mean the working directory).
 # The same table carries the caller's `uv_no_group` as UV_NO_GROUP
 # (meridianlabs-ai/inspect-docs#7), refused unless it is uv dependency-group
-# names separated by spaces, so it too is a plain literal string.
+# names separated by spaces, so it too is a plain literal string. A refused
+# value is not echoed: a line break in it could start a workflow command.
 set_lines=()
 if [ -n "$uv_no_group" ]; then
   name='[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?'
   groups="^$name( $name)*\$"
   if ! [[ "$uv_no_group" =~ $groups ]]; then
-    echo "::error::uv-no-group must be uv dependency-group names separated by spaces, not '$uv_no_group'" >&2
+    echo "::error::uv-no-group must be uv dependency-group names separated by spaces" >&2
     exit 1
   fi
   set_lines+=("UV_NO_GROUP = '$uv_no_group'")
