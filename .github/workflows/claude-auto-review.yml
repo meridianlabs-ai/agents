@@ -391,7 +391,7 @@ jobs:
       # 2026-09-18; the gate used to skip with a log line when it was absent).
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -1164,7 +1164,7 @@ jobs:
       # agent never pushes, so the identity behind it no longer matters
       # here). The fetch itself is a read, so the job token is enough for it.
       - name: Check out PR branch
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.gate.outputs.head_branch }}
@@ -1434,7 +1434,7 @@ jobs:
       # too: the agent never pushes, and the helper is scoped to this
       # server's URL, so a `git fetch` the agent aims at any other host gets
       # no credential.
-      - uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
+      - uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250
         id: claude
         env:
           GIT_TOKEN: ${{ github.token }}
@@ -2076,7 +2076,7 @@ jobs:
       # fetches. The fetch itself is a read, so the job token is enough for
       # it.
       - name: Check out PR branch
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.gate.outputs.head_branch }}
@@ -3172,7 +3172,7 @@ jobs:
       # ""`), so no other repository is in scope. Revoked when the job ends.
       - name: Mint the machine account's token
         id: mint
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           # `app-id` accepts the App ID or the Client ID; v2 has no client-id input.
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
