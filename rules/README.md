@@ -26,6 +26,15 @@ These files give all our agents one set of rules for shared work. The rules appl
 - The repo's own `AGENTS.md`, `CLAUDE.md` and `CONTRIBUTING*` add to these rules. If a repo rule conflicts with a shared rule, obey the repo rule and report the conflict.
 - Your personal rules can add to these rules or make them stricter. Do not use personal rules to make a Required rule looser.
 
+## What goes here and what goes in a repo
+
+All rules in this section: Provisional, from Eric.
+
+- Put a rule here only when the team would defend it as a team convention for how agents behave in every Meridian repo.
+- Put a repo's facts and procedures in that repo's `AGENTS.md`, `CLAUDE.md` or `CONTRIBUTING*`. Examples: build and test commands, gated test lists, release steps, layout.
+- Keep personal preferences in personal files.
+- When the team adopts a rule here, this file is the authority for it. Remove the personal copies of that rule.
+
 ## How a harness loads the rules
 
 Use a local clone, or fetch the files at a tag. Pick one of these methods.
