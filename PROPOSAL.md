@@ -21,7 +21,10 @@ Because Meridian-wide rules are not part of one repo, a repo file cannot carry t
 | Files | `rules/code-changes.md`, `rules/pr-review.md` | `rules/ownership.md`, "Lessons from your work" in `rules/README.md` |
 | Files in both | `rules/security.md`, `rules/public-writing.md` | `rules/security.md`, `rules/public-writing.md` |
 
-Why two paths: most tools cannot import a file from a different location, so repo-scoped text must be in each repo (Ransom's point).
+Why two paths: the two kinds reach different agents.
+
+- A Meridian person's own agent has a setup that the person controls. We can point it at rules in any location. That is how Meridian-wide rules arrive, and it is the premise of this proposal.
+- An agent that only opens a repo has no setup that we control. Examples are a CI agent, a cloud agent, or an outside contributor's tool. It reads only the files in the repo, and most tools cannot import a file from a different location into `AGENTS.md`. So repo-scoped text must be in each repo (Ransom's point).
 
 One source: `rules/` holds the text of both kinds. Ransom's `templates/AGENTS.md` block gets its content from the repo-scoped files. The inspect_ai fork stays a special case, as in his design.
 
