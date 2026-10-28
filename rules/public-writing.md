@@ -12,7 +12,7 @@ These rules apply to text that other people read: PR titles and bodies, issues, 
 ### Style
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Write in ASD-STE100 Simplified Technical English.
 - Write one topic in each sentence.
@@ -31,7 +31,7 @@ These rules apply to text that other people read: PR titles and bodies, issues, 
 ### Authorship
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - When an agent writes text that a human did not review, the text must say that an agent wrote it.
 - Start the text with the agent's name and its owner, for example `Review Bot (Alex's bot):`.
@@ -40,17 +40,17 @@ These rules apply to text that other people read: PR titles and bodies, issues, 
 
 ### References
 
-- Refer to a PR or an issue by repo, number and a short description, for example `inspect_ai pr 1234 - fix log path`. Do not use a bare number. (Provisional, from Eric)
+- Refer to a PR or an issue by repo, number and a short description, for example `inspect_ai pr 1234 - fix log path`. Do not use a bare number. (Provisional)
 
 ### Automation triggers
 
-- Do not write a token that starts a workflow (for example `@claude` or `@auto`) in a PR body or comment, unless you want to start that workflow. (Provisional, from Eric)
+- Do not write a token that starts a workflow (for example `@claude` or `@auto`) in a PR body or comment, unless you want to start that workflow. (Provisional)
 - Do not quote the marker text that automation reads.
 
 ## Feedback and commits
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Do not offer optional feedback with no clear action. Fix it, require it, file an issue that someone will do, or omit it.
 - Do not ask a question when the reason is not stated or the answer no longer matters.

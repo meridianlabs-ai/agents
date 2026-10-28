@@ -8,7 +8,7 @@
 This file says what an agent can do alone, with no human, and what it never does alone. "Your person" is the human that the agent works for.
 
 > [!NOTE]
-> All rules in this file: Provisional, from Eric.
+> All rules in this file: Provisional.
 
 ## Approve and merge a PR alone
 

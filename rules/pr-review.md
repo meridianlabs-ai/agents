@@ -14,7 +14,7 @@ These rules apply when an agent reviews a PR. They apply to every author: a pers
 ### Scope
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Review the problem that the PR states.
 - Do not ask the author to fix problems outside that scope.
@@ -23,7 +23,7 @@ These rules apply when an agent reviews a PR. They apply to every author: a pers
 ### What blocks a merge
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Tag every finding **blocking** or **non-blocking**.
 - A finding is blocking only if it is one of these:
@@ -39,7 +39,7 @@ These rules apply when an agent reviews a PR. They apply to every author: a pers
 ### Non-blocking findings
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Post each non-blocking finding one time.
 - The author fixes it or dismisses it with a reason.
@@ -49,7 +49,7 @@ These rules apply when an agent reviews a PR. They apply to every author: a pers
 ### Evidence
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Read the diff. Do not review only the PR description.
 - Find the sentence in the description that the PR depends on. Check that the base branch has that problem.
@@ -70,7 +70,7 @@ For each regression finding, state these four items:
 ### Live state
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Record the head SHA that you reviewed.
 - Before you post, read the head SHA again.
@@ -79,7 +79,7 @@ For each regression finding, state these four items:
 ### Later passes
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Start a later pass with a table of all earlier findings. Mark each one addressed, open, deferred, or no longer applies, with `file:line` on the current head.
 - Then review the commits since the last pass.
@@ -87,18 +87,18 @@ For each regression finding, state these four items:
 
 ## Second reviews and who wrote the PR
 
-- For a change to security, privilege, sandbox or CI trust code, get a second review from a different model family. Report where the two reviews disagree first. (Provisional, from Eric)
-- When a maintainer's `### Agent review` section shows full scope, named models, a result for each finding and coverage of the current head, you can accept that review. Check a sample of the fixes. Do not repeat the full review. (Provisional, from Eric)
-- On a PR by a Meridian employee, do not use "request changes" to ask for a different design. Push the change to the branch. Post one comment that says what you changed and why. **NEEDS TEAM AGREEMENT.** (Provisional, from Eric)
-- On a PR by another author, use a "request changes" review to ask for a different design, not a comment. Recommend one design. Do not list neutral options. (Provisional, from Eric)
-- On a PR from an external contributor, check correctness and tests with more care. Use a welcoming tone. (Provisional, from Eric)
+- For a change to security, privilege, sandbox or CI trust code, get a second review from a different model family. Report where the two reviews disagree first. (Provisional)
+- When a maintainer's `### Agent review` section shows full scope, named models, a result for each finding and coverage of the current head, you can accept that review. Check a sample of the fixes. Do not repeat the full review. (Provisional)
+- On a PR by a Meridian employee, do not use "request changes" to ask for a different design. Push the change to the branch. Post one comment that says what you changed and why. **NEEDS TEAM AGREEMENT.** (Provisional)
+- On a PR by another author, use a "request changes" review to ask for a different design, not a comment. Recommend one design. Do not list neutral options. (Provisional)
+- On a PR from an external contributor, check correctness and tests with more care. Use a welcoming tone. (Provisional)
 
 ## Shared definitions
 
 ### A change that the reviewer makes
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 These words describe the size of a fix:
 

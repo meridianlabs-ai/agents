@@ -11,15 +11,15 @@ These rules apply when an agent changes code and prepares a PR.
 
 ### Before you start
 
-- Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING*`, and each nested `AGENTS.md` under the paths that you change. (Provisional, from Eric)
-- Check that the issue is still open and that no other PR fixes it. (Provisional, from Eric)
-- Make a new branch from the current base branch. Do not commit on a branch that you got from another task. (Provisional, from Eric)
+- Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING*`, and each nested `AGENTS.md` under the paths that you change. (Provisional)
+- Check that the issue is still open and that no other PR fixes it. (Provisional)
+- Make a new branch from the current base branch. Do not commit on a branch that you got from another task. (Provisional)
 - Work in a separate worktree or clone. Do not change the branch of a checkout that a person uses.
 
 ### The change
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Make the smallest change that solves the problem. Use the idiom that the repo already uses.
 - Do not add changes that are not related to the problem.
@@ -28,21 +28,21 @@ These rules apply when an agent changes code and prepares a PR.
 ### Git
 
 - Make all changes through a PR. Do not push to a default branch or a protected branch.
-- Do not force-push. Do not rebase a branch that you pushed. Merge the base branch into it. (Provisional, from Eric)
-- Merge the base branch only when the repo requires an up-to-date branch, or when the PR has a conflict. (Provisional, from Eric)
+- Do not force-push. Do not rebase a branch that you pushed. Merge the base branch into it. (Provisional)
+- Merge the base branch only when the repo requires an up-to-date branch, or when the PR has a conflict. (Provisional)
 
 ### Tests
 
 - Run the repo's tests and lint before you open the PR, or before you mark it ready.
-- Write tests that run the real path: the real endpoint, the real container, the real page. (Provisional, from Eric)
-- Gated tests (for example slow, API or sandbox tests that the repo's `AGENTS.md` names) that cover the change must run on the current head before the PR is ready. (Provisional, from Eric)
-- Coverage is per subsystem and per provider. A pass for one provider does not show a pass for another. (Provisional, from Eric)
-- If nobody can run a gated test, keep the PR as a draft. Say which test did not run and who can run it. (Provisional, from Eric)
+- Write tests that run the real path: the real endpoint, the real container, the real page. (Provisional)
+- Gated tests (for example slow, API or sandbox tests that the repo's `AGENTS.md` names) that cover the change must run on the current head before the PR is ready. (Provisional)
+- Coverage is per subsystem and per provider. A pass for one provider does not show a pass for another. (Provisional)
+- If nobody can run a gated test, keep the PR as a draft. Say which test did not run and who can run it. (Provisional)
 
 ### Broken and flaky checks
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - A missing, queued, skipped, cancelled or neutral check is not a pass.
 - Compare the checks that the changed paths must start with the runs that exist.
@@ -53,7 +53,7 @@ These rules apply when an agent changes code and prepares a PR.
 ### Claims
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Report what you saw, not what you started. Give the commit, the run URL or the check result.
 - If you started something and did not check the result, say "started, not verified".
@@ -63,7 +63,7 @@ These rules apply when an agent changes code and prepares a PR.
 ## Ready for review
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 Before you mark a PR ready, or ask a person to review it:
 
@@ -77,7 +77,7 @@ Before you mark a PR ready, or ask a person to review it:
 ## Mechanisms
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Before you add a new mechanism, check whether an existing one already does the job.
 - When a fix adds a second mechanism next to an existing one, propose to remove the old one.

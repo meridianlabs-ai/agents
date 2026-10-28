@@ -34,7 +34,7 @@ Keep a small set of shared rule files in `rules/` in this repo. Each of us point
 
 The files are short and harness-neutral. They say what to do, not how a specific tool does it.
 
-Rules marked **Provisional, from Eric** are Eric's starting points. They are not agreed. Change them or remove them.
+Rules marked **Provisional** are starting points. They are not agreed. Change them or remove them.
 
 ## Topics
 
@@ -60,7 +60,7 @@ The files are living documents. The bar is better, not perfect: today we are in 
 - To change a rule, open a PR against `rules/`. One other human maintainer approves it.
 - We tag versions (`rules-v1`, `rules-v2`, ...). A harness can track `main` or pin a tag.
 - An agent can draft a rule change. A human approves it.
-- When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Living rules: better, not perfect" in `meridian-agents.md`. (Provisional, from Eric)
+- When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Living rules: better, not perfect" in `meridian-agents.md`. (Provisional)
 
 ## How we review the first version
 
@@ -73,7 +73,7 @@ Before step 4, nobody points an agent at these files.
 
 ## Open questions
 
-1. **Which repos are in scope? (from Eric, top-level discussion)** Some Meridian repos may not need agent alignment: these rules and a tracker. Which repos are in scope? Suggestions only: morpheus, veevals, condorai. Other candidates are demo, private or stale repos: flow_steps_demo, inspect-viz-example-logs, inspect_ai_dev, inspect_petri_dev, meridian-docs, meridian-fundraising, release-testing, remote-worker-dashboard, scout-hal-import, sentinel-presentation, situational-awareness, ts-mono-test. How does `rules/ownership.md` mark a repo that is out of scope? For example, a separate "Out of scope" list.
+1. **Which repos are in scope? (top-level discussion)** Some Meridian repos may not need agent alignment: these rules and a tracker. Which repos are in scope? Suggestions only: morpheus, veevals, condorai. Other candidates are demo, private or stale repos: flow_steps_demo, inspect-viz-example-logs, inspect_ai_dev, inspect_petri_dev, meridian-docs, meridian-fundraising, release-testing, remote-worker-dashboard, scout-hal-import, sentinel-presentation, situational-awareness, ts-mono-test. How does `rules/ownership.md` mark a repo that is out of scope? For example, a separate "Out of scope" list.
 2. Is meridianlabs-ai/agents the right place for these files? We can move them later.
 3. Layout and paths: one `rules/` directory with several files, or one file? Is the split right between repo-scoped rules (through Ransom's sync) and Meridian-wide rules (through `meridian-agents.md`)? See "Two kinds of rules". Ransom: does this fit your design?
 4. Who approves a rule change: one other maintainer, or all active maintainers for a new rule?
@@ -86,7 +86,7 @@ Before step 4, nobody points an agent at these files.
 11. Tags, or track `main` only?
 12. Should this repo's `AGENTS.md` and the CI reviewer prompt load `rules/pr-review.md`?
 13. Is ASD-STE100 a rule we all agree on for public text, or taste to leave out for now?
-14. Slack bug reports (from Eric). Many of our agents can scan Slack for bug reports and feature requests. Do we want this? If yes: who tracks which channel? How do we prevent duplicate work, for example one tracker for each channel, as in `rules/ownership.md`? What does an agent do with a report: open an issue, tell its person, or reply in the thread?
+14. Slack bug reports. Many of our agents can scan Slack for bug reports and feature requests. Do we want this? If yes: who tracks which channel? How do we prevent duplicate work, for example one tracker for each channel, as in `rules/ownership.md`? What does an agent do with a report: open an issue, tell its person, or reply in the thread?
 
 ## What we ask of you
 

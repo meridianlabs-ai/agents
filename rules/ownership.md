@@ -28,7 +28,7 @@ All Meridian people have write access to UKGovernmentBEIS/inspect_ai and to all 
 
 ## Repo tracking
 
-Each repo can have many people who can help. Each repo has exactly one tracker. The tracker is the person whose agent tracks the repo's CI and canary failures. (Provisional, from Eric)
+Each repo can have many people who can help. Each repo has exactly one tracker. The tracker is the person whose agent tracks the repo's CI and canary failures. (Provisional)
 
 Some repos may be out of scope. The team has not decided which.
 
@@ -89,7 +89,7 @@ To set or change a tracker, open a PR that changes this table. The new tracker a
 ### CI and canary alerts
 
 > [!NOTE]
-> All rules in this section: Provisional, from Eric.
+> All rules in this section: Provisional.
 
 - Before you act on a red CI run or a red canary alert, read this file.
 - Act only if your person is the tracker for that repo.
