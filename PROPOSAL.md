@@ -55,12 +55,12 @@ Rules marked **Provisional, from Eric** are Eric's starting points. They are not
 
 ## How we iterate
 
-The files are living documents. They do not need to be perfect before we adopt them.
+The files are living documents. The bar is better, not perfect: today we are in a bad place, and these rules make things much better. They do not need to be perfect before we adopt them, and neither does a change to them.
 
 - To change a rule, open a PR against `rules/`. One other human maintainer approves it.
 - We tag versions (`rules-v1`, `rules-v2`, ...). A harness can track `main` or pin a tag.
 - An agent can draft a rule change. A human approves it.
-- When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Lessons from your work" in `meridian-agents.md`. (Provisional, from Eric)
+- When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Living rules: better, not perfect" in `meridian-agents.md`. (Provisional, from Eric)
 
 ## How we review the first version
 

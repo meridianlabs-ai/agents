@@ -4,7 +4,21 @@
 
 1. Read the rule files below. Obey every rule in them.
 2. Before you act on a red CI run or a red canary alert, read [`rules/ownership.md`](rules/ownership.md). Act only if your person is the tracker for that repo.
-3. When you learn a lesson from your work, follow "Lessons from your work" below.
+3. Help make these rules better. See "Living rules: better, not perfect" below.
+
+## Living rules: better, not perfect
+
+All rules in this section: Provisional, from Eric.
+
+These rules are a living system. They learn from our experience, and every agent that follows them helps make them better.
+
+**Better, not perfect.** Today, each of our agents follows different rules, and that is a bad place to be. These rules make things much better. We do not hold them to the bar of perfect, and we do not hold a change to them to that bar. A change that makes the rules better is a good change, even when it does not fix everything.
+
+Your responsibility:
+
+- As you work, look for ways to make these rules better. Examples: your person corrects you; you and another agent do the same work; a rule is wrong, missing or not clear; a rule is the same in every repo's `AGENTS.md` and belongs here.
+- When you find one, ask your person, then open a small PR against `meridianlabs-ai/agents` that changes the rule. Give one example of the problem. See "How to change a rule" below.
+- Do not wait until a change is perfect. Propose it when it is better than what is here.
 
 ## What these rules are
 
@@ -33,7 +47,7 @@ These rules build on Ransom's [`design/shared-instructions.md`](design/shared-in
 | What they are | How any agent works in one repo: code changes, PR review, security | Rules common to all Meridian work: who is who, which alerts each person's agent tracks, Slack, lessons from work |
 | Who gets them | Every agent that works in the repo: CI agents, all tools, outside contributors | Each Meridian person's own agents |
 | How they arrive | A shared block in each repo's `AGENTS.md`, kept in sync from `templates/AGENTS.md` | One line in each person's user-level agent setup that points at this file |
-| Files | [`rules/code-changes.md`](rules/code-changes.md), [`rules/pr-review.md`](rules/pr-review.md) | [`rules/ownership.md`](rules/ownership.md), "Lessons from your work" below |
+| Files | [`rules/code-changes.md`](rules/code-changes.md), [`rules/pr-review.md`](rules/pr-review.md) | [`rules/ownership.md`](rules/ownership.md), "Living rules" in this file |
 | Files in both | [`rules/agent-authority.md`](rules/agent-authority.md), [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) | [`rules/agent-authority.md`](rules/agent-authority.md), [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) |
 
 Why two paths: the two kinds reach different agents.
@@ -91,11 +105,3 @@ To stay current, track `main` and pull often. To stay stable, check out a tag.
 3. Tag a new version when a set of changes is ready (`rules-vN`). Tell the team in the PR.
 
 To propose a new rule, open a PR or an issue with the rule text and one example that shows the problem.
-
-## Lessons from your work
-
-All rules in this section: Provisional, from Eric.
-
-- When you learn a lesson from your own work, propose a rule change. Examples: your person corrects you; you and another agent do the same work; a rule is wrong, missing or not clear.
-- Ask your person before you open the PR.
-- Open a small PR against `meridianlabs-ai/agents` that changes the rule. Give one example of the problem.
