@@ -1,8 +1,9 @@
 # Ownership
 
-Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
-
-Rule scope: **Meridian-wide**. Each Meridian person's agents obey these rules. They reach them through `meridian-agents.md`.
+> [!NOTE]
+> Rule scope: **Meridian-wide**. Each Meridian person's agents obey these rules. They reach them through `meridian-agents.md`.
+>
+> Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
 This file says who is who, and who tracks CI and canary failures in each repo. It stops two agents from doing the same work.
 

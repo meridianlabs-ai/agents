@@ -1,8 +1,9 @@
 # Agent authority
 
-Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
-
-Rule scope: **repo and Meridian-wide**. They reach agents through each repo's `AGENTS.md` and through `meridian-agents.md`.
+> [!NOTE]
+> Rule scope: **repo and Meridian-wide**. They reach agents through each repo's `AGENTS.md` and through `meridian-agents.md`.
+>
+> Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
 This file says what an agent can do alone, with no human, and what it never does alone. "Your person" is the human that the agent works for.
 

@@ -1,8 +1,9 @@
 # Public writing
 
-Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
-
-Rule scope: **repo and Meridian-wide**. They reach agents through each repo's `AGENTS.md` and through `meridian-agents.md`.
+> [!NOTE]
+> Rule scope: **repo and Meridian-wide**. They reach agents through each repo's `AGENTS.md` and through `meridian-agents.md`.
+>
+> Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
 These rules apply to text that other people read: PR titles and bodies, issues, comments, reviews, commit messages and chat posts.
 

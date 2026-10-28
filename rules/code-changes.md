@@ -1,8 +1,9 @@
 # Code changes
 
-Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
-
-Rule scope: **repo**. Every agent that works in a repo obeys these rules. They reach it through the repo's `AGENTS.md`.
+> [!NOTE]
+> Rule scope: **repo**. Every agent that works in a repo obeys these rules. They reach it through the repo's `AGENTS.md`.
+>
+> Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
 These rules apply when an agent changes code and prepares a PR.
 
