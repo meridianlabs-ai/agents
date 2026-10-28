@@ -2,6 +2,17 @@
 
 Status: draft for discussion. Nothing here is in force.
 
+## This builds on Ransom's design
+
+This proposal builds on Ransom's [`design/shared-instructions.md`](design/shared-instructions.md) (June 2026, on `main`). His design puts one shared block of rules in each repo's `AGENTS.md` and keeps the copies in sync. That block reaches every agent that works in the repo: CI agents, all tools and outside contributors. Most tools cannot import a file from a different location, so the text must be in each repo.
+
+This proposal adds two things to that design:
+
+1. **The content.** `rules/` holds the shared rules. Ransom's `templates/AGENTS.md` block gets its content from `rules/`.
+2. **A second path, for each person.** Some duties are not part of one repo: who tracks which alerts, Slack, and lessons from work. Each person's agent reads them from [`meridian-agents.md`](meridian-agents.md).
+
+So we keep one source, with two paths. Rules for a repo (code changes, PR review, security) go into each repo through Ransom's sync. Rules for a person (ownership, alerts, lessons) go through `meridian-agents.md`. The inspect_ai fork stays a special case, as in his design.
+
 Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
 ## The problem
@@ -61,7 +72,7 @@ Before step 4, nobody points an agent at these files.
 
 1. **Which repos are in scope? (from Eric, top-level discussion)** Some Meridian repos may not need agent alignment: these rules and a tracker. Which repos are in scope? Suggestions only: morpheus, veevals, condorai. Other candidates are demo, private or stale repos: flow_steps_demo, inspect-viz-example-logs, inspect_ai_dev, inspect_petri_dev, meridian-docs, meridian-fundraising, release-testing, remote-worker-dashboard, scout-hal-import, sentinel-presentation, situational-awareness, ts-mono-test. How does `rules/ownership.md` mark a repo that is out of scope? For example, a separate "Out of scope" list.
 2. Is meridianlabs-ai/agents the right place for these files? We can move them later.
-3. Layout: one `rules/` directory with several files, or one file? How does this relate to [`design/shared-instructions.md`](design/shared-instructions.md) (already on `main`, not part of this PR), which copies a shared block into each repo's `AGENTS.md`?
+3. Layout and paths: one `rules/` directory with several files, or one file? Is the split right between rules for a repo (through Ransom's sync, see "This builds on Ransom's design") and rules for a person (through `meridian-agents.md`)? Ransom: does this fit your design?
 4. Who approves a rule change: one other maintainer, or all active maintainers for a Required rule?
 5. Is the Required and Recommended split right? Candidates to discuss: an unrun gated test as blocking; the 7-day package age limit; a second-model review.
 6. Non-blocking findings: post them one time, or post no optional feedback at all?
