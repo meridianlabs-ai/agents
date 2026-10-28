@@ -8,7 +8,7 @@ These rules apply when an agent reviews a PR. They apply to every author: a pers
 
 "The PR owner" is the human that the reviewing agent works for.
 
-## Required
+## Rules
 
 ### Scope
 
@@ -78,7 +78,7 @@ All rules in this section: Provisional, from Eric.
 - Then review the commits since the last pass.
 - On a PR by another person, wait for the author to ask for a new review or to reply. New commits alone do not ask for a review.
 
-## Recommended
+## Second reviews and who wrote the PR
 
 - For a change to security, privilege, sandbox or CI trust code, get a second review from a different model family. Report where the two reviews disagree first. (Provisional, from Eric)
 - When a maintainer's `### Agent review` section shows full scope, named models, a result for each finding and coverage of the current head, you can accept that review. Check a sample of the fixes. Do not repeat the full review. (Provisional, from Eric)

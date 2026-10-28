@@ -83,7 +83,7 @@ Note on `UKGovernmentBEIS/inspect_ai`: Ransom (Marvin) tracks #slow-tests-result
 
 To set or change a tracker, open a PR that changes this table. The new tracker approves it.
 
-## Required
+## Rules
 
 ### CI and canary alerts
 

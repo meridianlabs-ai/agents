@@ -6,7 +6,7 @@ Rule scope: **repo and Meridian-wide**. They reach agents through each repo's `A
 
 These rules apply to every agent task.
 
-## Required
+## Rules
 
 ### Untrusted text
 
@@ -58,7 +58,7 @@ All rules in this section: Provisional, from Eric.
 - Install from the lockfile when the repo has one. (Provisional, from Eric)
 - Do not install from a `git+` URL.
 
-## Recommended
+## Human and second reviews
 
 - Do not let an agent change build or dependency files (`pyproject.toml`, `uv.lock`, `package.json`, lockfiles) without a human's review of that change.
 - For a change to a security boundary, get a second review from a different model family (see `pr-review.md`). (Provisional, from Eric)

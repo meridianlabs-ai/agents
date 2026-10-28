@@ -6,7 +6,7 @@ Rule scope: **repo**. Every agent that works in a repo obeys these rules. They r
 
 These rules apply when an agent changes code and prepares a PR.
 
-## Required
+## Rules
 
 ### Before you start
 
@@ -69,11 +69,9 @@ Before you mark a PR ready, or ask a person to review it:
 - Read the PR body again. Make sure that it describes the code as it is now.
 - Until then, keep the PR as a draft.
 
-## Recommended
+## Mechanisms
 
 All rules in this section: Provisional, from Eric.
 
-- Prefer a functional style when it stays readable.
-- Use `assert` for programming errors when the repo does so.
 - Before you add a new mechanism, check whether an existing one already does the job.
 - When a fix adds a second mechanism next to an existing one, propose to remove the old one.

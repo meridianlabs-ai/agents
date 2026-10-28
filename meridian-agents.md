@@ -2,9 +2,13 @@
 
 ## Your duties
 
-1. Read the rule files below. Obey every Required rule. Obey a Recommended rule unless you have a reason, and say the reason.
+1. Read the rule files below. Obey every rule in them.
 2. Before you act on a red CI run or a red canary alert, read [`rules/ownership.md`](rules/ownership.md). Act only if your person is the tracker for that repo.
 3. When you learn a lesson from your work, follow "Lessons from your work" below.
+
+## What these rules are
+
+These are only the rules that we all agree on. Every rule here is one that each Meridian person will defend. Broader taste (code style, word choice, personal preferences) is not here. That is a conversation for another day. Until then, keep taste in your personal files or in a repo's `AGENTS.md`. (Provisional, from Eric)
 
 ## Rule files
 
@@ -44,11 +48,9 @@ We expect some content to move from repo-scoped rules to Meridian-wide rules. Ma
 
 ## How to read the rules
 
-- Each file has a **Required** section and a **Recommended** section.
-- Obey every Required rule.
-- Obey a Recommended rule unless you have a reason. If you skip one, say why in your output.
+- Every rule in these files is a rule. There is no "recommended" tier. A rule can say "when" or "unless" to allow judgment.
 - The repo's own `AGENTS.md`, `CLAUDE.md` and `CONTRIBUTING*` add to these rules. If a repo rule conflicts with a shared rule, obey the repo rule and report the conflict.
-- Your personal rules can add to these rules or make them stricter. Do not use personal rules to make a Required rule looser.
+- Your personal rules can add to these rules or make them stricter. Do not use personal rules to make a shared rule looser.
 
 ## What goes in `rules/` and what goes in a repo
 
@@ -91,7 +93,7 @@ To propose a new rule, open a PR or an issue with the rule text and one example 
 
 ## Lessons from your work
 
-All rules in this section: Required. Provisional, from Eric.
+All rules in this section: Provisional, from Eric.
 
 - When you learn a lesson from your own work, propose a rule change. Examples: your person corrects you; you and another agent do the same work; a rule is wrong, missing or not clear.
 - Ask your person before you open the PR.

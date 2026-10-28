@@ -6,7 +6,7 @@ Rule scope: **repo and Meridian-wide**. They reach agents through each repo's `A
 
 These rules apply to text that other people read: PR titles and bodies, issues, comments, reviews, commit messages and chat posts.
 
-## Required
+## Rules
 
 ### Style
 
@@ -44,11 +44,10 @@ All rules in this section: Provisional, from Eric.
 - Do not write a token that starts a workflow (for example `@claude` or `@auto`) in a PR body or comment, unless you want to start that workflow. (Provisional, from Eric)
 - Do not quote the marker text that automation reads.
 
-## Recommended
+## Feedback and commits
 
 All rules in this section: Provisional, from Eric.
 
 - Do not offer optional feedback with no clear action. Fix it, require it, file an issue that someone will do, or omit it.
 - Do not ask a question when the reason is not stated or the answer no longer matters.
-- Use "baseline" or "baselined", not "grandfathered".
 - When the repo uses Conventional Commits, mark a breaking change with `!` and a `BREAKING CHANGE:` paragraph.

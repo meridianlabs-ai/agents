@@ -44,7 +44,7 @@ Rules marked **Provisional, from Eric** are Eric's starting points. They are not
 4. **What an agent may do alone, and how a bot shows authorship.** See `rules/security.md` and `rules/public-writing.md`.
 5. **Supply chain and CI changes.** See `rules/security.md`.
 6. **Tests, including broken and flaky tests.** See `rules/code-changes.md`.
-7. **Claiming work.** Two agents must not do the same work. See `rules/ownership.md`: one tracker for each repo's CI and canary failures. Slack bug reports: see open question 15.
+7. **Claiming work.** Two agents must not do the same work. See `rules/ownership.md`: one tracker for each repo's CI and canary failures. Slack bug reports: see open question 14.
 8. **Releases.** Out of scope for this proposal.
 
 ## What adopting means
@@ -76,18 +76,17 @@ Before step 4, nobody points an agent at these files.
 1. **Which repos are in scope? (from Eric, top-level discussion)** Some Meridian repos may not need agent alignment: these rules and a tracker. Which repos are in scope? Suggestions only: morpheus, veevals, condorai. Other candidates are demo, private or stale repos: flow_steps_demo, inspect-viz-example-logs, inspect_ai_dev, inspect_petri_dev, meridian-docs, meridian-fundraising, release-testing, remote-worker-dashboard, scout-hal-import, sentinel-presentation, situational-awareness, ts-mono-test. How does `rules/ownership.md` mark a repo that is out of scope? For example, a separate "Out of scope" list.
 2. Is meridianlabs-ai/agents the right place for these files? We can move them later.
 3. Layout and paths: one `rules/` directory with several files, or one file? Is the split right between repo-scoped rules (through Ransom's sync) and Meridian-wide rules (through `meridian-agents.md`)? See "Two kinds of rules". Ransom: does this fit your design?
-4. Who approves a rule change: one other maintainer, or all active maintainers for a Required rule?
-5. Is the Required and Recommended split right? Candidates to discuss: an unrun gated test as blocking; the 7-day package age limit; a second-model review.
-6. Non-blocking findings: post them one time, or post no optional feedback at all?
-7. Review between employees (topic 2): push the change, or ask first? Does this apply to design changes too?
-8. Which PRs need no human (see `rules/pr-review.md`)? When can an agent approve or merge?
-9. Claiming work (topic 7): should CODEOWNERS and GitHub review requests route and claim work? Existing examples: inspect_swarm pr 95 - a catch-all CODEOWNERS line that requests a review from one maintainer on every PR; and the CODEOWNERS lines in most of our repos that gate release PRs.
-10. Is "add or make stricter only" the right rule for personal files?
-11. What disclosure format do bots use? Does a bot account (for example a GitHub App) also need a prefix?
-12. Tags, or track `main` only?
-13. Should this repo's `AGENTS.md` and the CI reviewer prompt load `rules/pr-review.md`?
-14. Is ASD-STE100 required for all public text, or recommended?
-15. Slack bug reports (from Eric). Many of our agents can scan Slack for bug reports and feature requests. Do we want this? If yes: who tracks which channel? How do we prevent duplicate work, for example one tracker for each channel, as in `rules/ownership.md`? What does an agent do with a report: open an issue, tell its person, or reply in the thread?
+4. Who approves a rule change: one other maintainer, or all active maintainers for a new rule?
+5. Non-blocking findings: post them one time, or post no optional feedback at all?
+6. Review between employees (topic 2): push the change, or ask first? Does this apply to design changes too?
+7. Which PRs need no human (see `rules/pr-review.md`)? When can an agent approve or merge?
+8. Claiming work (topic 7): should CODEOWNERS and GitHub review requests route and claim work? Existing examples: inspect_swarm pr 95 - a catch-all CODEOWNERS line that requests a review from one maintainer on every PR; and the CODEOWNERS lines in most of our repos that gate release PRs.
+9. Is "add or make stricter only" the right rule for personal files?
+10. What disclosure format do bots use? Does a bot account (for example a GitHub App) also need a prefix?
+11. Tags, or track `main` only?
+12. Should this repo's `AGENTS.md` and the CI reviewer prompt load `rules/pr-review.md`?
+13. Is ASD-STE100 a rule we all agree on for public text, or taste to leave out for now?
+14. Slack bug reports (from Eric). Many of our agents can scan Slack for bug reports and feature requests. Do we want this? If yes: who tracks which channel? How do we prevent duplicate work, for example one tracker for each channel, as in `rules/ownership.md`? What does an agent do with a report: open an issue, tell its person, or reply in the thread?
 
 ## What we ask of you
 
