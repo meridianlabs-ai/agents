@@ -4,23 +4,22 @@ Scope: these files are written for Meridian Labs employees and their agents. Any
 
 This file says who is who, and who tracks CI and canary failures in each repo. It stops two agents from doing the same work.
 
-## People
+## Meridian People
 
-| Name | GitHub | Role |
+| Name | GitHub | Notes |
 |---|---|---|
-| Eric Patey | `epatey` | Co-maintainer, Meridian employee |
-| JJ Allaire | `jjallaire` | Co-maintainer. Meridian employee: to confirm |
-| Charles Teague | `dragonstyle` | Co-maintainer, Meridian employee |
-| Ransom Richardson | `ransomr` | Co-maintainer, Meridian employee |
-| Matt Brandly | `brandly` | Co-maintainer. Meridian employee: to confirm |
-| Craig Walton | `craig-meridian` | Meridian employee: to confirm |
-| Alexandra Abbas | `alexandraabbas` | Meridian employee: to confirm |
-| Kai Fronsdal | `kaifronsdal` | Meridian employee: to confirm |
-| noahwc | `jchengjr` | Meridian employee: to confirm |
-| Marvin | `i-am-marvin`, `meridian-marvin[bot]` | Agent (Ransom's) |
-| Canary Wrangler, Cletus | none (Slack only) | Agents (Eric's) |
-
-"Co-maintainer" means write access or more on `UKGovernmentBEIS/inspect_ai`. Other people on that repo are not in this table.
+| Eric Patey | `epatey` | |
+| JJ Allaire | `jjallaire` | |
+| Charles Teague | `dragonstyle` | |
+| Ransom Richardson | `ransomr` | |
+| Matt Brandly | `brandly` | |
+| Craig Walton | `craig-meridian` | |
+| Alexandra Abbas | `alexandraabbas` | |
+| Kai Fronsdal | `kaifronsdal` | |
+| Noah Chen | `jchengjr` | |
+| Marvin | `i-am-marvin`, `meridian-marvin[bot]` | Ransom's agent; watches #slow-tests-results |
+| Canary Wrangler | none (Slack only) | Eric's agent; handles canary alerts for Eric's repos |
+| Cletus | none (Slack only) | Eric's agent (chief of staff) |
 
 ## Repo tracking
 
@@ -41,7 +40,7 @@ Each repo can have many people who can help. Each repo has exactly one tracker. 
 | inspect-viz-example-logs | JJ (tentative) | | | no | |
 | inspect_ai (fork) | | | | no | |
 | inspect_ai_dev | JJ (tentative) | | | no | |
-| inspect_charxiv | noahwc (tentative) | | | no | |
+| inspect_charxiv | Noah (tentative) | | | no | |
 | inspect_flow | Ransom (tentative) | | ransomr, jjallaire, dragonstyle | yes | #canaries |
 | inspect_harbor | Alexandra (tentative) | | alexandraabbas, jjallaire, dragonstyle | yes | #canaries |
 | inspect_petri | Kai (tentative) | | kaifronsdal, jjallaire, dragonstyle | yes | #canaries |
