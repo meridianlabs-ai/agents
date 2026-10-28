@@ -59,15 +59,15 @@ Before step 4, nobody points an agent at these files.
 
 ## Open questions
 
-1. Is meridianlabs-ai/agents the right place for these files? We can move them later.
-2. Layout: one `rules/` directory with four files, or one file? How does this relate to `design/shared-instructions.md`, which copies a shared block into each repo's `AGENTS.md`?
-3. Who approves a rule change: one other maintainer, or all active maintainers for a Required rule?
-4. Is the Required and Recommended split right? Candidates to discuss: an unrun gated test as blocking; the 7-day package age limit; a second-model review.
-5. Non-blocking findings: post them one time, or post no optional feedback at all?
-6. Review between employees (topic 2): push the change, or ask first? Does this apply to design changes too?
-7. Which PRs need no human (see `rules/pr-review.md`)? When can an agent approve or merge?
-8. Claiming work (topic 7): should CODEOWNERS and GitHub review requests route and claim work? Existing examples: inspect_swarm pr 95 - a catch-all CODEOWNERS line that requests a review from one maintainer on every PR; and the CODEOWNERS lines in most of our repos that gate release PRs.
-9. Which repos do the rules cover?
+1. **Which repos are in scope? (from Eric, top-level discussion)** Some Meridian repos may not need agent alignment: these rules and a tracker. Which repos are in scope? Suggestions only: morpheus, veevals, condorai. Other candidates are demo, private or stale repos: flow_steps_demo, inspect-viz-example-logs, inspect_ai_dev, inspect_petri_dev, meridian-docs, meridian-fundraising, release-testing, remote-worker-dashboard, scout-hal-import, sentinel-presentation, situational-awareness, ts-mono-test. How does `rules/ownership.md` mark a repo that is out of scope? For example, a separate "Out of scope" list.
+2. Is meridianlabs-ai/agents the right place for these files? We can move them later.
+3. Layout: one `rules/` directory with four files, or one file? How does this relate to `design/shared-instructions.md`, which copies a shared block into each repo's `AGENTS.md`?
+4. Who approves a rule change: one other maintainer, or all active maintainers for a Required rule?
+5. Is the Required and Recommended split right? Candidates to discuss: an unrun gated test as blocking; the 7-day package age limit; a second-model review.
+6. Non-blocking findings: post them one time, or post no optional feedback at all?
+7. Review between employees (topic 2): push the change, or ask first? Does this apply to design changes too?
+8. Which PRs need no human (see `rules/pr-review.md`)? When can an agent approve or merge?
+9. Claiming work (topic 7): should CODEOWNERS and GitHub review requests route and claim work? Existing examples: inspect_swarm pr 95 - a catch-all CODEOWNERS line that requests a review from one maintainer on every PR; and the CODEOWNERS lines in most of our repos that gate release PRs.
 10. Is "add or make stricter only" the right rule for personal files?
 11. What disclosure format do bots use? Does a bot account (for example a GitHub App) also need a prefix?
 12. Tags and a changelog, or track `main` only?

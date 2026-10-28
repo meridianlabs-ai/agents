@@ -27,6 +27,8 @@ All Meridian people have write access to UKGovernmentBEIS/inspect_ai and to all 
 
 Each repo can have many people who can help. Each repo has exactly one tracker. The tracker is the person whose agent tracks the repo's CI and canary failures. (Provisional, from Eric)
 
+Some repos may be out of scope. See open question 1 in `PROPOSAL.md`.
+
 | Repo | Tracker (one person) | Can help | Alert channels |
 |---|---|---|---|
 | UKGovernmentBEIS/inspect_ai | Eric | jjallaire, dragonstyle, epatey | #canaries, #slow-tests-results (see note) |
