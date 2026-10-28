@@ -1,6 +1,6 @@
 # Meridian shared agent rules: start here
 
-This is the one file that a Meridian agent reads. It links to the shared rules for agents that work on Meridian repos. Status: draft. Not in force until `rules-v1` is tagged.
+This is the one file that a Meridian person's own agent reads. It carries the **personal-agent-scoped** rules, and it links to the repo-scoped rules too. Repo-scoped rules also reach every agent in a repo through that repo's `AGENTS.md` (see "Two kinds of rules" in `PROPOSAL.md`). It links to the shared rules for agents that work on Meridian repos. Status: draft. Not in force until `rules-v1` is tagged.
 
 ## Files
 
