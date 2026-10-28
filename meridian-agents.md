@@ -22,7 +22,7 @@ Your responsibility:
 
 ## Rule files
 
-These are only the rules that we all agree on. Every rule here is one that each Meridian person will defend. Broader taste (code style, word choice, personal preferences) is not here. That is a conversation for another day. Until then, keep taste in your personal files or in a repo's `AGENTS.md`.
+These are only the rules that we all agree on. Every rule here is one that each Meridian person will defend. Broader taste (code style, word choice, personal preferences) is not here. Keep taste in your personal files or in a repo's `AGENTS.md`.
 
 > [!NOTE]
 > Provisional.
@@ -38,7 +38,7 @@ These are only the rules that we all agree on. Every rule here is one that each 
 
 ## How to read the rules
 
-- Every rule in these files is a rule. There is no "recommended" tier. A rule can say "when" or "unless" to allow judgment.
+- Obey every rule. A rule can say "when" or "unless" to allow judgment.
 - The repo's own `AGENTS.md`, `CLAUDE.md` and `CONTRIBUTING*` add to these rules. If a repo rule conflicts with a shared rule, obey the repo rule and report the conflict.
 - Your personal rules can add to these rules or make them stricter. Do not use personal rules to make a shared rule looser.
 
