@@ -36,32 +36,6 @@ These are only the rules that we all agree on. Every rule here is one that each 
 | [`rules/agent-authority.md`](rules/agent-authority.md) | Repo and Meridian-wide | What an agent can do alone (approve, merge, close), and what it never does alone. |
 | [`rules/ownership.md`](rules/ownership.md) | Meridian-wide | Who is who, and who tracks CI and canary failures in each repo. |
 
-## Two kinds of rules
-
-These rules build on Ransom's [`design/shared-instructions.md`](design/shared-instructions.md).
-
-- **Repo-scoped rules** tell an agent how to work in one repo. They reach every agent in a repo through that repo's `AGENTS.md`.
-- **Meridian-wide rules** are common to all Meridian work. They are the same for every repo and every Meridian person. Because they are not part of one repo, they reach each person's own agents through this file.
-
-| | **Repo-scoped rules** (Ransom's design) | **Meridian-wide rules** |
-|---|---|---|
-| What they are | How any agent works in one repo: code changes, PR review, security | Rules common to all Meridian work: who is who, which alerts each person's agent tracks, Slack, lessons from work |
-| Who gets them | Every agent that works in the repo: CI agents, all tools, outside contributors | Each Meridian person's own agents |
-| How they arrive | A shared block in each repo's `AGENTS.md`, kept in sync from `templates/AGENTS.md` | One line in each person's user-level agent setup that points at this file |
-| Files | [`rules/code-changes.md`](rules/code-changes.md), [`rules/pr-review.md`](rules/pr-review.md) | [`rules/ownership.md`](rules/ownership.md), "Living rules" in this file |
-| Files in both | [`rules/agent-authority.md`](rules/agent-authority.md), [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) | [`rules/agent-authority.md`](rules/agent-authority.md), [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) |
-
-Why two paths: the two kinds reach different agents.
-
-- A Meridian person's own agent has a setup that the person controls. We can point it at rules in any location. That is how Meridian-wide rules arrive.
-- An agent that only opens a repo has no setup that we control. Examples are a CI agent, a cloud agent, or an outside contributor's tool. It reads only the files in the repo, and most tools cannot import a file from a different location into `AGENTS.md`. So repo-scoped text must be in each repo (Ransom's point).
-
-One source: `rules/` holds the text of both kinds. Ransom's `templates/AGENTS.md` block gets its content from the repo-scoped files. The inspect_ai fork stays a special case, as in his design.
-
-Each file in `rules/` starts with a "Rule scope" line.
-
-We expect some content to move from repo-scoped rules to Meridian-wide rules. Many rules that each repo's `AGENTS.md` has now (for example review bars, PR conventions and test discipline) are really common to all Meridian work. When a rule is the same in every repo, move it to `rules/` as a Meridian-wide rule, and remove the copies from each repo.
-
 ## How to read the rules
 
 - Every rule in these files is a rule. There is no "recommended" tier. A rule can say "when" or "unless" to allow judgment.
