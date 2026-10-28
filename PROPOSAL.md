@@ -2,6 +2,8 @@
 
 Status: draft for discussion. Nothing here is in force.
 
+This file is for review of the draft PR only. We remove it before the PR merges. Every rule and every lasting explanation is in `meridian-agents.md` and `rules/`, and no file that lands links to this file.
+
 Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
 ## Two kinds of rules: repo-scoped and Meridian-wide
@@ -13,24 +15,7 @@ This proposal builds on Ransom's [`design/shared-instructions.md`](design/shared
 
 Because Meridian-wide rules are not part of one repo, a repo file cannot carry them. So we make each Meridian person's own agents aware of them, through [`meridian-agents.md`](meridian-agents.md). Delivery through personal agents follows from the definition. It is not the definition.
 
-| | **Repo-scoped rules** (Ransom's design) | **Meridian-wide rules** (this proposal adds) |
-|---|---|---|
-| What they are | How any agent works in one repo: code changes, PR review, security | Rules common to all Meridian work: who is who, which alerts each person's agent tracks, Slack, lessons from work |
-| Who gets them | Every agent that works in the repo: CI agents, all tools, outside contributors | Each Meridian person's own agents |
-| How they arrive | A shared block in each repo's `AGENTS.md`, kept in sync from `templates/AGENTS.md` | One line in each person's user-level agent setup that points at [`meridian-agents.md`](meridian-agents.md) |
-| Files | `rules/code-changes.md`, `rules/pr-review.md` | `rules/ownership.md`, "Lessons from your work" in `rules/README.md` |
-| Files in both | `rules/security.md`, `rules/public-writing.md` | `rules/security.md`, `rules/public-writing.md` |
-
-Why two paths: the two kinds reach different agents.
-
-- A Meridian person's own agent has a setup that the person controls. We can point it at rules in any location. That is how Meridian-wide rules arrive, and it is the premise of this proposal.
-- An agent that only opens a repo has no setup that we control. Examples are a CI agent, a cloud agent, or an outside contributor's tool. It reads only the files in the repo, and most tools cannot import a file from a different location into `AGENTS.md`. So repo-scoped text must be in each repo (Ransom's point).
-
-One source: `rules/` holds the text of both kinds. Ransom's `templates/AGENTS.md` block gets its content from the repo-scoped files. The inspect_ai fork stays a special case, as in his design.
-
-Each file in `rules/` starts with a "Rule scope" line.
-
-We expect some content to move from repo-scoped rules to Meridian-wide rules. Many rules that each repo's `AGENTS.md` has now (for example review bars, PR conventions and test discipline) are really common to all Meridian work. When a rule is the same in every repo, move it to `rules/` as a Meridian-wide rule, and remove the copies from each repo.
+The table, the reasons for two paths, and how rules move between the two kinds are in [`rules/README.md`](rules/README.md#two-kinds-of-rules). That text lands with the rules.
 
 ## The problem
 
@@ -73,7 +58,6 @@ Rules marked **Provisional, from Eric** are Eric's starting points. They are not
 The files are living documents. They do not need to be perfect before we adopt them.
 
 - To change a rule, open a PR against `rules/`. One other human maintainer approves it.
-- Each change adds a line to `rules/CHANGELOG.md`.
 - We tag versions (`rules-v1`, `rules-v2`, ...). A harness can track `main` or pin a tag.
 - An agent can draft a rule change. A human approves it.
 - When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Lessons from your work" in `rules/README.md`. (Provisional, from Eric)
@@ -100,7 +84,7 @@ Before step 4, nobody points an agent at these files.
 9. Claiming work (topic 7): should CODEOWNERS and GitHub review requests route and claim work? Existing examples: inspect_swarm pr 95 - a catch-all CODEOWNERS line that requests a review from one maintainer on every PR; and the CODEOWNERS lines in most of our repos that gate release PRs.
 10. Is "add or make stricter only" the right rule for personal files?
 11. What disclosure format do bots use? Does a bot account (for example a GitHub App) also need a prefix?
-12. Tags and a changelog, or track `main` only?
+12. Tags, or track `main` only?
 13. Should this repo's `AGENTS.md` and the CI reviewer prompt load `rules/pr-review.md`?
 14. Is ASD-STE100 required for all public text, or recommended?
 15. Slack bug reports (from Eric). Many of our agents can scan Slack for bug reports and feature requests. Do we want this? If yes: who tracks which channel? How do we prevent duplicate work, for example one tracker for each channel, as in `rules/ownership.md`? What does an agent do with a report: open an issue, tell its person, or reply in the thread?

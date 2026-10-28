@@ -10,7 +10,7 @@ These files give all our agents one set of rules for shared work. The rules appl
 
 ## Files
 
-There are two kinds of rules. **Repo-scoped** rules reach every agent in a repo through that repo's `AGENTS.md` (Ransom's [`design/shared-instructions.md`](../design/shared-instructions.md)). **Meridian-wide** rules are common to all Meridian work. They reach each person's own agents through [`meridian-agents.md`](../meridian-agents.md). See "Two kinds of rules" in `PROPOSAL.md`.
+Each file has a rule scope. See "Two kinds of rules" below.
 
 | File | Rule scope | What it covers |
 |---|---|---|
@@ -19,7 +19,32 @@ There are two kinds of rules. **Repo-scoped** rules reach every agent in a repo 
 | `security.md` | Repo and Meridian-wide | Untrusted input, CI execution, workflow files, supply chain. |
 | `public-writing.md` | Repo and Meridian-wide | Text that other people read, and how an agent discloses itself. |
 | `ownership.md` | Meridian-wide | Who is who, and who tracks CI and canary failures in each repo. |
-| `CHANGELOG.md` | n/a | One line for each change to these rules. |
+
+## Two kinds of rules
+
+These rules build on Ransom's [`design/shared-instructions.md`](../design/shared-instructions.md).
+
+- **Repo-scoped rules** tell an agent how to work in one repo. They reach every agent in a repo through that repo's `AGENTS.md`.
+- **Meridian-wide rules** are common to all Meridian work. They are the same for every repo and every Meridian person. Because they are not part of one repo, they reach each person's own agents through [`meridian-agents.md`](../meridian-agents.md).
+
+| | **Repo-scoped rules** (Ransom's design) | **Meridian-wide rules** |
+|---|---|---|
+| What they are | How any agent works in one repo: code changes, PR review, security | Rules common to all Meridian work: who is who, which alerts each person's agent tracks, Slack, lessons from work |
+| Who gets them | Every agent that works in the repo: CI agents, all tools, outside contributors | Each Meridian person's own agents |
+| How they arrive | A shared block in each repo's `AGENTS.md`, kept in sync from `templates/AGENTS.md` | One line in each person's user-level agent setup that points at [`meridian-agents.md`](../meridian-agents.md) |
+| Files | `code-changes.md`, `pr-review.md` | `ownership.md`, "Lessons from your work" in this file |
+| Files in both | `security.md`, `public-writing.md` | `security.md`, `public-writing.md` |
+
+Why two paths: the two kinds reach different agents.
+
+- A Meridian person's own agent has a setup that the person controls. We can point it at rules in any location. That is how Meridian-wide rules arrive.
+- An agent that only opens a repo has no setup that we control. Examples are a CI agent, a cloud agent, or an outside contributor's tool. It reads only the files in the repo, and most tools cannot import a file from a different location into `AGENTS.md`. So repo-scoped text must be in each repo (Ransom's point).
+
+One source: This directory holds the text of both kinds. Ransom's `templates/AGENTS.md` block gets its content from the repo-scoped files. The inspect_ai fork stays a special case, as in his design.
+
+Each file here starts with a "Rule scope" line.
+
+We expect some content to move from repo-scoped rules to Meridian-wide rules. Many rules that each repo's `AGENTS.md` has now (for example review bars, PR conventions and test discipline) are really common to all Meridian work. When a rule is the same in every repo, move it here as a Meridian-wide rule, and remove the copies from each repo.
 
 ## How to read the rules
 
@@ -63,9 +88,8 @@ To stay current, track `main` and pull often. To stay stable, check out a tag.
 ## How to change a rule
 
 1. Open a PR that changes files in `rules/`. An agent can write the PR. A human opens or approves it.
-2. Add one line to `CHANGELOG.md` that says what changed and why.
-3. One human maintainer who did not write the change approves it.
-4. Tag a new version when a set of changes is ready (`rules-vN`). Tell the team in the PR.
+2. One human maintainer who did not write the change approves it.
+3. Tag a new version when a set of changes is ready (`rules-vN`). Tell the team in the PR.
 
 To propose a new rule, open a PR or an issue with the rule text and one example that shows the problem.
 
