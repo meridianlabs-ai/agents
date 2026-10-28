@@ -61,7 +61,7 @@ Before step 4, nobody points an agent at these files.
 
 1. **Which repos are in scope? (from Eric, top-level discussion)** Some Meridian repos may not need agent alignment: these rules and a tracker. Which repos are in scope? Suggestions only: morpheus, veevals, condorai. Other candidates are demo, private or stale repos: flow_steps_demo, inspect-viz-example-logs, inspect_ai_dev, inspect_petri_dev, meridian-docs, meridian-fundraising, release-testing, remote-worker-dashboard, scout-hal-import, sentinel-presentation, situational-awareness, ts-mono-test. How does `rules/ownership.md` mark a repo that is out of scope? For example, a separate "Out of scope" list.
 2. Is meridianlabs-ai/agents the right place for these files? We can move them later.
-3. Layout: one `rules/` directory with four files, or one file? How does this relate to `design/shared-instructions.md`, which copies a shared block into each repo's `AGENTS.md`?
+3. Layout: one `rules/` directory with several files, or one file? How does this relate to [`design/shared-instructions.md`](design/shared-instructions.md) (already on `main`, not part of this PR), which copies a shared block into each repo's `AGENTS.md`?
 4. Who approves a rule change: one other maintainer, or all active maintainers for a Required rule?
 5. Is the Required and Recommended split right? Candidates to discuss: an unrun gated test as blocking; the 7-day package age limit; a second-model review.
 6. Non-blocking findings: post them one time, or post no optional feedback at all?
