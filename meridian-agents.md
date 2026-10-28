@@ -20,14 +20,12 @@ Your responsibility:
 - When you find one, ask your person, then open a small PR against `meridianlabs-ai/agents` that changes the rule. Give one example of the problem. See "How to change a rule" below.
 - Do not wait until a change is perfect. Propose it when it is better than what is here.
 
-## What these rules are
+## Rule files
 
 These are only the rules that we all agree on. Every rule here is one that each Meridian person will defend. Broader taste (code style, word choice, personal preferences) is not here. That is a conversation for another day. Until then, keep taste in your personal files or in a repo's `AGENTS.md`.
 
 > [!NOTE]
 > Provisional.
-
-## Rule files
 
 | File | Rule scope | What it covers |
 |---|---|---|
