@@ -3,8 +3,7 @@
 ## Your duties
 
 1. Read the rule files below. Obey every rule in them.
-2. Before you act on a red CI run or a red canary alert, read [`rules/ownership.md`](rules/ownership.md). Act only if your person is the tracker for that repo.
-3. Help make these rules better. See "Living rules: better, not perfect" below.
+2. Help make these rules better. See "Living rules: better, not perfect" below.
 
 ## Living rules: better, not perfect
 
