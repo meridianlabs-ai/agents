@@ -66,7 +66,7 @@ Rules marked **Provisional** are starting points. They are not agreed. Change th
 
 ## What adopting means
 
-- You point each of your agent setups at one file, [`meridian-agents.md`](meridian-agents.md). It is the one entry point and links to all the rules. Its "Adopt the rules" section has the block to paste and where it goes for each harness.
+- You point each of your agent setups at one file, [`meridian-agents.md`](meridian-agents.md). It is the one entry point for agents and links to all the rules. [`ADOPTING.md`](ADOPTING.md) has the block to paste and where it goes for each harness.
 - Your own files can add rules. They can be stricter. If you want a rule to be looser, propose a change to the shared rule.
 - You keep your harness, your tools and your personal workflow.
 

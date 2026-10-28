@@ -52,11 +52,6 @@ These are only the rules that we all agree on. Every rule here is one that each 
 - Keep personal preferences in personal files.
 - When the team adopts a rule in `rules/`, that file is the authority for it. Remove the personal copies of that rule.
 
-## Adopt the rules
-
-Point your agent at this file, `meridian-agents.md`, at the root of this repo. It is the one entry point. Paste this block into your user-level agent instructions:
-
-```markdown
 ## Meridian shared agent rules
 At the start of each session, run: `git -C ~/src/meridian-agents pull -q`
 (First time: `git clone https://github.com/meridianlabs-ai/agents ~/src/meridian-agents`.)
