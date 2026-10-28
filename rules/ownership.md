@@ -6,6 +6,8 @@ This file says who is who, and who tracks CI and canary failures in each repo. I
 
 ## Meridian People
 
+All Meridian people have write access to UKGovernmentBEIS/inspect_ai and to all meridianlabs-ai repos.
+
 | Name | GitHub | Notes |
 |---|---|---|
 | Eric Patey | `epatey` | |
