@@ -12,7 +12,8 @@ These rules apply when an agent reviews a PR. They apply to every author: a pers
 
 ### Scope
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Review the problem that the PR states.
 - Do not ask the author to fix problems outside that scope.
@@ -20,7 +21,8 @@ All rules in this section: Provisional, from Eric.
 
 ### What blocks a merge
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Tag every finding **blocking** or **non-blocking**.
 - A finding is blocking only if it is one of these:
@@ -35,7 +37,8 @@ All rules in this section: Provisional, from Eric.
 
 ### Non-blocking findings
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Post each non-blocking finding one time.
 - The author fixes it or dismisses it with a reason.
@@ -44,7 +47,8 @@ All rules in this section: Provisional, from Eric.
 
 ### Evidence
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Read the diff. Do not review only the PR description.
 - Find the sentence in the description that the PR depends on. Check that the base branch has that problem.
@@ -64,7 +68,8 @@ For each regression finding, state these four items:
 
 ### Live state
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Record the head SHA that you reviewed.
 - Before you post, read the head SHA again.
@@ -72,7 +77,8 @@ All rules in this section: Provisional, from Eric.
 
 ### Later passes
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Start a later pass with a table of all earlier findings. Mark each one addressed, open, deferred, or no longer applies, with `file:line` on the current head.
 - Then review the commits since the last pass.
@@ -90,7 +96,8 @@ All rules in this section: Provisional, from Eric.
 
 ### A change that the reviewer makes
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 These words describe the size of a fix:
 

@@ -10,7 +10,8 @@ These rules apply to text that other people read: PR titles and bodies, issues, 
 
 ### Style
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Write in ASD-STE100 Simplified Technical English.
 - Write one topic in each sentence.
@@ -28,7 +29,8 @@ All rules in this section: Provisional, from Eric.
 
 ### Authorship
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - When an agent writes text that a human did not review, the text must say that an agent wrote it.
 - Start the text with the agent's name and its owner, for example `Review Bot (Alex's bot):`.
@@ -46,7 +48,8 @@ All rules in this section: Provisional, from Eric.
 
 ## Feedback and commits
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Do not offer optional feedback with no clear action. Fix it, require it, file an issue that someone will do, or omit it.
 - Do not ask a question when the reason is not stated or the answer no longer matters.

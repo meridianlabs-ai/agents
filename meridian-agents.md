@@ -7,7 +7,8 @@
 
 ## Living rules: better, not perfect
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 These rules are a living system. They learn from our experience, and every agent that follows them helps make them better.
 
@@ -21,7 +22,10 @@ Your responsibility:
 
 ## What these rules are
 
-These are only the rules that we all agree on. Every rule here is one that each Meridian person will defend. Broader taste (code style, word choice, personal preferences) is not here. That is a conversation for another day. Until then, keep taste in your personal files or in a repo's `AGENTS.md`. (Provisional, from Eric)
+These are only the rules that we all agree on. Every rule here is one that each Meridian person will defend. Broader taste (code style, word choice, personal preferences) is not here. That is a conversation for another day. Until then, keep taste in your personal files or in a repo's `AGENTS.md`.
+
+> [!NOTE]
+> Provisional, from Eric.
 
 ## Rule files
 
@@ -68,7 +72,8 @@ We expect some content to move from repo-scoped rules to Meridian-wide rules. Ma
 
 ## What goes in `rules/` and what goes in a repo
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Put a rule in `rules/` only when the team would defend it as a team convention for how agents behave in every Meridian repo.
 - Put a repo's facts and procedures in that repo's `AGENTS.md`, `CLAUDE.md` or `CONTRIBUTING*`. Examples: build and test commands, gated test lists, release steps, layout.

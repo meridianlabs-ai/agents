@@ -6,7 +6,8 @@ Rule scope: **repo and Meridian-wide**. They reach agents through each repo's `A
 
 This file says what an agent can do alone, with no human, and what it never does alone. "Your person" is the human that the agent works for.
 
-All rules in this file: Provisional, from Eric.
+> [!NOTE]
+> All rules in this file: Provisional, from Eric.
 
 ## Approve and merge a PR alone
 

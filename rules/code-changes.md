@@ -17,7 +17,8 @@ These rules apply when an agent changes code and prepares a PR.
 
 ### The change
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Make the smallest change that solves the problem. Use the idiom that the repo already uses.
 - Do not add changes that are not related to the problem.
@@ -39,7 +40,8 @@ All rules in this section: Provisional, from Eric.
 
 ### Broken and flaky checks
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - A missing, queued, skipped, cancelled or neutral check is not a pass.
 - Compare the checks that the changed paths must start with the runs that exist.
@@ -49,7 +51,8 @@ All rules in this section: Provisional, from Eric.
 
 ### Claims
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Report what you saw, not what you started. Give the commit, the run URL or the check result.
 - If you started something and did not check the result, say "started, not verified".
@@ -58,7 +61,8 @@ All rules in this section: Provisional, from Eric.
 
 ## Ready for review
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 Before you mark a PR ready, or ask a person to review it:
 
@@ -71,7 +75,8 @@ Before you mark a PR ready, or ask a person to review it:
 
 ## Mechanisms
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Before you add a new mechanism, check whether an existing one already does the job.
 - When a fix adds a second mechanism next to an existing one, propose to remove the old one.

@@ -87,7 +87,8 @@ To set or change a tracker, open a PR that changes this table. The new tracker a
 
 ### CI and canary alerts
 
-All rules in this section: Provisional, from Eric.
+> [!NOTE]
+> All rules in this section: Provisional, from Eric.
 
 - Before you act on a red CI run or a red canary alert, read this file.
 - Act only if your person is the tracker for that repo.
