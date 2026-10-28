@@ -2,7 +2,7 @@
 
 Status: draft for discussion. Nothing here is in force.
 
-This file is for review of the draft PR only. We remove it before the PR merges. Every rule and every lasting explanation is in `meridian-agents.md` and `rules/`, and no file that lands links to this file.
+This file is for review of the draft PR only. We remove it before the PR merges. Every rule and every lasting explanation is in `meridian-agents.md` and the files it links to, and no file that lands links to this file.
 
 Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
@@ -15,7 +15,7 @@ This proposal builds on Ransom's [`design/shared-instructions.md`](design/shared
 
 Because Meridian-wide rules are not part of one repo, a repo file cannot carry them. So we make each Meridian person's own agents aware of them, through [`meridian-agents.md`](meridian-agents.md). Delivery through personal agents follows from the definition. It is not the definition.
 
-The table, the reasons for two paths, and how rules move between the two kinds are in [`rules/README.md`](rules/README.md#two-kinds-of-rules). That text lands with the rules.
+The table, the reasons for two paths, and how rules move between the two kinds are in [`meridian-agents.md`](meridian-agents.md#two-kinds-of-rules). That text lands with the rules.
 
 ## The problem
 
@@ -49,7 +49,7 @@ Rules marked **Provisional, from Eric** are Eric's starting points. They are not
 
 ## What adopting means
 
-- You point each of your agent setups at one file, [`meridian-agents.md`](meridian-agents.md). It links to all the rules. `rules/README.md` ("Adopt the rules") has the block to paste and where it goes for each harness.
+- You point each of your agent setups at one file, [`meridian-agents.md`](meridian-agents.md). It is the one entry point and links to all the rules. Its "Adopt the rules" section has the block to paste and where it goes for each harness.
 - Your own files can add rules. They can be stricter. If you want a rule to be looser, propose a change to the shared rule.
 - You keep your harness, your tools and your personal workflow.
 
@@ -60,7 +60,7 @@ The files are living documents. They do not need to be perfect before we adopt t
 - To change a rule, open a PR against `rules/`. One other human maintainer approves it.
 - We tag versions (`rules-v1`, `rules-v2`, ...). A harness can track `main` or pin a tag.
 - An agent can draft a rule change. A human approves it.
-- When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Lessons from your work" in `rules/README.md`. (Provisional, from Eric)
+- When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Lessons from your work" in `meridian-agents.md`. (Provisional, from Eric)
 
 ## How we review the first version
 
