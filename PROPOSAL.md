@@ -29,7 +29,7 @@ Rules marked **Provisional, from Eric** are Eric's starting points. They are not
 4. **What an agent may do alone, and how a bot shows authorship.** See `rules/security.md` and `rules/public-writing.md`.
 5. **Supply chain and CI changes.** See `rules/security.md`.
 6. **Tests, including broken and flaky tests.** See `rules/code-changes.md`.
-7. **Claiming work.** Two agents must not do the same work. See `rules/ownership.md`: one tracker for each repo's CI and canary failures.
+7. **Claiming work.** Two agents must not do the same work. See `rules/ownership.md`: one tracker for each repo's CI and canary failures. Slack bug reports: see open question 15.
 8. **Releases.** Out of scope for this proposal.
 
 ## What adopting means
@@ -73,6 +73,7 @@ Before step 4, nobody points an agent at these files.
 12. Tags and a changelog, or track `main` only?
 13. Should this repo's `AGENTS.md` and the CI reviewer prompt load `rules/pr-review.md`?
 14. Is ASD-STE100 required for all public text, or recommended?
+15. Slack bug reports (from Eric). Many of our agents can scan Slack for bug reports and feature requests. Do we want this? If yes: who tracks which channel? How do we prevent duplicate work, for example one tracker for each channel, as in `rules/ownership.md`? What does an agent do with a report: open an issue, tell its person, or reply in the thread?
 
 ## What we ask of you
 
