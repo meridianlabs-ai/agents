@@ -1,13 +1,5 @@
 # Meridian shared agent rules: start here
 
-Status: draft. Not in force until `rules-v1` is tagged.
-
-This is the one entry point for the shared rules. A Meridian person's own agent reads this file and the files it links to. Everything starts here.
-
-Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
-
-These files give all our agents one set of rules for shared work. The rules apply to every harness. Each person keeps their own harness and their own extra rules.
-
 ## Your duties
 
 1. Read the rule files below. Obey every Required rule. Obey a Recommended rule unless you have a reason, and say the reason.
