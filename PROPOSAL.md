@@ -41,6 +41,8 @@ We have two layers.
 
 Layer 2 can stay different for each person. Layer 1 should not, for the work we share.
 
+In the long term, we might want one Meridian bot that does all of this work for the team. That is too large a change to do now. This proposal addresses the most immediate and urgent need: the agents that each of us already runs must follow the same rules for the work we share.
+
 ## The idea
 
 Keep a small set of shared rule files in `rules/` in this repo. Each of us points our agents at them, from any harness. Then all our agents use one bar for shared work.
