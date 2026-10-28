@@ -52,23 +52,6 @@ These are only the rules that we all agree on. Every rule here is one that each 
 - Keep personal preferences in personal files.
 - When the team adopts a rule in `rules/`, that file is the authority for it. Remove the personal copies of that rule.
 
-## Meridian shared agent rules
-At the start of each session, run: `git -C ~/src/meridian-agents pull -q`
-(First time: `git clone https://github.com/meridianlabs-ai/agents ~/src/meridian-agents`.)
-If you cannot run git, read https://github.com/meridianlabs-ai/agents/blob/main/meridian-agents.md
-Then read ~/src/meridian-agents/meridian-agents.md and follow it.
-```
-
-Where to paste it:
-
-- **Claude Code.** User-level `~/.claude/CLAUDE.md`. It then applies in every repo.
-- **Codex.** `~/.codex/AGENTS.md`.
-- **Cursor.** Settings > Rules > User Rules.
-- **Grok Bot or another bot.** The bot's profile, or a skill that loads at session start.
-- **GitHub Actions.** Check out `meridianlabs-ai/agents` at a tag, with `path:` set, and add `meridian-agents.md` and the files it links to the agent prompt.
-
-To stay current, track `main` and pull often. To stay stable, check out a tag.
-
 ## How to change a rule
 
 1. Open a PR that changes this file or files in `rules/`. An agent can write the PR. A human opens or approves it.
