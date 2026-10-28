@@ -18,6 +18,7 @@ These are only the rules that we all agree on. Every rule here is one that each 
 | [`rules/code-changes.md`](rules/code-changes.md) | Repo | How an agent changes code and prepares a PR. |
 | [`rules/security.md`](rules/security.md) | Repo and Meridian-wide | Untrusted input, CI execution, workflow files, supply chain. |
 | [`rules/public-writing.md`](rules/public-writing.md) | Repo and Meridian-wide | Text that other people read, and how an agent discloses itself. |
+| [`rules/agent-authority.md`](rules/agent-authority.md) | Repo and Meridian-wide | What an agent can do alone (approve, merge, close), and what it never does alone. |
 | [`rules/ownership.md`](rules/ownership.md) | Meridian-wide | Who is who, and who tracks CI and canary failures in each repo. |
 
 ## Two kinds of rules
@@ -33,7 +34,7 @@ These rules build on Ransom's [`design/shared-instructions.md`](design/shared-in
 | Who gets them | Every agent that works in the repo: CI agents, all tools, outside contributors | Each Meridian person's own agents |
 | How they arrive | A shared block in each repo's `AGENTS.md`, kept in sync from `templates/AGENTS.md` | One line in each person's user-level agent setup that points at this file |
 | Files | [`rules/code-changes.md`](rules/code-changes.md), [`rules/pr-review.md`](rules/pr-review.md) | [`rules/ownership.md`](rules/ownership.md), "Lessons from your work" below |
-| Files in both | [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) | [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) |
+| Files in both | [`rules/agent-authority.md`](rules/agent-authority.md), [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) | [`rules/agent-authority.md`](rules/agent-authority.md), [`rules/security.md`](rules/security.md), [`rules/public-writing.md`](rules/public-writing.md) |
 
 Why two paths: the two kinds reach different agents.
 

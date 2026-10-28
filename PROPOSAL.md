@@ -41,7 +41,7 @@ Rules marked **Provisional, from Eric** are Eric's starting points. They are not
 1. **Robust PR review.** The review bar and what blocks a merge. See `rules/pr-review.md`.
 2. **Review between Meridian employees.** In general, the reviewer makes the change and pushes it. The reviewer does not use "request changes". **NEEDS TEAM AGREEMENT.** See `rules/pr-review.md`.
 3. **Ready for review.** The bar an author meets before asking for a review. See `rules/code-changes.md`.
-4. **What an agent may do alone, and how a bot shows authorship.** See `rules/security.md` and `rules/public-writing.md`.
+4. **Agent authority: what an agent may do alone.** When an agent can approve and merge with no human, and what it never does alone. See `rules/agent-authority.md`. How a bot shows authorship: see `rules/public-writing.md`.
 5. **Supply chain and CI changes.** See `rules/security.md`.
 6. **Tests, including broken and flaky tests.** See `rules/code-changes.md`.
 7. **Claiming work.** Two agents must not do the same work. See `rules/ownership.md`: one tracker for each repo's CI and canary failures. Slack bug reports: see open question 14.
@@ -79,7 +79,7 @@ Before step 4, nobody points an agent at these files.
 4. Who approves a rule change: one other maintainer, or all active maintainers for a new rule?
 5. Non-blocking findings: post them one time, or post no optional feedback at all?
 6. Review between employees (topic 2): push the change, or ask first? Does this apply to design changes too?
-7. Which PRs need no human (see `rules/pr-review.md`)? When can an agent approve or merge?
+7. Agent authority (see `rules/agent-authority.md`): is the checklist right? Who can approve: must the person opt in, and is the author's own agent excluded?
 8. Claiming work (topic 7): should CODEOWNERS and GitHub review requests route and claim work? Existing examples: inspect_swarm pr 95 - a catch-all CODEOWNERS line that requests a review from one maintainer on every PR; and the CODEOWNERS lines in most of our repos that gate release PRs.
 9. Is "add or make stricter only" the right rule for personal files?
 10. What disclosure format do bots use? Does a bot account (for example a GitHub App) also need a prefix?

@@ -28,23 +28,15 @@ All rules in this section: Provisional, from Eric.
 ### Workflow files and CI
 
 - An agent can change files under `.github/workflows/` on a branch or in a draft PR. (Provisional, from Eric)
-- A PR that changes `.github/workflows/` must get review and approval from a human maintainer before it merges. (Provisional, from Eric)
-- An agent must not approve or merge a PR that changes `.github/workflows/`. (Provisional, from Eric)
+- A PR that changes `.github/workflows/` needs a human maintainer's approval before it merges (see [`agent-authority.md`](agent-authority.md)). (Provisional, from Eric)
 - Say in the PR body that the PR changes a workflow and needs a human maintainer's approval. (Provisional, from Eric)
 - Do not put `${{ ... }}` expressions with event text, inputs or step output directly in a `run:` block. Pass them through `env:` and use a quoted variable.
 - Pin each third-party GitHub Action to a full commit SHA.
 - Give each token the smallest permissions that the job needs. Do not use `secrets: inherit`.
 
-### What an agent does not do alone
+### Agent authority
 
-All rules in this section: Provisional, from Eric.
-
-- Do not bypass a branch rule or a ruleset.
-- Do not use `gh pr merge --admin`, or merge past a failed or missing required check.
-- Do not change branch protection, rulesets, repo settings, collaborators or org membership.
-- Do not publish a package, upload a release artifact or start a release workflow.
-- A human can approve one of these actions for one specific case. That approval does not apply to other cases.
-- For when an agent can approve or merge a PR, see "PRs that need no human" in `pr-review.md`.
+For what an agent can do alone, and what it never does alone, see [`agent-authority.md`](agent-authority.md).
 
 ### Secrets
 

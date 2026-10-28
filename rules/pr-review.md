@@ -121,44 +121,6 @@ On a PR by an external contributor:
 - Request changes only for items that the author must do: a substantive conflict, a failed check with no known cause, missing gated tests, or a fix only the author can make.
 - Do not request changes for optional items, or for items that you can fix yourself.
 
-### PRs that need no human
+### When an agent can approve or merge
 
-All rules in this section: Provisional, from Eric.
-
-Each review records one line: "decision for the PR owner".
-
-- The decision is **none** when nothing is left to choose after you understand the change. Size does not matter.
-- A question belongs in this line only if different answers lead to different actions. Examples: approve or hold, keep or cut scope, merge now or wait for a release.
-- If each answer leads to approval, it is not a question.
-- Operational work is never a question: a branch that is behind, a conflict that you can fix, a check to run again, a flaky check. Do it, and report it in one line.
-
-A PR needs a human review if one of these is true, even when all checks pass:
-
-1. The decision for the PR owner is a question.
-2. It changes security, privilege or sandbox boundaries, path or ownership checks, or `pull_request_target` jobs.
-3. Its effect is much wider than its stated scope: public contracts, stored data, downstream users, package contents, images, releases or deployments.
-4. It changes a public API, makes a type wider, or breaks compatibility.
-5. The review found a design finding.
-6. Two models disagree on a blocking finding, and a run did not settle it.
-7. The change needed a plan before coding.
-8. The agent is not sure about any item above.
-
-Size alone does not make a PR need a human. A long diff of mechanical or generated changes does not.
-
-A PR also needs a human if it changes `.github/workflows/` (see `security.md`), or if a gated test did not run on the current head.
-
-The human review can be the PR owner's review, or an approval on the current head from a maintainer who is not the author.
-
-If none of these apply, and the agent review is complete on the current head, the agent can approve and merge.
-
-On a PR by a Meridian employee or a trusted contributor:
-
-- You can accept the author's documented agent review instead of your own review runs. It must show scope, models, a result for each finding, and coverage of the current head.
-- Do not close the PR.
-- Before you post a close or a "request changes", show the exact text to the PR owner. Post it only after the PR owner agrees.
-
-On a PR by an external contributor:
-
-- The author's agent review is context only. It does not replace your review.
-- You can close the PR without a human when it is not eligible (no issue that describes a real problem) or not worth the work in that area. Give the reason first.
-- You can request changes without a human, for the items in "A change that the reviewer makes".
+See [`agent-authority.md`](agent-authority.md).
