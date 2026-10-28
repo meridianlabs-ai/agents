@@ -8,6 +8,8 @@ Scope: these files are written for Meridian Labs employees and their agents. Any
 
 This proposal builds on Ransom's [`design/shared-instructions.md`](design/shared-instructions.md) (June 2026, on `main`). His design covers **repo-scoped rules**. This proposal adds **personal-agent-scoped rules**.
 
+Another way to say it: personal-agent-scoped rules are the rules that are **common to all Meridian work**. They are the same for every repo and every person. Repo-scoped rules are about how to work in one repo.
+
 | | **Repo-scoped rules** (Ransom's design) | **Personal-agent-scoped rules** (this proposal adds) |
 |---|---|---|
 | What they cover | How any agent works in one repo: code changes, PR review, security | What *your* agent does for *you* across all repos: which alerts it tracks, Slack, lessons from work |
@@ -21,6 +23,8 @@ Why two paths: most tools cannot import a file from a different location, so rep
 One source: `rules/` holds the text of both kinds. Ransom's `templates/AGENTS.md` block gets its content from the repo-scoped files. The inspect_ai fork stays a special case, as in his design.
 
 Each file in `rules/` starts with a "Rule scope" line.
+
+We expect some content to move from repo-scoped files to personal-agent-scoped files. Many rules that each repo's `AGENTS.md` has now (for example review bars, PR conventions and test discipline) are really common to all Meridian work. When a rule is the same in every repo, move it to `rules/` as a common rule, and remove the copies from each repo.
 
 ## The problem
 
