@@ -39,6 +39,25 @@ Operational work never needs a human: a branch that is behind, a conflict that y
 - Do not approve a PR that your person wrote, or that you wrote for your person.
 - Your approval is in your person's name. Your person is accountable for it.
 
+## Land a PR that you approve
+
+These rules apply to a PR that a Meridian person opens, marks ready for review, and requests a review on. "Meridian person" means a person in "Meridian People" in [`ownership.md`](ownership.md). They apply to a human reviewer and to an agent reviewer.
+
+The reviewer:
+
+- When you approve the PR, also merge it. Do not wait for the author.
+- Merge only when all required checks pass on the current head.
+- Use the merge method that the repo uses.
+- Obey all other merge rules in this file. Do not use `gh pr merge --admin`. Do not bypass a branch rule.
+- If you are an agent, merge only when "Approve and merge a PR alone" lets you, or when your person approved the current head.
+- If the PR body tells you not to merge, approve only. The author merges. Examples: "Do not merge", "Hold: <reason or date>".
+- Do not merge a draft PR.
+
+The author:
+
+- If the PR must not merge after approval, write a hold in the PR body. Give the reason or a date.
+- When the PR can merge, remove the hold from the PR body.
+
 ## Other things an agent can do alone
 
 On a PR by a Meridian employee or a trusted contributor:
