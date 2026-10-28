@@ -16,6 +16,7 @@ These files give all our agents one set of rules for shared work. The rules appl
 | `code-changes.md` | How an agent changes code and prepares a PR. |
 | `security.md` | Untrusted input, CI execution, workflow files, supply chain. |
 | `public-writing.md` | Text that other people read, and how an agent discloses itself. |
+| `ownership.md` | Who is who, and who tracks CI and canary failures in each repo. |
 | `CHANGELOG.md` | One line for each change to these rules. |
 
 ## How to read the rules
@@ -35,16 +36,27 @@ All rules in this section: Provisional, from Eric.
 - Keep personal preferences in personal files.
 - When the team adopts a rule here, this file is the authority for it. Remove the personal copies of that rule.
 
-## How a harness loads the rules
+## Adopt the rules
 
-Use a local clone, or fetch the files at a tag. Pick one of these methods.
+Point your agent at one file: [`meridian-agents.md`](../meridian-agents.md) at the root of this repo. It links to everything else. Paste this block into your user-level agent instructions:
 
-- **Claude Code.** Add an import to your user `~/.claude/CLAUDE.md`: `@<path to clone>/rules/README.md` and one import for each rule file.
-- **Agents that read `AGENTS.md` (Codex and others).** Add this line to your user-level instructions: "Read and obey the files in `<path to clone>/rules/`."
-- **A cloud bot or app.** Add a skill or setup step that reads the files from a local clone. Or fetch them from `https://raw.githubusercontent.com/meridianlabs-ai/agents/<tag>/rules/<file>`.
-- **GitHub Actions.** Check out `meridianlabs-ai/agents` at a tag, with `path:` set, and add the rule files to the agent prompt.
+```markdown
+## Meridian shared agent rules
+At the start of each session, run: `git -C ~/src/meridian-agents pull -q`
+(First time: `git clone https://github.com/meridianlabs-ai/agents ~/src/meridian-agents`.)
+If you cannot run git, read https://github.com/meridianlabs-ai/agents/blob/main/meridian-agents.md
+Then read ~/src/meridian-agents/meridian-agents.md and follow it.
+```
 
-To stay current, track `main` and pull often. To stay stable, pin a tag.
+Where to paste it:
+
+- **Claude Code.** User-level `~/.claude/CLAUDE.md`. It then applies in every repo.
+- **Codex.** `~/.codex/AGENTS.md`.
+- **Cursor.** Settings > Rules > User Rules.
+- **Grok Bot or another bot.** The bot's profile, or a skill that loads at session start.
+- **GitHub Actions.** Check out `meridianlabs-ai/agents` at a tag, with `path:` set, and add `meridian-agents.md` and the files it links to the agent prompt.
+
+To stay current, track `main` and pull often. To stay stable, check out a tag.
 
 ## How to change a rule
 
@@ -54,3 +66,11 @@ To stay current, track `main` and pull often. To stay stable, pin a tag.
 4. Tag a new version when a set of changes is ready (`rules-vN`). Tell the team in the PR.
 
 To propose a new rule, open a PR or an issue with the rule text and one example that shows the problem.
+
+## Lessons from your work
+
+All rules in this section: Required. Provisional, from Eric.
+
+- When you learn a lesson from your own work, propose a rule change. Examples: your person corrects you; you and another agent do the same work; a rule is wrong, missing or not clear.
+- Ask your person before you open the PR.
+- Open a small PR against `meridianlabs-ai/agents` that changes the rule. Give one example of the problem.

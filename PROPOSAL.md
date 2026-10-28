@@ -29,12 +29,12 @@ Rules marked **Provisional, from Eric** are Eric's starting points. They are not
 4. **What an agent may do alone, and how a bot shows authorship.** See `rules/security.md` and `rules/public-writing.md`.
 5. **Supply chain and CI changes.** See `rules/security.md`.
 6. **Tests, including broken and flaky tests.** See `rules/code-changes.md`.
-7. **Claiming work.** Two agents must not do the same work. No rule file yet. See the open questions.
+7. **Claiming work.** Two agents must not do the same work. See `rules/ownership.md`: one tracker for each repo's CI and canary failures.
 8. **Releases.** Out of scope for this proposal.
 
 ## What adopting means
 
-- You add one line or one step to each of your agent setups that loads `rules/`. `rules/README.md` shows how for common harnesses.
+- You point each of your agent setups at one file, [`meridian-agents.md`](meridian-agents.md). It links to all the rules. `rules/README.md` ("Adopt the rules") has the block to paste and where it goes for each harness.
 - Your own files can add rules. They can be stricter. If you want a rule to be looser, propose a change to the shared rule.
 - You keep your harness, your tools and your personal workflow.
 
@@ -46,6 +46,7 @@ The files are living documents. They do not need to be perfect before we adopt t
 - Each change adds a line to `rules/CHANGELOG.md`.
 - We tag versions (`rules-v1`, `rules-v2`, ...). A harness can track `main` or pin a tag.
 - An agent can draft a rule change. A human approves it.
+- When an agent learns a lesson from its own work, it asks its person, then opens a small PR that changes the rule, with one example of the problem. See "Lessons from your work" in `rules/README.md`. (Provisional, from Eric)
 
 ## How we review the first version
 
