@@ -10,15 +10,15 @@ These files give all our agents one set of rules for shared work. The rules appl
 
 ## Files
 
-There are two kinds of rules. **Repo-scoped** rules reach every agent in a repo through that repo's `AGENTS.md` (Ransom's [`design/shared-instructions.md`](../design/shared-instructions.md)). **Personal-agent-scoped** rules reach each person's own agents through [`meridian-agents.md`](../meridian-agents.md). See "Two kinds of rules" in `PROPOSAL.md`.
+There are two kinds of rules. **Repo-scoped** rules reach every agent in a repo through that repo's `AGENTS.md` (Ransom's [`design/shared-instructions.md`](../design/shared-instructions.md)). **Meridian-wide** rules are common to all Meridian work. They reach each person's own agents through [`meridian-agents.md`](../meridian-agents.md). See "Two kinds of rules" in `PROPOSAL.md`.
 
 | File | Rule scope | What it covers |
 |---|---|---|
 | `pr-review.md` | Repo | The review bar: what blocks a merge, how to report findings. |
 | `code-changes.md` | Repo | How an agent changes code and prepares a PR. |
-| `security.md` | Repo and personal | Untrusted input, CI execution, workflow files, supply chain. |
-| `public-writing.md` | Repo and personal | Text that other people read, and how an agent discloses itself. |
-| `ownership.md` | Personal | Who is who, and who tracks CI and canary failures in each repo. |
+| `security.md` | Repo and Meridian-wide | Untrusted input, CI execution, workflow files, supply chain. |
+| `public-writing.md` | Repo and Meridian-wide | Text that other people read, and how an agent discloses itself. |
+| `ownership.md` | Meridian-wide | Who is who, and who tracks CI and canary failures in each repo. |
 | `CHANGELOG.md` | n/a | One line for each change to these rules. |
 
 ## How to read the rules

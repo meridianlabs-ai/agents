@@ -4,27 +4,30 @@ Status: draft for discussion. Nothing here is in force.
 
 Scope: these files are written for Meridian Labs employees and their agents. Anyone can read them. Nobody outside Meridian is expected to follow them, but we think they are reasonable, good practice.
 
-## Two kinds of rules: repo-scoped and personal-agent-scoped
+## Two kinds of rules: repo-scoped and Meridian-wide
 
-This proposal builds on Ransom's [`design/shared-instructions.md`](design/shared-instructions.md) (June 2026, on `main`). His design covers **repo-scoped rules**. This proposal adds **personal-agent-scoped rules**.
+This proposal builds on Ransom's [`design/shared-instructions.md`](design/shared-instructions.md) (June 2026, on `main`). His design covers **repo-scoped rules**. This proposal adds **Meridian-wide rules**.
 
-Another way to say it: personal-agent-scoped rules are the rules that are **common to all Meridian work**. They are the same for every repo and every person. Repo-scoped rules are about how to work in one repo.
+- **Repo-scoped rules** tell an agent how to work in one repo.
+- **Meridian-wide rules** are common to all Meridian work. They are the same for every repo and every Meridian person.
 
-| | **Repo-scoped rules** (Ransom's design) | **Personal-agent-scoped rules** (this proposal adds) |
+Because Meridian-wide rules are not part of one repo, a repo file cannot carry them. So we make each Meridian person's own agents aware of them, through [`meridian-agents.md`](meridian-agents.md). Delivery through personal agents follows from the definition. It is not the definition.
+
+| | **Repo-scoped rules** (Ransom's design) | **Meridian-wide rules** (this proposal adds) |
 |---|---|---|
-| What they cover | How any agent works in one repo: code changes, PR review, security | What *your* agent does for *you* across all repos: which alerts it tracks, Slack, lessons from work |
+| What they are | How any agent works in one repo: code changes, PR review, security | Rules common to all Meridian work: who is who, which alerts each person's agent tracks, Slack, lessons from work |
 | Who gets them | Every agent that works in the repo: CI agents, all tools, outside contributors | Each Meridian person's own agents |
 | How they arrive | A shared block in each repo's `AGENTS.md`, kept in sync from `templates/AGENTS.md` | One line in each person's user-level agent setup that points at [`meridian-agents.md`](meridian-agents.md) |
 | Files | `rules/code-changes.md`, `rules/pr-review.md` | `rules/ownership.md`, "Lessons from your work" in `rules/README.md` |
 | Files in both | `rules/security.md`, `rules/public-writing.md` | `rules/security.md`, `rules/public-writing.md` |
 
-Why two paths: most tools cannot import a file from a different location, so repo-scoped text must be in each repo (Ransom's point). Personal duties are not part of one repo, so a repo file cannot carry them.
+Why two paths: most tools cannot import a file from a different location, so repo-scoped text must be in each repo (Ransom's point).
 
 One source: `rules/` holds the text of both kinds. Ransom's `templates/AGENTS.md` block gets its content from the repo-scoped files. The inspect_ai fork stays a special case, as in his design.
 
 Each file in `rules/` starts with a "Rule scope" line.
 
-We expect some content to move from repo-scoped files to personal-agent-scoped files. Many rules that each repo's `AGENTS.md` has now (for example review bars, PR conventions and test discipline) are really common to all Meridian work. When a rule is the same in every repo, move it to `rules/` as a common rule, and remove the copies from each repo.
+We expect some content to move from repo-scoped rules to Meridian-wide rules. Many rules that each repo's `AGENTS.md` has now (for example review bars, PR conventions and test discipline) are really common to all Meridian work. When a rule is the same in every repo, move it to `rules/` as a Meridian-wide rule, and remove the copies from each repo.
 
 ## The problem
 
@@ -83,7 +86,7 @@ Before step 4, nobody points an agent at these files.
 
 1. **Which repos are in scope? (from Eric, top-level discussion)** Some Meridian repos may not need agent alignment: these rules and a tracker. Which repos are in scope? Suggestions only: morpheus, veevals, condorai. Other candidates are demo, private or stale repos: flow_steps_demo, inspect-viz-example-logs, inspect_ai_dev, inspect_petri_dev, meridian-docs, meridian-fundraising, release-testing, remote-worker-dashboard, scout-hal-import, sentinel-presentation, situational-awareness, ts-mono-test. How does `rules/ownership.md` mark a repo that is out of scope? For example, a separate "Out of scope" list.
 2. Is meridianlabs-ai/agents the right place for these files? We can move them later.
-3. Layout and paths: one `rules/` directory with several files, or one file? Is the split right between repo-scoped rules (through Ransom's sync) and personal-agent-scoped rules (through `meridian-agents.md`)? See "Two kinds of rules". Ransom: does this fit your design?
+3. Layout and paths: one `rules/` directory with several files, or one file? Is the split right between repo-scoped rules (through Ransom's sync) and Meridian-wide rules (through `meridian-agents.md`)? See "Two kinds of rules". Ransom: does this fit your design?
 4. Who approves a rule change: one other maintainer, or all active maintainers for a Required rule?
 5. Is the Required and Recommended split right? Candidates to discuss: an unrun gated test as blocking; the 7-day package age limit; a second-model review.
 6. Non-blocking findings: post them one time, or post no optional feedback at all?
