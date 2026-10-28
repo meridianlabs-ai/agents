@@ -8,7 +8,7 @@ Scope: these files are written for Meridian Labs employees and their agents. Any
 
 ## Two kinds of rules: repo-scoped and Meridian-wide
 
-This proposal builds on Ransom's [`design/shared-instructions.md`](design/shared-instructions.md) (June 2026, on `main`). His design covers **repo-scoped rules**. This proposal adds **Meridian-wide rules**.
+This proposal builds on Ransom's [`design/shared-instructions.md`](../design/shared-instructions.md) (June 2026, on `main`). His design covers **repo-scoped rules**. This proposal adds **Meridian-wide rules**.
 
 - **Repo-scoped rules** tell an agent how to work in one repo.
 - **Meridian-wide rules** are common to all Meridian work. They are the same for every repo and every Meridian person.
