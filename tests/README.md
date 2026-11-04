@@ -794,7 +794,9 @@ Testing a change).
   the land job needs all three under `always()`; each probe job ends with
   the memory scan its references imply, the canary calls the probe per
   engine with the two sentinels only, the canary keeps a daily off-the-hour
-  schedule beside its push and dispatch triggers, and the stand-in action
+  schedule beside its push and dispatch triggers, every canary job is
+  skipped for a Dependabot-triggered run and gated by nothing else, and the
+  stand-in action
   prints lengths, never values. The OIDC exchange probe
   (design/untrusted-agent-job.md → Testing): each probe agent job requests
   an OIDC token exactly when the real one does (both, since step 7) and

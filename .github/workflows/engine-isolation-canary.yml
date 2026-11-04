@@ -134,6 +134,15 @@
 # failed scheduled run to the user who last modified the cron line, and
 # disables a scheduled workflow after 60 days without repository activity
 # (this repository is public).
+#
+# Every job is skipped when Dependabot triggered the run (`github.actor` is
+# `dependabot[bot]`, also on a re-run of its run), so its pushes show
+# skipped, not red. Such a run gets Dependabot's secrets, not the
+# repository's, so both sentinels arrive empty and every "expect present"
+# scan fails; openai/codex-action also refuses an actor without write
+# access (run 41790251511). The sentinels are not added as Dependabot
+# secrets. The bumped pins are tested after the merge, by the push to
+# `main` and the daily run; every other actor and event runs every job.
 
 name: engine isolation canary
 
@@ -172,12 +181,14 @@ permissions:
 
 jobs:
   probe:
+    if: github.actor != 'dependabot[bot]'
     uses: ./.github/workflows/engine-isolation-canary-reusable.yml
     secrets:
       CANARY_A: ${{ secrets.CANARY_SENTINEL_A }}
       CANARY_B: ${{ secrets.CANARY_SENTINEL_B }}
 
   pipeline-probe:
+    if: github.actor != 'dependabot[bot]'
     strategy:
       fail-fast: false
       matrix:
@@ -196,6 +207,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.CANARY_SENTINEL_B }}
 
   provisioning-boundary:
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -278,6 +290,7 @@ jobs:
           .venv-recipe/bin/python --version
 
   caller-recipes:
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -464,6 +477,7 @@ jobs:
         run: bash "tests/fixtures/callers/$FIXTURE/check.sh"
 
   claude-launcher:
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -601,6 +615,7 @@ jobs:
           echo "reclaimed: .git and the root runner-owned and closed to the group"
 
   codex-action-path:
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # node-first true is the codex jobs' shape; false is the control, the
