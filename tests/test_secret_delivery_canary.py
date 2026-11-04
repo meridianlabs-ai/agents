@@ -21,7 +21,8 @@ probe keeps their shape, so these checks hold the two together:
 - the canary calls the probe once per engine with A for both App secrets
   and B for the OpenAI key, from the repository's sentinel secrets only;
 - the canary runs daily (off the hour) as well as on its push paths and by
-  hand;
+  hand, and skips every job, by one job-level condition and no other, when
+  Dependabot triggered the run (its runs get no sentinels);
 - each probe agent job requests an OIDC token exactly when the real one
   does (both, for their model credential's federation since step 7 of
   design/untrusted-agent-job.md) and runs the OIDC exchange probe before
@@ -166,6 +167,17 @@ def test_the_canary_runs_daily_as_well_as_on_push_and_by_hand():
     minute, hour, dom, month, dow = cron[0].split()
     assert minute.isdigit() and minute != "0", "off the top of the hour"
     assert hour.isdigit() and (dom, month, dow) == ("*", "*", "*"), "once a day"
+
+
+def test_the_canary_skips_every_job_for_dependabot_and_only_for_dependabot():
+    # A run Dependabot triggers gets Dependabot's secrets, not the sentinels,
+    # and codex-action refuses its actor, so every job is skipped for it
+    # (run 41790251511). No other condition may gate a job: every other
+    # actor and event runs every check.
+    conditions = {name: [line for line in code_lines(block) if line.startswith("    if: ")]
+                  for name, block in jobs(workflow(CANARY)).items()}
+    assert conditions and all(c == ["    if: github.actor != 'dependabot[bot]'"]
+                              for c in conditions.values()), conditions
 
 
 # --- the OIDC exchange probe (design/untrusted-agent-job.md → Testing) -------
