@@ -363,3 +363,7 @@ runs (`codex-path-smoke.yml`, `root-boundary-smoke.yml`,
 - Don't commit secrets (there are none here by design).
 - Don't break the pristine-`main` / `meridian` invariants on the inspect_ai
   fork (see design/architecture.md → The inspect_ai fork).
+
+## Reviewing other people's pull requests
+
+Unless a maintainer asked for your review, submit any review on someone else's pull request as a **Comment**, never **Approve** or **Request changes**. In this repository those are maintainer decisions: a non-maintainer's verdict doesn't count toward merging and misleads the author about where their PR stands. Put any confirmation or concern in the comment text, and say that you are an AI agent and not a maintainer. This does not apply to agents acting for project maintainers.
