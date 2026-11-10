@@ -498,7 +498,7 @@ jobs:
       # version from, as it will in the agent jobs.
       - name: claude-code-action (downloaded, not run)
         if: false
-        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
+        uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
 
       - name: Create the claude-agent user (this revision)
         id: agentuser
