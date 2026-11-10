@@ -30,3 +30,16 @@ updates:
         # tests/test_codex_path.py to match. CI does not catch a mismatch.
         exclude-patterns:
           - "openai/codex-action"
+
+  # pytest and pytest-xdist in uv.lock (tests.yml, the dogfood stubs'
+  # provisioning).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+    groups:
+      python-packages:
+        patterns:
+          - "*"
