@@ -2,8 +2,9 @@
 # (.github/workflows/engine-isolation-canary.yml, job `provisioning-boundary`;
 # Claude Security finding 4628446, review round 1). Its build backend is
 # setup.py, which runs whatever the installing user can do; the harness
-# dev-installs it exactly as the codex jobs provision a checkout and then
-# checks what that code could and could not reach.
+# provisions it exactly as the codex jobs provision a checkout (the generic
+# `uv sync --frozen`, from the uv.lock next to this file) and then checks
+# what that code could and could not reach.
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -11,3 +12,4 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hostile-checkout"
 version = "0"
+requires-python = ">=3.10"
