@@ -1,0 +1,15 @@
+# Development tools for this repository's tests (tests.yml) and its dogfood
+# stubs' provisioning. Not a package: with no [build-system], uv installs
+# only the dependencies.
+[project]
+name = "meridian-agents"
+version = "0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest", "pytest-xdist"]
+
+[tool.uv]
+exclude-newer = "7 days"
+required-version = ">=0.13.4"

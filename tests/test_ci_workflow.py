@@ -10,11 +10,10 @@ dogfood @auto stub is examples/claude-auto-stub.yml with its REQUIRED EDIT
 made: its `workflow_run` names tests.yml's `name:`.
 
 Every job in the three dogfood stubs calls a reusable agent workflow and sets
-the same `provision` recipe: a venv on tests.yml's Python with pytest and
-pytest-xdist, what tests.yml installs, so `python3 -m pytest -n auto` runs as
-the agent user (this repo has no pyproject.toml, so without a recipe nothing
-is provisioned; decision: Ransom, 2026-09-24). The examples keep the recipe
-commented.
+the same `provision` recipe: uv.lock's dev group (pytest and pytest-xdist) on
+tests.yml's Python, what tests.yml installs, so `python3 -m pytest -n auto`
+runs as the agent user (decision: Ransom, 2026-09-24). The examples keep the
+recipe commented.
 """
 
 import re
@@ -65,7 +64,7 @@ def test_tests_workflow_runs_the_suite_on_every_pr_and_push_to_main():
         "    branches: [main]",
     ]
     # the command tests/README.md and AGENTS.md document
-    assert "      - run: python3 -m pytest -n auto" in code_lines(text)
+    assert "      - run: uv run --no-sync python3 -m pytest -n auto" in code_lines(text)
 
 
 def test_tests_workflow_holds_no_secret_and_a_read_only_token():
@@ -96,7 +95,7 @@ def test_tests_workflow_pins_actions_by_sha_and_starts_no_agent():
     # commit SHA with its version in a comment, never a branch; nothing from
     # this repo, so no reusable agent workflow and no composite runs
     for ref in uses:
-        assert re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40} # v\S+", ref), ref
+        assert re.fullmatch(r"(actions/[a-z-]+|astral-sh/setup-uv)@[0-9a-f]{40} # v\S+", ref), ref
     assert not [line for line in code if re.search(r"\bgh\b|@claude|@review|@auto", line)]
 
 
@@ -155,10 +154,10 @@ def provision_recipe(job):
 def test_own_stubs_provision_the_tests_workflows_tools_in_every_job():
     ci = TESTS_YML.read_text()
     (python,) = re.findall(r'^          python-version: "([0-9.]+)"$', ci, re.M)
-    # what tests.yml installs before `python3 -m pytest -n auto`: pytest
-    # and pytest-xdist; a new test dependency there belongs in the recipe too
-    assert "      - run: pip install pytest pytest-xdist" in code_lines(ci)
-    expected = [f"uv venv --python {python}", "uv pip install pytest pytest-xdist"]
+    # what tests.yml installs before `python3 -m pytest -n auto`: uv.lock's
+    # dev group (pytest and pytest-xdist), on the same Python
+    assert f"      - run: uv sync --locked --python {python}" in code_lines(ci)
+    expected = [f"uv sync --frozen --python {python}"]
     for stub in STUBS:
         jobs = jobs_by_name((WORKFLOWS / stub).read_text())
         assert jobs, stub
@@ -175,3 +174,44 @@ def test_examples_leave_the_provision_recipe_commented():
         calling = [job for job in jobs.values() if any(REUSABLE_CALL.fullmatch(line) for line in job)]
         assert calling, example
         assert all(provision_recipe(job) is None for job in calling), example
+
+
+def stage_fixture_script() -> str:
+    """The run: body of engine-isolation-canary.yml's "Stage the fixture"."""
+    lines = (WORKFLOWS / "engine-isolation-canary.yml").read_text().splitlines()
+    i = lines.index("      - name: Stage the fixture")
+    j = lines.index("        run: |", i)
+    body = []
+    for line in lines[j + 1:]:
+        if line and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    return "\n".join(body) + "\n"
+
+
+def test_caller_fixtures_are_staged_without_this_repositorys_manifests(tmp_path):
+    # This repository has a pyproject.toml and uv.lock for its test tools; the
+    # caller-recipes canary overlays each fixture on the checkout, so a
+    # fixture without one must not inherit it (ts-mono-like checks it has no
+    # pyproject.toml; inspect-ai-like brings no uv.lock).
+    import shutil
+    import subprocess
+
+    shutil.copytree(ROOT / "tests" / "fixtures" / "callers", tmp_path / "tests" / "fixtures" / "callers")
+    # The step hashes the staged lockfile; a stand-in keeps this portable
+    # (macOS has no sha256sum).
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (bins / "sha256sum").write_text("#!/bin/sh\necho hash\n")
+    (bins / "sha256sum").chmod(0o755)
+    for fixture, expected in (("ts-mono-like", set()), ("inspect-ai-like", {"pyproject.toml"})):
+        ws = tmp_path / fixture
+        shutil.copytree(tmp_path / "tests", ws / "tests")
+        (ws / "pyproject.toml").write_text("[project]\nname = 'meridian-agents'\n")
+        (ws / "uv.lock").write_text("version = 1\n")
+        out = tmp_path / f"{fixture}.out"
+        subprocess.run(["bash", "-c", stage_fixture_script()], cwd=ws, check=True, capture_output=True,
+                       env={"PATH": f"{bins}:/usr/bin:/bin", "FIXTURE": fixture, "GITHUB_OUTPUT": str(out)})
+        assert {f for f in ("pyproject.toml", "uv.lock") if (ws / f).exists()} == expected, fixture
+        if expected:
+            assert "meridian-agents" not in (ws / "pyproject.toml").read_text(), fixture

@@ -306,12 +306,16 @@ jobs:
       # workspace root; its recipe is read into an output the way a caller
       # stub's `codex_provision` reaches the reusable workflow; the lockfile
       # hash is recorded so the checks can show the sync was the locked one.
+      # This repository's own pyproject.toml and uv.lock (its test tools) are
+      # removed first, so a fixture without them (ts-mono-like has no
+      # pyproject.toml; inspect-ai-like has no uv.lock) stays without them.
       - name: Stage the fixture
         id: fx
         env:
           FIXTURE: ${{ matrix.fixture }}
         run: |
           set -euo pipefail
+          rm -f pyproject.toml uv.lock
           cp -R "tests/fixtures/callers/$FIXTURE/project/." .
           {
             echo "recipe<<RECIPE_EOF"

@@ -864,8 +864,8 @@ Testing a change).
   line, which names that workflow's `name:`, its `provision` recipe and
   its uncommented `allow_build_config: true`;
   every job of the three dogfood stubs calling a reusable agent workflow
-  with the same recipe (a venv on tests.yml's Python with pytest and
-  pytest-xdist, what tests.yml installs), while the examples leave it
+  with the same recipe (`uv sync --frozen` on tests.yml's Python: uv.lock's
+  dev group, what tests.yml installs), while the examples leave it
   commented.
 - `test_model_defaults.py` — the four Claude workflows' `model` input
   defaults to the `opus` alias (never a dated id) with `fallback_model`
@@ -884,8 +884,8 @@ status fails in a test as it would on the runner.
 Run from the repo root:
 
 ```sh
-pip install pytest pytest-xdist
-python3 -m pytest -n auto
+uv sync --locked
+uv run python3 -m pytest -n auto
 ```
 
 `-n auto` runs one worker per core. A plain `python3 -m pytest` runs the
