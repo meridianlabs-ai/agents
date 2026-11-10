@@ -37,18 +37,34 @@ if [ -n "$recipe" ]; then
   echo "running the caller's codex provisioning recipe"
   bash --noprofile --norc -eo pipefail "$recipe"
 else
-  # Exactly the checkout's uv.lock: `--frozen` never resolves, so nothing
-  # newer than the lock (and the cooldown it was made under) is installed.
-  # It also skips the freshness check: the caller's CI checks that with
-  # `--locked`, and a head whose lock is stale must still provision so an
-  # agent can repair it. No uv.lock fails provisioning. `uv sync` adds the
-  # `dev` dependency group by default; the `dev` extra is named only when
-  # the project declares one, because an undeclared extra is an error.
-  if python3 -c 'import tomllib,sys; sys.exit(0 if "dev" in tomllib.load(open("pyproject.toml","rb")).get("project",{}).get("optional-dependencies",{}) else 1)'; then
-    uv sync --frozen --extra dev
-  else
-    uv sync --frozen
-  fi
+  # The project's dependencies exactly as uv.lock records them: `--frozen`
+  # installs the lock without resolving it again, so no dependency newer
+  # than the lock (and the cooldown it was made under) is installed. The
+  # build backend's own requirements are not in uv.lock and still resolve
+  # when the project is built. `--frozen` also skips the freshness check:
+  # the caller's CI checks that with `--locked`, and a head whose lock is
+  # stale must still provision so an agent can repair it. No uv.lock fails
+  # provisioning. The `dev` extra and the `dev` group are requested when
+  # the lock's root project records them; reading the lock, not
+  # pyproject.toml, because `--frozen` rejects an extra or group the lock
+  # lacks (a stale lock), and naming the group keeps it when the project's
+  # `default-groups` leaves it out.
+  python3 - <<'PY'
+import os
+import tomllib
+
+flags = []
+if os.path.exists("uv.lock"):
+    with open("uv.lock", "rb") as f:
+        lock = tomllib.load(f)
+    root = next((p for p in lock.get("package", []) if "." in p.get("source", {}).values()), {})
+    meta = root.get("metadata", {})
+    flags = [
+        *(["--extra", "dev"] if "dev" in meta.get("provides-extras", []) else []),
+        *(["--group", "dev"] if "dev" in meta.get("requires-dev", {}) else []),
+    ]
+os.execvp("uv", ["uv", "sync", "--frozen", *flags])
+PY
 fi
 # The job PATH only as the runner and only when asked (the composite's
 # `add-to-path`, default true): under `user` the environment is `env -i`'s,

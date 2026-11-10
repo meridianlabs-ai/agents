@@ -80,8 +80,8 @@ step.
 
 **Optional — let the agents run your tests.** By default the agents review and
 build against a bare runner with only a generic dev-install
-(`uv sync --frozen`, plus `--extra dev` when the project declares that
-extra, when the checkout has a `pyproject.toml`; it installs exactly
+(`uv sync --frozen`, plus the `dev` extra and group when `uv.lock`
+records them, when the checkout has a `pyproject.toml`; it installs exactly
 `uv.lock`, and a checkout without one fails provisioning). To give them your real environment, set the reusable
 workflows' `provision` input in your stubs: bash that runs in the checkout as
 the unprivileged agent user (`claude-agent` on Claude runs, `codex` on codex

@@ -155,8 +155,8 @@ on:
           checkout may run as the runner in an agent job (Claude Security
           findings 4628446 and 4629153). Empty (the default) falls back to
           `codex_provision`; with both empty the generic recipe runs — `uv
-          sync --frozen` (`--extra dev` when the project declares that
-          extra; no uv.lock fails provisioning) — where the checkout has a
+          sync --frozen` (`--extra dev` and `--group dev` when uv.lock records
+          them; no uv.lock fails provisioning) — where the checkout has a
           pyproject.toml.
           Set it to keep what the repository's claude-setup did: a Python
           pin (`uv sync --frozen --python 3.11`), a lockfile sync (`uv sync --frozen --dev`),

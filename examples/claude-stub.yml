@@ -125,7 +125,7 @@ jobs:
     with:
       # provision (optional; agents#136): the repository's provisioning recipe
       # — bash run as the unprivileged agent user in the checkout, in place of
-      # the generic `uv sync --frozen` (`--extra dev` when declared), on both engines
+      # the generic `uv sync --frozen` (dev extra and group when uv.lock has them), on both engines
       # (design/executed-paths-residual.md in the agents repo). No agent job
       # runs a claude-setup action any more (a composite runs as the runner,
       # and nothing from the checkout may run as the runner there), so put
@@ -262,7 +262,7 @@ jobs:
     with:
       # provision (optional; agents#136): the repository's provisioning recipe
       # — bash run as the unprivileged agent user in the checkout, in place of
-      # the generic `uv sync --frozen` (`--extra dev` when declared), on both engines
+      # the generic `uv sync --frozen` (dev extra and group when uv.lock has them), on both engines
       # (design/executed-paths-residual.md in the agents repo). No agent job
       # runs a claude-setup action any more (a composite runs as the runner,
       # and nothing from the checkout may run as the runner there), so put
