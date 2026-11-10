@@ -174,3 +174,44 @@ def test_examples_leave_the_provision_recipe_commented():
         calling = [job for job in jobs.values() if any(REUSABLE_CALL.fullmatch(line) for line in job)]
         assert calling, example
         assert all(provision_recipe(job) is None for job in calling), example
+
+
+def stage_fixture_script() -> str:
+    """The run: body of engine-isolation-canary.yml's "Stage the fixture"."""
+    lines = (WORKFLOWS / "engine-isolation-canary.yml").read_text().splitlines()
+    i = lines.index("      - name: Stage the fixture")
+    j = lines.index("        run: |", i)
+    body = []
+    for line in lines[j + 1:]:
+        if line and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    return "\n".join(body) + "\n"
+
+
+def test_caller_fixtures_are_staged_without_this_repositorys_manifests(tmp_path):
+    # This repository has a pyproject.toml and uv.lock for its test tools; the
+    # caller-recipes canary overlays each fixture on the checkout, so a
+    # fixture without one must not inherit it (ts-mono-like checks it has no
+    # pyproject.toml; inspect-ai-like brings no uv.lock).
+    import shutil
+    import subprocess
+
+    shutil.copytree(ROOT / "tests" / "fixtures" / "callers", tmp_path / "tests" / "fixtures" / "callers")
+    # The step hashes the staged lockfile; a stand-in keeps this portable
+    # (macOS has no sha256sum).
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (bins / "sha256sum").write_text("#!/bin/sh\necho hash\n")
+    (bins / "sha256sum").chmod(0o755)
+    for fixture, expected in (("ts-mono-like", set()), ("inspect-ai-like", {"pyproject.toml"})):
+        ws = tmp_path / fixture
+        shutil.copytree(tmp_path / "tests", ws / "tests")
+        (ws / "pyproject.toml").write_text("[project]\nname = 'meridian-agents'\n")
+        (ws / "uv.lock").write_text("version = 1\n")
+        out = tmp_path / f"{fixture}.out"
+        subprocess.run(["bash", "-c", stage_fixture_script()], cwd=ws, check=True, capture_output=True,
+                       env={"PATH": f"{bins}:/usr/bin:/bin", "FIXTURE": fixture, "GITHUB_OUTPUT": str(out)})
+        assert {f for f in ("pyproject.toml", "uv.lock") if (ws / f).exists()} == expected, fixture
+        if expected:
+            assert "meridian-agents" not in (ws / "pyproject.toml").read_text(), fixture
