@@ -37,11 +37,17 @@ if [ -n "$recipe" ]; then
   echo "running the caller's codex provisioning recipe"
   bash --noprofile --norc -eo pipefail "$recipe"
 else
-  uv venv
-  if python3 -c 'import tomllib,sys; sys.exit(0 if "dependency-groups" in tomllib.load(open("pyproject.toml","rb")) else 1)'; then
-    uv pip install -e ".[dev]" --group dev
+  # Exactly the checkout's uv.lock: `--frozen` never resolves, so nothing
+  # newer than the lock (and the cooldown it was made under) is installed.
+  # It also skips the freshness check: the caller's CI checks that with
+  # `--locked`, and a head whose lock is stale must still provision so an
+  # agent can repair it. No uv.lock fails provisioning. `uv sync` adds the
+  # `dev` dependency group by default; the `dev` extra is named only when
+  # the project declares one, because an undeclared extra is an error.
+  if python3 -c 'import tomllib,sys; sys.exit(0 if "dev" in tomllib.load(open("pyproject.toml","rb")).get("project",{}).get("optional-dependencies",{}) else 1)'; then
+    uv sync --frozen --extra dev
   else
-    uv pip install -e ".[dev]"
+    uv sync --frozen
   fi
 fi
 # The job PATH only as the runner and only when asked (the composite's

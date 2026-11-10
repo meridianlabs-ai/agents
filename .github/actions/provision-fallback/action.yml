@@ -8,7 +8,7 @@ description: >-
   and claude-auto-review.yml, which keep their own `if:` (the hashFiles
   guards and each workflow's trigger gate), `timeout-minutes` and
   `continue-on-error` — only the recipe lives here, so a tweak to the uv
-  version, the retry or the extras/group detection is made once. The
+  version, the retry or the extra detection is made once. The
   recipe itself is `provision.sh` next to this file (so the one step can
   run it as another user; the script is the same bash the step used to
   inline). Referenced fully-qualified
@@ -21,7 +21,7 @@ description: >-
   and Python caller repos that never added the action; on the codex
   engine, EVERY provisioned checkout — the codex jobs never run the
   caller's `claude-setup` (below). NEVER a cross-repository fork head
-  (issue #59): `uv pip install -e` runs the checkout's build backend, as
+  (issue #59): `uv sync` runs the checkout's build backend, as
   `runner` with sudo, unrestricted egress and the job token present on the
   Claude path — every caller excludes those before this step (the
   reviewer's fork_head gate, the CI-fix stub's `head_repository.full_name
@@ -108,22 +108,21 @@ description: >-
   their PATH from its `config.toml` instead (the `bin` output, above). Fatal on
   failure, exactly like claude-setup: a repo whose pyproject exists but
   cannot dev-install is a loud signal, not a silent static-only run — the
-  callers' Surface steps report a failed outcome. No plain `-e .` fallback:
-  uv (verified on 0.13.5), like pip, only WARNS on an unknown extra, so the
-  `[dev]` install already succeeds on repos without one — a fallback could
-  only mask real failures as a silent static degrade. Dev tools may instead
-  live in PEP 735 `[dependency-groups]` (uv-native layouts: inspect_sandboxes
-  has NO optional-dependencies at all), where the extras warning would mean
-  a green step with a toolless venv — so when that table exists, `--group
-  dev` is added; unlike an unknown extra, an absent group ERRORS, which is
-  the loud failure this step wants. The table is detected with tomllib
-  (runner python3 is ≥3.11), not grep: TOML allows whitespace in/before the
-  header, and a formatting variant silently taking the extras-only branch is
-  the exact toolless-venv outcome the group branch exists to prevent. Parity
-  gap, accepted: claude-setup pins `--python 3.11` to the fork's CI, while
-  bare `uv venv` resolves the runner's default (3.12 today, drifting with
-  the image) — a generic fallback can't hardcode any one minor; repos that
-  care can ship a `.python-version`, which uv honors.
+  callers' Surface steps report a failed outcome. The install is `uv sync
+  --frozen` (2026-11-10, dependency hardening): exactly the checkout's
+  `uv.lock`, never a resolution, so nothing newer than the lock and the
+  cooldown it was made under reaches the agent's environment. `--frozen`
+  rather than `--locked`: the caller's CI already rejects a stale lock, and
+  a head whose lock is stale must still provision so an agent can repair
+  it. A checkout with no `uv.lock` fails provisioning (every Python caller
+  commits one). `uv sync` installs the `dev` dependency group (PEP 735;
+  inspect_sandboxes has no optional-dependencies at all) by default; the
+  `dev` extra is named only when `[project.optional-dependencies]` declares
+  it, because `uv sync` ERRORS on an undeclared extra (verified on 0.13.5).
+  The table is read with tomllib (runner python3 is ≥3.11), not grep: TOML
+  allows whitespace in/before the header. The Python version follows the
+  project's `.python-version` and `requires-python`; a repo that needs a
+  particular minor sets `provision: uv sync --frozen --python 3.11`.
 
   The `.venv/` it creates — and the `<pkg>.egg-info/` a setuptools PEP 660
   editable install writes INTO the source tree (verified: `pip install -e .`

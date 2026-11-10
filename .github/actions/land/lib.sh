@@ -265,7 +265,7 @@ landing_failure_hint() {
 #   Tier 2:
 #   - Build and dependency configuration provisioning executes, at every
 #     depth (workspace members are built and installed too):
-#     provision-fallback's `uv pip install -e .[dev]` runs the build backend
+#     provision-fallback's `uv sync --frozen` runs the build backend
 #     pyproject.toml / setup.py / setup.cfg name and installs what they, and
 #     uv.toml's indexes and .python-version, select; callers' recipes run
 #     `uv sync` (uv.lock), pip requirements files, or `pnpm install`, which

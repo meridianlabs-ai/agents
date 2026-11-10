@@ -70,7 +70,7 @@ jobs:
     with:
       # provision (optional; agents#136): the repository's provisioning recipe
       # — bash run as the unprivileged agent user in the checkout, in place of
-      # the generic `uv venv && uv pip install -e .[dev]`, on both engines
+      # the generic `uv sync --frozen` (`--extra dev` when declared), on both engines
       # (design/executed-paths-residual.md in the agents repo). No agent job
       # runs a claude-setup action any more (a composite runs as the runner,
       # and nothing from the checkout may run as the runner there), so put
@@ -80,12 +80,11 @@ jobs:
       # found. A stub that still sets the
       # earlier `codex_provision` keeps working: it is used when `provision`
       # is empty. Examples —
-      # a Python pin:          uv venv --python 3.11 && uv pip install -e ".[dev]"
-      # a lockfile sync:       uv venv --python 3.11 && uv sync --dev
+      # a Python pin:          uv sync --frozen --python 3.11
+      # a lockfile sync:       uv sync --frozen --python 3.11 --extra dev
       # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
       # provision: |
-      #   uv venv --python 3.11
-      #   uv sync --dev
+      #   uv sync --frozen --python 3.11
       # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
       # pyproject.toml, so without a recipe nothing is provisioned and the
       # agent had to install pytest itself. The suite needs pytest and
@@ -138,7 +137,7 @@ jobs:
     with:
       # provision (optional; agents#136): the repository's provisioning recipe
       # — bash run as the unprivileged agent user in the checkout, in place of
-      # the generic `uv venv && uv pip install -e .[dev]`, on both engines
+      # the generic `uv sync --frozen` (`--extra dev` when declared), on both engines
       # (design/executed-paths-residual.md in the agents repo). No agent job
       # runs a claude-setup action any more (a composite runs as the runner,
       # and nothing from the checkout may run as the runner there), so put
@@ -148,12 +147,11 @@ jobs:
       # found. A stub that still sets the
       # earlier `codex_provision` keeps working: it is used when `provision`
       # is empty. Examples —
-      # a Python pin:          uv venv --python 3.11 && uv pip install -e ".[dev]"
-      # a lockfile sync:       uv venv --python 3.11 && uv sync --dev
+      # a Python pin:          uv sync --frozen --python 3.11
+      # a lockfile sync:       uv sync --frozen --python 3.11 --extra dev
       # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
       # provision: |
-      #   uv venv --python 3.11
-      #   uv sync --dev
+      #   uv sync --frozen --python 3.11
       # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
       # pyproject.toml, so without a recipe nothing is provisioned and the
       # agent had to install pytest itself. The suite needs pytest and

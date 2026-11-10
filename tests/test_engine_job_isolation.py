@@ -821,7 +821,7 @@ def test_recipe_runs_the_caller_script_instead_of_the_default_install(tmp_path):
 
 def test_recipe_installs_the_checkout_and_appends_path_only_as_the_runner(tmp_path):
     log, gh_path, work = recipe_run(tmp_path, github_path=True, pyproject='[project]\nname = "x"\n')
-    assert log == "uv venv\nuv pip install -e .[dev]\n"
+    assert log == "uv sync --frozen\n"
     assert gh_path.read_text() == f"{tmp_path}/.local/bin\n{work}/.venv/bin\n"
     assert (work / ".git" / "info" / "exclude").read_text() == ".venv/\n*.egg-info/\n"
 
@@ -851,11 +851,19 @@ def test_recipe_fails_fast_like_a_bash_step(tmp_path):
     assert log == "handled\ndone\n"
 
 
-def test_recipe_skips_the_path_append_under_sudo_and_adds_the_dev_group(tmp_path):
+def test_recipe_skips_the_path_append_under_sudo_and_adds_the_dev_extra(tmp_path):
     log, gh_path, _ = recipe_run(tmp_path, github_path=False,
-                                 pyproject='[project]\nname = "x"\n[dependency-groups]\ndev = ["pytest"]\n')
-    assert log == "uv venv\nuv pip install -e .[dev] --group dev\n"
+                                 pyproject='[project]\nname = "x"\n[project.optional-dependencies]\ndev = ["pytest"]\n')
+    assert log == "uv sync --frozen --extra dev\n"
     assert not gh_path.exists()
+
+
+def test_recipe_names_no_extra_for_a_dev_group_alone(tmp_path):
+    # `uv sync` installs the `dev` group by default; naming an undeclared
+    # extra would be an error.
+    log, _, _ = recipe_run(tmp_path, github_path=False,
+                           pyproject='[project]\nname = "x"\n[dependency-groups]\ndev = ["pytest"]\n')
+    assert log == "uv sync --frozen\n"
 
 
 def workflow_text(name: str) -> str:
