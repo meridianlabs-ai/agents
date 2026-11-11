@@ -19,9 +19,9 @@ take effect on every repo's next run.
   agents run here too. `-stub` suffix because the canonical stub filenames are
   taken by the reusable definitions; keep them in sync with `examples/`. The
   @auto stub has both halves: its CI-fix half watches `tests` (below). Every
-  job sets a `provision` recipe (a venv with pytest and pytest-xdist, on the
-  Python `tests` uses) so the agents can run the suite; the examples leave it
-  commented.
+  job sets a `provision` recipe (`uv sync --frozen`: uv.lock's dev group,
+  pytest and pytest-xdist, on the Python `tests` uses) so the agents can run
+  the suite; the examples leave it commented.
 - `.github/workflows/tests.yml` — this repo's CI (workflow `name: tests`): the
   full suite, `python3 -m pytest -n auto`, on every PR and push to main, with
   a read-only token and no secrets (see Testing a change).
@@ -323,8 +323,8 @@ is in [THREAT_MODEL.md](THREAT_MODEL.md).
 ## Testing a change
 
 The unit tests are in `tests/` (tests/README.md lists what each file
-covers): `python3 -m pytest -n auto` from the root, with pytest and
-pytest-xdist installed. `-n auto` runs one worker per core; the suite spends
+covers): `uv sync --locked`, then `uv run python3 -m pytest -n auto` from
+the root (pytest and pytest-xdist come from uv.lock). `-n auto` runs one worker per core; the suite spends
 its time starting processes, so a serial run takes several times longer.
 Without pytest-xdist, or for a single file or test, leave `-n auto` out.
 Run it before pushing any change to a workflow, composite, stub, example or

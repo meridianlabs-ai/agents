@@ -307,12 +307,16 @@ jobs:
       # workspace root; its recipe is read into an output the way a caller
       # stub's `codex_provision` reaches the reusable workflow; the lockfile
       # hash is recorded so the checks can show the sync was the locked one.
+      # This repository's own pyproject.toml and uv.lock (its test tools) are
+      # removed first, so a fixture without them (ts-mono-like has no
+      # pyproject.toml; inspect-ai-like has no uv.lock) stays without them.
       - name: Stage the fixture
         id: fx
         env:
           FIXTURE: ${{ matrix.fixture }}
         run: |
           set -euo pipefail
+          rm -f pyproject.toml uv.lock
           cp -R "tests/fixtures/callers/$FIXTURE/project/." .
           {
             echo "recipe<<RECIPE_EOF"
@@ -495,7 +499,7 @@ jobs:
       # version from, as it will in the agent jobs.
       - name: claude-code-action (downloaded, not run)
         if: false
-        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
+        uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
 
       - name: Create the claude-agent user (this revision)
         id: agentuser
