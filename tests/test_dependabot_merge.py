@@ -91,6 +91,7 @@ def pr(number=822, ref="dependabot/uv/python-packages-0a0afc6848", sha=SHA, labe
         "labels": [{"name": n} for n in labels],
         "auto_merge": auto_merge,
         "base": {"ref": "main"},
+        "state": "open",
     }
 
 
@@ -473,6 +474,15 @@ def test_base_changed_after_listing(fake):
     assert dm.handle_repo(REPO, POLICY, live=True)
     assert f.writes == []
     assert dm.log_lines[-1] == f"{REPO}#822 skip: base changed to release"
+
+
+def test_closed_after_listing(fake):
+    # Dependabot closes a superseded PR, or a person merges it, during the run.
+    f = fake(prs=[pr()])
+    f.reads[f"repos/{REPO}/pulls/822"] = pr() | {"state": "closed"}
+    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert f.writes == []
+    assert dm.log_lines[-1] == f"{REPO}#822 skip: closed since the PR list was read"
 
 
 def test_label_added_after_listing_counts(fake):

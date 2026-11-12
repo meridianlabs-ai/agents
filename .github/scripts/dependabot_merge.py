@@ -11,6 +11,7 @@ squash merging is off. Otherwise it makes sure the `no-auto-merge` label exists,
 every open PR that `dependabot[bot]` opened against the default branch. A PR
 is left alone when:
 
+  - it closed while the job worked through earlier PRs;
   - it carries the `no-auto-merge` label;
   - anyone but Dependabot pushed to its branch, by the branch's activity
     record, or its head moved while the job read it;
@@ -238,9 +239,12 @@ def approve(repo: str, n: int, sha: str, live: bool) -> None:
 
 
 def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bool) -> None:
-    # Read now, not from the repository's PR list: a label added, or a base
-    # changed, while the job worked through earlier PRs counts.
+    # Read now, not from the repository's PR list: a PR closed, a label added,
+    # or a base changed while the job worked through earlier PRs counts.
     pr = gh_json("api", f"repos/{repo}/pulls/{n}")
+    if pr["state"] != "open":
+        log(f"{repo}#{n} skip: {pr['state']} since the PR list was read")
+        return
     if pr["base"]["ref"] != branch:
         log(f"{repo}#{n} skip: base changed to {pr['base']['ref']}")
         return

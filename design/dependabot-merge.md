@@ -91,6 +91,8 @@ logs a failing merge call (see below).
   pushes to the branch, or its head moved while the job read it. Who a commit
   is credited to is not enough, because someone with write access can push a
   commit credited to Dependabot.
+- It closed while the job worked through earlier PRs, for example when
+  Dependabot superseded it.
 - It carries the `no-auto-merge` label.
 - The App has already approved its current head and auto-merge is on.
 - The merge policy doesn't allow every package it updates.
