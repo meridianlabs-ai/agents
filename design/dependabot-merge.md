@@ -81,6 +81,7 @@ branch rules and settings, and skips the whole repo when any of these holds:
   is credited to is not enough, because someone with write access can push a
   commit credited to Dependabot.
 - It carries the `no-auto-merge` label.
+- Its base changed away from the default branch while the job read it.
 - The App has already approved its current head.
 - The merge policy doesn't allow every package it updates.
 
@@ -173,6 +174,7 @@ allow:
   # github_actions: [patch, minor, major]
 
 # Packages that always wait for a person, whatever the bump.
+# Covers packages Dependabot names, not others a lockfile update moves with them.
 always_ask: []
 ```
 
@@ -186,6 +188,11 @@ name, such as `dependabot/uv/...`. The bump type comes from the
 `update-type: version-update:semver-minor`, the same places the
 `dependabot/fetch-metadata` action reads. A grouped PR merges only if every
 package in it is allowed.
+
+`always_ask` and the bump limits apply only to the packages Dependabot names
+in that block, not to other packages a lockfile update moves along with them.
+For example, inspect_scout PR 822 named only pandas, pydantic and
+arize-phoenix-client, and its `uv.lock` change also moved pydantic-core.
 
 **Opting a PR out.** `no-auto-merge` is an ordinary repo label; GitHub has no
 built-in equivalent. The job creates it in each repo it serves. To stop a

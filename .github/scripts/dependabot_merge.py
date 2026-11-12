@@ -250,19 +250,26 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
     if reason:
         log(f"{repo}#{n} skip: {reason}")
         return
+    if not pr["auto_merge"]:
+        runs = [
+            r
+            for page in gh_pages(f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
+            for r in page["check_runs"]
+        ]
+        statuses = [
+            s for page in gh_pages(f"repos/{repo}/commits/{sha}/status?per_page=100") for s in page["statuses"]
+        ]
+        passed = checks_passed(required, runs, statuses)
+    # A writer could retarget the PR while the job read it, and the merge
+    # pins only the head. A change after this read is not caught.
+    latest = gh_json("api", f"repos/{repo}/pulls/{n}")
+    if (latest["base"]["ref"], latest["head"]["sha"]) != (branch, sha):
+        log(f"{repo}#{n} skip: base or head changed while the job read it")
+        return
     if pr["auto_merge"]:
         log(f"{repo}#{n} act: auto-merge already on, approval only")
         approve(repo, n, sha, live)
         return
-    runs = [
-        r
-        for page in gh_pages(f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
-        for r in page["check_runs"]
-    ]
-    statuses = [
-        s for page in gh_pages(f"repos/{repo}/commits/{sha}/status?per_page=100") for s in page["statuses"]
-    ]
-    passed = checks_passed(required, runs, statuses)
     log(f"{repo}#{n} act: required checks {'passed' if passed else 'not all passed yet'}")
     approve(repo, n, sha, live)
     if passed:
