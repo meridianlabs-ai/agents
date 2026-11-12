@@ -29,7 +29,7 @@ take effect on every repo's next run.
   `dependabot-merger` environment, it approves and merges (or turns on
   auto-merge for) the Dependabot PRs the policy allows, in every repository
   the App is installed on. Runs dry (logs, writes nothing) until `--live`
-  is added.
+  is added. Design: [design/dependabot-merge.md](design/dependabot-merge.md).
 - `.github/workflows/tests.yml` — this repo's CI (workflow `name: tests`): the
   full suite, `python3 -m pytest -n auto`, on every PR and push to main, with
   a read-only token and no secrets (see Testing a change).
