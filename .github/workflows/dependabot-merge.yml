@@ -1,0 +1,73 @@
+# Hourly Dependabot merge job: approves routine Dependabot version-bump PRs
+# that the merge policy (.github/dependabot-merge-policy.yml) allows, then
+# merges each one whose required checks have already passed, or turns on
+# auto-merge so GitHub merges it when they pass. The rules it applies are in
+# .github/scripts/dependabot_merge.py. Deterministic — no agent invocation.
+#
+# Identity: the GitHub App `meridian-dependabot-merger` (Metadata read, Pull
+# requests write, Contents write; no Workflows, so GitHub Actions bumps stay
+# manual). It is installed only on the repositories that take part, and the
+# job acts on every repository of that installation. The App is on no
+# ruleset's bypass list: its own approval is what meets a repository's
+# 1-approval rule, so its token can approve PRs. That is why the key is a
+# secret of the `dependabot-merger` environment, which only `main` may use:
+# a run on any other branch cannot read it.
+#
+# DRY RUN: the script runs without `--live`, so it logs every decision and
+# every write it would make and writes nothing, and the token below is minted
+# read-only. Going live is one reviewed change: add `--live` to the run step
+# and mint `permission-pull-requests: write` and `permission-contents: write`.
+#
+# Failure handling is minimal on purpose: a failed PR or repository is
+# logged as an error and fails the run; there are no retries or alerts.
+
+name: Dependabot merge
+
+on:
+  schedule:
+    - cron: "41 * * * *" # hourly, off the top-of-hour rush
+  workflow_dispatch:
+
+concurrency:
+  group: dependabot-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: dependabot-merger
+    steps:
+      # One-hour installation token for every repository the App is
+      # installed on. Read-only while the job runs dry.
+      - name: Mint the App's token
+        id: mint
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.DEPENDABOT_MERGER_APP_ID }}
+          private-key: ${{ secrets.DEPENDABOT_MERGER_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          permission-metadata: read
+          permission-pull-requests: read
+          permission-contents: read
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      # PyYAML from uv.lock, with no Actions cache.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.5"
+          enable-cache: false
+      - run: uv sync --locked --no-dev --python 3.12
+
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: uv run --no-sync python3 .github/scripts/dependabot_merge.py
