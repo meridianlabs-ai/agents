@@ -4,9 +4,9 @@
 For each repository the `meridian-dependabot-merger` GitHub App is installed
 on (or each `--repo`), the job reads the default branch's rules and the
 repository's settings. It skips the repository when the rules require no
-status checks, when an approval rule neither dismisses stale approvals nor
-requires approval of the last push, or when auto-merge or squash merging is
-off. Otherwise it makes sure the `no-auto-merge` label exists, and looks at
+status checks or no approval, when an approval rule neither dismisses stale
+approvals nor requires approval of the last push, or when auto-merge or
+squash merging is off. Otherwise it makes sure the `no-auto-merge` label exists, and looks at
 every open PR that `dependabot[bot]` opened against the default branch. A PR
 is left alone when:
 
@@ -191,13 +191,15 @@ def required_checks(rules: list[dict]) -> list[tuple[str, int | None]]:
 
 
 def check_passed(context: str, app_id: int | None, runs: list[dict], statuses: list[dict]) -> bool:
-    matching = [
+    """GitHub's rule: every check run and, for a check not bound to an app,
+    every commit status of that name must pass, and there must be one."""
+    matching_runs = [
         r for r in runs if r["name"] == context and (app_id is None or r["app"]["id"] == app_id)
     ]
-    if matching:
-        return all(r["status"] == "completed" and r["conclusion"] in PASSING for r in matching)
-    return app_id is None and any(
-        s["context"] == context and s["state"] == "success" for s in statuses
+    matching_statuses = [s for s in statuses if s["context"] == context] if app_id is None else []
+    return bool(matching_runs or matching_statuses) and (
+        all(r["status"] == "completed" and r["conclusion"] in PASSING for r in matching_runs)
+        and all(s["state"] == "success" for s in matching_statuses)
     )
 
 
@@ -218,10 +220,13 @@ def ensure_label(repo: str, live: bool) -> None:
         )
 
 
-def handle_pr(repo: str, n: int, required, policy: Policy, live: bool) -> None:
-    # Read now, not from the repository's PR list: a label added while the
-    # job worked through earlier PRs counts.
+def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bool) -> None:
+    # Read now, not from the repository's PR list: a label added, or a base
+    # changed, while the job worked through earlier PRs counts.
     pr = gh_json("api", f"repos/{repo}/pulls/{n}")
+    if pr["base"]["ref"] != branch:
+        log(f"{repo}#{n} skip: base changed to {pr['base']['ref']}")
+        return
     sha = pr["head"]["sha"]
     commits = [c for page in gh_pages(f"repos/{repo}/pulls/{n}/commits?per_page=100") for c in page]
     reviews = [r for page in gh_pages(f"repos/{repo}/pulls/{n}/reviews?per_page=100") for r in page]
@@ -272,11 +277,12 @@ def repo_skip_reason(info: dict, rules: list[dict]) -> str | None:
     if not required_checks(rules):
         return f"no required status checks on {info['default_branch']}"
     # Otherwise the App's approval would still count after someone else pushed.
-    if any(
-        p["required_approving_review_count"] >= 1
-        and not (p["dismiss_stale_reviews_on_push"] or p["require_last_push_approval"])
-        for p in pr_rules
-    ):
+    # An approval required by classic branch protection is not in the rules,
+    # so a repository needs its approval rule in a ruleset.
+    approval_rules = [p for p in pr_rules if p["required_approving_review_count"] >= 1]
+    if not approval_rules:
+        return "no ruleset requires an approval"
+    if not all(p["dismiss_stale_reviews_on_push"] or p["require_last_push_approval"] for p in approval_rules):
         return "an approval rule neither dismisses stale approvals nor requires approval of the last push"
     # Otherwise an approved PR could never merge, and later runs leave it alone.
     if info.get("allow_auto_merge") is False:
@@ -311,7 +317,7 @@ def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
     ok = True
     for pr in prs:
         try:
-            handle_pr(repo, pr["number"], required, policy, live)
+            handle_pr(repo, pr["number"], branch, required, policy, live)
         except Exception as e:  # noqa: BLE001 — one PR's failure must not stop the others
             log(f"::error::{repo}#{pr['number']}: {e}")
             ok = False

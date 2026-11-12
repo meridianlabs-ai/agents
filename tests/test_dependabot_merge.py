@@ -90,6 +90,7 @@ def pr(number=822, ref="dependabot/uv/python-packages-0a0afc6848", sha=SHA, labe
         "head": {"sha": sha, "ref": ref},
         "labels": [{"name": n} for n in labels],
         "auto_merge": auto_merge,
+        "base": {"ref": "main"},
     }
 
 
@@ -313,6 +314,14 @@ def test_check_not_passed(runs):
     assert not dm.check_passed("lint", 15368, runs, [])
 
 
+@pytest.mark.parametrize("state", ["pending", "failure"])
+def test_check_run_and_status_of_one_name_must_both_pass(state):
+    statuses = [{"context": "external-ci", "state": state}]
+    assert not dm.check_passed("external-ci", None, [run("external-ci", app_id=1)], statuses)
+    # Bound to an app, the status is not GitHub's to count.
+    assert dm.check_passed("external-ci", 1, [run("external-ci", app_id=1)], statuses)
+
+
 def test_status_context_counts_only_without_integration():
     statuses = [{"context": "external-ci", "state": "success"}]
     assert dm.check_passed("external-ci", None, [], statuses)
@@ -355,7 +364,9 @@ def reads(prs, checks=(run("lint"),), labels=("no-auto-merge",), rules=None):
     return {
         f"repos/{REPO}": {"default_branch": "main", "allow_auto_merge": True, "allow_squash_merge": True},
         rf"repos/{REPO}/rules/branches/main\?.*": [
-            rules if rules is not None else [checks_rule({"context": "lint", "integration_id": 15368})]
+            rules
+            if rules is not None
+            else [approval_rule(), checks_rule({"context": "lint", "integration_id": 15368})]
         ],
         rf"repos/{REPO}/labels\?.*": [[{"name": n} for n in labels]],
         rf"repos/{REPO}/pulls\?state=open&base=main.*": [prs],
@@ -424,6 +435,14 @@ def test_failed_check_still_gets_auto_merge(fake):
     f = fake(prs=[pr()], checks=[run("lint", "failure")])
     assert dm.handle_repo(REPO, POLICY, live=True)
     assert [w[1] for w in f.writes] == ["-X", "graphql"]
+
+
+def test_base_changed_after_listing(fake):
+    f = fake(prs=[pr()])
+    f.reads[f"repos/{REPO}/pulls/822"] = pr() | {"base": {"ref": "release"}}
+    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert f.writes == []
+    assert dm.log_lines[-1] == f"{REPO}#822 skip: base changed to release"
 
 
 def test_label_added_after_listing_counts(fake):
@@ -544,6 +563,9 @@ def test_inspect_scout_rules_pass():
     "info, rules, reason",
     [
         (INFO, [approval_rule()], "no required status checks on main"),
+        # The approval may live in classic branch protection, which the rules omit.
+        (INFO, [CHECKS], "no ruleset requires an approval"),
+        (INFO, [approval_rule(dismiss=False, count=0), CHECKS], "no ruleset requires an approval"),
         (
             INFO,
             [approval_rule(), approval_rule(dismiss=False), CHECKS],

@@ -267,7 +267,8 @@ Testing a change).
   not allowed, bump types per dependency type, `always_ask`, a grouped PR
   needing every package allowed, a missing update-type); the required
   checks from every ruleset and when they count as passed; the repository
-  skips (no required checks, an approval rule that keeps stale approvals,
+  skips (no required checks, no approval rule in a ruleset, an approval
+  rule that keeps stale approvals,
   auto-merge or squash merging off); no write in a
   dry run, the default; in a live run an approval then a squash merge, or
   auto-merge, each pinned to the checked head; a repository without
