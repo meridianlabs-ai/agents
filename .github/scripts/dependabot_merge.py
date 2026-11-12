@@ -13,15 +13,17 @@ is left alone when:
   - it carries the `no-auto-merge` label;
   - anyone but Dependabot pushed to its branch, by the branch's activity
     record, or its head moved while the job read it;
-  - auto-merge is already on, or the App already approved its current head;
+  - the App already approved its current head;
   - the policy file (.github/dependabot-merge-policy.yml) does not allow
     every package it updates: the dependency type comes from the branch name
     (dependabot/<type>/...), the bump type from the `updated-dependencies`
     block of the commit messages, and a package in `always_ask` never
     merges.
 
-Any other PR is approved at its head commit, then merged (squash, pinned to
-that commit) when every required check has already passed, or given
+Any other PR is approved at its head commit. If auto-merge is already on
+(Dependabot rebased a PR the job approved, and the rules dismissed that
+approval), that is all. Otherwise the job then merges it (squash, pinned to
+that commit) when every required check has already passed, or turns on
 auto-merge (pinned to that commit) when not. The job never updates a branch
 and does nothing about a failed check.
 
@@ -158,8 +160,6 @@ def skip_reason(
         return f"branch not pushed only by Dependabot (pushed by: {', '.join(pushers) or 'nobody'})"
     if not commits or commits[-1]["sha"] != sha:
         return "head moved while the job read it"
-    if pr["auto_merge"]:
-        return "auto-merge already on"
     if any(
         r["user"]["login"] == APP_BOT and r["state"] == "APPROVED" and r["commit_id"] == sha
         for r in reviews
@@ -221,6 +221,15 @@ def ensure_label(repo: str, live: bool) -> None:
         )
 
 
+def approve(repo: str, n: int, sha: str, live: bool) -> None:
+    write(
+        live,
+        f"approve {repo}#{n} at {sha[:10]}",
+        "api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews",
+        "-f", f"commit_id={sha}", "-f", "event=APPROVE",
+    )
+
+
 def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bool) -> None:
     # Read now, not from the repository's PR list: a label added, or a base
     # changed, while the job worked through earlier PRs counts.
@@ -241,6 +250,10 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
     if reason:
         log(f"{repo}#{n} skip: {reason}")
         return
+    if pr["auto_merge"]:
+        log(f"{repo}#{n} act: auto-merge already on, approval only")
+        approve(repo, n, sha, live)
+        return
     runs = [
         r
         for page in gh_pages(f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
@@ -251,12 +264,7 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
     ]
     passed = checks_passed(required, runs, statuses)
     log(f"{repo}#{n} act: required checks {'passed' if passed else 'not all passed yet'}")
-    write(
-        live,
-        f"approve {repo}#{n} at {sha[:10]}",
-        "api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews",
-        "-f", f"commit_id={sha}", "-f", "event=APPROVE",
-    )
+    approve(repo, n, sha, live)
     if passed:
         write(
             live,

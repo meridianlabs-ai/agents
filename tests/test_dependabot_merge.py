@@ -187,10 +187,14 @@ def test_head_moved():
     assert skip(pr(), [], [], POLICY) == "head moved while the job read it"
 
 
-def test_auto_merge_already_on():
-    assert skip(pr(auto_merge={"merge_method": "squash"}), [commit()], [], POLICY) == (
-        "auto-merge already on"
-    )
+def test_auto_merge_on_without_approval_at_head_is_acted_on():
+    # Dependabot rebased a PR the job approved; the rules dismissed the approval.
+    assert skip(pr(auto_merge={"merge_method": "squash"}), [commit()], [], POLICY) is None
+
+
+def test_auto_merge_on_and_approved_at_head():
+    p = pr(auto_merge={"merge_method": "squash"})
+    assert skip(p, [commit()], [review()], POLICY) == "already approved at this head"
 
 
 def test_already_approved_at_head():
@@ -428,6 +432,14 @@ def test_live_pending_checks_enable_auto_merge_at_head(fake):
     assert auto[:2] == ("api", "graphql")
     assert "enablePullRequestAutoMerge" in auto[3] and "expectedHeadOid:$sha" in auto[3]
     assert {"pr=PR_node_822", "sha=" + SHA} <= set(auto)
+
+
+def test_auto_merge_on_gets_approval_only(fake):
+    f = fake(prs=[pr(auto_merge={"merge_method": "squash"})])
+    assert dm.handle_repo(REPO, POLICY, live=True)
+    (approve,) = f.writes
+    assert approve[3] == f"repos/{REPO}/pulls/822/reviews" and "commit_id=" + SHA in approve
+    assert dm.log_lines[-2] == f"{REPO}#822 act: auto-merge already on, approval only"
 
 
 def test_failed_check_still_gets_auto_merge(fake):

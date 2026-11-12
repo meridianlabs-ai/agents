@@ -262,8 +262,8 @@ Testing a change).
   workflow: the policy file's shape; the `updated-dependencies` block of a
   real grouped commit message; each rule before the policy (the
   `no-auto-merge` label, a push to the branch by anyone but Dependabot in
-  its activity record, a head that moved, auto-merge already
-  on, the App's approval at the current head); the policy (GitHub Actions
+  its activity record, a head that moved, the App's approval at the
+  current head; a PR with auto-merge on gets the approval alone); the policy (GitHub Actions
   not allowed, bump types per dependency type, `always_ask`, a grouped PR
   needing every package allowed, a missing update-type); the required
   checks from every ruleset and when they count as passed; the repository
