@@ -142,6 +142,10 @@ def test_updated_dependencies_of_a_grouped_commit():
     ]
 
 
+def test_updated_dependencies_needs_exactly_one_block():
+    assert dm.updated_dependencies(GROUPED_MESSAGE + GROUPED_MESSAGE) is None
+
+
 def test_updated_dependencies_absent():
     assert dm.updated_dependencies("Merge branch 'main' into dependabot/uv/x") is None
 
@@ -567,8 +571,9 @@ SCOUT_RULES = [
 
 
 def test_inspect_scout_rules_pass():
-    assert dm.repo_skip_reason(INFO, SCOUT_RULES) is None
-    assert dm.repo_skip_reason(INFO, [approval_rule(dismiss=False, last_push=True), CHECKS]) is None
+    assert dm.repo_skip_reason(INFO, SCOUT_RULES, dm.required_checks(SCOUT_RULES)) is None
+    last_push = [approval_rule(dismiss=False, last_push=True), CHECKS]
+    assert dm.repo_skip_reason(INFO, last_push, dm.required_checks(last_push)) is None
 
 
 @pytest.mark.parametrize(
@@ -589,7 +594,7 @@ def test_inspect_scout_rules_pass():
     ],
 )
 def test_repo_skipped(info, rules, reason):
-    assert dm.repo_skip_reason(info, rules) == reason
+    assert dm.repo_skip_reason(info, rules, dm.required_checks(rules)) == reason
 
 
 def test_unreadable_settings_are_logged_not_skipped(fake):

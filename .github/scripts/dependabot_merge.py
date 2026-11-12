@@ -124,9 +124,9 @@ def load_policy(text: str) -> Policy:
 
 def updated_dependencies(message: str) -> list[dict] | None:
     """The `updated-dependencies` entries of a Dependabot commit message, or
-    None when the message has no such block."""
-    m = METADATA_RE.search(message)
-    return yaml.safe_load(m.group(1))["updated-dependencies"] if m else None
+    None unless the message has exactly one such block."""
+    blocks = METADATA_RE.findall(message)
+    return yaml.safe_load(blocks[0])["updated-dependencies"] if len(blocks) == 1 else None
 
 
 def pushed_only_by_dependabot(activity: list[dict], sha: str) -> bool:
@@ -283,10 +283,10 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
         )
 
 
-def repo_skip_reason(info: dict, rules: list[dict]) -> str | None:
+def repo_skip_reason(info: dict, rules: list[dict], required) -> str | None:
     """Why the job leaves a whole repository alone, or None."""
     pr_rules = [r["parameters"] for r in rules if r["type"] == "pull_request"]
-    if not required_checks(rules):
+    if not required:
         return f"no required status checks on {info['default_branch']}"
     # Otherwise the App's approval would still count after someone else pushed.
     # An approval required by classic branch protection is not in the rules,
@@ -312,7 +312,7 @@ def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
     branch = info["default_branch"]
     rules = [r for page in gh_pages(f"repos/{repo}/rules/branches/{branch}?per_page=100") for r in page]
     required = required_checks(rules)
-    reason = repo_skip_reason(info, rules)
+    reason = repo_skip_reason(info, rules, required)
     if reason:
         log(f"{repo} skip: {reason}")
         return True
