@@ -152,7 +152,7 @@ def dependency_reason(dep: dict, dep_type: str, policy: Policy) -> str | None:
 
 def approved_at(reviews: list[dict], sha: str) -> bool:
     return any(
-        r["user"]["login"] == APP_BOT and r["state"] == "APPROVED" and r["commit_id"] == sha
+        (r.get("user") or {}).get("login") == APP_BOT and r["state"] == "APPROVED" and r["commit_id"] == sha
         for r in reviews
     )
 
@@ -348,7 +348,7 @@ def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
         pr
         for page in gh_pages(f"repos/{repo}/pulls?state=open&base={branch}&per_page=100")
         for pr in page
-        if pr["user"]["login"] == DEPENDABOT
+        if (pr.get("user") or {}).get("login") == DEPENDABOT
     ]
     log(f"{repo}: {len(prs)} open Dependabot PRs, {len(required)} required checks")
     ok = True

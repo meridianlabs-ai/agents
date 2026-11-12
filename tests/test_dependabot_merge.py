@@ -219,6 +219,23 @@ def test_other_reviews_do_not_count_as_approved(other):
     assert skip(pr(), [commit()], [other], POLICY) is None
 
 
+def test_authorless_review_before_app_approval():
+    # GitHub's reviews API allows user: null (for example, a deleted account).
+    authorless = review() | {"user": None}
+    assert dm.approved_at([authorless, review()], SHA)
+    assert not dm.approved_at([authorless], SHA)
+    p = pr(auto_merge={"merge_method": "squash"})
+    assert skip(p, [commit()], [authorless, review()], POLICY) == "already approved at this head, auto-merge on"
+    assert skip(pr(), [commit()], [authorless, review()], POLICY) is None
+
+
+def test_authorless_pr_in_list_is_ignored(fake):
+    f = fake(prs=[pr(number=1) | {"user": None}, pr()])
+    assert dm.handle_repo(REPO, POLICY, live=False)
+    assert f"{REPO}: 1 open Dependabot PRs, 1 required checks" in dm.log_lines
+    assert dm.log_lines[-1] == f"  would squash-merge {REPO}#822 at {SHA[:10]}"
+
+
 def test_github_actions_waits_for_a_person():
     reason = skip(
         pr(ref="dependabot/github_actions/github-actions-7477375a64"),
