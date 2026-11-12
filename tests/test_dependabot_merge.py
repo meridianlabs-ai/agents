@@ -356,6 +356,13 @@ def test_status_context_counts_only_without_integration():
     assert not dm.check_passed("external-ci", None, [], [{"context": "external-ci", "state": "pending"}])
 
 
+def test_check_run_without_app_is_not_the_required_app():
+    # GitHub's check-run schema allows app: null.
+    no_app = run("lint") | {"app": None}
+    assert not dm.check_passed("lint", 15368, [no_app], [])
+    assert dm.check_passed("lint", 15368, [no_app, run("lint")], [])
+
+
 def test_checks_passed_needs_all():
     required = [("lint", 15368), ("test", 15368)]
     assert dm.checks_passed(required, [run("lint"), run("test")], [])

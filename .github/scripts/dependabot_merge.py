@@ -203,7 +203,7 @@ def check_passed(context: str, app_id: int | None, runs: list[dict], statuses: l
     """GitHub's rule: every check run and, for a check not bound to an app,
     every commit status of that name must pass, and there must be one."""
     matching_runs = [
-        r for r in runs if r["name"] == context and (app_id is None or r["app"]["id"] == app_id)
+        r for r in runs if r["name"] == context and (app_id is None or (r.get("app") or {}).get("id") == app_id)
     ]
     matching_statuses = [s for s in statuses if s["context"] == context] if app_id is None else []
     return bool(matching_runs or matching_statuses) and (
