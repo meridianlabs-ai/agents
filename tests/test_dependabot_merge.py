@@ -198,11 +198,12 @@ def test_auto_merge_on_without_approval_at_head_is_acted_on():
 
 def test_auto_merge_on_and_approved_at_head():
     p = pr(auto_merge={"merge_method": "squash"})
-    assert skip(p, [commit()], [review()], POLICY) == "already approved at this head"
+    assert skip(p, [commit()], [review()], POLICY) == "already approved at this head, auto-merge on"
 
 
-def test_already_approved_at_head():
-    assert skip(pr(), [commit()], [review()], POLICY) == "already approved at this head"
+def test_approved_at_head_without_auto_merge_is_acted_on():
+    # The merge or auto-merge call after the approval may have failed.
+    assert skip(pr(), [commit()], [review()], POLICY) is None
 
 
 @pytest.mark.parametrize(
@@ -446,6 +447,19 @@ def test_auto_merge_on_gets_approval_only(fake):
     assert dm.log_lines[-2] == f"{REPO}#822 act: auto-merge already on, approval only"
 
 
+@pytest.mark.parametrize(
+    "checks, write",
+    [((run("lint"),), ("api", "-X", "PUT")), ((run("lint", None, status="queued"),), ("api", "graphql"))],
+)
+def test_approved_at_head_gets_merge_step_again_without_approval(fake, checks, write):
+    f = fake(prs=[pr()], checks=checks)
+    f.reads[rf"repos/{REPO}/pulls/\d+/reviews\?.*"] = [[review()]]
+    assert dm.handle_repo(REPO, POLICY, live=True)
+    (only,) = f.writes
+    assert only[: len(write)] == write
+    assert dm.log_lines[-2].endswith(", already approved")
+
+
 def test_failed_check_still_gets_auto_merge(fake):
     # CI failure: the job does nothing special; the PR waits with auto-merge on.
     f = fake(prs=[pr()], checks=[run("lint", "failure")])
@@ -588,6 +602,12 @@ def test_inspect_scout_rules_pass():
             [approval_rule(), approval_rule(dismiss=False), CHECKS],
             "an approval rule neither dismisses stale approvals nor requires approval of the last push",
         ),
+        (
+            INFO,
+            [approval_rule(), CHECKS | {"parameters": CHECKS["parameters"] | {"strict_required_status_checks_policy": True}}],
+            "branches must be up to date before merging",
+        ),
+        (INFO, [*SCOUT_RULES, {"type": "merge_queue", "parameters": {}}], "merge queue"),
         (INFO | {"allow_auto_merge": False}, SCOUT_RULES, "Allow auto-merge is off"),
         (INFO | {"allow_squash_merge": False}, SCOUT_RULES, "squash merging is not allowed"),
         (INFO, [approval_rule(methods=("merge",)), CHECKS], "squash merging is not allowed"),

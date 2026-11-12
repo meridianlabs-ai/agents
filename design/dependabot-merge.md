@@ -50,11 +50,11 @@ flowchart TD
     B --> S{Repo meets the<br/>participation rules?}
     S -- no --> SK[Skip the repo]
     S -- yes --> P[For each open PR<br/>dependabot opened]
-    P --> R{Only Dependabot pushed,<br/>no no-auto-merge label,<br/>not already approved at head?}
+    P --> R{Only Dependabot pushed,<br/>no no-auto-merge label,<br/>not approved at head with auto-merge on?}
     R -- no --> L[Leave it]
     R -- yes --> Q{Policy allows every<br/>package in the PR?}
     Q -- no --> L
-    Q -- yes --> AP[Approve at the head commit]
+    Q -- yes --> AP[Approve at the head commit,<br/>unless already approved there]
     AP --> AM{Auto-merge<br/>already on?}
     AM -- yes --> DONE[Done]
     AM -- no --> C{Required checks<br/>all passed?}
@@ -71,8 +71,19 @@ branch rules and settings, and skips the whole repo when any of these holds:
 - The approval rule neither dismisses stale approvals nor requires approval
   of the most recent push. Otherwise the App's approval would still count
   after someone else pushed.
+- Branches must be up to date before merging, or the branch has a merge
+  queue. The job never updates a branch or adds a PR to a queue, so a merge
+  would fail after the approval. Like the approval rule, the job sees these
+  only in a ruleset, not in classic branch protection.
 - Allow auto-merge or squash merging is off, so a merge would fail after the
   approval.
+
+Code-owner review over a manifest or lockfile also blocks the merge, but the
+job does not check it: inspect_scout requires code-owner review for its
+CHANGELOG and release manifest, and telling those apart from dependency files
+would mean matching CODEOWNERS patterns. It stays a Rollout preparation step.
+A PR it blocks waits for a person, and while its auto-merge is off each run
+logs a failing merge call (see below).
 
 **PR rules.** A PR is left alone when:
 
@@ -81,13 +92,17 @@ branch rules and settings, and skips the whole repo when any of these holds:
   is credited to is not enough, because someone with write access can push a
   commit credited to Dependabot.
 - It carries the `no-auto-merge` label.
-- The App has already approved its current head.
+- The App has already approved its current head and auto-merge is on.
 - The merge policy doesn't allow every package it updates.
 
 Running the job twice does no harm. A PR the App has already approved at its
-current head is left as it is. If a later push cancels that approval, for
-example when Dependabot rebases the PR after another bump merges, the next
-run approves it again and leaves auto-merge as it is.
+current head, with auto-merge on, is left as it is. With auto-merge off, the
+next run runs the merge or auto-merge step again without approving again, so
+a merge call that failed after the approval is retried every hour. A repo rule
+the job does not check then shows as a failing call in each run's log. If a
+later push cancels the approval, for example when Dependabot rebases the PR
+after another bump merges, the next run approves it again and leaves
+auto-merge as it is.
 
 ## Identity and credentials
 
@@ -233,14 +248,16 @@ run step, and mint the token with `permission-pull-requests: write` and
 `permission-contents: write`. Until then the script runs without `--live`,
 and the token is minted read-only.
 
-"Require branches to be up to date" must stay off in participating repos.
-With it on, every merge puts the other open PRs behind main, and the job
-would have to update each one and wait for CI again. That update would also
-add a commit that isn't Dependabot's.
+"Require branches to be up to date" must stay off in participating repos, and
+the job skips a repo that turns it on in a ruleset. With it on, every merge
+puts the other open PRs behind main, and the job would have to update each
+one and wait for CI again. That update would also add a commit that isn't
+Dependabot's.
 
 ## Failure handling
 
 Kept to the minimum on purpose. A PR whose required checks fail stays open
 with auto-merge on, and a person sees the red check. A failed PR or repo is
-logged as an error and fails the run. There are no retries, alerts or
-dashboard; add one only when a real failure shows it's needed.
+logged as an error and fails the run. The next hourly run is the only retry.
+There are no alerts or dashboard; add one only when a real failure shows
+it's needed.

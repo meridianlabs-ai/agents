@@ -5,7 +5,8 @@ For each repository the `meridian-dependabot-merger` GitHub App is installed
 on (or each `--repo`), the job reads the default branch's rules and the
 repository's settings. It skips the repository when the rules require no
 status checks or no approval, when an approval rule neither dismisses stale
-approvals nor requires approval of the last push, or when auto-merge or
+approvals nor requires approval of the last push, when branches must be up to
+date before merging, when it has a merge queue, or when auto-merge or
 squash merging is off. Otherwise it makes sure the `no-auto-merge` label exists, and looks at
 every open PR that `dependabot[bot]` opened against the default branch. A PR
 is left alone when:
@@ -13,19 +14,19 @@ is left alone when:
   - it carries the `no-auto-merge` label;
   - anyone but Dependabot pushed to its branch, by the branch's activity
     record, or its head moved while the job read it;
-  - the App already approved its current head;
+  - the App already approved its current head and auto-merge is on;
   - the policy file (.github/dependabot-merge-policy.yml) does not allow
     every package it updates: the dependency type comes from the branch name
     (dependabot/<type>/...), the bump type from the `updated-dependencies`
     block of the commit messages, and a package in `always_ask` never
     merges.
 
-Any other PR is approved at its head commit. If auto-merge is already on
-(Dependabot rebased a PR the job approved, and the rules dismissed that
-approval), that is all. Otherwise the job then merges it (squash, pinned to
-that commit) when every required check has already passed, or turns on
-auto-merge (pinned to that commit) when not. The job never updates a branch
-and does nothing about a failed check.
+Any other PR is approved at its head commit, unless the App already approved
+that commit. If auto-merge is already on (Dependabot rebased a PR the job
+approved, and the rules dismissed that approval), that is all. Otherwise the
+job then merges it (squash, pinned to that commit) when every required check
+has already passed, or turns on auto-merge (pinned to that commit) when not.
+The job never updates a branch and does nothing about a failed check.
 
 Without `--live` (the default) the job writes nothing: it logs every
 decision and every write it would make. Every write goes through `write()`.
@@ -148,6 +149,13 @@ def dependency_reason(dep: dict, dep_type: str, policy: Policy) -> str | None:
     return None
 
 
+def approved_at(reviews: list[dict], sha: str) -> bool:
+    return any(
+        r["user"]["login"] == APP_BOT and r["state"] == "APPROVED" and r["commit_id"] == sha
+        for r in reviews
+    )
+
+
 def skip_reason(
     pr: dict, commits: list[dict], activity: list[dict], reviews: list[dict], policy: Policy
 ) -> str | None:
@@ -160,11 +168,10 @@ def skip_reason(
         return f"branch not pushed only by Dependabot (pushed by: {', '.join(pushers) or 'nobody'})"
     if not commits or commits[-1]["sha"] != sha:
         return "head moved while the job read it"
-    if any(
-        r["user"]["login"] == APP_BOT and r["state"] == "APPROVED" and r["commit_id"] == sha
-        for r in reviews
-    ):
-        return "already approved at this head"
+    # Without auto-merge on, an approved PR gets the merge or auto-merge step
+    # again: that step may have failed on the run that approved it.
+    if pr["auto_merge"] and approved_at(reviews, sha):
+        return "already approved at this head, auto-merge on"
     branch = BRANCH_RE.match(pr["head"]["ref"])
     if not branch:
         return f"no dependency type in branch {pr['head']['ref']}"
@@ -263,8 +270,13 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
         s for page in gh_pages(f"repos/{repo}/commits/{sha}/status?per_page=100") for s in page["statuses"]
     ]
     passed = checks_passed(required, runs, statuses)
-    log(f"{repo}#{n} act: required checks {'passed' if passed else 'not all passed yet'}")
-    approve(repo, n, sha, live)
+    approved = approved_at(reviews, sha)
+    log(
+        f"{repo}#{n} act: required checks {'passed' if passed else 'not all passed yet'}"
+        + (", already approved" if approved else "")
+    )
+    if not approved:
+        approve(repo, n, sha, live)
     if passed:
         write(
             live,
@@ -288,6 +300,15 @@ def repo_skip_reason(info: dict, rules: list[dict], required) -> str | None:
     pr_rules = [r["parameters"] for r in rules if r["type"] == "pull_request"]
     if not required:
         return f"no required status checks on {info['default_branch']}"
+    # The job never updates a branch, so a merge would fail after the approval.
+    if any(
+        r["parameters"].get("strict_required_status_checks_policy")
+        for r in rules
+        if r["type"] == "required_status_checks"
+    ):
+        return "branches must be up to date before merging"
+    if any(r["type"] == "merge_queue" for r in rules):
+        return "merge queue"
     # Otherwise the App's approval would still count after someone else pushed.
     # An approval required by classic branch protection is not in the rules,
     # so a repository needs its approval rule in a ruleset.
