@@ -360,7 +360,7 @@ class FakeGH:
         path = args[-1]
         for pattern, value in self.reads.items():
             if re.fullmatch(pattern, path):
-                return json.dumps(value() if callable(value) else value)
+                return json.dumps(value)
         raise AssertionError(f"unrouted gh call: {args}")
 
     @property
@@ -459,22 +459,6 @@ def test_base_changed_after_listing(fake):
     assert dm.handle_repo(REPO, POLICY, live=True)
     assert f.writes == []
     assert dm.log_lines[-1] == f"{REPO}#822 skip: base changed to release"
-
-
-@pytest.mark.parametrize("auto_merge", [None, {"merge_method": "squash"}])
-@pytest.mark.parametrize(
-    "change", [{"base": {"ref": "release"}}, {"head": {"sha": "f" * 40, "ref": pr()["head"]["ref"]}}]
-)
-def test_base_or_head_changed_while_job_read_pr(fake, auto_merge, change):
-    # A writer retargets or pushes after the job's last read before the writes.
-    f = fake(prs=[pr(auto_merge=auto_merge)])
-    last_read = "/activity?" if auto_merge else "/status?"
-    f.reads[f"repos/{REPO}/pulls/822"] = lambda: pr(auto_merge=auto_merge) | (
-        change if any(last_read in c[-1] for c in f.calls) else {}
-    )
-    assert dm.handle_repo(REPO, POLICY, live=True)
-    assert f.writes == []
-    assert dm.log_lines[-1] == f"{REPO}#822 skip: base or head changed while the job read it"
 
 
 def test_label_added_after_listing_counts(fake):

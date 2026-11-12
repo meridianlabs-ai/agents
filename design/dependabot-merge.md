@@ -81,7 +81,6 @@ branch rules and settings, and skips the whole repo when any of these holds:
   is credited to is not enough, because someone with write access can push a
   commit credited to Dependabot.
 - It carries the `no-auto-merge` label.
-- Its base changed away from the default branch while the job read it.
 - The App has already approved its current head.
 - The merge policy doesn't allow every package it updates.
 
