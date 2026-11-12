@@ -260,9 +260,10 @@ Testing a change).
 - `test_dependabot_merge.py` — the Dependabot merge job
   (`.github/scripts/dependabot_merge.py`, against a fake `gh`) and its
   workflow: each PR rule (the `no-auto-merge` label, a push to the branch
-  by anyone but Dependabot in its activity record, a head that moved, the App's approval at the
-  current head; a PR with auto-merge on gets the approval alone; a GitHub
-  Actions bump skipped, other dependency types acted on); the required
+  by anyone but Dependabot in its activity record, a head that moved, the
+  App's approval at the current head; a PR with auto-merge on gets the
+  approval alone; a GitHub Actions bump skipped, other dependency types
+  acted on); the required
   checks from every ruleset and when they count as passed; the repository
   skips (no required checks, no approval rule in a ruleset, an approval
   rule that keeps stale approvals,
