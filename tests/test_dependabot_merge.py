@@ -375,7 +375,7 @@ def reads(prs, checks=(run("lint"),), labels=("no-auto-merge",), rules=None):
         rf"repos/{REPO}/pulls/\d+/reviews\?.*": [[]],
         rf"repos/{REPO}/activity\?ref=refs/heads/dependabot/uv/.*": [[push(SHA)]],
         rf"repos/{REPO}/commits/{SHA}/check-runs\?.*": [{"check_runs": list(checks)}],
-        rf"repos/{REPO}/commits/{SHA}/status": {"statuses": []},
+        rf"repos/{REPO}/commits/{SHA}/status\?per_page=100": [{"statuses": []}],
     }
 
 

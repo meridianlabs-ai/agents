@@ -35,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -230,9 +231,10 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
     sha = pr["head"]["sha"]
     commits = [c for page in gh_pages(f"repos/{repo}/pulls/{n}/commits?per_page=100") for c in page]
     reviews = [r for page in gh_pages(f"repos/{repo}/pulls/{n}/reviews?per_page=100") for r in page]
+    ref = urllib.parse.quote(f"refs/heads/{pr['head']['ref']}", safe="/")
     activity = [
         a
-        for page in gh_pages(f"repos/{repo}/activity?ref=refs/heads/{pr['head']['ref']}&per_page=100")
+        for page in gh_pages(f"repos/{repo}/activity?ref={ref}&per_page=100")
         for a in page
     ]
     reason = skip_reason(pr, commits, activity, reviews, policy)
@@ -244,7 +246,9 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
         for page in gh_pages(f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
         for r in page["check_runs"]
     ]
-    statuses = gh_json("api", f"repos/{repo}/commits/{sha}/status")["statuses"]
+    statuses = [
+        s for page in gh_pages(f"repos/{repo}/commits/{sha}/status?per_page=100") for s in page["statuses"]
+    ]
     passed = checks_passed(required, runs, statuses)
     log(f"{repo}#{n} act: required checks {'passed' if passed else 'not all passed yet'}")
     write(
