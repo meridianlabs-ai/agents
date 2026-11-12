@@ -66,13 +66,20 @@ def message(*deps: tuple[str, str | None]) -> str:
     return f"build: bump\n\n---\nupdated-dependencies:\n{entries}...\n\nSigned-off-by: dependabot[bot]\n"
 
 
-def commit(sha=SHA, msg=GROUPED_MESSAGE, author=dm.DEPENDABOT, committer="web-flow", verified=True):
-    return {
-        "sha": sha,
-        "author": {"login": author} if author else None,
-        "committer": {"login": committer},
-        "commit": {"message": msg, "verification": {"verified": verified}},
-    }
+def commit(sha=SHA, msg=GROUPED_MESSAGE):
+    return {"sha": sha, "commit": {"message": msg}}
+
+
+def push(after=SHA, actor=dm.DEPENDABOT, kind="push", before=OLD_SHA):
+    return {"activity_type": kind, "actor": {"login": actor} if actor else None, "before": before, "after": after}
+
+
+def skip(p, commits, reviews, policy, activity=None):
+    """skip_reason, with the branch created by Dependabot at the PR's head
+    unless `activity` says otherwise."""
+    if activity is None:
+        activity = [push(p["head"]["sha"], kind="branch_creation", before="0" * 40)]
+    return dm.skip_reason(p, commits, activity, reviews, policy)
 
 
 def pr(number=822, ref="dependabot/uv/python-packages-0a0afc6848", sha=SHA, labels=(), auto_merge=None):
@@ -142,43 +149,51 @@ def test_updated_dependencies_absent():
 
 
 def test_allowed_grouped_pr_is_acted_on():
-    assert dm.skip_reason(pr(), [commit()], [], POLICY) is None
+    assert skip(pr(), [commit()], [], POLICY) is None
 
 
 def test_opt_out_label():
-    reason = dm.skip_reason(pr(labels=["dependencies", "no-auto-merge"]), [commit()], [], POLICY)
+    reason = skip(pr(labels=["dependencies", "no-auto-merge"]), [commit()], [], POLICY)
     assert reason == "labeled no-auto-merge"
 
 
+def test_dependabot_rebase_is_still_dependabot():
+    activity = [push(SHA, kind="force_push"), push(OLD_SHA, kind="branch_creation", before="0" * 40)]
+    assert skip(pr(), [commit()], [], POLICY, activity) is None
+
+
 @pytest.mark.parametrize(
-    "bad",
+    "activity, pushers",
     [
-        # inspect_scout pr 816: a person merged main into the branch.
-        dict(sha="4e091e4850aa", msg="Merge branch 'main'", author="epatey"),
-        dict(sha="4e091e4850aa", author=None),  # an author GitHub could not link
-        dict(sha="4e091e4850aa", verified=False),  # an unsigned commit claiming Dependabot
-        dict(sha="4e091e4850aa", committer="epatey"),  # pushed from a local clone
+        # inspect_scout pr 816 (2026-11-11): a person merged main into the branch.
+        ([push(SHA, actor="epatey"), push(OLD_SHA, kind="branch_creation")], "dependabot[bot], epatey"),
+        # A person's push earlier in the branch's life, later rebased away by Dependabot.
+        ([push(SHA, kind="force_push"), push(OLD_SHA, actor="epatey")], "dependabot[bot], epatey"),
+        ([push(SHA, actor=None)], "unknown"),
+        # No record of the push that made the head: unknown pusher.
+        ([push(OLD_SHA, kind="branch_creation")], "dependabot[bot]"),
+        ([], "nobody"),
     ],
 )
-def test_commit_not_from_dependabot(bad):
-    commits = [commit(sha=OLD_SHA), commit(**bad)]
-    reason = dm.skip_reason(pr(sha=bad["sha"]), commits, [], POLICY)
-    assert reason == "commits not from Dependabot: 4e091e4850"
+def test_branch_pushed_by_someone_else(activity, pushers):
+    # The commits themselves look like Dependabot's; only the pushes tell.
+    reason = skip(pr(), [commit()], [], POLICY, activity)
+    assert reason == f"branch not pushed only by Dependabot (pushed by: {pushers})"
 
 
 def test_head_moved():
-    assert dm.skip_reason(pr(sha="1" * 40), [commit()], [], POLICY) == "head moved while the job read it"
-    assert dm.skip_reason(pr(), [], [], POLICY) == "head moved while the job read it"
+    assert skip(pr(sha="1" * 40), [commit()], [], POLICY) == "head moved while the job read it"
+    assert skip(pr(), [], [], POLICY) == "head moved while the job read it"
 
 
 def test_auto_merge_already_on():
-    assert dm.skip_reason(pr(auto_merge={"merge_method": "squash"}), [commit()], [], POLICY) == (
+    assert skip(pr(auto_merge={"merge_method": "squash"}), [commit()], [], POLICY) == (
         "auto-merge already on"
     )
 
 
 def test_already_approved_at_head():
-    assert dm.skip_reason(pr(), [commit()], [review()], POLICY) == "already approved at this head"
+    assert skip(pr(), [commit()], [review()], POLICY) == "already approved at this head"
 
 
 @pytest.mark.parametrize(
@@ -190,11 +205,11 @@ def test_already_approved_at_head():
     ],
 )
 def test_other_reviews_do_not_count_as_approved(other):
-    assert dm.skip_reason(pr(), [commit()], [other], POLICY) is None
+    assert skip(pr(), [commit()], [other], POLICY) is None
 
 
 def test_github_actions_waits_for_a_person():
-    reason = dm.skip_reason(
+    reason = skip(
         pr(ref="dependabot/github_actions/github-actions-7477375a64"),
         [commit(msg=message(("pnpm/action-setup", "patch")))],
         [],
@@ -205,29 +220,29 @@ def test_github_actions_waits_for_a_person():
 
 def test_major_allowed_for_npm():
     p = pr(ref="dependabot/npm_and_yarn/react-19.0.0")
-    assert dm.skip_reason(p, [commit(msg=message(("react", "major")))], [], POLICY) is None
+    assert skip(p, [commit(msg=message(("react", "major")))], [], POLICY) is None
 
 
 def test_bump_type_limited_by_policy():
     policy = dm.load_policy("allow: {uv: [patch, minor]}\nalways_ask: []\n")
-    reason = dm.skip_reason(pr(), [commit(msg=message(("pandas", "major")))], [], policy)
+    reason = skip(pr(), [commit(msg=message(("pandas", "major")))], [], policy)
     assert reason == "pandas: major bump not allowed for uv"
 
 
 def test_grouped_pr_needs_every_package_allowed():
     policy = dm.load_policy("allow: {uv: [patch, minor, major]}\nalways_ask: [pydantic]\n")
-    assert dm.skip_reason(pr(), [commit()], [], policy) == "pydantic is in always_ask"
+    assert skip(pr(), [commit()], [], policy) == "pydantic is in always_ask"
 
 
 def test_always_ask_names_compare_as_pip_does():
     policy = dm.load_policy("allow: {uv: [patch, minor, major]}\nalways_ask: [Arize_Phoenix.Client]\n")
-    assert dm.skip_reason(pr(), [commit()], [], policy) == "arize-phoenix-client is in always_ask"
+    assert skip(pr(), [commit()], [], policy) == "arize-phoenix-client is in always_ask"
 
 
 def test_unknown_dependency_type_segment():
     # A multi-ecosystem group puts its own name where the dependency type goes.
     p = pr(ref="dependabot/python-deps/python-deps-0a0afc6848")
-    assert dm.skip_reason(p, [commit()], [], POLICY) == (
+    assert skip(p, [commit()], [], POLICY) == (
         "pandas: patch bump not allowed for python-deps; pydantic: patch bump not allowed for "
         "python-deps; arize-phoenix-client: minor bump not allowed for python-deps"
     )
@@ -236,18 +251,18 @@ def test_unknown_dependency_type_segment():
 def test_missing_update_type_is_not_allowed():
     # Dependabot omits update-type for a bump between commit SHAs.
     msg = message(("pandas", "patch"), ("some-git-dep", None))
-    assert dm.skip_reason(pr(), [commit(msg=msg)], [], POLICY) == (
+    assert skip(pr(), [commit(msg=msg)], [], POLICY) == (
         "some-git-dep: unknown bump not allowed for uv"
     )
 
 
 def test_commit_without_metadata():
     commits = [commit(sha=OLD_SHA), commit(msg="fix lockfile")]
-    assert dm.skip_reason(pr(), commits, [], POLICY) == "a commit has no updated-dependencies block"
+    assert skip(pr(), commits, [], POLICY) == "a commit has no updated-dependencies block"
 
 
 def test_branch_without_dependency_type():
-    assert dm.skip_reason(pr(ref="dependabot-uv-pandas"), [commit()], [], POLICY) == (
+    assert skip(pr(ref="dependabot-uv-pandas"), [commit()], [], POLICY) == (
         "no dependency type in branch dependabot-uv-pandas"
     )
 
@@ -338,7 +353,7 @@ class FakeGH:
 
 def reads(prs, checks=(run("lint"),), labels=("no-auto-merge",), rules=None):
     return {
-        f"repos/{REPO}": {"default_branch": "main"},
+        f"repos/{REPO}": {"default_branch": "main", "allow_auto_merge": True, "allow_squash_merge": True},
         rf"repos/{REPO}/rules/branches/main\?.*": [
             rules if rules is not None else [checks_rule({"context": "lint", "integration_id": 15368})]
         ],
@@ -347,6 +362,7 @@ def reads(prs, checks=(run("lint"),), labels=("no-auto-merge",), rules=None):
         **{f"repos/{REPO}/pulls/{p['number']}": p for p in prs},
         rf"repos/{REPO}/pulls/\d+/commits\?.*": [[commit()]],
         rf"repos/{REPO}/pulls/\d+/reviews\?.*": [[]],
+        rf"repos/{REPO}/activity\?ref=refs/heads/dependabot/uv/.*": [[push(SHA)]],
         rf"repos/{REPO}/commits/{SHA}/check-runs\?.*": [{"check_runs": list(checks)}],
         rf"repos/{REPO}/commits/{SHA}/status": {"statuses": []},
     }
@@ -490,3 +506,67 @@ def test_workflow_hourly_and_pinned():
     uses = re.findall(r"uses: (\S+)", WORKFLOW_TEXT)
     assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in uses)
     assert "persist-credentials: false" in WORKFLOW_TEXT
+
+
+# --- whole-repository skips ------------------------------------------------
+
+CHECKS = checks_rule({"context": "lint", "integration_id": 15368})
+INFO = {"default_branch": "main", "allow_auto_merge": True, "allow_squash_merge": True}
+
+
+def approval_rule(dismiss=True, last_push=False, count=1, methods=("squash",)):
+    return {
+        "type": "pull_request",
+        "parameters": {
+            "required_approving_review_count": count,
+            "dismiss_stale_reviews_on_push": dismiss,
+            "require_last_push_approval": last_push,
+            "allowed_merge_methods": list(methods),
+        },
+    }
+
+
+# inspect_scout's rules on 2026-11-12, trimmed: a 1-approval rule that
+# dismisses stale approvals, and a code-owner rule that requires none.
+SCOUT_RULES = [
+    approval_rule(methods=("merge", "squash", "rebase")),
+    approval_rule(dismiss=False, count=0),
+    CHECKS,
+]
+
+
+def test_inspect_scout_rules_pass():
+    assert dm.repo_skip_reason(INFO, SCOUT_RULES) is None
+    assert dm.repo_skip_reason(INFO, [approval_rule(dismiss=False, last_push=True), CHECKS]) is None
+
+
+@pytest.mark.parametrize(
+    "info, rules, reason",
+    [
+        (INFO, [approval_rule()], "no required status checks on main"),
+        (
+            INFO,
+            [approval_rule(), approval_rule(dismiss=False), CHECKS],
+            "an approval rule neither dismisses stale approvals nor requires approval of the last push",
+        ),
+        (INFO | {"allow_auto_merge": False}, SCOUT_RULES, "Allow auto-merge is off"),
+        (INFO | {"allow_squash_merge": False}, SCOUT_RULES, "squash merging is not allowed"),
+        (INFO, [approval_rule(methods=("merge",)), CHECKS], "squash merging is not allowed"),
+    ],
+)
+def test_repo_skipped(info, rules, reason):
+    assert dm.repo_skip_reason(info, rules) == reason
+
+
+def test_unreadable_settings_are_logged_not_skipped(fake):
+    # A read-only token may not see the allow_* fields.
+    f = fake(prs=[])
+    f.reads[f"repos/{REPO}"] = {"default_branch": "main"}
+    assert dm.handle_repo(REPO, POLICY, live=False)
+    assert f"{REPO}: this token cannot read Allow auto-merge or squash merging; not checked" in dm.log_lines
+
+
+def test_skipped_repo_gets_no_write(fake):
+    f = fake(prs=[pr()], rules=[approval_rule(dismiss=False), CHECKS], labels=())
+    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert f.writes == []

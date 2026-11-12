@@ -261,12 +261,14 @@ Testing a change).
   (`.github/scripts/dependabot_merge.py`, against a fake `gh`) and its
   workflow: the policy file's shape; the `updated-dependencies` block of a
   real grouped commit message; each rule before the policy (the
-  `no-auto-merge` label, a commit not authored by `dependabot[bot]`,
-  committed by web-flow and verified, a head that moved, auto-merge already
+  `no-auto-merge` label, a push to the branch by anyone but Dependabot in
+  its activity record, a head that moved, auto-merge already
   on, the App's approval at the current head); the policy (GitHub Actions
   not allowed, bump types per dependency type, `always_ask`, a grouped PR
   needing every package allowed, a missing update-type); the required
-  checks from every ruleset and when they count as passed; no write in a
+  checks from every ruleset and when they count as passed; the repository
+  skips (no required checks, an approval rule that keeps stale approvals,
+  auto-merge or squash merging off); no write in a
   dry run, the default; in a live run an approval then a squash merge, or
   auto-merge, each pinned to the checked head; a repository without
   required checks skipped; and the workflow running dry with a read-only

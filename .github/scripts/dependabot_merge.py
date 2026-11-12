@@ -2,14 +2,17 @@
 """Hourly Dependabot merge job (workflow: .github/workflows/dependabot-merge.yml).
 
 For each repository the `meridian-dependabot-merger` GitHub App is installed
-on (or each `--repo`), the job reads the default branch's rules and skips the
-repository when they require no status checks. Otherwise it makes sure the
-`no-auto-merge` label exists, and looks at every open PR that
-`dependabot[bot]` opened against the default branch. A PR is left alone when:
+on (or each `--repo`), the job reads the default branch's rules and the
+repository's settings. It skips the repository when the rules require no
+status checks, when an approval rule neither dismisses stale approvals nor
+requires approval of the last push, or when auto-merge or squash merging is
+off. Otherwise it makes sure the `no-auto-merge` label exists, and looks at
+every open PR that `dependabot[bot]` opened against the default branch. A PR
+is left alone when:
 
   - it carries the `no-auto-merge` label;
-  - any commit on it is not a verified Dependabot commit, or its head moved
-    while the job read it;
+  - anyone but Dependabot pushed to its branch, by the branch's activity
+    record, or its head moved while the job read it;
   - auto-merge is already on, or the App already approved its current head;
   - the policy file (.github/dependabot-merge-policy.yml) does not allow
     every package it updates: the dependency type comes from the branch name
@@ -38,8 +41,6 @@ from pathlib import Path
 import yaml
 
 DEPENDABOT = "dependabot[bot]"
-# GitHub signs the commits Dependabot makes; their committer is web-flow.
-DEPENDABOT_COMMITTER = "web-flow"
 APP_BOT = "meridian-dependabot-merger[bot]"
 OPT_OUT_LABEL = "no-auto-merge"
 POLICY_PATH = Path(__file__).resolve().parents[1] / "dependabot-merge-policy.yml"
@@ -125,11 +126,12 @@ def updated_dependencies(message: str) -> list[dict] | None:
     return yaml.safe_load(m.group(1))["updated-dependencies"] if m else None
 
 
-def is_dependabot_commit(commit: dict) -> bool:
-    return (
-        (commit.get("author") or {}).get("login") == DEPENDABOT
-        and (commit.get("committer") or {}).get("login") == DEPENDABOT_COMMITTER
-        and commit["commit"]["verification"]["verified"]
+def pushed_only_by_dependabot(activity: list[dict], sha: str) -> bool:
+    """True when every push, force push or creation of the branch was made by
+    Dependabot and one of them produced `sha`. Commit authorship cannot show
+    this: a person can push a GitHub-signed commit credited to Dependabot."""
+    return any(a["after"] == sha for a in activity) and all(
+        (a.get("actor") or {}).get("login") == DEPENDABOT for a in activity
     )
 
 
@@ -143,14 +145,16 @@ def dependency_reason(dep: dict, dep_type: str, policy: Policy) -> str | None:
     return None
 
 
-def skip_reason(pr: dict, commits: list[dict], reviews: list[dict], policy: Policy) -> str | None:
+def skip_reason(
+    pr: dict, commits: list[dict], activity: list[dict], reviews: list[dict], policy: Policy
+) -> str | None:
     """Why the job leaves this PR alone, or None when it acts on it."""
     sha = pr["head"]["sha"]
     if OPT_OUT_LABEL in (label["name"] for label in pr["labels"]):
         return f"labeled {OPT_OUT_LABEL}"
-    others = [c["sha"][:10] for c in commits if not is_dependabot_commit(c)]
-    if others:
-        return f"commits not from Dependabot: {', '.join(others)}"
+    if not pushed_only_by_dependabot(activity, sha):
+        pushers = sorted({(a.get("actor") or {}).get("login") or "unknown" for a in activity})
+        return f"branch not pushed only by Dependabot (pushed by: {', '.join(pushers) or 'nobody'})"
     if not commits or commits[-1]["sha"] != sha:
         return "head moved while the job read it"
     if pr["auto_merge"]:
@@ -221,7 +225,12 @@ def handle_pr(repo: str, n: int, required, policy: Policy, live: bool) -> None:
     sha = pr["head"]["sha"]
     commits = [c for page in gh_pages(f"repos/{repo}/pulls/{n}/commits?per_page=100") for c in page]
     reviews = [r for page in gh_pages(f"repos/{repo}/pulls/{n}/reviews?per_page=100") for r in page]
-    reason = skip_reason(pr, commits, reviews, policy)
+    activity = [
+        a
+        for page in gh_pages(f"repos/{repo}/activity?ref=refs/heads/{pr['head']['ref']}&per_page=100")
+        for a in page
+    ]
+    reason = skip_reason(pr, commits, activity, reviews, policy)
     if reason:
         log(f"{repo}#{n} skip: {reason}")
         return
@@ -257,14 +266,40 @@ def handle_pr(repo: str, n: int, required, policy: Policy, live: bool) -> None:
         )
 
 
+def repo_skip_reason(info: dict, rules: list[dict]) -> str | None:
+    """Why the job leaves a whole repository alone, or None."""
+    pr_rules = [r["parameters"] for r in rules if r["type"] == "pull_request"]
+    if not required_checks(rules):
+        return f"no required status checks on {info['default_branch']}"
+    # Otherwise the App's approval would still count after someone else pushed.
+    if any(
+        p["required_approving_review_count"] >= 1
+        and not (p["dismiss_stale_reviews_on_push"] or p["require_last_push_approval"])
+        for p in pr_rules
+    ):
+        return "an approval rule neither dismisses stale approvals nor requires approval of the last push"
+    # Otherwise an approved PR could never merge, and later runs leave it alone.
+    if info.get("allow_auto_merge") is False:
+        return "Allow auto-merge is off"
+    if info.get("allow_squash_merge") is False or any(
+        "squash" not in p.get("allowed_merge_methods", ["squash"]) for p in pr_rules
+    ):
+        return "squash merging is not allowed"
+    return None
+
+
 def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
     """Act on one repository's Dependabot PRs; False when any of them failed."""
-    branch = gh_json("api", f"repos/{repo}")["default_branch"]
+    info = gh_json("api", f"repos/{repo}")
+    branch = info["default_branch"]
     rules = [r for page in gh_pages(f"repos/{repo}/rules/branches/{branch}?per_page=100") for r in page]
     required = required_checks(rules)
-    if not required:
-        log(f"{repo} skip: no required status checks on {branch}")
+    reason = repo_skip_reason(info, rules)
+    if reason:
+        log(f"{repo} skip: {reason}")
         return True
+    if "allow_auto_merge" not in info or "allow_squash_merge" not in info:
+        log(f"{repo}: this token cannot read Allow auto-merge or squash merging; not checked")
     ensure_label(repo, live)
     prs = [
         pr
