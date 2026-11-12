@@ -120,10 +120,11 @@ the installed repos only.
 | Workflows | None | See below |
 
 GitHub won't merge a PR that changes `.github/workflows/` without Workflows:
-write, and every GitHub Actions bump changes those files. That permission is
-the riskiest one: a stolen token could change workflow files, and workflows
-can read a repo's secrets. So the App doesn't have it, and people merge
-GitHub Actions bumps by hand. Most repos batch those into one PR a week.
+write. That permission is the riskiest one: a stolen token could change
+workflow files, and workflows can read a repo's secrets. So the App doesn't
+have it. A GitHub Actions bump can also change only a composite action's
+`action.yml`, which needs no Workflows permission, so the policy also leaves
+out `github_actions`. People merge GitHub Actions bumps by hand. Most repos batch those into one PR a week.
 
 The check-run and commit-status reads work without Checks or Commit statuses
 permissions only because every participating repo is public. A private repo

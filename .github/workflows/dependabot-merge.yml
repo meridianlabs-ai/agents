@@ -5,9 +5,10 @@
 # .github/scripts/dependabot_merge.py. Deterministic — no agent invocation.
 #
 # Identity: the GitHub App `meridian-dependabot-merger` (Metadata read, Pull
-# requests write, Contents write; no Workflows, so GitHub Actions bumps stay
-# manual). It is installed only on the repositories that take part, and the
-# job acts on every repository of that installation. The App is on no
+# requests write, Contents write; no Workflows, so it cannot merge changes
+# under .github/workflows/, and the policy leaves out github_actions). It is
+# installed only on the repositories that take part, and the job acts on
+# every repository of that installation. The App is on no
 # ruleset's bypass list: its own approval is what meets a repository's
 # 1-approval rule, so its token can approve PRs. That is why the key is a
 # secret of the `dependabot-merger` environment, which only `main` may use:
