@@ -90,15 +90,32 @@ class Policy:
     always_ask: frozenset[str]
 
 
+def is_str_list(value) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+
+
+def normalized(name: str) -> str:
+    """A package name compared case-, `-`, `_` and `.`-insensitively, as pip
+    and uv compare them."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def load_policy(text: str) -> Policy:
     data = yaml.safe_load(text)
-    if set(data) != {"allow", "always_ask"}:
-        raise ValueError(f"policy keys must be allow and always_ask, got {sorted(data)}")
-    allow = {k: frozenset(v) for k, v in (data["allow"] or {}).items()}
-    unknown = set().union(*allow.values()) - set(BUMPS.values())
+    if not isinstance(data, dict) or set(data) != {"allow", "always_ask"}:
+        raise ValueError("policy: the keys must be allow and always_ask")
+    allow, always_ask = data["allow"] or {}, data["always_ask"] or []
+    if not isinstance(allow, dict) or not all(map(is_str_list, allow.values())):
+        raise ValueError("policy: allow must map each dependency type to a list of bump types")
+    if not is_str_list(always_ask):
+        raise ValueError("policy: always_ask must be a list of package names")
+    unknown = {b for bumps in allow.values() for b in bumps} - set(BUMPS.values())
     if unknown:
         raise ValueError(f"policy: unknown bump types {sorted(unknown)}")
-    return Policy(allow=allow, always_ask=frozenset(data["always_ask"] or []))
+    return Policy(
+        allow={k: frozenset(v) for k, v in allow.items()},
+        always_ask=frozenset(map(normalized, always_ask)),
+    )
 
 
 def updated_dependencies(message: str) -> list[dict] | None:
@@ -119,7 +136,7 @@ def is_dependabot_commit(commit: dict) -> bool:
 def dependency_reason(dep: dict, dep_type: str, policy: Policy) -> str | None:
     name = dep["dependency-name"]
     bump = BUMPS.get(dep.get("update-type", ""))
-    if name in policy.always_ask:
+    if normalized(name) in policy.always_ask:
         return f"{name} is in always_ask"
     if bump not in policy.allow.get(dep_type, frozenset()):
         return f"{name}: {bump or 'unknown'} bump not allowed for {dep_type}"
@@ -197,8 +214,11 @@ def ensure_label(repo: str, live: bool) -> None:
         )
 
 
-def handle_pr(repo: str, pr: dict, required, policy: Policy, live: bool) -> None:
-    n, sha = pr["number"], pr["head"]["sha"]
+def handle_pr(repo: str, n: int, required, policy: Policy, live: bool) -> None:
+    # Read now, not from the repository's PR list: a label added while the
+    # job worked through earlier PRs counts.
+    pr = gh_json("api", f"repos/{repo}/pulls/{n}")
+    sha = pr["head"]["sha"]
     commits = [c for page in gh_pages(f"repos/{repo}/pulls/{n}/commits?per_page=100") for c in page]
     reviews = [r for page in gh_pages(f"repos/{repo}/pulls/{n}/reviews?per_page=100") for r in page]
     reason = skip_reason(pr, commits, reviews, policy)
@@ -240,7 +260,8 @@ def handle_pr(repo: str, pr: dict, required, policy: Policy, live: bool) -> None
 def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
     """Act on one repository's Dependabot PRs; False when any of them failed."""
     branch = gh_json("api", f"repos/{repo}")["default_branch"]
-    required = required_checks(gh_json("api", f"repos/{repo}/rules/branches/{branch}"))
+    rules = [r for page in gh_pages(f"repos/{repo}/rules/branches/{branch}?per_page=100") for r in page]
+    required = required_checks(rules)
     if not required:
         log(f"{repo} skip: no required status checks on {branch}")
         return True
@@ -255,7 +276,7 @@ def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
     ok = True
     for pr in prs:
         try:
-            handle_pr(repo, pr, required, policy, live)
+            handle_pr(repo, pr["number"], required, policy, live)
         except Exception as e:  # noqa: BLE001 — one PR's failure must not stop the others
             log(f"::error::{repo}#{pr['number']}: {e}")
             ok = False

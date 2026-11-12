@@ -109,6 +109,12 @@ def test_policy_file_shape():
         "allow: {uv: [patch]}\nalways_ask: []\nextra: 1\n",
         "allow: {uv: [patch]}\n",
         "allow: {uv: [semver-patch]}\nalways_ask: []\n",
+        # A string would otherwise become a set of its letters.
+        "allow: {uv: [patch]}\nalways_ask: requests\n",
+        "allow: {uv: [patch]}\nalways_ask: {requests: 1}\n",
+        "allow: {uv: patch}\nalways_ask: []\n",
+        "allow: [uv]\nalways_ask: []\n",
+        "- allow\n",
     ],
 )
 def test_policy_rejects_bad_shape(text):
@@ -211,6 +217,20 @@ def test_bump_type_limited_by_policy():
 def test_grouped_pr_needs_every_package_allowed():
     policy = dm.load_policy("allow: {uv: [patch, minor, major]}\nalways_ask: [pydantic]\n")
     assert dm.skip_reason(pr(), [commit()], [], policy) == "pydantic is in always_ask"
+
+
+def test_always_ask_names_compare_as_pip_does():
+    policy = dm.load_policy("allow: {uv: [patch, minor, major]}\nalways_ask: [Arize_Phoenix.Client]\n")
+    assert dm.skip_reason(pr(), [commit()], [], policy) == "arize-phoenix-client is in always_ask"
+
+
+def test_unknown_dependency_type_segment():
+    # A multi-ecosystem group puts its own name where the dependency type goes.
+    p = pr(ref="dependabot/python-deps/python-deps-0a0afc6848")
+    assert dm.skip_reason(p, [commit()], [], POLICY) == (
+        "pandas: patch bump not allowed for python-deps; pydantic: patch bump not allowed for "
+        "python-deps; arize-phoenix-client: minor bump not allowed for python-deps"
+    )
 
 
 def test_missing_update_type_is_not_allowed():
@@ -319,11 +339,12 @@ class FakeGH:
 def reads(prs, checks=(run("lint"),), labels=("no-auto-merge",), rules=None):
     return {
         f"repos/{REPO}": {"default_branch": "main"},
-        f"repos/{REPO}/rules/branches/main": rules
-        if rules is not None
-        else [checks_rule({"context": "lint", "integration_id": 15368})],
+        rf"repos/{REPO}/rules/branches/main\?.*": [
+            rules if rules is not None else [checks_rule({"context": "lint", "integration_id": 15368})]
+        ],
         rf"repos/{REPO}/labels\?.*": [[{"name": n} for n in labels]],
         rf"repos/{REPO}/pulls\?state=open&base=main.*": [prs],
+        **{f"repos/{REPO}/pulls/{p['number']}": p for p in prs},
         rf"repos/{REPO}/pulls/\d+/commits\?.*": [[commit()]],
         rf"repos/{REPO}/pulls/\d+/reviews\?.*": [[]],
         rf"repos/{REPO}/commits/{SHA}/check-runs\?.*": [{"check_runs": list(checks)}],
@@ -387,6 +408,14 @@ def test_failed_check_still_gets_auto_merge(fake):
     f = fake(prs=[pr()], checks=[run("lint", "failure")])
     assert dm.handle_repo(REPO, POLICY, live=True)
     assert [w[1] for w in f.writes] == ["-X", "graphql"]
+
+
+def test_label_added_after_listing_counts(fake):
+    f = fake(prs=[pr()])
+    f.reads[f"repos/{REPO}/pulls/822"] = pr(labels=["no-auto-merge"])
+    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert f.writes == []
+    assert dm.log_lines[-1] == f"{REPO}#822 skip: labeled no-auto-merge"
 
 
 def test_live_skipped_pr_gets_no_write(fake):
