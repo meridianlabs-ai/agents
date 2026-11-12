@@ -156,8 +156,8 @@ def test_github_actions_waits_for_a_person():
     "ref",
     [
         "dependabot/npm_and_yarn/react-19.0.0",
-        # A dependency taken from a git branch: no update-type in the commit.
-        "dependabot/uv/inspect-ai-0a0afc6848",
+        "dependabot/docker/python-3.13-slim",
+        "dependabot/gitsubmodule/vendor/lib-0a0afc6848",
     ],
 )
 def test_other_ecosystems_are_acted_on(ref):

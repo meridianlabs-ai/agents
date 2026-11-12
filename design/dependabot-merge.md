@@ -157,8 +157,9 @@ use, so a workflow on any other branch can't read it. The App ID is the
 environment variable `DEPENDABOT_MERGER_APP_ID`. To revoke the job's access,
 delete the App's private key or uninstall the App.
 
-**Never install the App on agents.** This repo holds the job and its key, so
-the job does not approve and merge changes to it.
+**Never install the App on agents.** A bump merged here changes what every
+caller repo runs at `@main`, and what this job runs with the App's key, so a
+person reviews it.
 
 ### Creating the App
 
@@ -183,7 +184,8 @@ A Meridian org owner does this once:
 ## Which PRs merge
 
 Every Dependabot PR that passes the [PR rules](#each-run) merges once its
-required checks pass, whatever the bump type, package or dependency source.
+required checks pass, whatever the ecosystem (GitHub Actions aside), bump
+type, package or dependency source.
 For example, a dependency taken from a git branch has no semver bump type,
 and its PRs merge like any other.
 

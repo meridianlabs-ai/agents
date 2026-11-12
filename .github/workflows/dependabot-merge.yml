@@ -12,9 +12,11 @@
 # 1-approval rule, so its token can approve PRs. That is why the key is a
 # secret of the `dependabot-merger` environment, which only `main` may use:
 # a run on any other branch cannot read it. The App is never installed on
-# agents itself, which holds the job and its key. The check-run and commit-status reads
-# work without Checks or Commit statuses permissions only because every
-# repository it serves is public; a private one needs both, read-only.
+# agents itself: a bump merged here changes what every caller repo runs at
+# @main and what this job runs with the App's key. The check-run and
+# commit-status reads work without Checks or Commit statuses permissions
+# only because every repository it serves is public; a private one needs
+# both, read-only.
 #
 # DRY RUN: the script runs without `--live`, so it logs every decision and
 # every write it would make and writes nothing, and the token below is minted
