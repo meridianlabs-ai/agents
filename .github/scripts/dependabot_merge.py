@@ -16,11 +16,9 @@ is left alone when:
   - anyone but Dependabot pushed to its branch, by the branch's activity
     record, or its head moved while the job read it;
   - the App already approved its current head and auto-merge is on;
-  - the policy file (.github/dependabot-merge-policy.yml) does not allow
-    every package it updates: the dependency type comes from the branch name
-    (dependabot/<type>/...), the bump type from the `updated-dependencies`
-    block of the commit messages, and a package in `always_ask` never
-    merges.
+  - its branch name (dependabot/<type>/...) names no dependency type, or
+    names github_actions: the App has no Workflows permission, so a merge
+    of a change under .github/workflows/ would fail after the approval.
 
 Any other PR is approved at its head commit, unless the App already approved
 that commit. If auto-merge is already on (Dependabot rebased a PR the job
@@ -40,24 +38,13 @@ import re
 import subprocess
 import sys
 import urllib.parse
-from dataclasses import dataclass
-from pathlib import Path
-
-import yaml
 
 DEPENDABOT = "dependabot[bot]"
 APP_BOT = "meridian-dependabot-merger[bot]"
 OPT_OUT_LABEL = "no-auto-merge"
-POLICY_PATH = Path(__file__).resolve().parents[1] / "dependabot-merge-policy.yml"
-BUMPS = {
-    "version-update:semver-patch": "patch",
-    "version-update:semver-minor": "minor",
-    "version-update:semver-major": "major",
-}
 # Check-run conclusions GitHub counts as passing for a required check.
 PASSING = frozenset({"success", "neutral", "skipped"})
 BRANCH_RE = re.compile(r"dependabot/([^/]+)/")
-METADATA_RE = re.compile(r"^---\n(updated-dependencies:\n.*?)^\.\.\.$", re.M | re.S)
 
 log_lines: list[str] = []
 
@@ -90,47 +77,6 @@ def write(live: bool, description: str, *args: str) -> None:
     log(f"  {description}" if live else f"  would {description}")
 
 
-@dataclass(frozen=True)
-class Policy:
-    allow: dict[str, frozenset[str]]
-    always_ask: frozenset[str]
-
-
-def is_str_list(value) -> bool:
-    return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
-
-
-def normalized(name: str) -> str:
-    """A package name compared case-, `-`, `_` and `.`-insensitively, as pip
-    and uv compare them."""
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def load_policy(text: str) -> Policy:
-    data = yaml.safe_load(text)
-    if not isinstance(data, dict) or set(data) != {"allow", "always_ask"}:
-        raise ValueError("policy: the keys must be allow and always_ask")
-    allow, always_ask = data["allow"] or {}, data["always_ask"] or []
-    if not isinstance(allow, dict) or not all(map(is_str_list, allow.values())):
-        raise ValueError("policy: allow must map each dependency type to a list of bump types")
-    if not is_str_list(always_ask):
-        raise ValueError("policy: always_ask must be a list of package names")
-    unknown = {b for bumps in allow.values() for b in bumps} - set(BUMPS.values())
-    if unknown:
-        raise ValueError(f"policy: unknown bump types {sorted(unknown)}")
-    return Policy(
-        allow={k: frozenset(v) for k, v in allow.items()},
-        always_ask=frozenset(map(normalized, always_ask)),
-    )
-
-
-def updated_dependencies(message: str) -> list[dict] | None:
-    """The `updated-dependencies` entries of a Dependabot commit message, or
-    None unless the message has exactly one such block."""
-    blocks = METADATA_RE.findall(message)
-    return yaml.safe_load(blocks[0])["updated-dependencies"] if len(blocks) == 1 else None
-
-
 def pushed_only_by_dependabot(activity: list[dict], sha: str) -> bool:
     """True when every push, force push or creation of the branch was made by
     Dependabot and one of them produced `sha`. Commit authorship cannot show
@@ -140,16 +86,6 @@ def pushed_only_by_dependabot(activity: list[dict], sha: str) -> bool:
     )
 
 
-def dependency_reason(dep: dict, dep_type: str, policy: Policy) -> str | None:
-    name = dep["dependency-name"]
-    bump = BUMPS.get(dep.get("update-type", ""))
-    if normalized(name) in policy.always_ask:
-        return f"{name} is in always_ask"
-    if bump not in policy.allow.get(dep_type, frozenset()):
-        return f"{name}: {bump or 'unknown'} bump not allowed for {dep_type}"
-    return None
-
-
 def approved_at(reviews: list[dict], sha: str) -> bool:
     return any(
         (r.get("user") or {}).get("login") == APP_BOT and r["state"] == "APPROVED" and r["commit_id"] == sha
@@ -157,9 +93,7 @@ def approved_at(reviews: list[dict], sha: str) -> bool:
     )
 
 
-def skip_reason(
-    pr: dict, commits: list[dict], activity: list[dict], reviews: list[dict], policy: Policy
-) -> str | None:
+def skip_reason(pr: dict, commits: list[dict], activity: list[dict], reviews: list[dict]) -> str | None:
     """Why the job leaves this PR alone, or None when it acts on it."""
     sha = pr["head"]["sha"]
     if OPT_OUT_LABEL in (label["name"] for label in pr["labels"]):
@@ -176,16 +110,9 @@ def skip_reason(
     branch = BRANCH_RE.match(pr["head"]["ref"])
     if not branch:
         return f"no dependency type in branch {pr['head']['ref']}"
-    blocks = [updated_dependencies(c["commit"]["message"]) for c in commits]
-    if None in blocks:
-        return "a commit has no updated-dependencies block"
-    reasons = [
-        reason
-        for block in blocks
-        for dep in block
-        if (reason := dependency_reason(dep, branch.group(1), policy))
-    ]
-    return "; ".join(reasons) or None
+    if branch.group(1) == "github_actions":
+        return "GitHub Actions bump: the App has no Workflows permission to merge it"
+    return None
 
 
 def required_checks(rules: list[dict]) -> list[tuple[str, int | None]]:
@@ -238,7 +165,7 @@ def approve(repo: str, n: int, sha: str, live: bool) -> None:
     )
 
 
-def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bool) -> None:
+def handle_pr(repo: str, n: int, branch: str, required, live: bool) -> None:
     # Read now, not from the repository's PR list: a PR closed, a label added,
     # or a base changed while the job worked through earlier PRs counts.
     pr = gh_json("api", f"repos/{repo}/pulls/{n}")
@@ -257,7 +184,7 @@ def handle_pr(repo: str, n: int, branch: str, required, policy: Policy, live: bo
         for page in gh_pages(f"repos/{repo}/activity?ref={ref}&per_page=100")
         for a in page
     ]
-    reason = skip_reason(pr, commits, activity, reviews, policy)
+    reason = skip_reason(pr, commits, activity, reviews)
     if reason:
         log(f"{repo}#{n} skip: {reason}")
         return
@@ -331,7 +258,7 @@ def repo_skip_reason(info: dict, rules: list[dict], required) -> str | None:
     return None
 
 
-def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
+def handle_repo(repo: str, live: bool) -> bool:
     """Act on one repository's Dependabot PRs; False when any of them failed."""
     info = gh_json("api", f"repos/{repo}")
     branch = info["default_branch"]
@@ -354,7 +281,7 @@ def handle_repo(repo: str, policy: Policy, live: bool) -> bool:
     ok = True
     for pr in prs:
         try:
-            handle_pr(repo, pr["number"], branch, required, policy, live)
+            handle_pr(repo, pr["number"], branch, required, live)
         except Exception as e:  # noqa: BLE001 — one PR's failure must not stop the others
             log(f"::error::{repo}#{pr['number']}: {e}")
             ok = False
@@ -373,15 +300,13 @@ def installation_repos() -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", action="append", help="owner/name; default: the App's repositories")
-    parser.add_argument("--policy", type=Path, default=POLICY_PATH)
     parser.add_argument("--live", action="store_true", help="write; without it, log only")
     args = parser.parse_args(argv)
-    policy = load_policy(args.policy.read_text(encoding="utf-8"))
     log(f"mode: {'live' if args.live else 'dry run (no writes)'}")
 
     def guarded(repo: str) -> bool:
         try:
-            return handle_repo(repo, policy, args.live)
+            return handle_repo(repo, args.live)
         except Exception as e:  # noqa: BLE001 — one repo's failure must not stop the others
             log(f"::error::{repo}: {e}")
             return False

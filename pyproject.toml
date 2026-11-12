@@ -1,14 +1,11 @@
-# PyYAML for the Dependabot merge job (dependabot-merge.yml) and its tests;
-# development tools for this repository's tests (tests.yml) and its dogfood
+# Development tools for this repository's tests (tests.yml) and its dogfood
 # stubs' provisioning. Not a package: with no [build-system], uv installs
 # only the dependencies.
 [project]
 name = "meridian-agents"
 version = "0"
 requires-python = ">=3.12"
-dependencies = [
-    "pyyaml>=6.0.3",
-]
+dependencies = []
 
 [dependency-groups]
 dev = ["pytest", "pytest-xdist"]

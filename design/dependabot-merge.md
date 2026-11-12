@@ -8,8 +8,9 @@ document, running dry: it logs what it would do and writes nothing.
 Routine Dependabot version bumps across Meridian repos merge without a
 person, once the repo's required CI checks pass. One scheduled job in this
 repo does it for every participating repo, so no repo needs its own workflow
-file or config to take part. A bump merges only when the merge policy allows
-it and the required checks pass. Anything else stays open for a person.
+file or config to take part. A bump merges whatever its bump type or
+package, but only when the required checks pass. Anything else stays open
+for a person.
 
 Out of scope: the security-alert PRs that ts-mono's `dependabot-fix` workflow
 opens, GitHub Actions bumps (see [Identity](#identity-and-credentials)), and
@@ -50,11 +51,9 @@ flowchart TD
     B --> S{Repo meets the<br/>participation rules?}
     S -- no --> SK[Skip the repo]
     S -- yes --> P[For each open PR<br/>dependabot opened]
-    P --> R{Only Dependabot pushed,<br/>no no-auto-merge label,<br/>not approved at head with auto-merge on?}
+    P --> R{Only Dependabot pushed,<br/>no no-auto-merge label,<br/>not approved at head with auto-merge on,<br/>not a GitHub Actions bump?}
     R -- no --> L[Leave it]
-    R -- yes --> Q{Policy allows every<br/>package in the PR?}
-    Q -- no --> L
-    Q -- yes --> AP[Approve at the head commit,<br/>unless already approved there]
+    R -- yes --> AP[Approve at the head commit,<br/>unless already approved there]
     AP --> AM{Auto-merge<br/>already on?}
     AM -- yes --> DONE[Done]
     AM -- no --> C{Required checks<br/>all passed?}
@@ -95,7 +94,9 @@ logs a failing merge call (see below).
   Dependabot superseded it.
 - It carries the `no-auto-merge` label.
 - The App has already approved its current head and auto-merge is on.
-- The merge policy doesn't allow every package it updates.
+- Its branch is `dependabot/github_actions/...` (see
+  [Identity](#identity-and-credentials)), or its branch name has no
+  dependency type in the `dependabot/<type>/...` position.
 
 Running the job twice does no harm. A PR the App has already approved at its
 current head, with auto-merge on, is left as it is. With auto-merge off, the
@@ -122,9 +123,15 @@ the installed repos only.
 GitHub won't merge a PR that changes `.github/workflows/` without Workflows:
 write. That permission is the riskiest one: a stolen token could change
 workflow files, and workflows can read a repo's secrets. So the App doesn't
-have it. A GitHub Actions bump can also change only a composite action's
-`action.yml`, which needs no Workflows permission, so the policy also leaves
-out `github_actions`. People merge GitHub Actions bumps by hand. Most repos batch those into one PR a week.
+have it. The job therefore skips every PR on a `dependabot/github_actions/...`
+branch, including one that changes only a composite action's `action.yml`,
+which needs no Workflows permission. People merge GitHub Actions bumps by
+hand. Most repos batch those into one PR a week. In inspect_scout, GitHub
+Actions is the only Dependabot ecosystem whose PRs change
+`.github/workflows/`. A multi-ecosystem group puts its group name where the
+dependency type goes in the branch name, so the job would approve such a
+group that includes GitHub Actions, and the merge would then fail. No
+participating repo uses one.
 
 The check-run and commit-status reads work without Checks or Commit statuses
 permissions only because every participating repo is public. A private repo
@@ -150,9 +157,8 @@ use, so a workflow on any other branch can't read it. The App ID is the
 environment variable `DEPENDABOT_MERGER_APP_ID`. To revoke the job's access,
 delete the App's private key or uninstall the App.
 
-**Never install the App on agents.** The job's own dependencies live here
-(PyYAML, from `uv.lock`), so it would approve and merge bumps of the code it
-runs with that token.
+**Never install the App on agents.** This repo holds the job and its key, so
+the job does not approve and merge changes to it.
 
 ### Creating the App
 
@@ -174,42 +180,12 @@ A Meridian org owner does this once:
    or email.
 6. Don't add the App to any ruleset's bypass list.
 
-## Merge policy
+## Which PRs merge
 
-The policy file, `.github/dependabot-merge-policy.yml`, sets which bump types
-may merge for each dependency type, and lists packages that always wait for a
-person:
-
-```yaml
-# Which Dependabot bumps the job may auto-merge.
-# A dependency type left out here never auto-merges.
-allow:
-  uv:             [patch, minor, major]
-  pip:            [patch, minor, major]
-  npm_and_yarn:   [patch, minor, major]
-  # github_actions waits for a person until the App has Workflows: write.
-  # github_actions: [patch, minor, major]
-
-# Packages that always wait for a person, whatever the bump.
-# Covers packages Dependabot names, not others a lockfile update moves with them.
-always_ask: []
-```
-
-Every bump type merges for Python and npm. To make major bumps wait for a
-person in every repo, change `[patch, minor, major]` to `[patch, minor]`. To
-hold back one package, add its name to `always_ask`.
-
-**How the job reads a PR.** The dependency type comes from Dependabot's branch
-name, such as `dependabot/uv/...`. The bump type comes from the
-`updated-dependencies` block in Dependabot's commit messages, such as
-`update-type: version-update:semver-minor`, the same places the
-`dependabot/fetch-metadata` action reads. A grouped PR merges only if every
-package in it is allowed.
-
-`always_ask` and the bump limits apply only to the packages Dependabot names
-in that block, not to other packages a lockfile update moves along with them.
-For example, inspect_scout PR 822 named only pandas, pydantic and
-arize-phoenix-client, and its `uv.lock` change also moved pydantic-core.
+Every Dependabot PR that passes the [PR rules](#each-run) merges once its
+required checks pass, whatever the bump type, package or dependency source.
+For example, a dependency taken from a git branch has no semver bump type,
+and its PRs merge like any other.
 
 **Opting a PR out.** `no-auto-merge` is an ordinary repo label; GitHub has no
 built-in equivalent. The job creates it in each repo it serves. To stop a
@@ -230,8 +206,7 @@ only proposes releases that are some days old. Dependabot's cooldown counts
 whole days, so a repo that wants a shorter wait for a fast-moving package
 leaves it out of the Dependabot cooldown and enforces the wait elsewhere.
 inspect_scout, for example, gives anthropic, google-genai, openai and
-inspect-swe a 6-hour cooldown through uv's `exclude-newer-package`. To make
-such a package wait for a person instead, add it to `always_ask`.
+inspect-swe a 6-hour cooldown through uv's `exclude-newer-package`.
 
 ## Rollout
 

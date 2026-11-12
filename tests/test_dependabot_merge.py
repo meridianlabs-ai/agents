@@ -1,8 +1,8 @@
 """Tests for .github/scripts/dependabot_merge.py and its workflow,
 .github/workflows/dependabot-merge.yml.
 
-The rules before the policy, the policy itself, the required-check reading,
-and the writes: none in a dry run, and in a live run an approval followed by
+The rules per PR and per repository, the required-check reading, and the
+writes: none in a dry run, and in a live run an approval followed by
 a merge or by auto-merge, each pinned to the head commit the job checked.
 Every `gh` call goes through the module's `gh()`, so the tests stand in a fake
 for it. Run with `python3 -m pytest` from the repo root.
@@ -29,57 +29,20 @@ REPO = "meridianlabs-ai/inspect_scout"
 SHA = "d21865bd30511382189b1431621db17f7e2bc0f2"
 OLD_SHA = "0" * 40
 
-# The head commit message of inspect_scout pr 822 (2026-11-12), trimmed.
-GROUPED_MESSAGE = """build: bump the python-packages group with 3 updates
-
-Bumps the python-packages group with 3 updates: pandas, pydantic and arize-phoenix-client.
-
----
-updated-dependencies:
-- dependency-name: pandas
-  dependency-version: 3.1.1
-  dependency-type: direct:production
-  update-type: version-update:semver-patch
-  dependency-group: python-packages
-- dependency-name: pydantic
-  dependency-version: 2.14.3
-  dependency-type: direct:production
-  update-type: version-update:semver-patch
-  dependency-group: python-packages
-- dependency-name: arize-phoenix-client
-  dependency-version: 3.7.0
-  dependency-type: direct:production
-  update-type: version-update:semver-minor
-  dependency-group: python-packages
-...
-
-Signed-off-by: dependabot[bot] <support@github.com>
-"""
-
-
-def message(*deps: tuple[str, str | None]) -> str:
-    entries = "".join(
-        f"- dependency-name: {name}\n  dependency-type: direct:production\n"
-        + (f"  update-type: version-update:semver-{bump}\n" if bump else "")
-        for name, bump in deps
-    )
-    return f"build: bump\n\n---\nupdated-dependencies:\n{entries}...\n\nSigned-off-by: dependabot[bot]\n"
-
-
-def commit(sha=SHA, msg=GROUPED_MESSAGE):
-    return {"sha": sha, "commit": {"message": msg}}
+def commit(sha=SHA):
+    return {"sha": sha}
 
 
 def push(after=SHA, actor=dm.DEPENDABOT, kind="push", before=OLD_SHA):
     return {"activity_type": kind, "actor": {"login": actor} if actor else None, "before": before, "after": after}
 
 
-def skip(p, commits, reviews, policy, activity=None):
+def skip(p, commits, reviews, activity=None):
     """skip_reason, with the branch created by Dependabot at the PR's head
     unless `activity` says otherwise."""
     if activity is None:
         activity = [push(p["head"]["sha"], kind="branch_creation", before="0" * 40)]
-    return dm.skip_reason(p, commits, activity, reviews, policy)
+    return dm.skip_reason(p, commits, activity, reviews)
 
 
 def pr(number=822, ref="dependabot/uv/python-packages-0a0afc6848", sha=SHA, labels=(), auto_merge=None):
@@ -99,73 +62,21 @@ def review(user=dm.APP_BOT, state="APPROVED", commit_id=SHA):
     return {"user": {"login": user}, "state": state, "commit_id": commit_id}
 
 
-POLICY = dm.load_policy((ROOT / ".github" / "dependabot-merge-policy.yml").read_text())
+# --- the rules, per PR -----------------------------------------------------
 
 
-# --- the policy file -------------------------------------------------------
-
-
-def test_policy_file_shape():
-    assert POLICY.allow == {
-        t: frozenset({"patch", "minor", "major"}) for t in ("uv", "pip", "npm_and_yarn")
-    }
-    assert POLICY.always_ask == frozenset()
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "allow: {uv: [patch]}\nalways_ask: []\nextra: 1\n",
-        "allow: {uv: [patch]}\n",
-        "allow: {uv: [semver-patch]}\nalways_ask: []\n",
-        # A string would otherwise become a set of its letters.
-        "allow: {uv: [patch]}\nalways_ask: requests\n",
-        "allow: {uv: [patch]}\nalways_ask: {requests: 1}\n",
-        "allow: {uv: patch}\nalways_ask: []\n",
-        "allow: [uv]\nalways_ask: []\n",
-        "- allow\n",
-    ],
-)
-def test_policy_rejects_bad_shape(text):
-    with pytest.raises(ValueError):
-        dm.load_policy(text)
-
-
-# --- the commit metadata ---------------------------------------------------
-
-
-def test_updated_dependencies_of_a_grouped_commit():
-    deps = dm.updated_dependencies(GROUPED_MESSAGE)
-    assert [(d["dependency-name"], d["update-type"]) for d in deps] == [
-        ("pandas", "version-update:semver-patch"),
-        ("pydantic", "version-update:semver-patch"),
-        ("arize-phoenix-client", "version-update:semver-minor"),
-    ]
-
-
-def test_updated_dependencies_needs_exactly_one_block():
-    assert dm.updated_dependencies(GROUPED_MESSAGE + GROUPED_MESSAGE) is None
-
-
-def test_updated_dependencies_absent():
-    assert dm.updated_dependencies("Merge branch 'main' into dependabot/uv/x") is None
-
-
-# --- the rules and the policy, per PR --------------------------------------
-
-
-def test_allowed_grouped_pr_is_acted_on():
-    assert skip(pr(), [commit()], [], POLICY) is None
+def test_dependabot_pr_is_acted_on():
+    assert skip(pr(), [commit()], []) is None
 
 
 def test_opt_out_label():
-    reason = skip(pr(labels=["dependencies", "no-auto-merge"]), [commit()], [], POLICY)
+    reason = skip(pr(labels=["dependencies", "no-auto-merge"]), [commit()], [])
     assert reason == "labeled no-auto-merge"
 
 
 def test_dependabot_rebase_is_still_dependabot():
     activity = [push(SHA, kind="force_push"), push(OLD_SHA, kind="branch_creation", before="0" * 40)]
-    assert skip(pr(), [commit()], [], POLICY, activity) is None
+    assert skip(pr(), [commit()], [], activity) is None
 
 
 @pytest.mark.parametrize(
@@ -183,28 +94,28 @@ def test_dependabot_rebase_is_still_dependabot():
 )
 def test_branch_pushed_by_someone_else(activity, pushers):
     # The commits themselves look like Dependabot's; only the pushes tell.
-    reason = skip(pr(), [commit()], [], POLICY, activity)
+    reason = skip(pr(), [commit()], [], activity)
     assert reason == f"branch not pushed only by Dependabot (pushed by: {pushers})"
 
 
 def test_head_moved():
-    assert skip(pr(sha="1" * 40), [commit()], [], POLICY) == "head moved while the job read it"
-    assert skip(pr(), [], [], POLICY) == "head moved while the job read it"
+    assert skip(pr(sha="1" * 40), [commit()], []) == "head moved while the job read it"
+    assert skip(pr(), [], []) == "head moved while the job read it"
 
 
 def test_auto_merge_on_without_approval_at_head_is_acted_on():
     # Dependabot rebased a PR the job approved; the rules dismissed the approval.
-    assert skip(pr(auto_merge={"merge_method": "squash"}), [commit()], [], POLICY) is None
+    assert skip(pr(auto_merge={"merge_method": "squash"}), [commit()], []) is None
 
 
 def test_auto_merge_on_and_approved_at_head():
     p = pr(auto_merge={"merge_method": "squash"})
-    assert skip(p, [commit()], [review()], POLICY) == "already approved at this head, auto-merge on"
+    assert skip(p, [commit()], [review()]) == "already approved at this head, auto-merge on"
 
 
 def test_approved_at_head_without_auto_merge_is_acted_on():
     # The merge or auto-merge call after the approval may have failed.
-    assert skip(pr(), [commit()], [review()], POLICY) is None
+    assert skip(pr(), [commit()], [review()]) is None
 
 
 @pytest.mark.parametrize(
@@ -216,7 +127,7 @@ def test_approved_at_head_without_auto_merge_is_acted_on():
     ],
 )
 def test_other_reviews_do_not_count_as_approved(other):
-    assert skip(pr(), [commit()], [other], POLICY) is None
+    assert skip(pr(), [commit()], [other]) is None
 
 
 def test_authorless_review_before_app_approval():
@@ -225,72 +136,36 @@ def test_authorless_review_before_app_approval():
     assert dm.approved_at([authorless, review()], SHA)
     assert not dm.approved_at([authorless], SHA)
     p = pr(auto_merge={"merge_method": "squash"})
-    assert skip(p, [commit()], [authorless, review()], POLICY) == "already approved at this head, auto-merge on"
-    assert skip(pr(), [commit()], [authorless, review()], POLICY) is None
+    assert skip(p, [commit()], [authorless, review()]) == "already approved at this head, auto-merge on"
+    assert skip(pr(), [commit()], [authorless, review()]) is None
 
 
 def test_authorless_pr_in_list_is_ignored(fake):
     f = fake(prs=[pr(number=1) | {"user": None}, pr()])
-    assert dm.handle_repo(REPO, POLICY, live=False)
+    assert dm.handle_repo(REPO, live=False)
     assert f"{REPO}: 1 open Dependabot PRs, 1 required checks" in dm.log_lines
     assert dm.log_lines[-1] == f"  would squash-merge {REPO}#822 at {SHA[:10]}"
 
 
 def test_github_actions_waits_for_a_person():
-    reason = skip(
-        pr(ref="dependabot/github_actions/github-actions-7477375a64"),
-        [commit(msg=message(("pnpm/action-setup", "patch")))],
-        [],
-        POLICY,
-    )
-    assert reason == "pnpm/action-setup: patch bump not allowed for github_actions"
+    reason = skip(pr(ref="dependabot/github_actions/github-actions-7477375a64"), [commit()], [])
+    assert reason == "GitHub Actions bump: the App has no Workflows permission to merge it"
 
 
-def test_major_allowed_for_npm():
-    p = pr(ref="dependabot/npm_and_yarn/react-19.0.0")
-    assert skip(p, [commit(msg=message(("react", "major")))], [], POLICY) is None
-
-
-def test_bump_type_limited_by_policy():
-    policy = dm.load_policy("allow: {uv: [patch, minor]}\nalways_ask: []\n")
-    reason = skip(pr(), [commit(msg=message(("pandas", "major")))], [], policy)
-    assert reason == "pandas: major bump not allowed for uv"
-
-
-def test_grouped_pr_needs_every_package_allowed():
-    policy = dm.load_policy("allow: {uv: [patch, minor, major]}\nalways_ask: [pydantic]\n")
-    assert skip(pr(), [commit()], [], policy) == "pydantic is in always_ask"
-
-
-def test_always_ask_names_compare_as_pip_does():
-    policy = dm.load_policy("allow: {uv: [patch, minor, major]}\nalways_ask: [Arize_Phoenix.Client]\n")
-    assert skip(pr(), [commit()], [], policy) == "arize-phoenix-client is in always_ask"
-
-
-def test_unknown_dependency_type_segment():
-    # A multi-ecosystem group puts its own name where the dependency type goes.
-    p = pr(ref="dependabot/python-deps/python-deps-0a0afc6848")
-    assert skip(p, [commit()], [], POLICY) == (
-        "pandas: patch bump not allowed for python-deps; pydantic: patch bump not allowed for "
-        "python-deps; arize-phoenix-client: minor bump not allowed for python-deps"
-    )
-
-
-def test_missing_update_type_is_not_allowed():
-    # Dependabot omits update-type for a bump between commit SHAs.
-    msg = message(("pandas", "patch"), ("some-git-dep", None))
-    assert skip(pr(), [commit(msg=msg)], [], POLICY) == (
-        "some-git-dep: unknown bump not allowed for uv"
-    )
-
-
-def test_commit_without_metadata():
-    commits = [commit(sha=OLD_SHA), commit(msg="fix lockfile")]
-    assert skip(pr(), commits, [], POLICY) == "a commit has no updated-dependencies block"
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "dependabot/npm_and_yarn/react-19.0.0",
+        # A dependency taken from a git branch: no update-type in the commit.
+        "dependabot/uv/inspect-ai-0a0afc6848",
+    ],
+)
+def test_other_ecosystems_are_acted_on(ref):
+    assert skip(pr(ref=ref), [commit()], []) is None
 
 
 def test_branch_without_dependency_type():
-    assert skip(pr(ref="dependabot-uv-pandas"), [commit()], [], POLICY) == (
+    assert skip(pr(ref="dependabot-uv-pandas"), [commit()], []) == (
         "no dependency type in branch dependabot-uv-pandas"
     )
 
@@ -426,7 +301,7 @@ def fake(monkeypatch):
 
 def test_dry_run_writes_nothing(fake):
     f = fake(prs=[pr()], labels=())
-    assert dm.handle_repo(REPO, POLICY, live=False)
+    assert dm.handle_repo(REPO, live=False)
     assert f.writes == []
     assert dm.log_lines[-3:] == [
         f"{REPO}#822 act: required checks passed",
@@ -446,7 +321,7 @@ def test_dry_run_is_the_default(fake, monkeypatch):
 
 def test_live_approves_then_merges_at_head(fake):
     f = fake(prs=[pr()])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     approve, merge = f.writes
     assert approve[:4] == ("api", "-X", "POST", f"repos/{REPO}/pulls/822/reviews")
     assert {"commit_id=" + SHA, "event=APPROVE"} <= set(approve)
@@ -456,7 +331,7 @@ def test_live_approves_then_merges_at_head(fake):
 
 def test_live_pending_checks_enable_auto_merge_at_head(fake):
     f = fake(prs=[pr()], checks=[run("lint", None, status="queued")])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     approve, auto = f.writes
     assert approve[3] == f"repos/{REPO}/pulls/822/reviews"
     assert auto[:2] == ("api", "graphql")
@@ -466,7 +341,7 @@ def test_live_pending_checks_enable_auto_merge_at_head(fake):
 
 def test_auto_merge_on_gets_approval_only(fake):
     f = fake(prs=[pr(auto_merge={"merge_method": "squash"})])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     (approve,) = f.writes
     assert approve[3] == f"repos/{REPO}/pulls/822/reviews" and "commit_id=" + SHA in approve
     assert dm.log_lines[-2] == f"{REPO}#822 act: auto-merge already on, approval only"
@@ -479,7 +354,7 @@ def test_auto_merge_on_gets_approval_only(fake):
 def test_approved_at_head_gets_merge_step_again_without_approval(fake, checks, write):
     f = fake(prs=[pr()], checks=checks)
     f.reads[rf"repos/{REPO}/pulls/\d+/reviews\?.*"] = [[review()]]
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     (only,) = f.writes
     assert only[: len(write)] == write
     assert dm.log_lines[-2].endswith(", already approved")
@@ -488,14 +363,14 @@ def test_approved_at_head_gets_merge_step_again_without_approval(fake, checks, w
 def test_failed_check_still_gets_auto_merge(fake):
     # CI failure: the job does nothing special; the PR waits with auto-merge on.
     f = fake(prs=[pr()], checks=[run("lint", "failure")])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert [w[1] for w in f.writes] == ["-X", "graphql"]
 
 
 def test_base_changed_after_listing(fake):
     f = fake(prs=[pr()])
     f.reads[f"repos/{REPO}/pulls/822"] = pr() | {"base": {"ref": "release"}}
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert f.writes == []
     assert dm.log_lines[-1] == f"{REPO}#822 skip: base changed to release"
 
@@ -504,7 +379,7 @@ def test_closed_after_listing(fake):
     # Dependabot closes a superseded PR, or a person merges it, during the run.
     f = fake(prs=[pr()])
     f.reads[f"repos/{REPO}/pulls/822"] = pr() | {"state": "closed"}
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert f.writes == []
     assert dm.log_lines[-1] == f"{REPO}#822 skip: closed since the PR list was read"
 
@@ -512,20 +387,20 @@ def test_closed_after_listing(fake):
 def test_label_added_after_listing_counts(fake):
     f = fake(prs=[pr()])
     f.reads[f"repos/{REPO}/pulls/822"] = pr(labels=["no-auto-merge"])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert f.writes == []
     assert dm.log_lines[-1] == f"{REPO}#822 skip: labeled no-auto-merge"
 
 
 def test_live_skipped_pr_gets_no_write(fake):
     f = fake(prs=[pr(labels=["no-auto-merge"])])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert f.writes == []
 
 
 def test_live_creates_missing_label(fake):
     f = fake(prs=[], labels=("dependencies",))
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     (create,) = f.writes
     assert create[:4] == ("api", "-X", "POST", f"repos/{REPO}/labels")
     assert "name=no-auto-merge" in create
@@ -533,7 +408,7 @@ def test_live_creates_missing_label(fake):
 
 def test_repo_without_required_checks_is_skipped(fake):
     f = fake(prs=[pr()], rules=[{"type": "deletion"}])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert f.writes == []
     assert not any("pulls" in c[-1] or "labels" in c[-1] for c in f.calls)
     assert dm.log_lines == [f"{REPO} skip: no required status checks on main"]
@@ -542,7 +417,7 @@ def test_repo_without_required_checks_is_skipped(fake):
 def test_prs_from_others_are_ignored(fake):
     person = pr(number=900) | {"user": {"login": "epatey"}}
     f = fake(prs=[person])
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert f.writes == []
     assert not any("/pulls/900/" in c[-1] for c in f.calls)
 
@@ -557,7 +432,7 @@ def test_one_failed_pr_does_not_stop_the_others(fake):
         return original(*args)
 
     dm.gh = failing
-    assert not dm.handle_repo(REPO, POLICY, live=True)
+    assert not dm.handle_repo(REPO, live=True)
     assert any(c[-1] == f"repos/{REPO}/pulls/2/reviews?per_page=100" for c in f.calls)
     assert f"::error::{REPO}#1: 422" in dm.log_lines
 
@@ -569,7 +444,7 @@ WORKFLOW_TEXT = WORKFLOW.read_text()
 
 def test_workflow_runs_dry():
     assert "--live" not in WORKFLOW_TEXT.split("name: Merge", 1)[1]
-    assert re.search(r"^\s+run: uv run --no-sync python3 \.github/scripts/dependabot_merge\.py$", WORKFLOW_TEXT, re.M)
+    assert re.search(r"^\s+run: python3 \.github/scripts/dependabot_merge\.py$", WORKFLOW_TEXT, re.M)
 
 
 def test_workflow_token_is_read_only_while_dry():
@@ -655,11 +530,11 @@ def test_unreadable_settings_are_logged_not_skipped(fake):
     # A read-only token may not see the allow_* fields.
     f = fake(prs=[])
     f.reads[f"repos/{REPO}"] = {"default_branch": "main"}
-    assert dm.handle_repo(REPO, POLICY, live=False)
+    assert dm.handle_repo(REPO, live=False)
     assert f"{REPO}: this token cannot read Allow auto-merge or squash merging; not checked" in dm.log_lines
 
 
 def test_skipped_repo_gets_no_write(fake):
     f = fake(prs=[pr()], rules=[approval_rule(dismiss=False), CHECKS], labels=())
-    assert dm.handle_repo(REPO, POLICY, live=True)
+    assert dm.handle_repo(REPO, live=True)
     assert f.writes == []
