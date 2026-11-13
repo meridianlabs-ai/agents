@@ -109,7 +109,8 @@ jobs:
     # earlier `codex_provision` keeps working: it is used when `provision`
     # is empty. Examples —
     # a Python pin:          uv sync --frozen --python 3.11
-    # a lockfile sync:       uv sync --frozen --python 3.11 --extra dev
+    #   add `--extra dev` only when the project declares a `dev` extra:
+    #   `uv sync` installs no optional extras by default
     # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
     # with:
     #   provision: |

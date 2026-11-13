@@ -127,7 +127,9 @@ description: >-
   `default-groups` leaves `dev` out. The lock is read with tomllib (runner
   python3 is ≥3.11). The Python version follows the
   project's `.python-version` and `requires-python`; a repo that needs a
-  particular minor sets `provision: uv sync --frozen --python 3.11`.
+  particular minor sets `provision: uv sync --frozen --python 3.11`, plus
+  `--extra dev` when the project declares a `dev` extra (`uv sync`
+  installs no optional extras by default).
 
   The `.venv/` it creates — and the `<pkg>.egg-info/` a setuptools PEP 660
   editable install writes INTO the source tree (verified: `pip install -e .`
