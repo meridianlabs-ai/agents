@@ -22,6 +22,14 @@ take effect on every repo's next run.
   job sets a `provision` recipe (`uv sync --frozen`: uv.lock's dev group,
   pytest and pytest-xdist, on the Python `tests` uses) so the agents can run
   the suite; the examples leave it commented.
+- `.github/workflows/dependabot-merge.yml` — the hourly Dependabot merge job
+  (`.github/scripts/dependabot_merge.py`, policy in
+  `.github/dependabot-merge-policy.yml`): as the GitHub App
+  `meridian-dependabot-merger`, whose key lives in the `main`-only
+  `dependabot-merger` environment, it approves and merges (or turns on
+  auto-merge for) the Dependabot PRs the policy allows, in every repository
+  the App is installed on. Runs dry (logs, writes nothing) until `--live`
+  is added. Design: [design/dependabot-merge.md](design/dependabot-merge.md).
 - `.github/workflows/tests.yml` — this repo's CI (workflow `name: tests`): the
   full suite, `python3 -m pytest -n auto`, on every PR and push to main, with
   a read-only token and no secrets (see Testing a change).

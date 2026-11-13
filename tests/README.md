@@ -257,6 +257,24 @@ Testing a change).
   the retired PAT is named by no tracked file outside `design/`; this
   repo's stubs and the examples pass the two app secrets explicitly and
   nothing else.
+- `test_dependabot_merge.py` — the Dependabot merge job
+  (`.github/scripts/dependabot_merge.py`, against a fake `gh`) and its
+  workflow: the policy file's shape; the `updated-dependencies` block of a
+  real grouped commit message; each rule before the policy (the
+  `no-auto-merge` label, a push to the branch by anyone but Dependabot in
+  its activity record, a head that moved, the App's approval at the
+  current head; a PR with auto-merge on gets the approval alone); the policy (GitHub Actions
+  not allowed, bump types per dependency type, `always_ask`, a grouped PR
+  needing every package allowed, a missing update-type); the required
+  checks from every ruleset and when they count as passed; the repository
+  skips (no required checks, no approval rule in a ruleset, an approval
+  rule that keeps stale approvals,
+  auto-merge or squash merging off); no write in a
+  dry run, the default; in a live run an approval then a squash merge, or
+  auto-merge, each pinned to the checked head; a repository without
+  required checks skipped; and the workflow running dry with a read-only
+  token, its key only in the `dependabot-merger` environment, every action
+  pinned by SHA.
 - `test_atlas_sync.py` — the hourly Atlas sync's author checks
   (`.github/scripts/atlas_sync.py`, against a fake `gh`): `trusted_author`
   (trusted logins — the machine account under both its User and GitHub App
