@@ -86,7 +86,9 @@ records them, when the checkout has a `pyproject.toml`; it installs exactly
 workflows' `provision` input in your stubs: bash that runs in the checkout as
 the unprivileged agent user (`claude-agent` on Claude runs, `codex` on codex
 runs), with uv on `PATH`, that user's `HOME`, network, and no sudo or Docker —
-for example `uv sync --frozen --python 3.11`, or
+for example `uv sync --frozen --python 3.11` (add `--extra dev` when the
+project declares a `dev` extra; `uv sync` installs no optional extras by
+default), or
 `corepack enable --install-directory ~/.local/bin && pnpm install
 --frozen-lockfile` (the example stubs show the shape). Create `.venv` in the
 checkout so the agents find its tools. A `.github/actions/claude-setup`
