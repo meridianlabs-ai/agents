@@ -1,8 +1,8 @@
 # Caller fixtures for the codex provisioning recipe
 
 Representative projects for the four callers whose `claude-setup` action
-does more than the generic codex recipe (`uv venv && uv pip install -e
-.[dev]`), each with the `codex_provision` recipe its stub would set and the
+does more than the generic codex recipe (`uv sync --frozen`,
+with the dev extra and group when uv.lock records them), each with the `codex_provision` recipe its stub would set and the
 checks the hosted canary (`.github/workflows/engine-isolation-canary.yml`,
 job `caller-recipes`) runs after provisioning as the codex user on the
 stock `ubuntu-latest` image. Agents-owned stand-ins, not the callers' trees:

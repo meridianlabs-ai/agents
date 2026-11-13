@@ -780,7 +780,7 @@ Testing a change).
   codex -H` when `user` is set, the recipe directly otherwise, a caller
   recipe handed over as a `$RUNNER_TEMP` file and refused when it is not
   bash, a failing sudo fails the step), `provision.sh` against stub
-  `curl`/`uv` (the venv and the `.[dev]` / `--group dev` install, a caller
+  `curl`/`uv` (`uv sync --frozen`, with the `dev` extra and group only when uv.lock records them, a stale lock included, a caller
   recipe replacing them after the uv bootstrap, the `.git/info/exclude`
   lines, the `GITHUB_PATH` appends made only when that file is there),
   `create-codex-user`'s `codex-home.sh` (a planted `config.toml` symlink

@@ -116,10 +116,12 @@ on:
           checkout may run as the runner in an agent job (Claude Security
           findings 4628446 and 4629153). Empty (the default) falls back to
           `codex_provision`; with both empty the generic recipe runs — `uv
-          venv` and `uv pip install -e .[dev]` (`--group dev` when the
-          project declares one) — where the checkout has a pyproject.toml.
+          sync --frozen` (`--extra dev` and `--group dev` when uv.lock records
+          them; no uv.lock fails provisioning) — where the checkout has a
+          pyproject.toml.
           Set it to keep what the repository's claude-setup did: a Python
-          pin (`uv venv --python 3.11`), a lockfile sync (`uv sync --dev`),
+          pin (`uv sync --frozen --python 3.11`, plus `--extra dev` when the
+          project declares a `dev` extra), a lockfile sync (`uv sync --frozen --dev`),
           Node tooling (`corepack enable --install-directory ~/.local/bin &&
           pnpm install --frozen-lockfile`). The recipe runs with uv
           bootstrapped on PATH and network on; it has no sudo, HOME is the
