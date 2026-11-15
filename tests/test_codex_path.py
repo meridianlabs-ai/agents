@@ -1284,14 +1284,14 @@ def test_codex_commit_steps_write_qualified_subjects(world, name, job, step, var
 
 def provision(w, add_to_path: str):
     """The composite's script with the network and uv stubbed: `curl | sh`
-    installs nothing, `uv venv` makes `.venv/bin` with a python that has no
-    tiktoken, `uv pip install` is a no-op."""
+    installs nothing, `uv sync` makes `.venv/bin` with a python that has no
+    tiktoken."""
     stubs = w["tmp"] / f"stubs-{add_to_path}"
     stubs.mkdir()
     (stubs / "curl").write_text("#!/bin/bash\nexit 0\n")
     (stubs / "uv").write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = venv ]; then mkdir -p .venv/bin; printf \'#!/bin/bash\\nexit 1\\n\' >.venv/bin/python; chmod +x .venv/bin/python; fi\n'
+        'if [ "$1" = sync ]; then mkdir -p .venv/bin; printf \'#!/bin/bash\\nexit 1\\n\' >.venv/bin/python; chmod +x .venv/bin/python; fi\n'
         'echo "uv $*" >>"$UV_LOG"\n')
     for f in stubs.iterdir():
         f.chmod(0o755)
@@ -1318,7 +1318,7 @@ def test_provision_fallback_add_to_path_false_writes_nothing_to_github_path(worl
     assert github_path == ""
     assert f"nothing added to the job PATH (tools at {ws}/.venv/bin)" in r.stdout
     # The venv is still made and installed, and excluded from git.
-    assert "uv venv" in uv_log and 'uv pip install -e .[dev]' in uv_log
+    assert uv_log == "uv sync --frozen\n"
     assert (ws / ".git" / "info" / "exclude").read_text() == ".venv/\n*.egg-info/\n"
 
 

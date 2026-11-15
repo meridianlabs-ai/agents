@@ -1,5 +1,5 @@
 """The hostile build backend of the provisioning-boundary harness: what a
-pipeline-authored head could do to the job during `uv pip install -e .` if its
+pipeline-authored head could do to the job during `uv sync` if its
 build hooks ran as the runner (finding 4628446), executed here as whatever
 user provisions the checkout. Every action is recorded in HOSTILE_REPORT (a
 file in the checkout) for the harness to read back:

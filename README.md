@@ -80,12 +80,15 @@ step.
 
 **Optional — let the agents run your tests.** By default the agents review and
 build against a bare runner with only a generic dev-install
-(`uv venv && uv pip install -e .[dev]`, when the checkout has a
-`pyproject.toml`). To give them your real environment, set the reusable
+(`uv sync --frozen`, plus the `dev` extra and group when `uv.lock`
+records them, when the checkout has a `pyproject.toml`; it installs exactly
+`uv.lock`, and a checkout without one fails provisioning). To give them your real environment, set the reusable
 workflows' `provision` input in your stubs: bash that runs in the checkout as
 the unprivileged agent user (`claude-agent` on Claude runs, `codex` on codex
 runs), with uv on `PATH`, that user's `HOME`, network, and no sudo or Docker —
-for example `uv venv --python 3.11 && uv sync --dev`, or
+for example `uv sync --frozen --python 3.11` (add `--extra dev` when the
+project declares a `dev` extra; `uv sync` installs no optional extras by
+default), or
 `corepack enable --install-directory ~/.local/bin && pnpm install
 --frozen-lockfile` (the example stubs show the shape). Create `.venv` in the
 checkout so the agents find its tools. A `.github/actions/claude-setup`

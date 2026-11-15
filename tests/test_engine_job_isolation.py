@@ -779,7 +779,8 @@ def test_composite_fails_when_sudo_fails(tmp_path):
     assert r.returncode == 7
 
 
-def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str, caller_recipe: str = None, check: bool = True):
+def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str, caller_recipe: str = None, check: bool = True,
+               lock: str = None):
     """Run provision.sh with the network and uv stubbed: the uv installer
     curl prints an empty script, `uv` records its arguments; `python3` is
     the interpreter running the tests (tomllib needs 3.11)."""
@@ -793,6 +794,8 @@ def recipe_run(tmp_path: Path, *, github_path: bool, pyproject: str, caller_reci
     (work / ".git" / "info").mkdir(parents=True)
     if pyproject is not None:
         (work / "pyproject.toml").write_text(pyproject)
+    if lock is not None:
+        (work / "uv.lock").write_text(lock)
     gh_path = tmp_path / "github_path"
     env = {"PATH": f"{bins}:{os.environ['PATH']}", "UV_LOG": str(log), "HOME": str(tmp_path)}
     if github_path:
@@ -821,7 +824,7 @@ def test_recipe_runs_the_caller_script_instead_of_the_default_install(tmp_path):
 
 def test_recipe_installs_the_checkout_and_appends_path_only_as_the_runner(tmp_path):
     log, gh_path, work = recipe_run(tmp_path, github_path=True, pyproject='[project]\nname = "x"\n')
-    assert log == "uv venv\nuv pip install -e .[dev]\n"
+    assert log == "uv sync --frozen\n"
     assert gh_path.read_text() == f"{tmp_path}/.local/bin\n{work}/.venv/bin\n"
     assert (work / ".git" / "info" / "exclude").read_text() == ".venv/\n*.egg-info/\n"
 
@@ -851,11 +854,40 @@ def test_recipe_fails_fast_like_a_bash_step(tmp_path):
     assert log == "handled\ndone\n"
 
 
-def test_recipe_skips_the_path_append_under_sudo_and_adds_the_dev_group(tmp_path):
-    log, gh_path, _ = recipe_run(tmp_path, github_path=False,
-                                 pyproject='[project]\nname = "x"\n[dependency-groups]\ndev = ["pytest"]\n')
-    assert log == "uv venv\nuv pip install -e .[dev] --group dev\n"
+def lock_with(*, extras=(), groups=(), source='{ editable = "." }'):
+    """A uv.lock whose root project records these extras and groups, the
+    way uv 0.13.5 writes them (`provides-extras`, `requires-dev`)."""
+    text = f'version = 1\nrevision = 5\n\n[[package]]\nname = "x"\nversion = "0"\nsource = {source}\n'
+    text += "\n[package.metadata]\n"
+    if extras:
+        text += "provides-extras = [" + ", ".join(f'"{e}"' for e in extras) + "]\n"
+    if groups:
+        text += "\n[package.metadata.requires-dev]\n" + "".join(f"{g} = []\n" for g in groups)
+    return text
+
+
+def test_recipe_skips_the_path_append_under_sudo_and_adds_the_locked_dev_extra_and_group(tmp_path):
+    log, gh_path, _ = recipe_run(tmp_path, github_path=False, pyproject='[project]\nname = "x"\n',
+                                 lock=lock_with(extras=("dev",), groups=("dev", "doc")))
+    assert log == "uv sync --frozen --extra dev --group dev\n"
     assert not gh_path.exists()
+
+
+def test_recipe_reads_the_extra_from_a_stale_lock_not_pyproject(tmp_path):
+    # pyproject.toml gained a dev extra the lock does not have yet: `--frozen`
+    # would reject `--extra dev`, and a stale lock must still provision.
+    log, _, _ = recipe_run(tmp_path, github_path=False,
+                           pyproject='[project]\nname = "x"\n[project.optional-dependencies]\ndev = ["pytest"]\n',
+                           lock=lock_with())
+    assert log == "uv sync --frozen\n"
+
+
+def test_recipe_names_the_dev_group_even_when_default_groups_omit_it(tmp_path):
+    # A project with `default-groups = ["doc"]` would otherwise lose its
+    # test tools; a virtual root project is found the same way.
+    log, _, _ = recipe_run(tmp_path, github_path=False, pyproject='[project]\nname = "x"\n',
+                           lock=lock_with(groups=("doc", "dev"), source='{ virtual = "." }'))
+    assert log == "uv sync --frozen --group dev\n"
 
 
 def workflow_text(name: str) -> str:

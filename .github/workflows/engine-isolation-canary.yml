@@ -216,12 +216,13 @@ jobs:
           persist-credentials: false
 
       # The hostile checkout takes the place of a caller's tree: its
-      # pyproject.toml and setup.py go to the workspace root, where the
-      # composites expect the project.
+      # pyproject.toml, uv.lock and setup.py go to the workspace root, where
+      # the composites expect the project (the generic recipe installs
+      # exactly uv.lock and fails without one).
       - name: Stage the hostile checkout
         run: |
           set -euo pipefail
-          cp tests/fixtures/hostile-checkout/pyproject.toml tests/fixtures/hostile-checkout/setup.py .
+          cp tests/fixtures/hostile-checkout/pyproject.toml tests/fixtures/hostile-checkout/uv.lock tests/fixtures/hostile-checkout/setup.py .
           echo "HOSTILE_REPORT=$GITHUB_WORKSPACE/hostile-report.txt" >>"$GITHUB_ENV"
 
       - name: Create codex user (this revision)

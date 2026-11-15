@@ -125,7 +125,7 @@ jobs:
     with:
       # provision (optional; agents#136): the repository's provisioning recipe
       # — bash run as the unprivileged agent user in the checkout, in place of
-      # the generic `uv venv && uv pip install -e .[dev]`, on both engines
+      # the generic `uv sync --frozen` (dev extra and group when uv.lock has them), on both engines
       # (design/executed-paths-residual.md in the agents repo). No agent job
       # runs a claude-setup action any more (a composite runs as the runner,
       # and nothing from the checkout may run as the runner there), so put
@@ -135,12 +135,12 @@ jobs:
       # found. A stub that still sets the
       # earlier `codex_provision` keeps working: it is used when `provision`
       # is empty. Examples —
-      # a Python pin:          uv venv --python 3.11 && uv pip install -e ".[dev]"
-      # a lockfile sync:       uv venv --python 3.11 && uv sync --dev
+      # a Python pin:          uv sync --frozen --python 3.11
+      #   add `--extra dev` only when the project declares a `dev` extra:
+      #   `uv sync` installs no optional extras by default
       # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
       # provision: |
-      #   uv venv --python 3.11
-      #   uv sync --dev
+      #   uv sync --frozen --python 3.11
       # trigger_phrase is single-valued, so resolve it from the SAME source the
       # action will check for this event (comment > review > issue), not from a
       # union of all sources — otherwise a stale @claude in an enclosing issue
@@ -263,7 +263,7 @@ jobs:
     with:
       # provision (optional; agents#136): the repository's provisioning recipe
       # — bash run as the unprivileged agent user in the checkout, in place of
-      # the generic `uv venv && uv pip install -e .[dev]`, on both engines
+      # the generic `uv sync --frozen` (dev extra and group when uv.lock has them), on both engines
       # (design/executed-paths-residual.md in the agents repo). No agent job
       # runs a claude-setup action any more (a composite runs as the runner,
       # and nothing from the checkout may run as the runner there), so put
@@ -273,12 +273,12 @@ jobs:
       # found. A stub that still sets the
       # earlier `codex_provision` keeps working: it is used when `provision`
       # is empty. Examples —
-      # a Python pin:          uv venv --python 3.11 && uv pip install -e ".[dev]"
-      # a lockfile sync:       uv venv --python 3.11 && uv sync --dev
+      # a Python pin:          uv sync --frozen --python 3.11
+      #   add `--extra dev` only when the project declares a `dev` extra:
+      #   `uv sync` installs no optional extras by default
       # Node tooling:          corepack enable --install-directory ~/.local/bin && pnpm install --frozen-lockfile
       # provision: |
-      #   uv venv --python 3.11
-      #   uv sync --dev
+      #   uv sync --frozen --python 3.11
       trigger_phrase: "@auto"
       label_trigger: "auto"
       # allow_build_config (optional, default false; agents repo:
