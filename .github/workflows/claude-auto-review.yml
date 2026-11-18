@@ -1436,7 +1436,7 @@ jobs:
       # too: the agent never pushes, and the helper is scoped to this
       # server's URL, so a `git fetch` the agent aims at any other host gets
       # no credential.
-      - uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
+      - uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         id: claude
         env:
           GIT_TOKEN: ${{ github.token }}
