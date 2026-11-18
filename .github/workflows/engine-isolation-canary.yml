@@ -155,6 +155,7 @@ on:
       - ".github/actions/assert-runner-only-path/**"
       - ".github/actions/create-codex-user/**"
       - ".github/actions/provision-fallback/**"
+      - ".github/actions/npm-pins/**"
       - ".github/actions/reclaim-codex-workspace/**"
       - ".github/actions/claude-agent-launcher/**"
       - ".github/workflows/engine-isolation-canary.yml"
@@ -303,6 +304,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Read the npm pins (this revision)
+        id: npmpins
+        uses: ./.github/actions/npm-pins
+
       # The fixture's project files take the place of a caller's tree at the
       # workspace root; its recipe is read into an output the way a caller
       # stub's `codex_provision` reaches the reusable workflow; the lockfile
@@ -398,11 +403,12 @@ jobs:
       # own bubblewrap step.
       - name: Tools and gate by name under codex's command environment
         env:
+          CODEX_VERSION: ${{ steps.npmpins.outputs.codex }}
           FIXTURE: ${{ matrix.fixture }}
           BIN: ${{ steps.setup.outputs.bin }}
         run: |
           set -euo pipefail
-          npm install -g @openai/codex >/dev/null
+          npm install -g --ignore-scripts "@openai/codex@${CODEX_VERSION:?}" >/dev/null
           codex=$(command -v codex)
           echo "codex: $codex ($("$codex" --version)); system bwrap: $(command -v bwrap || echo none)"
           if [ "$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo 1)" != 1 ]; then
@@ -634,6 +640,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Read the npm pins (this revision)
+        id: npmpins
+        uses: ./.github/actions/npm-pins
+
       # The codex jobs' step, verbatim: the same pin and version as
       # openai/codex-action's own setup-node.
       - name: Set up Node for codex-action
@@ -658,6 +668,7 @@ jobs:
       - name: openai/codex-action, without a key or a prompt
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
+          codex-version: ${{ steps.npmpins.outputs.codex }}
           safety-strategy: unprivileged-user
           codex-user: codex
 
@@ -672,6 +683,7 @@ jobs:
         env:
           NODE_FIRST: ${{ matrix.node-first }}
           RECLAIM: ${{ steps.codexreclaim.outcome }}
+          CODEX_VERSION: ${{ steps.npmpins.outputs.codex }}
         run: |
           set -euo pipefail
           node=$(command -v node)
@@ -697,6 +709,9 @@ jobs:
             # vendored binary, the proxy).
             [ "$writable" -eq 0 ] || { echo "::error::$writable entries under $prefix are writable by the codex user"; exit 1; }
             echo "the reclaim passed and nothing under $prefix is codex-writable: codex-action added no codex-writable directory to the job PATH"
+            got=$(codex --version)
+            [ "$got" = "codex-cli $CODEX_VERSION" ] || { echo "::error::codex-action installed $got, not the pinned $CODEX_VERSION"; exit 1; }
+            echo "codex-action installed the pinned codex: $got"
           else
             if [ "$RECLAIM" = success ]; then
               echo "::warning::the control did not reproduce: without the Node step the reclaim passed, so the image no longer ships $node_bin writable by the codex user"

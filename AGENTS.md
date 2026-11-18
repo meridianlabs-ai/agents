@@ -40,7 +40,7 @@ take effect on every repo's next run.
   `unresolved-merge-guard`, `provision-fallback`,
   `reset-auto-counters`, `disarm-auto-loop`, `verify-auto-labeler`,
   `qualify-commit-refs`,
-  `compose-settings`, `dev-agent-context`,
+  `compose-settings`, `dev-agent-context`, `npm-pins`,
   `drop-runner-root`, `openai-wif-proxy`,
   `bind-ci-run`, `post-pr-comment`, `resolve-reported-threads`,
   `pr-feedback-context`, `emit-landing`, `land`).

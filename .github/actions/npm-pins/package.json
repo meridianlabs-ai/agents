@@ -1,0 +1,9 @@
+{
+  "name": "agents-npm-pins",
+  "private": true,
+  "description": "Exact versions of the npm packages the agent jobs install. action.yml reads them; Dependabot moves them.",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.82",
+    "@openai/codex": "0.167.1"
+  }
+}

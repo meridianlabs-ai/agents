@@ -78,6 +78,16 @@ Testing a change).
   file, a missing file and a file that is not a JSON object. A structural
   check pins the three workflows' compose steps to the composite and their
   deny lists.
+- `test_npm_pins.py` — the `npm-pins` composite and the npm installs it
+  versions: its step, lifted from its action.yml, outputs the exact
+  versions in `package.json` and refuses a range, a tag, a prerelease or a
+  missing package. Structural checks: every codex-action step passes
+  `codex-version` from a pins step under the Node step's condition; the
+  reviewer installs the pinned sandbox-runtime with `--ignore-scripts`;
+  the canary runs codex-action on the pin and checks `codex --version`;
+  every workflow or composite line that starts with `npm install` names a
+  pinned version and refuses an empty one; the composite's outputs map to
+  its step; and Dependabot watches the manifest with a 7-day cooldown.
 - `test_land_helpers.py` — the `land` composite's `lib.sh` helpers (de-fang,
   retry, open-or-adopt PR — a draft only on create when asked, an adopted
   PR's draft state untouched — and the branch-existence probe against a stub

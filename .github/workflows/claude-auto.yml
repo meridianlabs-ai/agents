@@ -1915,6 +1915,11 @@ jobs:
             .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage node_modules/ \
             >>.git/info/exclude
 
+      # The codex version codex-action installs (the CLI and its proxy).
+      - name: Read the npm pins
+        id: npmpins
+        uses: meridianlabs-ai/agents/.github/actions/npm-pins@main
+
       # Node on the job PATH BEFORE the codex user exists (design/codex-engine.md
       # → Runner-side search path). openai/codex-action runs this same
       # setup-node, pinned to this commit, with node-version "24", then
@@ -2146,6 +2151,7 @@ jobs:
         id: codexfix
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
+          codex-version: ${{ steps.npmpins.outputs.codex }}
           # Not a key: a fixed value in the charset codex-action's proxy
           # accepts. The forwarder drops it and sends the exchanged token.
           openai-api-key: "meridian-wif-placeholder"
