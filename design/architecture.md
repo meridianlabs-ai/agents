@@ -1638,7 +1638,10 @@ The pieces, and why each is load-bearing (all in `claude-review.yml`,
 external mode and fork heads only — normal same-repo reviews are untouched):
 
 - **Install step**: `bubblewrap` + `socat`, plus the
-  `@anthropic-ai/sandbox-runtime` seccomp filter. The filter is *not*
+  `@anthropic-ai/sandbox-runtime` seccomp filter, at the exact version in
+  `.github/actions/npm-pins/package.json` and with `--ignore-scripts`
+  (Claude Code reads only the package's `apply-seccomp` binary from the
+  global install). The filter is *not*
   optional on a GitHub runner: without it sandboxed code can connect to Unix
   domain sockets, and runners expose `/var/run/docker.sock` — a full escape.
   Also lifts Ubuntu ≥ 24.04's AppArmor user-namespace restriction if enforced.

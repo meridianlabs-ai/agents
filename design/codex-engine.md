@@ -925,12 +925,15 @@ counterpart.
   one mental model. Same behavior, different mechanism.
 - **Model**: `codex_model` input, default empty — codex-action then omits
   `--model` and the run uses the codex CLI's own default (gpt-6-astra as of
-  2026-09). The CLI is installed unpinned (`codex-version` unset), so the
-  default tracks OpenAI's current flagship without a PR here each time one
-  ships; the trade is that a silent OpenAI default change moves our runs
-  too — the codex-action step log names the model actually used, and
+  2026-09). The default follows the CLI version, without a PR here for
+  each new model; the trade is that a CLI bump can change the model our
+  runs use — the codex-action step log names the model actually used, and
   callers can set `codex_model` to pin. (Decision: Ransom, 2026-09-08;
-  pinned `gpt-5.6-sol` from 2026-08-31 until then.) Reasoning effort IS
+  pinned `gpt-5.6-sol` from 2026-08-31 until then.) The CLI was installed
+  unpinned until 2026-11; it is now the exact version in
+  `.github/actions/npm-pins/package.json`, which Dependabot moves weekly
+  with a 7-day cooldown, so a new default arrives with that bump rather
+  than on the day it ships. Reasoning effort IS
   pinned per role via `codex_effort` — independent of model, passed as
   `model_reasoning_effort` config: reviews run at `xhigh` — correctness
   over turnaround — and implementation runs (dev agent, both loops) at

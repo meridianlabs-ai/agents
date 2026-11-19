@@ -1,0 +1,44 @@
+name: npm-pins
+description: >-
+  Output the exact versions of the npm packages the agent jobs install, read
+  from package.json next to this file. The codex jobs pass `codex` to
+  openai/codex-action's `codex-version`, which installs both @openai/codex
+  and @openai/codex-responses-api-proxy at that version, so a codex bump
+  needs a proxy release of the same version. The reviewer's sandbox step
+  installs @anthropic-ai/sandbox-runtime at `sandbox-runtime` (its own
+  dependencies still resolve at install time; nothing runs them). Dependabot
+  moves the versions after a 7-day cooldown (.github/dependabot.yml;
+  security updates skip it). Fails on anything but an exact version.
+  Referenced fully-qualified
+  (meridianlabs-ai/agents/.github/actions/npm-pins@main) so it works
+  regardless of what the job checked out.
+
+outputs:
+  codex:
+    description: The @openai/codex version.
+    value: ${{ steps.read.outputs.codex }}
+  sandbox-runtime:
+    description: The @anthropic-ai/sandbox-runtime version.
+    value: ${{ steps.read.outputs.sandbox-runtime }}
+
+runs:
+  using: composite
+  steps:
+    - id: read
+      shell: bash
+      run: |
+        # In the reviewer's job this runs after the agent user exists:
+        # resolve nothing through a directory that user could write.
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin
+        set -euo pipefail
+        manifest="$GITHUB_ACTION_PATH/package.json"
+        for pair in codex=@openai/codex sandbox-runtime=@anthropic-ai/sandbox-runtime; do
+          key=${pair%%=*}
+          pkg=${pair#*=}
+          version=$(jq -er --arg p "$pkg" '.dependencies[$p]' "$manifest")
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$pkg in npm-pins/package.json is \"$version\", not an exact version"
+            exit 1
+          fi
+          echo "$key=$version" >>"$GITHUB_OUTPUT"
+        done

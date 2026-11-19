@@ -31,6 +31,24 @@ updates:
         exclude-patterns:
           - "openai/codex-action"
 
+  # The npm packages the agent jobs install (openai/codex-action's CLI and
+  # proxy, the reviewer's sandbox-runtime), at the exact versions in
+  # npm-pins/package.json. Same cooldown as above. One weekly PR: codex
+  # releases most days. Before merging a codex bump, check that
+  # @openai/codex-responses-api-proxy has the same version (codex-action
+  # installs both). engine-isolation-canary skips Dependabot's runs, so the
+  # new pins first run on a hosted runner after the merge.
+  - package-ecosystem: "npm"
+    directory: "/.github/actions/npm-pins"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      npm-pins:
+        patterns:
+          - "*"
+
   # pytest and pytest-xdist in uv.lock (tests.yml, the dogfood stubs'
   # provisioning).
   - package-ecosystem: "uv"

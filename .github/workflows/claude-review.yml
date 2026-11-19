@@ -1031,6 +1031,13 @@ jobs:
           sudo chown -R claude-agent:claude-agent "$SCRATCH"
           echo "copied the stripped checkout to $SCRATCH/src ($(du -sh "$SCRATCH/src" | cut -f1)), owned by claude-agent — the writable tree for the reviewer's venv, install and tests; the checkout itself is read-only to the agent."
 
+      - name: Read the npm pins for the review sandbox
+        id: sandboxpins
+        if: >-
+          needs.gate.outputs.ok == 'true' &&
+          (needs.gate.outputs.mode == 'external' || needs.gate.outputs.fork_head == 'true')
+        uses: meridianlabs-ai/agents/.github/actions/npm-pins@main
+
       # Untrusted code — external mode's contributor tree, and a fork head a
       # write-access commenter admitted (issue #59) — is executed only inside
       # Claude Code's OS-level Bash sandbox (bubblewrap + network proxy):
@@ -1052,10 +1059,14 @@ jobs:
         # Fail fast instead: SANDBOX_OUTCOME=failure feeds the Surface step,
         # which posts the ⚠️ + cc asking for a re-trigger.
         timeout-minutes: 10
+        env:
+          SRT_VERSION: ${{ steps.sandboxpins.outputs.sandbox-runtime }}
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq bubblewrap socat
-          sudo npm install -g @anthropic-ai/sandbox-runtime
+          # Claude Code reads only the package's apply-seccomp binary from the
+          # global install; no install script runs as root.
+          sudo npm install -g --ignore-scripts "@anthropic-ai/sandbox-runtime@${SRT_VERSION:?}"
           # Ubuntu 24.04+ AppArmor can block the unprivileged user namespaces
           # bubblewrap needs; lift the restriction if this runner enforces it.
           if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
@@ -2293,6 +2304,12 @@ jobs:
           sha=$(git rev-parse HEAD)
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
 
+      # The codex version codex-action installs (the CLI and its proxy).
+      - name: Read the npm pins
+        id: npmpins
+        if: needs.gate.outputs.ok == 'true'
+        uses: meridianlabs-ai/agents/.github/actions/npm-pins@main
+
       # Node on the job PATH BEFORE the codex user exists (design/codex-engine.md
       # → Runner-side search path). openai/codex-action runs this same
       # setup-node, pinned to this commit, with node-version "24", then
@@ -2685,6 +2702,7 @@ jobs:
         if: needs.gate.outputs.ok == 'true'
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
+          codex-version: ${{ steps.npmpins.outputs.codex }}
           # Not a key: a fixed value in the charset codex-action's proxy
           # accepts. The forwarder drops it and sends the exchanged token.
           openai-api-key: "meridian-wif-placeholder"
