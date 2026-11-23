@@ -567,14 +567,15 @@ def test_one_failed_pr_does_not_stop_the_others(fake):
 WORKFLOW_TEXT = WORKFLOW.read_text()
 
 
-def test_workflow_runs_dry():
-    assert "--live" not in WORKFLOW_TEXT.split("name: Merge", 1)[1]
-    assert re.search(r"^\s+run: uv run --no-sync python3 \.github/scripts/dependabot_merge\.py$", WORKFLOW_TEXT, re.M)
+def test_workflow_runs_live():
+    assert re.search(
+        r"^\s+run: uv run --no-sync python3 \.github/scripts/dependabot_merge\.py --live$", WORKFLOW_TEXT, re.M
+    )
 
 
-def test_workflow_token_is_read_only_while_dry():
-    perms = re.findall(r"^\s+permission-[a-z-]+: (\w+)$", WORKFLOW_TEXT, re.M)
-    assert perms and set(perms) == {"read"}
+def test_workflow_token_permissions():
+    perms = dict(re.findall(r"^\s+permission-([a-z-]+): (\w+)$", WORKFLOW_TEXT, re.M))
+    assert perms == {"metadata": "read", "pull-requests": "write", "contents": "write"}
 
 
 def test_workflow_key_only_in_main_only_environment():

@@ -282,9 +282,9 @@ Testing a change).
   auto-merge or squash merging off); no write in a
   dry run, the default; in a live run an approval then a squash merge, or
   auto-merge, each pinned to the checked head; a repository without
-  required checks skipped; and the workflow running dry with a read-only
-  token, its key only in the `dependabot-merger` environment, every action
-  pinned by SHA.
+  required checks skipped; and the workflow running live (`--live`, a token
+  with Pull requests and Contents write), its key only in the
+  `dependabot-merger` environment, every action pinned by SHA.
 - `test_atlas_sync.py` — the hourly Atlas sync's author checks
   (`.github/scripts/atlas_sync.py`, against a fake `gh`): `trusted_author`
   (trusted logins — the machine account under both its User and GitHub App
