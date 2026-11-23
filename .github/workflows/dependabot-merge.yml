@@ -18,10 +18,9 @@
 # work without Checks or Commit statuses permissions only because every
 # repository it serves is public; a private one needs both, read-only.
 #
-# DRY RUN: the script runs without `--live`, so it logs every decision and
-# every write it would make and writes nothing, and the token below is minted
-# read-only. Going live is one reviewed change: add `--live` to the run step
-# and mint `permission-pull-requests: write` and `permission-contents: write`.
+# LIVE: the run step passes `--live`, so the job makes the writes above and
+# logs every decision and every write. The token below has Pull requests
+# write and Contents write, which those writes need.
 #
 # Failure handling is minimal on purpose: a failed PR or repository is
 # logged as an error and fails the run; there are no retries or alerts.
@@ -47,7 +46,7 @@ jobs:
     environment: dependabot-merger
     steps:
       # One-hour installation token for every repository the App is
-      # installed on. Read-only while the job runs dry.
+      # installed on, with the write permissions the live job needs.
       - name: Mint the App's token
         id: mint
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -56,8 +55,8 @@ jobs:
           private-key: ${{ secrets.DEPENDABOT_MERGER_PRIVATE_KEY }}
           owner: meridianlabs-ai
           permission-metadata: read
-          permission-pull-requests: read
-          permission-contents: read
+          permission-pull-requests: write
+          permission-contents: write
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,4 +74,4 @@ jobs:
       - name: Merge
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
-        run: uv run --no-sync python3 .github/scripts/dependabot_merge.py
+        run: uv run --no-sync python3 .github/scripts/dependabot_merge.py --live

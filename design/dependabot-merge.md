@@ -1,7 +1,7 @@
 # Dependabot merge job
 
 Status: accepted (Eric, 2026-11-10). Implemented in the same PR as this
-document, running dry: it logs what it would do and writes nothing.
+document. The job runs live: it makes the writes the policy allows.
 
 ## Goal
 
@@ -246,10 +246,10 @@ flowchart TD
     P2 -->|gate: first merges land with green CI and nothing to undo| P3
 ```
 
-**Going live** is one reviewed change to the workflow: add `--live` to the
-run step, and mint the token with `permission-pull-requests: write` and
-`permission-contents: write`. Until then the script runs without `--live`,
-and the token is minted read-only.
+**Live mode**: the workflow's run step passes `--live`, and the token is
+minted with `permission-pull-requests: write` and
+`permission-contents: write`. Without `--live` the script writes nothing: it
+logs every write it would make.
 
 "Require branches to be up to date" must stay off in participating repos, and
 the job skips a repo that turns it on in a ruleset. With it on, every merge
