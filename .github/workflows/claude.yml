@@ -1766,7 +1766,7 @@ jobs:
       # any other host (its allow-list permits the verb) gets no credential.
       # The agent never pushes; the land job pushes the commits and opens
       # the PR.
-      - uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
+      - uses: anthropics/claude-code-action@e5812cd75691ca7bbfc57c0ecf4441db3a1ab7dd # v1.0.281
         id: claude
         env:
           GIT_TOKEN: ${{ github.token }}
