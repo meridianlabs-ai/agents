@@ -3006,7 +3006,7 @@ jobs:
 
       - name: Run Codex
         id: codexrun
-        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
+        uses: openai/codex-action@306c6a196a99dcc6582530c396a19d2672d5e9ec # v1.14
         with:
           codex-version: ${{ steps.npmpins.outputs.codex }}
           # Not a key: a fixed value in the charset codex-action's proxy
