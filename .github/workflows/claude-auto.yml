@@ -1236,7 +1236,7 @@ jobs:
       # rewritten origin URL — the JOB token too: the agent never pushes,
       # and the helper is scoped to this server's URL, so a `git fetch` the
       # agent aims at any other host gets no credential.
-      - uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
+      - uses: anthropics/claude-code-action@e5812cd75691ca7bbfc57c0ecf4441db3a1ab7dd # v1.0.281
         id: claude
         env:
           GIT_TOKEN: ${{ github.token }}
