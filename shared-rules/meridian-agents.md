@@ -1,0 +1,61 @@
+# Meridian shared agent rules: start here
+
+## Your duties
+
+1. Read the rule files below. Obey every rule in them.
+2. Help make these rules better. See "Living rules: better, not perfect" below.
+
+## Living rules: better, not perfect
+
+> [!NOTE]
+> All rules in this section: Provisional.
+
+These rules are a living system. They learn from our experience, and every agent that follows them helps make them better.
+
+**Better, not perfect.** Today, each of our agents follows different rules, and that is a bad place to be. These rules make things much better. We do not hold them to the bar of perfect, and we do not hold a change to them to that bar. A change that makes the rules better is a good change, even when it does not fix everything.
+
+Your responsibility:
+
+- As you work, look for ways to make these rules better. Examples: your person corrects you; you and another agent do the same work; a rule is wrong, missing or not clear; a rule is the same in every repo's `AGENTS.md` and belongs here.
+- When you find one, ask your person, then open a small PR against `meridianlabs-ai/agents` that changes the rule. Give one example of the problem. See "How to change a rule" below.
+- Do not wait until a change is perfect. Propose it when it is better than what is here.
+
+## Rule files
+
+These are only the rules that we all agree on. Every rule here is one that each Meridian person will defend. Broader taste (code style, word choice, personal preferences) is not here. Keep taste in your personal files or in a repo's `AGENTS.md`.
+
+> [!NOTE]
+> Provisional.
+
+| File | Rule scope | What it covers |
+|---|---|---|
+| [`rules/pr-review.md`](rules/pr-review.md) | Repo | The review bar: what blocks a merge, how to report findings. |
+| [`rules/code-changes.md`](rules/code-changes.md) | Repo | How an agent changes code and prepares a PR. |
+| [`rules/security.md`](rules/security.md) | Repo and Meridian-wide | Untrusted input, CI execution, workflow files, supply chain. |
+| [`rules/public-writing.md`](rules/public-writing.md) | Repo and Meridian-wide | Text that other people read, and how an agent discloses itself. |
+| [`rules/agent-authority.md`](rules/agent-authority.md) | Repo and Meridian-wide | What an agent can do alone (approve, merge, close), and what it never does alone. |
+| [`rules/ownership.md`](rules/ownership.md) | Meridian-wide | Who is who, and who tracks CI and canary failures in each repo. |
+
+## How to read the rules
+
+- Obey every rule. A rule can say "when" or "unless" to allow judgment.
+- The repo's own `AGENTS.md`, `CLAUDE.md` and `CONTRIBUTING*` add to these rules. If a repo rule conflicts with a shared rule, obey the repo rule and report the conflict.
+- Your personal rules can add to these rules or make them stricter. Do not use personal rules to make a shared rule looser.
+
+## What goes in `rules/` and what goes in a repo
+
+> [!NOTE]
+> All rules in this section: Provisional.
+
+- Put a rule in `rules/` only when the team would defend it as a team convention for how agents behave in every Meridian repo.
+- Put a repo's facts and procedures in that repo's `AGENTS.md`, `CLAUDE.md` or `CONTRIBUTING*`. Examples: build and test commands, gated test lists, release steps, layout.
+- Keep personal preferences in personal files.
+- When the team adopts a rule in `rules/`, that file is the authority for it. Remove the personal copies of that rule.
+
+## How to change a rule
+
+1. Open a PR that changes this file or files in `rules/`. An agent can write the PR. A human opens or approves it.
+2. One human maintainer who did not write the change approves it.
+3. Tag a new version when a set of changes is ready (`rules-vN`). Tell the team in the PR.
+
+To propose a new rule, open a PR or an issue with the rule text and one example that shows the problem.
